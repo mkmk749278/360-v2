@@ -392,13 +392,13 @@ def test_observe_opens_one_arm_per_timeframe_from_a_real_signal():
         entry=180.0, stop_loss=175.0, tp1=190.0, tp2=195.0,
         signal_id="SIG-E2E", setup_class="MOVER_TREND_PULLBACK",
     )
-    live.observe_signal(sig, store, price=181.0, ledger=ledger)
+    live.observe_signal(sig, store, price=181.0, ledger=ledger, now_ts=_now_at(79))
     arms = ledger.open_arms()
     assert {a["timeframe"] for a in arms} == {"5m", "15m"}
     assert all(a["governor"] == live.GOV_SAR for a in arms)   # rising -> aligned
     assert all(a["signal_id"] == "SIG-E2E" for a in arms)
     # Idempotent: a second tick must not re-open the same arms.
-    live.observe_signal(sig, store, price=181.0, ledger=ledger)
+    live.observe_signal(sig, store, price=181.0, ledger=ledger, now_ts=_now_at(79))
     assert len(ledger.open_arms()) == 2
 
 
@@ -415,7 +415,10 @@ def test_observe_retires_an_arm_once_it_closes():
         entry=180.0, stop_loss=182.0, tp1=170.0, tp2=165.0,
         signal_id="SIG-CLOSE", setup_class="X",
     )
-    live.observe_signal(sig, store, price=180.0, ledger=ledger, timeframes=["15m"])
+    live.observe_signal(
+        sig, store, price=180.0, ledger=ledger, timeframes=["15m"],
+        now_ts=_now_at(len(bars) - 1),
+    )
     assert len(ledger.open_arms()) == 1
     # Next bar blows through the static stop while SAR is still opposed.
     for i, bar in enumerate([(180.5, 184.0, 180.0, 183.0)], start=len(bars)):
@@ -927,3 +930,94 @@ def test_risk_stamps_do_not_change_which_stop_the_arm_uses():
     assert arm["fill_level"] == pytest.approx(parked)
     # R still divides by the SL distance at entry, not by the SAR risk.
     assert arm["r_level"] == pytest.approx(arm["pnl_level_pct"] / 5.0)
+
+
+# --------------------------------------------------------------------------- #
+# Anchoring: an arm that starts life behind the clock replays, it does not step
+# --------------------------------------------------------------------------- #
+#
+# Found in the owner's 2026-07-31 export.  ACHUSDT 15m carried ``bars_seen: 158``
+# after 10 bars of life, and ``aligned_at_entry`` disagreed with its own 5m
+# sibling on the same signal — because the 15m series the arm anchored to was
+# ~40h stale at creation, so its SAR-at-entry was read off a 40h-old bar and its
+# first advance walked the whole gap in one pass.  Every fill it published was a
+# replay, on the one page in the system whose first sentence is "this is not a
+# replay".
+
+
+def _stale_signal(symbol="STALEUSDT"):
+    from src.channels.base import Signal
+    from src.smc import Direction
+
+    return Signal(
+        channel="scalp", symbol=symbol, direction=Direction.LONG,
+        entry=180.0, stop_loss=175.0, tp1=190.0, tp2=195.0,
+        signal_id="SIG-STALE", setup_class="MOVER_TREND_PULLBACK",
+    )
+
+
+def test_observe_refuses_to_open_an_arm_on_a_stale_anchor_bar():
+    """The guard. Fails against the old code, which opened the arm regardless."""
+    live.reset_sar_cache()
+    live.reset_health()
+    ledger = live.SarLiveLedger(path="/tmp/sar_live_test_stale.json")
+    bars = _rising(80)
+    store = _seed_store("STALEUSDT", bars, intervals=("15m",))
+    # The newest closed bar is index 79; the clock says 40 bars have passed since.
+    stale_now = _now_at(79) + 40 * (BAR_MS / 1000.0)
+    live.observe_signal(
+        _stale_signal(), store, price=181.0, ledger=ledger,
+        timeframes=["15m"], now_ts=stale_now,
+    )
+    assert ledger.open_arms() == []
+    live.roll_health_cycle()
+    h = live.step_health()
+    assert h["refused_open"] == 1
+    # Named, not merely counted: "no series" and "stale anchor" have different
+    # fixes, and a refusal must never be pooled with a frozen arm.
+    assert live.OPEN_REFUSED_STALE_ANCHOR in h["refused"]["STALEUSDT:15m"]
+    assert h["stalled"] == 0 and h["no_series"] == 0
+
+
+def test_observe_opens_once_the_series_catches_up():
+    """Refusing is not permanent — the arm opens on the first current anchor."""
+    live.reset_sar_cache()
+    live.reset_health()
+    ledger = live.SarLiveLedger(path="/tmp/sar_live_test_stale2.json")
+    bars = _rising(80)
+    store = _seed_store("STALEUSDT", bars, intervals=("15m",))
+    sig = _stale_signal()
+    live.observe_signal(
+        sig, store, price=181.0, ledger=ledger, timeframes=["15m"],
+        now_ts=_now_at(79) + 40 * (BAR_MS / 1000.0),
+    )
+    assert ledger.open_arms() == []
+    live.observe_signal(
+        sig, store, price=181.0, ledger=ledger, timeframes=["15m"],
+        now_ts=_now_at(79),
+    )
+    arms = ledger.open_arms()
+    assert len(arms) == 1
+    # Stamped where it becomes true: this arm anchored to a current bar.
+    assert arms[0]["anchor_bars_behind"] == pytest.approx(0.0)
+
+
+def test_first_step_bars_detects_an_arm_that_walked_history():
+    """The detector, kept beside the guard rather than replacing it.
+
+    A live arm consumes one bar per advance. Anything larger on the *first*
+    advance is history the arm walked after it was created, and the row says so
+    instead of leaving the reader to infer it from ``bars_seen``.
+    """
+    bars = _rising(60)
+    arm = _arm(bars, "LONG", entry=160.0, sl=152.0, tp1=9999.0)
+    assert arm["first_step_bars"] is None
+    live.step_arm(arm, _series(bars + _rising(12, start=220.0)),
+                  step=STEP, max_step=MAX_STEP)
+    assert arm["first_step_bars"] == 12
+    # Only the first advance is recorded — later steps must not overwrite it.
+    before = arm["first_step_bars"]
+    if arm["status"] == live.STATUS_RUNNING:
+        live.step_arm(arm, _series(bars + _rising(13, start=220.0)),
+                      step=STEP, max_step=MAX_STEP)
+    assert arm["first_step_bars"] == before
