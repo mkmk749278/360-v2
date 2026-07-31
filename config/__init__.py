@@ -520,6 +520,12 @@ MARKET_CONTEXT_ENABLED: bool = _safe_bool("MARKET_CONTEXT_ENABLED", "true")
 # (O(1) in-memory, no I/O) and forward-measure TP1-before-SL on real candles in
 # the existing 5-min audit loop → per-gate KEEP/TUNE/DROP + edge-matrix feed.
 SUPPRESSION_AUDIT_ENABLED: bool = _safe_bool("SUPPRESSION_AUDIT_ENABLED", "true")
+# Pre-scoring gate audit (setup_compat / execution).  Default ON: it is a
+# MEASUREMENT flag, and a measurement shipped default-OFF produces an empty
+# panel and a decision that keeps getting deferred (CLAUDE.md § Project Phase).
+# It cannot reach a subscriber or the money path — the gates suppress exactly
+# as before and the rows are refused by the edge-matrix feed.
+PRESCORING_AUDIT_ENABLED: bool = _safe_bool("PRESCORING_AUDIT_ENABLED", "true")
 # Feature-liveness watchdog (2026-07-14 incident — 8 features dead silently).
 # Every 5-min audit cycle, compare each measurement pipeline's OUTPUT counter
 # against its UPSTREAM driver and publish data/feature_liveness.json; sustained

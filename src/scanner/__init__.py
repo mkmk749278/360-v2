@@ -5047,6 +5047,65 @@ class Scanner:
         except Exception as exc:
             fail_open.record("scanner.stamp_suppressed", exc)
 
+    def _stamp_prescoring_suppressed(self, sig: Any, gate_name: str) -> None:
+        """Shadow-ledger stamp for a candidate killed BEFORE the scoring engine.
+
+        ``setup_compat`` and ``execution`` were the last two live gates with no
+        row in the Suppression Quality Audit — not because they were forgotten,
+        but because they fire ahead of the stamping point, so the audit could
+        rank every other gate while these two suppressed **37,782 candidates in
+        one window** unmeasured.  A gate that cannot be measured cannot earn its
+        place, and these are the two that decide which paths exist at all: every
+        regime-confined evaluator dies here (``MEAN_REVERT`` 98% of its rejects,
+        ``RANGE_FADE`` 89%, ``TREND_PULLBACK_EMA`` 97%), while
+        ``MOVER_TREND_PULLBACK`` takes **zero** regime rejects and is the only
+        path legal in every regime.  That asymmetry is the shape of the whole
+        delivered book and nothing was measuring it.
+
+        Two deliberate differences from ``_stamp_suppressed``:
+
+        * **No geometry-A/B stamp.**  That arm feeds the variants ledger and the
+          edge matrix; a pre-scoring candidate has no scored confidence and must
+          not become a matrix row.
+        * **``pre_scoring=True``**, which ``suppression_audit.feeds_edge_matrix``
+          refuses.  Layer C's ``context_emission_policy`` consumes the edge
+          matrix **live** to set per-context emission floors, so a row landing
+          there is a money-path change.  Measurement ON, money path untouched —
+          which is the whole of dark-first.
+
+        Observe-only and fail-open: the suppression decision above is unchanged
+        and byte-identical whether this returns or raises.
+        """
+        try:
+            from src import runtime_tunables as _rt
+            if not bool(_rt.get("prescoring_audit_enabled")):
+                return
+            from src import suppression_audit as _sa
+            _direction = getattr(sig, "direction", None)
+            _side = getattr(_direction, "value", None) or str(_direction or "")
+            _sa.stamp_candidate(
+                gate_name=gate_name,
+                symbol=str(getattr(sig, "symbol", "") or ""),
+                channel=str(getattr(sig, "channel", "") or ""),
+                setup_class=str(getattr(sig, "setup_class", "") or ""),
+                side=_side,
+                entry=float(getattr(sig, "entry", 0.0) or 0.0),
+                stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
+                # The evaluator's own confidence, not a scored one — this
+                # candidate never reached the scoring engine, and calling the
+                # two by one name is how a number gets quoted against the
+                # wrong population.
+                confidence=float(getattr(sig, "confidence", 0.0) or 0.0),
+                context_key=str(getattr(sig, "mc_context_key", "") or ""),
+                regime=str(getattr(sig, "entry_regime", "") or ""),
+                valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
+                pair_cohort=str(getattr(sig, "mc_pair_cohort", "") or ""),
+                pre_scoring=True,
+            )
+        except Exception as exc:
+            fail_open.record("scanner.stamp_prescoring_suppressed", exc)
+
     def _stamp_gate_rescue(
         self, sig: Any, gate_name: str, suffix: str, current_price: Optional[float]
     ) -> None:
@@ -6166,6 +6225,7 @@ class Scanner:
                 chan_name,
                 _setup_class_name,
             )
+            self._stamp_prescoring_suppressed(sig, f"setup_compat:{_compat_token}")
             log.debug("Rejected {} {} setup: {}", symbol, chan_name, setup.reason)
             return _reject("gated", None)
 
@@ -6181,6 +6241,7 @@ class Scanner:
                 chan_name,
                 _setup_class_name,
             )
+            self._stamp_prescoring_suppressed(sig, f"execution:{_exec_token}")
             log.debug("Rejected {} {} execution: {}", symbol, chan_name, execution.reason)
             return _reject("gated", None)
 

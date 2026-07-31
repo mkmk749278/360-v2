@@ -1960,6 +1960,17 @@ class CryptoSignalEngine:
                         # persist=False: hundreds of records can resolve in
                         # one cycle — one batched save() below, not one full
                         # JSON dump per record (2026-07-13 wedge contributor).
+                        # A pre-scoring reject never reached the scoring engine,
+                        # so it carries the evaluator's confidence and no scored
+                        # one.  It is audited (did setup_compat / execution save
+                        # or cost us?) and deliberately kept OUT of the matrix:
+                        # Layer C's context_emission_policy reads these cells
+                        # LIVE to set per-context emission floors, so admitting
+                        # ~38k unscored rows per window would move what the
+                        # money path emits.  Measurement ON, money path OFF —
+                        # the audit is the surface, the matrix is not.
+                        if not _sa.feeds_edge_matrix(rec):
+                            return
                         _src = SOURCE_SHADOW if _is_shadow_unit else SOURCE_SUPPRESSED
                         get_strategy_edge_store().record(
                             StrategyOutcome(
@@ -2614,6 +2625,62 @@ class CryptoSignalEngine:
             upstream=lambda: float(getattr(self._scanner, "_scan_cycle_count", 0)),
             min_upstream_delta=15.0,
             min_streak=72,         # ~6 h
+        ))
+        def _prescoring_audit() -> Tuple[bool, str]:
+            """Are the pre-scoring gates measurable, and is the sample fair?
+
+            Two failures this has to tell apart, because they look identical in
+            a per-gate table and need opposite fixes:
+
+            * **No rows** — the stamp is not reaching the audit.  That is the
+              state `cohort_edge` was in for 23 days and it reads exactly like a
+              quiet market (#834).
+            * **Rows, but almost all evicted** — the gate is so loud that its
+              400-row ring turns over faster than the measurement window, so the
+              verdict beside it describes a sample nobody sized.  The rate is
+              still honest; the reader has to know the denominator.
+
+            Reports the eviction pressure rather than paging on it: a loud gate
+            is not a fault, and filling this counter with non-failures is how a
+            real one stops standing out.
+            """
+            if not bool(_rt.get("prescoring_audit_enabled")):
+                return True, "disabled by tunable"
+            sampling = _sa.get_store().sampling()
+            pre = {
+                g: v for g, v in sampling.items()
+                if g.startswith("setup_compat:") or g.startswith("execution:")
+            }
+            if not pre:
+                # Only a fault once the scanner has actually rejected some.
+                rejects = sum(
+                    v for k, v in getattr(
+                        self._scanner, "_path_funnel_counters", {}
+                    ).items()
+                    if "gate_reject:setup_compat" in str(k)
+                    or "gate_reject:execution" in str(k)
+                )
+                if rejects < 50:
+                    return True, "no pre-scoring rejects yet"
+                return False, (
+                    f"{rejects} pre-scoring gate rejects and zero rows in the "
+                    "audit — the stamp is not reaching the store, so "
+                    "setup_compat / execution stay the only unmeasurable live "
+                    "gates."
+                )
+            held = sum(v["held"] for v in pre.values())
+            eviction = sum(v["evicted"] for v in pre.values())
+            hot = sorted(pre.items(), key=lambda kv: -kv[1]["evicted"])[:3]
+            detail = ", ".join(f"{g} {v['held']}/{v['held'] + v['evicted']}" for g, v in hot)
+            return True, (
+                f"{len(pre)} pre-scoring gates measured, {held} rows held, "
+                f"{eviction} evicted (sampled: {detail})"
+            )
+
+        fl.add_predicate(PredicateProbe(
+            name="prescoring_audit",
+            fn=_prescoring_audit,
+            min_streak=72,         # ~6 h — suppressions can be sparse
         ))
         # Edge-matrix feed: outcomes lag stamps by the ~1h forward window, so
         # the streak covers 3 h of flowing stamps with zero recorded outcomes.

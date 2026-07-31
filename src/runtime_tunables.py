@@ -107,6 +107,7 @@ def _build_registry() -> Dict[str, Tunable]:
         NOISE_FLOOR_ATR_MULT,
         NOISE_FLOOR_MAX_SL_PCT,
         NOISE_FLOOR_STOPS_ENABLED,
+        PRESCORING_AUDIT_ENABLED,
         SHADOW_STRATEGIES_ENABLED,
         SUPPRESSION_AUDIT_ENABLED,
     )
@@ -898,6 +899,28 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=SUPPRESSION_AUDIT_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="prescoring_audit_enabled",
+            label="Pre-scoring gate audit (setup_compat / execution)",
+            description=(
+                "Also record the candidates killed BEFORE scoring by the "
+                "setup-compatibility and execution-quality gates, and "
+                "forward-measure them like every other suppression. These "
+                "two were the last live gates with no row in the audit — "
+                "they fired ahead of the stamping point, so 37,782 "
+                "suppressions in one window carried no WOULD_WIN%, no EV "
+                "and no KEEP/TUNE/DROP, while every other gate was ranked "
+                "beside them. This is where every regime-confined "
+                "evaluator dies (MEAN_REVERT 98% of its rejects, "
+                "RANGE_FADE 89%) and where MOVER_TREND_PULLBACK takes "
+                "zero. Observe-only: the gates still suppress exactly as "
+                "before, the rows are excluded from the edge matrix so "
+                "Layer C cannot route on them, and nothing reaches a user."
+            ),
+            type="bool",
+            default=PRESCORING_AUDIT_ENABLED,
             category="Measurement",
         ),
         Tunable(
