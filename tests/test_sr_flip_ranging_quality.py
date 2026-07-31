@@ -33,9 +33,17 @@ def _enable_srflip_long(monkeypatch):
     monkeypatch.setattr(scalp_mod, "SR_FLIP_LONG_ENABLED", True)
 
 
-def test_srflip_long_disabled_by_default(monkeypatch):
-    """Engine default: a valid SR_FLIP LONG retest is gated off (long_disabled)."""
+def test_srflip_long_never_reaches_the_live_feed(monkeypatch):
+    """Engine default: a valid SR_FLIP LONG retest never emits to users.
+
+    Since 2026-07-31 the *mechanism* depends on the dark lane — with it off the
+    candidate is rejected outright, with it on the candidate is carried and
+    marked dark so the enqueue site diverts it. What must not change either way
+    is the outcome for a subscriber: no live SR_FLIP long.
+    """
     monkeypatch.setattr(scalp_mod, "SR_FLIP_LONG_ENABLED", False)
+    from src import dark_emission
+
     ch = ScalpChannel()
     candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
     indicators = _srflip_indicators_long(rsi_val=55.0)
@@ -43,8 +51,10 @@ def test_srflip_long_disabled_by_default(monkeypatch):
         "BTCUSDT", candles, indicators, _srflip_smc(direction="LONG"),
         0.01, 10_000_000, regime="RANGING",
     )
-    assert sig is None
-    assert ch._active_no_signal_reason == "long_disabled"
+    if sig is None:
+        assert ch._active_no_signal_reason == "long_disabled"
+    else:
+        assert dark_emission.is_dark(sig) is True
 
 
 def _eval(rsi_val: float, regime: str = "RANGING"):
