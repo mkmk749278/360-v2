@@ -443,50 +443,96 @@ def publish(sig: Any, now_ts: Optional[float] = None) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def slice_window(candles: Any, since_ts: float) -> Optional[Dict[str, List[float]]]:
-    """The 1m bars from the one containing ``since_ts`` onward, located by time.
+def slice_window(candles: Any, since_ts: float) -> Optional[Dict[str, Any]]:
+    """The 1m bars from the one containing ``since_ts`` onward.
 
-    Lives here rather than in the caller's closure so it can be driven by a test
-    with the store's real shape: the elapsed-time slice it replaces
-    (``n = elapsed // 60``, counted back from the end of the array) is invisible
-    when it is wrong, because it returns a plausible window of the wrong bars.
-    That assumption — gap-free array, last bar is current — fails on exactly the
-    symbols this lane cares about, and when it failed on the SAR arm it produced
-    172 confident rows describing nothing (#800).
+    Two outcomes, and the difference between them is the whole point:
 
-    Returns None when the window cannot be located honestly: no series, ragged
-    series, timestamps missing or padded with NaN, or history that already
-    rolled off past the stamp. The caller counts a None and leaves the row open
-    and unscored — refusing is the whole point, because the alternative is a
-    number nobody can trace back to a bar.
+    * **Dated** — the entry bar was located by ``open_time``. The window carries
+      its timestamps, so the caller can stamp which bar it last consumed and the
+      reader can tell a current row from a frozen one.
+    * **Undated** — the timestamps needed to place the stamp are not there, so
+      the window is the last ``elapsed // 60`` bars and carries **no**
+      ``open_time``. The walk still happens; the row simply never claims to be
+      current, and ops renders it ``unverified``.
+
+    Refusing outright was the first cut, and it was wrong in a way worth
+    recording: on 2026-07-31 the snapshot loader restored candles with no
+    ``open_time`` at all (it saved five keys and read back the same five), so
+    every bucket in a freshly-restarted engine was undatable and **every** dark
+    row reported ``no_candles`` — including core pairs whose candles were
+    plainly arriving. Turning "I cannot date these bars" into "there is no
+    measurement" is a worse failure than the imprecision it was avoiding, and it
+    is invisible in exactly the same way, because a blank page and a quiet market
+    look identical. Refuse the *claim*, not the measurement.
+
+    None is still returned when there is genuinely nothing to walk — no series,
+    ragged series, or history that rolled off before the stamp. That last one
+    stays a refusal: the bars between entry and the array's start are gone, so a
+    walk over what remains could book a TP1 that a missing SL preceded. Those
+    rows retire at the horizon as INSUFFICIENT rather than being scored.
     """
     import numpy as np
 
     if not candles:
         return None
     highs, lows = candles.get("high"), candles.get("low")
-    closes, open_time = candles.get("close"), candles.get("open_time")
-    if highs is None or lows is None or closes is None or open_time is None:
+    closes = candles.get("close")
+    open_time = candles.get("open_time")
+    if highs is None or lows is None or closes is None:
         return None
     n = len(highs)
-    if n == 0 or len(lows) != n or len(closes) != n or len(open_time) != n:
+    if n == 0 or len(lows) != n or len(closes) != n:
         return None
-    times = np.asarray(open_time, dtype=np.float64)
     since_ms = float(since_ts) * 1000.0
-    # The entry bar is the last one that had already opened at emission.
-    idx = int(np.searchsorted(times, since_ms, side="right")) - 1
+
+    def _undated(reason: str) -> Optional[Dict[str, Any]]:
+        # The legacy window: elapsed time, counted back from the end. Imprecise
+        # by construction — it assumes gap-free and current — which is why the
+        # row it produces is labelled rather than trusted.
+        elapsed = max(0.0, time.time() - float(since_ts))
+        want = int(elapsed // BAR_SECONDS) + 1
+        take = min(want, n)
+        if take <= 0:
+            return None
+        return {
+            "high": [float(v) for v in highs[-take:]],
+            "low": [float(v) for v in lows[-take:]],
+            "close": [float(v) for v in closes[-take:]],
+            "undated_reason": reason,
+        }
+
+    if open_time is None or len(open_time) != n:
+        return _undated("no_timestamps")
+    times = np.asarray(open_time, dtype=np.float64)
+    finite = np.isfinite(times)
+    if not finite.any():
+        return _undated("all_timestamps_padded")
+    # The store pads a bucket's pre-existing history with NaN when timestamps
+    # start arriving mid-life, so the real shape is a NaN prefix followed by a
+    # finite tail. searchsorted over the whole array would be reading an
+    # unsorted sequence — undefined, not merely imprecise — so it runs over the
+    # finite tail only.
+    first = int(np.argmax(finite))
+    tail = times[first:]
+    if not np.all(np.isfinite(tail)):
+        # Interleaved NaNs: not a prefix, so no contiguous region can be trusted.
+        return _undated("timestamps_interleaved")
+    if since_ms < float(tail[0]):
+        # The entry bar is inside the undated prefix (or older than the array).
+        # Undatable here, but still walkable — unless the array itself begins
+        # after the stamp, which is the rolled-off case handled below.
+        if first == 0:
+            return None      # history rolled off before the stamp — refuse
+        return _undated("stamp_before_timestamps")
+    idx = first + int(np.searchsorted(tail, since_ms, side="right")) - 1
     if idx < 0:
-        return None
-    window_times = times[idx:]
-    if not np.all(np.isfinite(window_times)):
-        # The store pads unknown timestamps with NaN rather than guessing; a
-        # guess is exactly what we would be adding back.
         return None
     return {
         "high": [float(v) for v in highs[idx:]],
         "low": [float(v) for v in lows[idx:]],
         "close": [float(v) for v in closes[idx:]],
-        "open_time": [float(t) for t in window_times],
+        "open_time": [float(t) for t in times[idx:]],
     }
 
 
@@ -569,7 +615,10 @@ def _note_advance(row: dict, now: float) -> None:
     last_ms = row.get("last_bar_ms")
     if last_ms is None:
         # Walked, but on a window that carried no usable timestamps. That is an
-        # unknown, and it stays an unknown: `stalled` is None, not False.
+        # unknown, and it stays an unknown: `stalled` is None, not False. The
+        # row was advanced — it is not a miss — but nothing here can say the
+        # bars it was advanced on were current, so the reader must not print an
+        # age beside it as though something had.
         row["bars_behind"] = None
         row["stalled"] = None
         return
@@ -639,7 +688,7 @@ def resolve_open(
     book = ledger if ledger is not None else get_ledger()
     tally = {
         "resolved": 0, "still_open": 0, "expired": 0, "no_candles": 0,
-        "stalled": 0, "insufficient": 0,
+        "stalled": 0, "insufficient": 0, "undated": 0,
     }
     try:
         for row in book.open_rows():
@@ -672,7 +721,14 @@ def resolve_open(
                 book.mark_dirty()
                 continue
             row.update(out)
+            # Why this row is undatable, recorded where it is known. Without it
+            # "no timestamps" and "the stamp predates them" are one blank, and
+            # they have different fixes — a snapshot that drops `open_time`
+            # versus a bucket still carrying its pre-restart prefix.
+            row["window_undated_reason"] = ohlc.get("undated_reason") or None
             _note_advance(row, now)
+            if row["window_undated_reason"]:
+                tally["undated"] += 1
             if out.get("status"):
                 row["closed_at"] = now
                 tally["resolved"] += 1
@@ -796,6 +852,21 @@ def resolution_health(
         ]
         bad = {id(r): r for r in stalled + untouched}
         if not bad:
+            # Advancing, but on windows nobody can date. Not a miss and not a
+            # stall — the rows resolve — yet it means the timestamp chain is
+            # broken upstream, which on 2026-07-31 was a snapshot loader that
+            # dropped `open_time` and blanked the whole lane for a full cycle
+            # before a human noticed. A probe that only watches for stalls
+            # cannot see it, so it is named here.
+            undated = [r for r in open_rows if r.get("window_undated_reason")]
+            if undated and len(undated) == len(open_rows):
+                reasons = sorted({str(r.get("window_undated_reason")) for r in undated})
+                return False, (
+                    f"all {len(open_rows)} open dark rows are being advanced on "
+                    f"windows that cannot be dated ({', '.join(reasons)}) — the "
+                    "outcomes are still real, but nothing can say whether the "
+                    "bars behind them are current"
+                )
             return True, f"{len(open_rows)} open rows, all advancing"
         worst = max(bad.values(), key=lambda r: int(r.get("resolve_misses") or 0))
         return False, (

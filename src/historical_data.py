@@ -283,6 +283,18 @@ class HistoricalDataStore:
                             "close": arrays["close"],
                             "volume": arrays["volume"],
                         }
+                        # Bar timestamps survive the restart, or every consumer
+                        # that locates a bar by wall clock is blind until the
+                        # array rolls over. They were absent here from the day
+                        # `open_time` was added (2026-07-31): the snapshot wrote
+                        # five keys, the loader read the same five, and
+                        # `_merge_candles` then *correctly* refused to merge a
+                        # timestamped fetch onto an untimestamped cache — so
+                        # after every restart the whole store was undatable.
+                        # Only saved when index-aligned: a short array whose
+                        # index i does not name bar i is worse than none.
+                        if len(arrays.get("open_time", ())) == len(arrays["close"]):
+                            _save_kw["open_time"] = arrays["open_time"]
                         for _ek in ("volume_usd", "taker_buy_vol_usd"):
                             if _ek in arrays and len(arrays[_ek]) > 0:
                                 _save_kw[_ek] = arrays[_ek]
@@ -353,6 +365,20 @@ class HistoricalDataStore:
                         for _ek in ("volume_usd", "taker_buy_vol_usd"):
                             if _ek in data.files:
                                 _loaded[_ek] = np.asarray(data[_ek], dtype=np.float64).ravel()
+                        # An npz written before timestamps were saved carries no
+                        # `open_time`. Pad it with NaN rather than leaving the
+                        # key absent: absence makes `_merge_candles` drop the
+                        # timestamps of the *fresh* side too, so one legacy file
+                        # keeps a bucket undatable for as long as it is merged
+                        # into. NaN says "this bar's time is unknown", which a
+                        # consumer can see and route around per bar.
+                        if "open_time" in data.files:
+                            _ot = np.asarray(data["open_time"], dtype=np.float64).ravel()
+                        else:
+                            _ot = np.full(len(_loaded["close"]), np.nan, dtype=np.float64)
+                        if len(_ot) != len(_loaded["close"]):
+                            _ot = np.full(len(_loaded["close"]), np.nan, dtype=np.float64)
+                        _loaded["open_time"] = _ot
                         self.candles.setdefault(symbol, {})[interval] = _loaded
                     loaded_count += 1
                 except Exception as exc:

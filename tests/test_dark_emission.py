@@ -15,6 +15,8 @@ also blocks the money path is a bug, not a guarantee.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from src import dark_emission as de
@@ -548,10 +550,52 @@ def test_a_window_whose_history_rolled_off_is_refused():
     assert de.slice_window(candles, since) is None
 
 
-def test_padded_timestamps_are_refused_rather_than_guessed():
+def test_padded_timestamps_downgrade_the_window_instead_of_blanking_it():
+    """The first cut refused, and on 2026-07-31 that turned a snapshot loader
+    which dropped `open_time` into a page reporting `no candles` on every row,
+    core pairs included. Refuse the *claim*, not the measurement."""
     start_ms = 1_700_000_000_000.0
     candles = _store_candles(start_ms, 5, pad_times=True)
-    assert de.slice_window(candles, start_ms / 1000.0) is None
+    window = de.slice_window(candles, time.time() - 120.0)
+    assert window is not None
+    assert "open_time" not in window, "an undated window must not claim a time"
+    assert window["undated_reason"] == "all_timestamps_padded"
+    assert len(window["high"]) >= 1
+
+
+def test_a_bucket_with_no_timestamp_series_at_all_still_walks():
+    candles = _store_candles(1_700_000_000_000.0, 5)
+    candles.pop("open_time")
+    window = de.slice_window(candles, time.time() - 120.0)
+    assert window is not None and window["undated_reason"] == "no_timestamps"
+
+
+def test_a_nan_prefix_is_searched_over_its_finite_tail_only():
+    """The restored history is NaN and the bars since boot are real, so the
+    array is not sorted — searchsorted over the whole of it is undefined, not
+    merely imprecise."""
+    import numpy as np
+
+    start_ms = 1_700_000_000_000.0
+    candles = _store_candles(start_ms, 10)
+    candles["open_time"][:6] = np.nan          # restored, undatable history
+    # A stamp inside the finite tail: located exactly, and dated.
+    since = (start_ms + 7 * 60_000.0 + 10_000.0) / 1000.0
+    window = de.slice_window(candles, since)
+    assert window["open_time"][0] == pytest.approx(start_ms + 7 * 60_000.0)
+    assert len(window["high"]) == 3
+
+
+def test_a_stamp_inside_the_undated_prefix_walks_undated():
+    """The row emitted before the restart. Its bars exist; their times do not."""
+    import numpy as np
+
+    start_ms = 1_700_000_000_000.0
+    candles = _store_candles(start_ms, 10)
+    candles["open_time"][:6] = np.nan
+    window = de.slice_window(candles, (start_ms + 2 * 60_000.0) / 1000.0)
+    assert window["undated_reason"] == "stamp_before_timestamps"
+    assert "open_time" not in window
 
 
 def test_a_ragged_series_is_refused_because_index_i_is_not_bar_i():
@@ -560,6 +604,45 @@ def test_a_ragged_series_is_refused_because_index_i_is_not_bar_i():
     candles = _store_candles(1_700_000_000_000.0, 5)
     candles["low"] = np.full(4, 99.0)
     assert de.slice_window(candles, 1_700_000_000.0) is None
+
+
+def test_a_ragged_timestamp_series_downgrades_rather_than_refusing():
+    """Ragged OHLC means the bars are unusable; ragged timestamps mean only the
+    times are. Different faults, different answers."""
+    import numpy as np
+
+    candles = _store_candles(1_700_000_000_000.0, 5)
+    candles["open_time"] = np.full(3, 1_700_000_000_000.0)
+    window = de.slice_window(candles, time.time() - 120.0)
+    assert window is not None and window["undated_reason"] == "no_timestamps"
+
+
+def test_an_undated_advance_is_not_a_miss_but_never_reads_as_current():
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    ohlc = {"high": [101.0], "low": [99.0], "close": [100.0],
+            "undated_reason": "no_timestamps"}
+    tally = de.resolve_open(lambda *_: ohlc, now_ts=ts + 600.0, ledger=ledger)
+    (row,) = ledger.rows()
+    assert row["resolve_misses"] == 0            # it advanced
+    assert row["last_resolved_at"] == ts + 600.0
+    assert row["window_undated_reason"] == "no_timestamps"
+    assert row["stalled"] is None                # unknown, never False
+    assert row["bars_behind"] is None
+    assert tally["undated"] == 1
+
+
+def test_the_probe_fails_when_the_whole_lane_goes_undated(monkeypatch):
+    """A lane advancing on undatable windows is not stalled and is not healthy.
+    Nothing watched for it, and the owner found it on a printed page."""
+    monkeypatch.setattr(de, "enabled", lambda: True)
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    ohlc = {"high": [101.0], "low": [99.0], "close": [100.0],
+            "undated_reason": "no_timestamps"}
+    de.resolve_open(lambda *_: ohlc, now_ts=ts + 600.0, ledger=ledger)
+    ok, detail = de.resolution_health(ledger, now_ts=ts + 600.0)
+    assert ok is False and "cannot be dated" in detail
 
 
 def test_slice_window_never_boolean_tests_a_numpy_array():
