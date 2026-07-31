@@ -150,6 +150,18 @@ EXIT_STATIC_TP1 = "static_tp1"
 #: and every one of them is excluded from the verdict rather than scored.
 EXIT_NO_SAR_AT_ENTRY = "no_sar_at_entry"
 EXIT_BAR_ROLLED_OUT = "bar_rolled_out_of_window"
+#: One advance tried to consume more bars than wall-clock time could have
+#: produced since the arm last moved. The bars are real, but they closed while
+#: this arm's series was frozen — walking them computes SAR levels and fills
+#: over history, which is a replay published on a page that says it is not one.
+#: Terminal and unscored, kept apart from ``bar_rolled_out_of_window`` because
+#: the fix differs: there the bar is gone, here the series jumped.
+EXIT_SERIES_JUMPED = "series_jumped_ahead"
+
+#: Slack on that test, in bars. A sweep can be late, and a bar can close between
+#: the freshness read and the walk, so a bar or two of overshoot is normal
+#: operation rather than a replay.
+_ADVANCE_SLACK_BARS = 2.0
 EXIT_FEED_STALLED = "candle_feed_stalled"
 EXIT_OPEN_AT_HORIZON = "still_open_at_horizon"
 
@@ -497,6 +509,13 @@ def new_arm(
         # forward-stepped row's clothes. The guard in ``observe_signal`` stops it
         # happening; this stamp is the detector that says so on the row itself.
         "first_step_bars": None,
+        # …and the same question asked of EVERY advance, not only the first.
+        # `first_step_bars` reads 1 on an arm that later swallows a hundred bars
+        # in one pass, which is exactly what three arms did on 2026-07-31 while
+        # every anchor column said `clean`. Set only when the guard fires, so a
+        # populated value here means the arm was retired rather than walked.
+        "advance_replay_bars": None,
+        "advance_allowed_bars": None,
         # Freshness of the measurement itself, not of the price beside it. An
         # open row is only as live as ``last_advance_at``: the parked stop was
         # computed on the bar consumed then and cannot have moved since.
@@ -655,6 +674,46 @@ def step_arm(
         is_long = _is_long(side)
         if arm.get("first_step_bars") is None and n > idx + 1:
             arm["first_step_bars"] = n - idx - 1
+
+        # ── Is this advance a walk, or a replay? ──────────────────────────
+        # #836 asked this of the arm's FIRST step and stopped there, so
+        # `first_step_bars` is 1 on an arm that later swallows a hundred bars in
+        # one pass. Owner data 2026-07-31: three arms stamped `anchor=clean`,
+        # `anchor_bars_behind≈0`, `first_step_bars=1` had consumed 466, 159 and
+        # 63 bars against lifetimes of 17, 5 and 9 — one of them contributing a
+        # −1.64R to the population an adoption decision reads.
+        #
+        # The mechanism is a frozen-then-refreshed series: a rotated-out mover's
+        # klines stop, the bucket freezes, and `refresh_timeframe` later REPLACES
+        # it with a fresh REST pull whose window still contains our last bar. The
+        # index is found, the walk is "valid", and it crosses hours of history in
+        # a single pass — pricing SAR against bars that closed long ago.
+        #
+        # A freshness rule applied at one end of an object's life is not applied
+        # to the object: the anchor guard runs at open, this runs at every step.
+        pending = n - idx - 1
+        width = timeframe_seconds(str(arm.get("timeframe") or ""))
+        if pending > 0 and width:
+            since = now - float(
+                arm.get("last_advance_at") or arm.get("opened_at") or now
+            )
+            allowed = max(0.0, since) / width + _ADVANCE_SLACK_BARS
+            if pending > allowed:
+                # Refuse, don't clamp. Walking "just the recent tail" would be a
+                # clamp — it would book fills on bars chosen by us rather than by
+                # the market, and the arm cannot know what it missed in between.
+                arm["status"] = STATUS_INSUFFICIENT
+                arm["exit_reason"] = EXIT_SERIES_JUMPED
+                arm["closed_at"] = now
+                arm["advance_replay_bars"] = float(pending)
+                arm["advance_allowed_bars"] = float(allowed)
+                log.warning(
+                    "SAR arm {} refused a {:.0f}-bar advance ({:.1f} allowed by "
+                    "the clock) — series jumped, not walked",
+                    arm.get("arm_id"), pending, allowed,
+                )
+                return True
+
         for i in range(idx + 1, n):
             hi, lo, op, cl = highs[i], lows[i], opens[i], closes[i]
             arm["last_bar_ms"] = times[i]

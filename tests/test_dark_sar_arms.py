@@ -200,3 +200,119 @@ def test_a_stale_anchor_is_refused_in_the_dark_lane_as_well(timestamped_store):
     sar.roll_health_cycle()
     assert sar.step_health(sar.LANE_DARK)["refused_open"] == 1
     assert sar.step_health(sar.LANE_LIVE)["refused_open"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# An advance is a walk, not a replay (owner data 2026-07-31)
+#
+# #836 asked "did this arm anchor to a current bar" and "how many bars did its
+# FIRST advance consume". Both read clean on three arms in the owner's export
+# that had consumed 466, 159 and 63 bars against lifetimes of 17, 5 and 9 —
+# because the over-walk happened on a LATER advance.
+#
+# Mechanism: a rotated-out mover's klines stop, its bucket freezes, and
+# `refresh_timeframe` REPLACES it with a fresh REST pull whose window still
+# contains the arm's last bar. The index is found, the walk is "valid", and it
+# crosses hours of history in one pass — pricing SAR against bars that closed
+# long ago, on the one page whose first sentence is "this is not a replay".
+# --------------------------------------------------------------------------- #
+
+
+def _running_arm(tf="15m", **kw):
+    # The real collaborator's type, not a dict with keys I invented — a mock
+    # whose shape I chose cannot verify a contract I got wrong (#798).
+    from src.sar_exit_shadow import SarLive
+
+    arm = sar.new_arm(
+        signal_id="SIG-1", symbol="AAAUSDT", side="LONG",
+        setup_class="MOVER_TREND_PULLBACK", timeframe=tf,
+        entry=100.0, stop_loss=97.0, tp1=106.0,
+        sar=SarLive(up=True, next_stop=96.0, last_closed_ms=1_700_000_000_000.0),
+        opened_ms=1_700_000_000_000.0,
+        anchor_bars_behind=0.0, now_ts=1_700_000_000.0,
+    )
+    arm.update(kw)
+    return arm
+
+
+def _series_from(start_ms, n, width_ms):
+    return {
+        "high": [101.0] * n, "low": [99.0] * n,
+        "open": [100.0] * n, "close": [100.0] * n,
+        "open_time": [start_ms + i * width_ms for i in range(n)],
+    }
+
+
+def test_a_normal_advance_of_one_bar_is_walked():
+    """The healthy case must keep working — this guard must not retire arms
+    that are simply being stepped."""
+    arm = _running_arm(last_bar_ms=1_700_000_000_000.0,
+                       last_advance_at=1_700_000_000.0)
+    series = _series_from(1_700_000_000_000.0, 2, 900_000.0)
+    sar.step_arm(arm, series, step=0.02, max_step=0.2,
+                 now_ts=1_700_000_900.0)          # one 15m bar later
+    assert arm["status"] == sar.STATUS_RUNNING
+    assert arm["bars_seen"] == 1
+
+
+def test_a_late_sweep_is_still_a_walk_not_a_replay():
+    """Slack exists because a sweep can be late and a bar can close between the
+    freshness read and the walk. Two bars of overshoot is operation, not fault."""
+    arm = _running_arm(last_bar_ms=1_700_000_000_000.0,
+                       last_advance_at=1_700_000_000.0)
+    series = _series_from(1_700_000_000_000.0, 4, 900_000.0)
+    sar.step_arm(arm, series, step=0.02, max_step=0.2,
+                 now_ts=1_700_000_900.0)          # 1 bar of clock, 3 pending
+    # It may well close on those bars — SAR flipping is a real outcome. What it
+    # must NOT do is refuse them as a replay.
+    assert arm["exit_reason"] != sar.EXIT_SERIES_JUMPED
+    assert arm["bars_seen"] > 0
+    assert arm.get("advance_replay_bars") is None
+
+
+def test_a_frozen_then_refreshed_series_is_refused_not_walked():
+    """The owner's AIOUSDT case: 466 bars offered against a 17-bar lifetime."""
+    arm = _running_arm(last_bar_ms=1_700_000_000_000.0,
+                       last_advance_at=1_700_000_000.0)
+    series = _series_from(1_700_000_000_000.0, 467, 900_000.0)
+    changed = sar.step_arm(arm, series, step=0.02, max_step=0.2,
+                           now_ts=1_700_000_000.0 + 17 * 900.0)
+    assert changed is True
+    assert arm["status"] == sar.STATUS_INSUFFICIENT
+    assert arm["exit_reason"] == sar.EXIT_SERIES_JUMPED
+    assert arm["bars_seen"] == 0, "not one of those bars may be scored"
+    assert arm["advance_replay_bars"] == 466
+
+
+def test_the_refusal_says_what_it_refused_and_what_the_clock_allowed():
+    """Two numbers, because one is an assertion and two are a detector."""
+    arm = _running_arm(last_bar_ms=1_700_000_000_000.0,
+                       last_advance_at=1_700_000_000.0)
+    series = _series_from(1_700_000_000_000.0, 100, 900_000.0)
+    sar.step_arm(arm, series, step=0.02, max_step=0.2,
+                 now_ts=1_700_000_000.0 + 5 * 900.0)
+    assert arm["advance_replay_bars"] == 99
+    assert arm["advance_allowed_bars"] == pytest.approx(7.0)   # 5 + 2 slack
+
+
+def test_the_jump_is_named_apart_from_a_rolled_out_bar():
+    """Different causes, different fixes: there the bar is gone, here the
+    series jumped. Pooling them would hide a replay inside a known-benign
+    bucket."""
+    assert sar.EXIT_SERIES_JUMPED != sar.EXIT_BAR_ROLLED_OUT
+    arm = _running_arm(last_bar_ms=1_699_000_000_000.0,   # not in the series
+                       last_advance_at=1_700_000_000.0)
+    series = _series_from(1_700_000_000_000.0, 4, 900_000.0)
+    sar.step_arm(arm, series, step=0.02, max_step=0.2, now_ts=1_700_000_900.0)
+    assert arm["exit_reason"] == sar.EXIT_BAR_ROLLED_OUT
+
+
+def test_an_unknown_timeframe_does_not_silently_disable_the_guard():
+    """`timeframe_seconds` returns None for an unknown width. The guard cannot
+    run — but it must not therefore wave the walk through pretending it checked."""
+    arm = _running_arm(tf="7m", last_bar_ms=1_700_000_000_000.0,
+                       last_advance_at=1_700_000_000.0)
+    series = _series_from(1_700_000_000_000.0, 200, 420_000.0)
+    sar.step_arm(arm, series, step=0.02, max_step=0.2, now_ts=1_700_000_420.0)
+    assert arm.get("advance_replay_bars") is None
+    assert sar.timeframe_seconds("7m") is None

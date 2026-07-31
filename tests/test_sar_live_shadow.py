@@ -465,6 +465,11 @@ OPS_CONTRACT_KEYS = frozenset({
     # that anchored to a stale bar walked history in its first advance, and
     # every freshness column above reads healthy on it because by then it was.
     "anchor_bars_behind", "first_step_bars",
+    # …and the per-advance version of the same question. `first_step_bars`
+    # guards only the arm's first step; these are set when a LATER advance tried
+    # to cross more bars than the clock allows, which is how an arm stamped
+    # `anchor=clean` consumed 466 bars in a 17-bar lifetime (2026-07-31).
+    "advance_replay_bars", "advance_allowed_bars",
 })
 
 
