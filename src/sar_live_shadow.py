@@ -870,6 +870,13 @@ class SarLiveLedger:
         Firestore — this is nowhere near the hot-path budget the cost rules
         guard.
         """
+        if not self._path:
+            # In-memory ledger (`path=""`, the tests' convention). Same reason
+            # as `dark_emission.DarkLedger.flush`: the atomic write would drop a
+            # stray `.tmp` in the cwd and then raise into `fail_open` on the
+            # rename, which is a non-failure filling the counter that is
+            # supposed to make real ones stand out.
+            return False
         try:
             with self._lock:
                 now = time.time()

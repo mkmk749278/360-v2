@@ -95,3 +95,8 @@ data/feature_liveness.json
 # poll writes it too — which is how it briefly got tracked (2026-07-30).
 data/sar_live_arms_v1.json
 data/sar_live_arms_v1.json.tmp.tmp
+
+# Stray atomic-write sibling from an in-memory ledger (`path=""`) — the
+# ledgers now short-circuit before writing it, and it must never be committed
+# again: it differs on every branch and conflicted on every merge.
+.tmp

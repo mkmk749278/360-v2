@@ -335,6 +335,15 @@ class DarkLedger:
                 "rows": [r for ring in self._paths.values() for r in ring],
             }
             self._dirty = False
+        if not self._path:
+            # `path=""` is the in-memory convention the tests construct with.
+            # Without this the atomic write still ran: it created `.tmp` in the
+            # process's cwd — the repo root under pytest, where `git add -A`
+            # then committed it on every branch, conflicting on every merge —
+            # and `os.replace(".tmp", "")` raised into `fail_open`, filling the
+            # counter with a non-failure. Returning True because nothing was
+            # asked to be persisted and nothing failed.
+            return True
         try:
             dirname = os.path.dirname(self._path)
             if dirname:
