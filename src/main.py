@@ -2580,10 +2580,18 @@ class CryptoSignalEngine:
             no_series = int(h.get("no_series") or 0)
             stalled = int(h.get("stalled") or 0)
             missed = no_series + stalled
+            # Arms we declined to open because the store's newest closed bar was
+            # itself bars old.  Reported, never paged on: no arm exists, so
+            # nothing is owed a verdict, and the refusal is the guard working.
+            # It still has to be *visible* — a silent skip is how the opposite
+            # failure (an arm anchoring to a 40h-old bar and back-replaying the
+            # gap) survived long enough to publish a row.
+            refused = int(h.get("refused_open") or 0)
+            tail = f"; {refused} arms not opened (stale anchor)" if refused else ""
             if stepped == 0 and missed == 0:
-                return True, "no open arms"
+                return True, f"no open arms{tail}"
             if missed == 0:
-                return True, f"{stepped} arms current, none stalled"
+                return True, f"{stepped} arms current, none stalled{tail}"
             symbols = ", ".join(sorted(h.get("symbols") or {})[:6])
             return False, (
                 f"{missed} live SAR arms could not be advanced this cycle "

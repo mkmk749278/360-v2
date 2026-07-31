@@ -4,6 +4,83 @@
 
 ---
 
+## 🟢 SESSION 95 2026-07-31 — the arm that anchored to a 40-hour-old bar (#836)
+
+Owner delivered the first full read of the SAR exit mechanism: the live-arm CSV
+(35 arms), the 5m and 15m dark-signal replays (16 signals each), and the
+`/signals/sar-live` page. Reading them against each other is what found this.
+
+### The verdict, on the data as it stands
+
+32 resolved arms / 17 signals / **8 symbols** / 24h, 30 of 32 `MOVER_TREND_PULLBACK`,
+COTIUSDT + ROBOUSDT alone 56% of the population.
+
+| Cut | R@level | R@confirm | Win |
+|---|---|---|---|
+| All resolved (n=32) | **+0.248** | +0.214 | 59% |
+| 5m (n=17) | +0.251 | +0.246 | 59% |
+| 15m (n=15) | +0.245 | +0.177 | 60% |
+| SAR governed (n=29) | +0.297 | +0.277 | 62% |
+| Original geometry governed (n=3) | −0.227 | −0.395 | 33% |
+
+**Confirm cost is real but small** — mean −0.039pp, i.e. waiting for the bar to close
+costs about 4bp against the parked-stop fill. This number had never been measured
+anywhere in the system; it is now, and it is not zero.
+
+**t = 1.37 on arms, 0.95 per signal, 0.77 per symbol.** The mechanism is *not*
+distinguishable from zero on this window. It is a promising read, not a verdict.
+
+### Two measurement faults the cross-read exposed
+
+1. **The dark-signals `sar_*` columns measure a different mechanism than the live
+   arm.** The replay runs SAR from bar one unconditionally; the live arm hands over
+   only once SAR comes onside, and until then the original SL/TP1 governs. On the 22
+   matched arms where SAR agreed at entry the two agree to −0.10pp. On the 6 where SAR
+   **opposed**, the replay reads **+0.73pp optimistic** — and on FAR-1A5692AF:5m it
+   printed +1.04% where the live arm took the −3.00% stop. 21% of arms open opposed.
+   *The dark CSV's SAR column is not a forecast of adopting this mechanism.*
+2. **R is divided by the SL distance the trade was sized for, on arms where SAR
+   replaced that stop with a wider one.** The SAR stop was **wider than the original
+   SL on 14 of 27** handovers — mean 1.25×, max **2.81×**. Re-divided by the risk
+   actually parked, +0.348R becomes **+0.292R**, and the worst arm's −1.90R is really
+   −0.71R at 2.7× the risk. Both readings are defensible; publishing only the first
+   flatters the mechanism on the upside and exaggerates it on the downside.
+
+### The bug (#836) — an arm can be born a replay
+
+ACHUSDT 15m: `bars_seen: 158` after **10 bars of life**, and `aligned_at_entry`
+disagreeing with its own 5m sibling on the same signal. `new_arm` anchors to
+`series["open_time"][-1]` — "the newest closed bar the store holds right now" — with
+**no check that that bar is current**. The ACHUSDT 15m series was ~40h stale at
+creation (a promoted mover: REST re-seed only, no WS klines), so SAR-at-entry was read
+off a 40h-old bar and the arm's first advance walked 39.5 hours of history in one pass,
+stamping `last_advance_at = now` on every one of them. The row published as a
+forward-stepped fill on the one page whose first sentence is *"This is not a replay."*
+The still-open PRLUSDT 15m arm on the page had the same shape (104 bars, ~1.7h old).
+
+1 of 32 resolved arms affected — it does not move the verdict above, but it is #800
+re-entering through the creation path, and every future promoted mover is exposed.
+
+**Fix:** `observe_signal` computes `bars_behind` on the candidate anchor and **refuses
+to open** past `SAR_LIVE_SHADOW_STALL_BARS` (default 3) rather than clamping the anchor
+forward to *now* — "now" is not the entry bar either. Refusals are counted and named
+(`refused_open` / `stale_anchor`) in `step_health`, reported by the liveness probe but
+never paged on: no arm exists, so nothing is owed a verdict. Every arm now stamps
+`anchor_bars_behind` where it becomes true, and `first_step_bars` — 1 on a live arm,
+larger only if it walked history — as the detector that reports on the guard.
+
+### Open
+
+- **Do not adopt on this window.** 8 symbols is not a population; wait for one that
+  spans regimes and setups beyond `MOVER_TREND_PULLBACK`.
+- Ops `/signals/sar-live` surfaces both (ops #109): an anchor panel grading every arm
+  `stepped` / `replayed` / `suspect` / `unverified` — replayed and suspect excluded from
+  every R, counted and named — and an `R @risk` column beside the SL-denominated one.
+  A missing stamp is `unverified`, not a pass, and the panel renders whether or not
+  anything failed.
+
+---
+
 ## 🟢 SESSION 94 2026-07-30 — the live arm was not live (#835, ops #108)
 
 Owner, hours after #832/#833 deployed, on the KORUUSDT SHORT arms: *"see that koru has

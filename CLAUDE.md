@@ -600,6 +600,35 @@ python -m src.main
   surface cannot grade its own liveness on a clock it supplies** — ops fetched the
   live price itself and printed it beside a two-hour-old stop under the words
   "right now", breaking from the other side the rule its own docstring carried.
+- **A forward measurement is only forward from the bar it anchors to.** `new_arm`
+  anchored to "the newest closed bar the store holds right now" and never asked
+  whether that bar *was* right now. For a promoted mover (REST re-seed only, no WS
+  klines) it was 40h old, so ACHUSDT 15m read its SAR-at-entry off a 40h-old bar,
+  disagreed with its own 5m sibling on the same signal, then walked 158 bars of
+  history in one advance — stamping `last_advance_at = now` on every one — and
+  published as a live fill on the page whose first sentence is "this is not a
+  replay" (2026-07-31, #836). #835 checked currency of data when *advancing* an arm
+  and not when *opening* one: **a freshness rule applied at one end of an object's
+  life is not applied to the object.** The answer is to refuse, not to re-anchor to
+  now — now is not the entry bar either — and a refusal is counted and named
+  (`refused_open` / `stale_anchor`) apart from a stalled arm, because no arm exists
+  and nothing is owed a verdict. Corollary: **one bar count is an assertion, two are
+  a detector** — `first_step_bars` is 1 on a genuinely live arm and larger only if
+  it walked history, so the row reports on its own guard.
+- **Two arms named for the same mechanism can measure different mechanisms.** The
+  dark-signals `sar_*` replay runs SAR from bar one; the live arm hands over only
+  once SAR comes onside and lets the original SL/TP1 govern until then. On the
+  candidates where SAR agreed at entry the two agree within 0.10pp — which is
+  exactly why nobody noticed that on the 21% where SAR **opposed** the replay reads
+  +0.73pp optimistic, printing +1.04% where the live arm took the −3.00% stop
+  (2026-07-31). Agreement on the easy majority is not validation; **check the
+  surfaces against each other on the population where their definitions differ.**
+- **Name the denominator when the mechanism replaces it.** R divides by the SL
+  distance the trade was sized for — but SAR cancels that stop, and its own stop was
+  **wider on 14 of 27 handovers** (mean 1.25×, max 2.81×). Divided by the risk
+  actually parked, +0.348R is +0.292R and the worst arm's −1.90R is −0.71R. Both are
+  defensible; publishing one silently is choosing the answer. Same rule as the two
+  fills: **where two denominators are defensible, publish both.**
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

@@ -150,6 +150,11 @@ EXIT_OPEN_AT_HORIZON = "still_open_at_horizon"
 STALL_NO_SERIES = "no_series"
 STALL_BARS_BEHIND = "bars_behind"
 
+#: Why an arm was not opened at all. Refusing to open is not a stall — no arm
+#: exists, so nothing is owed a verdict — but it is a *measurement* we declined
+#: to take and it is counted where the owner can see it.
+OPEN_REFUSED_STALE_ANCHOR = "stale_anchor"
+
 #: Bumped whenever a stored row's meaning changes. Readers gate on the schema,
 #: never on a date — a migration keyed to a timestamp that predicts a future
 #: deploy is how #802's first fix shipped 88 bad rows as good ones.
@@ -441,6 +446,7 @@ def new_arm(
     tp1: float,
     sar: Optional[SarLive],
     opened_ms: Optional[float],
+    anchor_bars_behind: Optional[float] = None,
     now_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Open one arm, deciding its governor from SAR at generation.
@@ -470,6 +476,18 @@ def new_arm(
         "opened_bar_ms": opened_ms,
         "last_bar_ms": opened_ms,
         "bars_seen": 0,
+        # How stale the bar this arm anchored to was, at the moment it anchored.
+        # Zero is the healthy case: the newest closed bar is the one that should
+        # be newest. Anything above it means the arm started life behind the
+        # clock, and ``first_step_bars`` records what that cost. Stamped here,
+        # where it becomes true — a reader cannot recover it later.
+        "anchor_bars_behind": anchor_bars_behind,
+        # Bars consumed by the arm's FIRST advance. On a live arm this is 1: one
+        # bar closes, the arm steps once. Anything larger is history the arm
+        # walked through *after* it was created, i.e. a replay wearing a
+        # forward-stepped row's clothes. The guard in ``observe_signal`` stops it
+        # happening; this stamp is the detector that says so on the row itself.
+        "first_step_bars": None,
         # Freshness of the measurement itself, not of the price beside it. An
         # open row is only as live as ``last_advance_at``: the parked stop was
         # computed on the bar consumed then and cannot have moved since.
@@ -626,6 +644,8 @@ def step_arm(
         entry = float(arm["entry"])
         side = arm["side"]
         is_long = _is_long(side)
+        if arm.get("first_step_bars") is None and n > idx + 1:
+            arm["first_step_bars"] = n - idx - 1
         for i in range(idx + 1, n):
             hi, lo, op, cl = highs[i], lows[i], opens[i], closes[i]
             arm["last_bar_ms"] = times[i]
@@ -950,6 +970,7 @@ def observe_signal(
     step: Optional[float] = None,
     max_step: Optional[float] = None,
     warmup: Optional[int] = None,
+    stall_bars: Optional[float] = None,
     ledger: Optional[SarLiveLedger] = None,
     now_ts: Optional[float] = None,
 ) -> None:
@@ -968,6 +989,7 @@ def observe_signal(
             SAR_EXIT_SHADOW_MAX_STEP,
             SAR_EXIT_SHADOW_STEP,
             SAR_LIVE_SHADOW_ENABLED,
+            SAR_LIVE_SHADOW_STALL_BARS,
             SAR_LIVE_SHADOW_TIMEFRAMES,
             SAR_LIVE_SHADOW_WARMUP_BARS,
         )
@@ -975,6 +997,7 @@ def observe_signal(
         if not SAR_LIVE_SHADOW_ENABLED:
             return
         tfs = timeframes if timeframes is not None else SAR_LIVE_SHADOW_TIMEFRAMES
+        sb = SAR_LIVE_SHADOW_STALL_BARS if stall_bars is None else stall_bars
         # One indicator, one set of parameters. The live arm deliberately reads
         # the same step/max-step as the replay arm and the app's chart study —
         # three surfaces drawing different SAR would make them incomparable.
@@ -1005,6 +1028,23 @@ def observe_signal(
                     # "could not open" into it would let a quiet failure to
                     # *advance* hide behind a busy failure to *open*.
                     continue
+                # An arm anchors to "the newest closed bar the store holds right
+                # now" and steps from there. When that bar is *itself* hours old
+                # the anchor is not the entry bar, and the arm's first advance
+                # walks the whole gap in one pass — computing SAR levels and
+                # fills over bars that closed before the arm existed. That is a
+                # replay, published under a page that says it is not one:
+                # ACHUSDT 15m consumed 158 bars (39.5h) in 10 bars of life on
+                # 2026-07-31, and its SAR-at-entry was read off a 40h-old bar.
+                # Presence of data is not currency of data (#835) — and the
+                # answer to an anchor we cannot trust is to refuse, not to clamp
+                # it forward to now, because "now" is not the entry bar either.
+                anchor_behind = bars_behind(series["open_time"][-1], tf, now)
+                if anchor_behind is not None and anchor_behind > float(sb):
+                    record_open_refusal(
+                        symbol, tf, OPEN_REFUSED_STALE_ANCHOR, anchor_behind
+                    )
+                    continue
                 live = _cached_sar_live(
                     symbol,
                     tf,
@@ -1026,6 +1066,7 @@ def observe_signal(
                         tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
                         sar=live,
                         opened_ms=series["open_time"][-1],
+                        anchor_bars_behind=anchor_behind,
                         now_ts=now,
                     )
                 )
@@ -1229,7 +1270,14 @@ def _price_of(price_fn: Optional[Any], symbol: str) -> Optional[float]:
 
 
 def _blank_health() -> Dict[str, Any]:
-    return {"stepped": 0, "no_series": 0, "stalled": 0, "symbols": {}}
+    return {
+        "stepped": 0,
+        "no_series": 0,
+        "stalled": 0,
+        "refused_open": 0,
+        "symbols": {},
+        "refused": {},
+    }
 
 
 _health_cur: Dict[str, Any] = _blank_health()
@@ -1257,6 +1305,32 @@ def record_step(symbol: str, ok: bool, reason: str = "") -> None:
         fail_open.record("sar_live_shadow.record_step", exc)
 
 
+def record_open_refusal(
+    symbol: str, timeframe: str, reason: str, bars_behind_now: Optional[float] = None
+) -> None:
+    """Count an arm we declined to open, and say why.
+
+    Kept apart from ``stepped``/``stalled``: those describe arms owed a verdict,
+    and this describes a measurement never started. Pooling them would let a
+    burst of refusals read as healthy stepping — the exact merge that made 2h19m
+    of frozen arms look fine in #835. A refusal is not a fault in the engine and
+    does not page; it is a fact about the candle store, and it belongs on screen
+    beside the arms it explains the absence of.
+    """
+    try:
+        with _health_lock:
+            _health_cur["refused_open"] = int(_health_cur["refused_open"]) + 1
+            if len(_health_cur["refused"]) < 256:
+                behind = (
+                    f" behind={bars_behind_now:.1f}b"
+                    if bars_behind_now is not None
+                    else ""
+                )
+                _health_cur["refused"][f"{symbol}:{timeframe}"] = f"{reason}{behind}"
+    except Exception as exc:
+        fail_open.record("sar_live_shadow.record_open_refusal", exc)
+
+
 def roll_health_cycle() -> None:
     global _health_cur, _health_last
     with _health_lock:
@@ -1270,7 +1344,9 @@ def step_health() -> Dict[str, Any]:
             "stepped": int(_health_last["stepped"]),
             "no_series": int(_health_last["no_series"]),
             "stalled": int(_health_last["stalled"]),
+            "refused_open": int(_health_last["refused_open"]),
             "symbols": dict(_health_last["symbols"]),
+            "refused": dict(_health_last["refused"]),
         }
 
 

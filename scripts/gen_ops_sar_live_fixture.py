@@ -8,7 +8,8 @@ dead code (#798), and it is how ops read ``entry_regime`` for months while
 nothing wrote it (#817).
 
 So this script drives the real ``sar_live_shadow`` — ``new_arm``, ``sweep``,
-``SarLiveLedger.flush`` — against a real ``HistoricalDataStore``, and writes what
+``SarLiveLedger.flush``, including the ``anchor_bars_behind`` stamp
+``observe_signal`` computes — against a real ``HistoricalDataStore``, and writes what
 the engine actually wrote. Regenerate after any change to the arm row shape:
 
     python3 scripts/gen_ops_sar_live_fixture.py \
@@ -89,7 +90,9 @@ def main(out_path: str) -> None:
             signal_id="BRKDN-C74F2BE4", symbol="KORUUSDT", side="SHORT",
             setup_class="BREAKDOWN_SHORT", timeframe=tf,
             entry=11.77, stop_loss=12.1231, tp1=11.26,
-            sar=sar, opened_ms=last, now_ts=opened_at,
+            sar=sar, opened_ms=last,
+            anchor_bars_behind=live.bars_behind(last, tf, opened_at),
+            now_ts=opened_at,
         ))
 
     # --- The advancing arm: SLXUSDT SHORT, 15m ------------------------------
@@ -101,7 +104,9 @@ def main(out_path: str) -> None:
         signal_id="MVRTP-F22476CD", symbol="SLXUSDT", side="SHORT",
         setup_class="MOVER_TREND_PULLBACK", timeframe="15m",
         entry=0.08592, stop_loss=0.08787286, tp1=0.083565987072,
-        sar=slx_sar, opened_ms=slx_last, now_ts=opened_at,
+        sar=slx_sar, opened_ms=slx_last,
+        anchor_bars_behind=live.bars_behind(slx_last, "15m", opened_at),
+        now_ts=opened_at,
     ))
 
     # Three more SLX bars close over the next 45 minutes. KORUUSDT's candles
