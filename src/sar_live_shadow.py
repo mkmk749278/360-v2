@@ -692,7 +692,7 @@ def step_arm(
         # A freshness rule applied at one end of an object's life is not applied
         # to the object: the anchor guard runs at open, this runs at every step.
         pending = n - idx - 1
-        width = timeframe_seconds(arm.get("timeframe"))
+        width = timeframe_seconds(str(arm.get("timeframe") or ""))
         if pending > 0 and width:
             since = now - float(
                 arm.get("last_advance_at") or arm.get("opened_at") or now
