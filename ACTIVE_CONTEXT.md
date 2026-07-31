@@ -69,15 +69,76 @@ never paged on: no arm exists, so nothing is owed a verdict. Every arm now stamp
 `anchor_bars_behind` where it becomes true, and `first_step_bars` — 1 on a live arm,
 larger only if it walked history — as the detector that reports on the guard.
 
+### A third caveat, from the Session-94 handoff's §4.1 trap: check the denominator
+
+The handoff's rule — *"check the denominator before computing R"* — applies to this
+window, and the answer is partly reassuring and partly not.
+
+**Reassuring:** the SAR arm does **not** read `sl_distance_pct_at_entry`, the field
+§4.1 shows is unusable (missing on 152 of 378, missingness outcome-correlated).
+`new_arm` computes `sl_distance_pct` from the row's own `entry` and `stop_loss` at
+creation, both of which are on the row — self-consistent, verifiable from the CSV,
+and taken from the **shipped** stop rather than the evaluator's pre-noise-floor one.
+`sar_live_shadow` already does what §4.1 asks the rest of the system for: one value,
+recorded once, at the moment the shipped stop is known.
+
+**Not reassuring:** **15 of 32 resolved arms (47%) divide by exactly 3.00%** — the
+`NOISE_FLOOR_MAX_SL_PCT` cap. That is a real stop that really shipped, so the R is
+honest; but for half the population the denominator is a **constant**, not the
+evaluator's geometry, and the two halves do not agree:
+
+| Denominator | n | R@level | Win | Raw pnl% |
+|---|---:|---:|---:|---:|
+| Capped at 3.00% | 15 | **+0.386** | 53% | +1.157 |
+| Evaluator geometry | 17 | **+0.127** | 65% | +0.141 |
+
+So +0.248R is a blend of two populations whose denominators mean different things,
+and it moves with the cap mix. Checked and **not** supported: the tempting story that
+SAR wins by widening a stop the cap had left too tight — SAR's stop was wider on 6 of
+10 capped arms against 8 of 17 uncapped, which at this n is nothing.
+
 ### Open
 
 - **Do not adopt on this window.** 8 symbols is not a population; wait for one that
-  spans regimes and setups beyond `MOVER_TREND_PULLBACK`.
-- Ops `/signals/sar-live` surfaces both (ops #109): an anchor panel grading every arm
-  `stepped` / `replayed` / `suspect` / `unverified` — replayed and suspect excluded from
-  every R, counted and named — and an `R @risk` column beside the SL-denominated one.
-  A missing stamp is `unverified`, not a pass, and the panel renders whether or not
-  anything failed.
+  spans regimes and setups beyond `MOVER_TREND_PULLBACK` — and report the capped share
+  beside the headline when it is re-read.
+- Ops `/signals/sar-live` surfaces the anchor grading and both denominators (ops #109,
+  merged): every arm graded `stepped` / `replayed` / `suspect` / `unverified` — replayed
+  and suspect excluded from every R, counted and named — and an `R @risk` column beside
+  the SL-denominated one. A missing stamp is `unverified`, not a pass, and the panel
+  renders whether or not anything failed.
+- **The page will read mostly `suspect` / `unverified` at first.** Every arm now in the
+  ledger predates the stamps. That is the fallback working, not a regression; the
+  `engine_stamped` count climbs as new arms open under #836.
+- **Not yet surfaced: the capped-denominator share.** `/signals/sar-live` splits on
+  *SAR stop vs designed SL* but not on *designed SL vs the noise-floor cap*, so the
+  table above cannot be read off the page. Small addition, worth making before the
+  next adoption read.
+
+### Carried from the Session-94 handoff — owner-directed and **still not started**
+
+Three sessions have now been spent on the SAR measurement plumbing (#832/#833 →
+#835 → #836) and the two items the owner actually directed are untouched. Naming
+that explicitly so it stops being invisible:
+
+- **ITEM 1 — `MEAN_REVERT`.** 4.09% detection, **zero** delivered in 28 days, and the
+  engine holds two numbers for it that **disagree in sign**: `MEAN_REVERT` reads 80% /
+  +0.58R over n=3085 while `SHADOW_MEAN_REVERT` reads 40% / −0.01R over n=3414 — and
+  `context_emission_policy._CONTROL_ARM` wires the **live gate** to the second. First
+  task is not the unlock, it is establishing whether the two arms measure the same
+  setup at all (`_CONTROL_ARM` maps `RANGE_FADE` the same way). Owner-sign-off,
+  dark-first.
+- **ITEM 3 — per-path verdict on the near-dead detectors.** `WHALE_MOMENTUM` 0 of
+  118,642 (check whether it is starved of *tick input* before touching a threshold);
+  `POST_DISPLACEMENT_CONTINUATION` 53% `regime_blocked` with the best positive cell in
+  the matrix (n=67, 90%, +0.75R). Stamp-and-shadow first; do not add new paths.
+- **§4.1 `sl_distance_pct_at_entry`** remains unusable system-wide — the SAR arm sidesteps
+  it, `/track-record` does not.
+- **§4.2 `pair_admission` still has no ops surface.** Directly relevant here: this
+  window is 30 of 32 `MOVER_TREND_PULLBACK` and nothing on any page says which
+  admission path those pairs came in through.
+- Also unverified from #834: whether `cohort_edge` has earned a row in the Suppression
+  Quality Audit yet, and whether delivered/day is recovering as cohorts age out.
 
 ---
 
