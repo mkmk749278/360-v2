@@ -115,6 +115,15 @@ from src.utils import get_logger
 
 log = get_logger(__name__)
 
+#: Health is per **lane**, not global. Two ledgers are swept — arms on delivered
+#: signals and arms on dark-feed rows — and pooling their counters would let a
+#: stall in the dark lane page as though the live arms had frozen, or a healthy
+#: dark lane dilute a real live failure. Same rule the ledgers themselves follow:
+#: a number is only readable if you can say which population it describes.
+LANE_LIVE = "live"
+LANE_DARK = "dark"
+
+
 # --------------------------------------------------------------------------- #
 # Vocabulary
 # --------------------------------------------------------------------------- #
@@ -936,6 +945,43 @@ def reset_ledger(ledger: Optional[SarLiveLedger] = None) -> None:
         _ledger = ledger
 
 
+#: Arms opened on **dark-feed** rows, in their own file (owner, 2026-07-31:
+#: "observe this dark feed too with SAR exit along with regular").
+#:
+#: A separate ledger rather than a `lane` column in the live one, and the
+#: distinction is not cosmetic: `sar_live_arms_v1.json` is the population
+#: `/signals/sar-live` presents as the evidence for adopting SAR on the money
+#: path, and every row in it reached a subscriber. A dark row reached nobody.
+#: Pooling them would inflate that evidence with signals that were never sent,
+#: and it would do so silently — a consumer that has not heard of the dark lane
+#: cannot filter for it, whereas a consumer pointed at a file it does not open
+#: cannot see it at all. Same reasoning as the ledgers being per-path rather
+#: than one ring: a number is readable only when its population is nameable.
+DARK_PATH = os.getenv("SAR_LIVE_SHADOW_DARK_PATH", "data/dark_sar_arms_v1.json")
+
+_dark_ledger: Optional[SarLiveLedger] = None
+
+
+def get_dark_ledger() -> SarLiveLedger:
+    global _dark_ledger
+    with _ledger_lock:
+        if _dark_ledger is None:
+            from config import SAR_LIVE_SHADOW_MAX_RESOLVED
+
+            _dark_ledger = SarLiveLedger(
+                path=DARK_PATH, max_resolved=SAR_LIVE_SHADOW_MAX_RESOLVED
+            )
+            _dark_ledger.load()
+        return _dark_ledger
+
+
+def reset_dark_ledger(ledger: Optional[SarLiveLedger] = None) -> None:
+    """Test hook."""
+    global _dark_ledger
+    with _ledger_lock:
+        _dark_ledger = ledger
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
@@ -972,6 +1018,7 @@ def observe_signal(
     warmup: Optional[int] = None,
     stall_bars: Optional[float] = None,
     ledger: Optional[SarLiveLedger] = None,
+    lane: str = LANE_LIVE,
     now_ts: Optional[float] = None,
 ) -> None:
     """Open this signal's arms on first sight. Advancing is ``sweep``'s job.
@@ -1042,7 +1089,7 @@ def observe_signal(
                 anchor_behind = bars_behind(series["open_time"][-1], tf, now)
                 if anchor_behind is not None and anchor_behind > float(sb):
                     record_open_refusal(
-                        symbol, tf, OPEN_REFUSED_STALE_ANCHOR, anchor_behind
+                        symbol, tf, OPEN_REFUSED_STALE_ANCHOR, anchor_behind, lane=lane
                     )
                     continue
                 live = _cached_sar_live(
@@ -1054,8 +1101,7 @@ def observe_signal(
                     s,
                     ms,
                 )
-                book.add(
-                    new_arm(
+                _arm = new_arm(
                         signal_id=signal_id,
                         symbol=symbol,
                         side=side,
@@ -1068,8 +1114,13 @@ def observe_signal(
                         opened_ms=series["open_time"][-1],
                         anchor_bars_behind=anchor_behind,
                         now_ts=now,
-                    )
                 )
+                # Stamped on the row, not only implied by which file it landed
+                # in. A row that cannot say which population it belongs to
+                # becomes unattributable the moment it is exported, copied into
+                # a comparison, or read beside rows from the other lane.
+                _arm["lane"] = str(lane)
+                book.add(_arm)
                 continue
             # The arm already exists — ``sweep`` advances it. Marking it here as
             # well would only duplicate what the sweep does moments later, and
@@ -1091,6 +1142,7 @@ def sweep(
     abandon_sec: Optional[float] = None,
     max_open_hours: Optional[float] = None,
     ledger: Optional[SarLiveLedger] = None,
+    lane: str = LANE_LIVE,
     now_ts: Optional[float] = None,
 ) -> Dict[str, int]:
     """Advance every open arm in the ledger. Returns a per-cycle tally.
@@ -1173,7 +1225,7 @@ def sweep(
             series = _series(store, symbol, tf, wu)
             if series is None:
                 tally["no_series"] += 1
-                record_step(symbol, False, f"{STALL_NO_SERIES}:{tf}")
+                record_step(symbol, False, f"{STALL_NO_SERIES}:{tf}", lane=lane)
                 if _note_series_state(
                     arm,
                     now=now,
@@ -1205,13 +1257,13 @@ def sweep(
 
             if advanced:
                 tally["advanced"] += 1
-                record_step(symbol, True)
+                record_step(symbol, True, lane=lane)
             elif arm.get("stalled"):
                 tally["stalled"] += 1
-                record_step(symbol, False, f"{STALL_BARS_BEHIND}:{tf}")
+                record_step(symbol, False, f"{STALL_BARS_BEHIND}:{tf}", lane=lane)
             else:
                 tally["current"] += 1
-                record_step(symbol, True)
+                record_step(symbol, True, lane=lane)
 
             if arm.get("status") == STATUS_RUNNING:
                 mark_arm(arm, _price_of(price_fn, symbol))
@@ -1280,33 +1332,42 @@ def _blank_health() -> Dict[str, Any]:
     }
 
 
-_health_cur: Dict[str, Any] = _blank_health()
-_health_last: Dict[str, Any] = _blank_health()
+_health_cur: Dict[str, Dict[str, Any]] = {LANE_LIVE: _blank_health(), LANE_DARK: _blank_health()}
+_health_last: Dict[str, Dict[str, Any]] = {LANE_LIVE: _blank_health(), LANE_DARK: _blank_health()}
 _health_lock = threading.Lock()
 
 
-def record_step(symbol: str, ok: bool, reason: str = "") -> None:
+def _cur(lane: str) -> Dict[str, Any]:
+    return _health_cur.setdefault(str(lane or LANE_LIVE), _blank_health())
+
+
+def record_step(symbol: str, ok: bool, reason: str = "", lane: str = LANE_LIVE) -> None:
     """Bucket one arm's cycle. ``reason`` is ``"<why>:<timeframe>"`` on a miss."""
     try:
         with _health_lock:
+            cur = _cur(lane)
             if ok:
-                _health_cur["stepped"] = int(_health_cur["stepped"]) + 1
-                _health_cur["symbols"].pop(symbol, None)
+                cur["stepped"] = int(cur["stepped"]) + 1
+                cur["symbols"].pop(symbol, None)
                 return
             key = (
                 "stalled"
                 if str(reason or "").startswith(STALL_BARS_BEHIND)
                 else "no_series"
             )
-            _health_cur[key] = int(_health_cur[key]) + 1
-            if len(_health_cur["symbols"]) < 256:
-                _health_cur["symbols"][symbol] = reason or "unknown"
+            cur[key] = int(cur[key]) + 1
+            if len(cur["symbols"]) < 256:
+                cur["symbols"][symbol] = reason or "unknown"
     except Exception as exc:
         fail_open.record("sar_live_shadow.record_step", exc)
 
 
 def record_open_refusal(
-    symbol: str, timeframe: str, reason: str, bars_behind_now: Optional[float] = None
+    symbol: str,
+    timeframe: str,
+    reason: str,
+    bars_behind_now: Optional[float] = None,
+    lane: str = LANE_LIVE,
 ) -> None:
     """Count an arm we declined to open, and say why.
 
@@ -1319,39 +1380,51 @@ def record_open_refusal(
     """
     try:
         with _health_lock:
-            _health_cur["refused_open"] = int(_health_cur["refused_open"]) + 1
-            if len(_health_cur["refused"]) < 256:
+            cur = _cur(lane)
+            cur["refused_open"] = int(cur["refused_open"]) + 1
+            if len(cur["refused"]) < 256:
                 behind = (
                     f" behind={bars_behind_now:.1f}b"
                     if bars_behind_now is not None
                     else ""
                 )
-                _health_cur["refused"][f"{symbol}:{timeframe}"] = f"{reason}{behind}"
+                cur["refused"][f"{symbol}:{timeframe}"] = f"{reason}{behind}"
     except Exception as exc:
         fail_open.record("sar_live_shadow.record_open_refusal", exc)
 
 
-def roll_health_cycle() -> None:
+def roll_health_cycle(lane: Optional[str] = None) -> None:
+    """Close the current window. ``lane=None`` rolls every lane.
+
+    A lane is rolled by whoever sweeps it: the monitor loop rolls ``live`` on
+    its cycle, the dark resolver rolls ``dark`` on its own — which are different
+    periods, and pooling them under one roll would report a window neither lane
+    actually ran.
+    """
     global _health_cur, _health_last
     with _health_lock:
-        _health_last = _health_cur
-        _health_cur = _blank_health()
+        lanes = list(_health_cur) if lane is None else [str(lane)]
+        for ln in lanes:
+            _health_last[ln] = _cur(ln)
+            _health_cur[ln] = _blank_health()
 
 
-def step_health() -> Dict[str, Any]:
+def step_health(lane: str = LANE_LIVE) -> Dict[str, Any]:
     with _health_lock:
+        last = _health_last.setdefault(str(lane or LANE_LIVE), _blank_health())
         return {
-            "stepped": int(_health_last["stepped"]),
-            "no_series": int(_health_last["no_series"]),
-            "stalled": int(_health_last["stalled"]),
-            "refused_open": int(_health_last["refused_open"]),
-            "symbols": dict(_health_last["symbols"]),
-            "refused": dict(_health_last["refused"]),
+            "lane": str(lane or LANE_LIVE),
+            "stepped": int(last["stepped"]),
+            "no_series": int(last["no_series"]),
+            "stalled": int(last["stalled"]),
+            "refused_open": int(last["refused_open"]),
+            "symbols": dict(last["symbols"]),
+            "refused": dict(last["refused"]),
         }
 
 
 def reset_health() -> None:
     global _health_cur, _health_last
     with _health_lock:
-        _health_cur = _blank_health()
-        _health_last = _blank_health()
+        _health_cur = {LANE_LIVE: _blank_health(), LANE_DARK: _blank_health()}
+        _health_last = {LANE_LIVE: _blank_health(), LANE_DARK: _blank_health()}
