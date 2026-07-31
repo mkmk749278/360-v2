@@ -2085,6 +2085,36 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Dark emission resolve error (fail-open): {}", exc)
 
+            # ── SAR exit arms on the dark rows ────────────────────────────
+            # The same mechanism the live arms measure, run over the dark feed
+            # so each row has two outcomes: what its own SL/TP1 geometry did,
+            # and what a SAR handover would have done. Owner, 2026-07-31.
+            #
+            # Swept here rather than in the monitor loop because these arms
+            # belong to this lane's clock — and the sweep is keyed on the arms
+            # owed a verdict, so an arm outlives its dark row exactly as a live
+            # arm outlives its signal (#835). The lane's health is rolled here
+            # too: the monitor loop rolls `live` on its own period, and one roll
+            # covering both would report a window neither lane ran.
+            try:
+                from src import dark_emission as _de_sar
+                from src import sar_live_shadow as _sarlive
+                if _de_sar.enabled():
+                    _dark_sar = await asyncio.to_thread(
+                        _sarlive.sweep,
+                        self.data_store,
+                        ledger=_sarlive.get_dark_ledger(),
+                        lane=_sarlive.LANE_DARK,
+                    )
+                    _sarlive.get_dark_ledger().flush(force=True)
+                    _sarlive.roll_health_cycle(_sarlive.LANE_DARK)
+                    if any(_dark_sar.values()):
+                        log.info("Dark SAR arms swept: {}", _dark_sar)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Dark SAR sweep error (fail-open): {}", exc)
+
             # ── Stop-geometry A/B: classify the FIXED/ATR pair ledger ──────
             # Same forward measure, dedicated store; both arms land in the
             # edge matrix as X@FIXED / X@ATR shadow rows so ops + the truth
@@ -2671,6 +2701,52 @@ class CryptoSignalEngine:
             name="sar_live_arms",
             fn=_sar_live_arms,
             min_streak=12,         # 1 min sustained (monitor ticks every 5s)
+        ))
+
+        def _dark_sar_arms() -> Tuple[bool, str]:
+            """Are the SAR arms on the DARK rows still being advanced?
+
+            Its own probe reading its own lane's counters, because a stall here
+            and a stall on the delivered-signal arms need different responses:
+            one is a measurement of a mechanism we might adopt, the other is a
+            measurement riding the loop that carries real exits.  Pooling them
+            would let a quiet dark-lane failure hide behind a busy live lane —
+            and, worse, page about the live arms when nothing is wrong with
+            them.
+
+            Same shape as ``sar_live_arms`` deliberately: refusals are reported
+            and never paged on, idle answers True with a reason.
+            """
+            from config import SAR_LIVE_SHADOW_ENABLED as _live_on
+
+            from src import dark_emission as _de_p
+            if not _live_on or not _de_p.enabled():
+                return True, "disabled by config"
+            from src import sar_live_shadow as _live
+
+            h = _live.step_health(_live.LANE_DARK)
+            stepped = int(h.get("stepped") or 0)
+            no_series = int(h.get("no_series") or 0)
+            stalled = int(h.get("stalled") or 0)
+            missed = no_series + stalled
+            refused = int(h.get("refused_open") or 0)
+            tail = f"; {refused} arms not opened (stale anchor)" if refused else ""
+            if stepped == 0 and missed == 0:
+                return True, f"no open dark arms{tail}"
+            if missed == 0:
+                return True, f"{stepped} dark arms current, none stalled{tail}"
+            symbols = ", ".join(sorted(h.get("symbols") or {})[:6])
+            return False, (
+                f"{missed} dark SAR arms could not be advanced this cycle "
+                f"({no_series} no candles, {stalled} bars behind; {stepped} "
+                f"current): {symbols}. The SAR comparison on those dark rows is "
+                f"frozen, so their two outcomes are no longer measured together."
+            )
+
+        fl.add_predicate(PredicateProbe(
+            name="dark_sar_arms",
+            fn=_dark_sar_arms,
+            min_streak=3,          # the dark lane sweeps on its own slower loop
         ))
 
         def _dark_resolution() -> Tuple[bool, str]:

@@ -791,3 +791,21 @@ def test_the_short_side_is_untouched():
     carry = src.index("_carry_long_dark = True")
     long_branch = src.rindex("if direction == Direction.LONG:", 0, carry)
     assert long_branch < carry, "the carry must sit inside the LONG branch"
+
+
+def test_an_in_memory_ledger_writes_nothing_and_records_no_failure(tmp_path, monkeypatch):
+    """`path=""` means "do not persist". The atomic write used to run anyway:
+    it created `.tmp` in the process's cwd — the repo root under pytest, where
+    it was committed on every branch and conflicted on every merge — and then
+    raised into `fail_open` on `os.replace(".tmp", "")`, filling the counter
+    that exists to make real failures stand out."""
+    from src import fail_open
+
+    monkeypatch.chdir(tmp_path)
+    before = len(fail_open.snapshot()) if hasattr(fail_open, "snapshot") else 0
+    ledger = de.DarkLedger(path="")
+    ledger.add({"symbol": "AAAUSDT", "setup_class": "MEAN_REVERT", "status": "OPEN"})
+    ledger.flush(force=True)
+    assert list(tmp_path.iterdir()) == [], "an in-memory ledger touched the disk"
+    if hasattr(fail_open, "snapshot"):
+        assert len(fail_open.snapshot()) == before
