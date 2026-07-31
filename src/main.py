@@ -2029,6 +2029,27 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Suppression audit classify error (fail-open): {}", exc)
 
+            # ── Dark emission lane: resolve the owner-only feed ────────────
+            # These rows are signals the scanner was willing to send on a path
+            # the gates normally silence. Unlike a suppression stamp they went
+            # through the full chain, so their outcomes are the closest thing
+            # to "what would the feed have looked like" we can measure without
+            # putting them in front of a user. Resolved off the loop thread for
+            # the same reason as the batches above: a backlog on the loop
+            # starves the scanner and trade-monitor heartbeats.
+            try:
+                from src import dark_emission as _de
+                if _de.enabled():
+                    _dark_counters = await asyncio.to_thread(
+                        _de.resolve_open, fetch_ohlc_since
+                    )
+                    if any(_dark_counters.values()):
+                        log.info("Dark emission resolved: {}", _dark_counters)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Dark emission resolve error (fail-open): {}", exc)
+
             # ── Stop-geometry A/B: classify the FIXED/ATR pair ledger ──────
             # Same forward measure, dedicated store; both arms land in the
             # edge matrix as X@FIXED / X@ATR shadow rows so ops + the truth

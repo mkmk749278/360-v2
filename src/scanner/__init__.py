@@ -171,6 +171,7 @@ from src.signal_quality import (
 from src.cluster_suppression import ClusterSuppressor
 from src.confidence_decay import apply_confidence_decay
 from src.cross_asset import AssetState, check_cross_asset_gate
+from src import dark_emission
 from src import fail_open
 from src import pair_penalty as _pair_penalty
 from src.feedback_loop import FeedbackLoop
@@ -5494,6 +5495,20 @@ class Scanner:
         except Exception as exc:
             log.debug("pre-TP stamp failed for %s: %s", getattr(sig, "symbol", "?"), exc)
 
+        # ── THE divergence point for the dark lane ────────────────────────
+        # A dark candidate has cleared every gate except the loosened one, and
+        # this is the one place it must not go further.  Structural, not
+        # conditional: the queue is the only route to SignalRouter, and
+        # therefore the only route to Telegram, FCM, the app feed, the position
+        # lock, and signal_dispatch placing real orders on real users' keys.
+        # One branch here is the whole safety property.
+        if dark_emission.is_dark(sig):
+            _dark_ok = dark_emission.publish(sig)
+            self._suppression_counters[
+                f"dark_emitted:{getattr(sig, 'setup_class', 'UNKNOWN')}"
+            ] += 1
+            return bool(_dark_ok)
+
         # Stamp cooldown on success.  Only persist after queue.put succeeds
         # (so a queue overflow doesn't lock out future legitimate signals).
         ok = await self.signal_queue.put(sig)
@@ -6226,8 +6241,22 @@ class Scanner:
                 _setup_class_name,
             )
             self._stamp_prescoring_suppressed(sig, f"setup_compat:{_compat_token}")
-            log.debug("Rejected {} {} setup: {}", symbol, chan_name, setup.reason)
-            return _reject("gated", None)
+            # Dark lane: carry an enrolled path PAST this gate instead of
+            # killing it, so the path actually emits and we see real signals
+            # rather than counterfactuals.  Every gate below still applies —
+            # the point is to learn what else would have stopped it — and the
+            # candidate is diverted at the single enqueue site, so it can never
+            # reach the router, a user, or an order.
+            if dark_emission.should_mark(sig, f"setup_compat:{_compat_token}"):
+                dark_emission.mark(sig, f"setup_compat:{_compat_token}")
+                self._increment_path_funnel(
+                    f"dark_carry:setup_compat:{_compat_token}",
+                    chan_name,
+                    _setup_class_name,
+                )
+            else:
+                log.debug("Rejected {} {} setup: {}", symbol, chan_name, setup.reason)
+                return _reject("gated", None)
 
         execution = self._evaluate_execution(sig, ctx, setup)
         if not execution.passed:
@@ -6242,8 +6271,18 @@ class Scanner:
                 _setup_class_name,
             )
             self._stamp_prescoring_suppressed(sig, f"execution:{_exec_token}")
-            log.debug("Rejected {} {} execution: {}", symbol, chan_name, execution.reason)
-            return _reject("gated", None)
+            if dark_emission.should_mark(sig, f"execution:{_exec_token}"):
+                dark_emission.mark(sig, f"execution:{_exec_token}")
+                self._increment_path_funnel(
+                    f"dark_carry:execution:{_exec_token}",
+                    chan_name,
+                    _setup_class_name,
+                )
+            else:
+                log.debug(
+                    "Rejected {} {} execution: {}", symbol, chan_name, execution.reason
+                )
+                return _reject("gated", None)
 
         # ── Filter 1: MTF Confluence Gate ──────────────────────────────────
         # Resolve the regime key early so regime-specific MTF config can
