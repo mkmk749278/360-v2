@@ -112,10 +112,37 @@ STATUS_OPEN = "OPEN"
 STATUS_TP1 = "CLOSED_TP1"
 STATUS_SL = "CLOSED_SL"
 STATUS_EXPIRED = "EXPIRED"
+#: Past the horizon and never walkable — the candles for this symbol stopped
+#: arriving (a rotated-out mover is the common case) so no verdict was ever
+#: earned. Terminal, and deliberately **not** EXPIRED: an expiry is a walked
+#: window in which nothing was touched, which is a real 0R outcome, while this
+#: is the absence of a measurement and scores nothing at all. Without it a row
+#: whose candles die simply never reaches the horizon test — the horizon lives
+#: behind a successful walk — and sits OPEN forever on the page.
+STATUS_INSUFFICIENT = "INSUFFICIENT"
 #: Emitted by the scanner, then refused by the dark lane's own throttle. Not a
 #: failure — it is the router layer doing what it does to live signals, and
 #: counting it is how the feed's real size becomes knowable.
 STATUS_THROTTLED = "THROTTLED"
+
+#: Bar width of the series the resolver walks. Used only to express staleness in
+#: bars rather than seconds — the unit the owner reads elsewhere.
+BAR_SECONDS = 60.0
+
+#: An open row whose newest consumed bar is this far behind the clock is no
+#: longer being measured: its ``mfe_pct`` and its status describe bars that
+#: stopped arriving. Named ``stalled`` on the row, apart from a row that simply
+#: has no series at all, because the two have different fixes (#835).
+STALE_BARS = 3
+
+#: Why a cycle could not advance a row. Recorded **on the row**, not only in the
+#: per-cycle tally: a fail-open ``continue`` with a global counter and no per-row
+#: stamp is how one permanently-unresolvable row hides inside a healthy total
+#: (#815). Each of these leaves the row OPEN and unscored, which is correct — a
+#: loss-selected sample is worse than no sample — but it must be *visible*.
+MISS_NO_CANDLES = "no_candles"
+MISS_UNUSABLE_WINDOW = "unusable_window"
+MISS_FETCH_ERROR = "fetch_error"
 
 
 def is_excluded(setup_class: Any) -> bool:
@@ -318,7 +345,7 @@ def reset_ledger(ledger: Optional[DarkLedger] = None) -> None:
 
 def _row_from_signal(sig: Any, now: float) -> dict:
     _direction = getattr(sig, "direction", None)
-    return {
+    row: Dict[str, Any] = {
         "schema": LEDGER_SCHEMA,
         "signal_id": str(getattr(sig, "signal_id", "") or ""),
         "symbol": str(getattr(sig, "symbol", "") or ""),
@@ -347,8 +374,29 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         "r_multiple": None,
         "mfe_pct": 0.0,
         "bars_seen": 0,
+        # Currency of the measurement, one per row. ``last_bar_ms`` is the newest
+        # bar the resolver actually consumed for THIS row and ``last_resolved_at``
+        # is when it did — three different clocks (the file's, the row's, and the
+        # reader's price feed) that #108 proved a surface cannot collapse into
+        # one. Filled by ``resolve_open``; None here means "not yet", which the
+        # reader must not render as a pass.
         "last_bar_ms": None,
+        "last_resolved_at": None,
+        "bars_behind": None,
+        "stalled": None,
+        "resolve_misses": 0,
+        "resolve_miss_reason": None,
     }
+    # Recorded where it becomes true (#802): the SL distance is knowable the
+    # instant the geometry exists and never changes afterwards. Any reader
+    # dividing an unrealized move into R needs this denominator to be the
+    # engine's, not one it re-derived — ops ports the math, it does not invent it.
+    entry = float(row["entry"] or 0.0)
+    stop = float(row["stop_loss"] or 0.0)
+    row["sl_distance_pct"] = (
+        abs(entry - stop) / entry * 100.0 if entry > 0 and stop > 0 else None
+    )
+    return row
 
 
 def publish(sig: Any, now_ts: Optional[float] = None) -> bool:
@@ -395,6 +443,53 @@ def publish(sig: Any, now_ts: Optional[float] = None) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def slice_window(candles: Any, since_ts: float) -> Optional[Dict[str, List[float]]]:
+    """The 1m bars from the one containing ``since_ts`` onward, located by time.
+
+    Lives here rather than in the caller's closure so it can be driven by a test
+    with the store's real shape: the elapsed-time slice it replaces
+    (``n = elapsed // 60``, counted back from the end of the array) is invisible
+    when it is wrong, because it returns a plausible window of the wrong bars.
+    That assumption — gap-free array, last bar is current — fails on exactly the
+    symbols this lane cares about, and when it failed on the SAR arm it produced
+    172 confident rows describing nothing (#800).
+
+    Returns None when the window cannot be located honestly: no series, ragged
+    series, timestamps missing or padded with NaN, or history that already
+    rolled off past the stamp. The caller counts a None and leaves the row open
+    and unscored — refusing is the whole point, because the alternative is a
+    number nobody can trace back to a bar.
+    """
+    import numpy as np
+
+    if not candles:
+        return None
+    highs, lows = candles.get("high"), candles.get("low")
+    closes, open_time = candles.get("close"), candles.get("open_time")
+    if highs is None or lows is None or closes is None or open_time is None:
+        return None
+    n = len(highs)
+    if n == 0 or len(lows) != n or len(closes) != n or len(open_time) != n:
+        return None
+    times = np.asarray(open_time, dtype=np.float64)
+    since_ms = float(since_ts) * 1000.0
+    # The entry bar is the last one that had already opened at emission.
+    idx = int(np.searchsorted(times, since_ms, side="right")) - 1
+    if idx < 0:
+        return None
+    window_times = times[idx:]
+    if not np.all(np.isfinite(window_times)):
+        # The store pads unknown timestamps with NaN rather than guessing; a
+        # guess is exactly what we would be adding back.
+        return None
+    return {
+        "high": [float(v) for v in highs[idx:]],
+        "low": [float(v) for v in lows[idx:]],
+        "close": [float(v) for v in closes[idx:]],
+        "open_time": [float(t) for t in window_times],
+    }
+
+
 def _walk(row: dict, ohlc: Dict[str, List[float]]) -> Optional[dict]:
     """Resolve one dark signal by walking bars in order.
 
@@ -403,10 +498,24 @@ def _walk(row: dict, ohlc: Dict[str, List[float]]) -> Optional[dict]:
     silently books whichever the reader prefers. Ambiguity is resolved
     pessimistically **and flagged**, so the row is visibly a judgement rather
     than quietly averaged in as a fact.
+
+    ``open_time`` is optional in the mapping but is what makes the walk
+    *datable*: the newest bar consumed is stamped as ``last_bar_ms``, and that
+    single field is the difference between "this row is open" and "this row
+    stopped being measured at 09:14 and has looked open ever since". A window
+    without it is walked exactly as before and stamps nothing rather than
+    guessing a time from the array's length — a missing stamp is not a pass, and
+    the caller counts it.
     """
     highs, lows = ohlc.get("high"), ohlc.get("low")
     if highs is None or lows is None or len(highs) == 0:
         return None
+    times = ohlc.get("open_time")
+    if times is not None and len(times) != len(highs):
+        # Ragged window: the bar at index i is not the bar timed at index i, so
+        # every stamp derived from it would be wrong. Drop the times, keep the
+        # walk, and let the row read as unstamped.
+        times = None
     entry = float(row["entry"])
     sl = float(row["stop_loss"])
     tp1 = float(row["tp1"])
@@ -427,7 +536,7 @@ def _walk(row: dict, ohlc: Dict[str, List[float]]) -> Optional[dict]:
             exit_price = sl if sl_hit else tp1
             status = STATUS_SL if sl_hit else STATUS_TP1
             pnl = ((exit_price - entry) if is_long else (entry - exit_price)) / entry * 100.0
-            return {
+            out = {
                 "status": status,
                 "exit_price": exit_price,
                 "pnl_pct": pnl,
@@ -436,7 +545,68 @@ def _walk(row: dict, ohlc: Dict[str, List[float]]) -> Optional[dict]:
                 "ambiguous_bar": ambiguous,
                 "bars_seen": i + 1,
             }
-    return {"mfe_pct": mfe, "bars_seen": len(highs)}
+            if times is not None:
+                out["last_bar_ms"] = float(times[i])
+            return out
+    out = {"mfe_pct": mfe, "bars_seen": len(highs)}
+    if times is not None:
+        out["last_bar_ms"] = float(times[-1])
+    return out
+
+
+def _note_advance(row: dict, now: float) -> None:
+    """Stamp that this row was advanced on real bars, and how current they are.
+
+    ``bars_behind`` is computed here because the engine owns both ends of it —
+    the bar and the clock. A reader that fetched its own price and graded the
+    row's liveness on *that* clock is #108, which this repo has now paid for
+    twice; the reader's job is to render this stamp and to notice when it stops
+    moving.
+    """
+    row["last_resolved_at"] = now
+    row["resolve_misses"] = 0
+    row["resolve_miss_reason"] = None
+    last_ms = row.get("last_bar_ms")
+    if last_ms is None:
+        # Walked, but on a window that carried no usable timestamps. That is an
+        # unknown, and it stays an unknown: `stalled` is None, not False.
+        row["bars_behind"] = None
+        row["stalled"] = None
+        return
+    behind = (now - float(last_ms) / 1000.0) / BAR_SECONDS - 1.0
+    row["bars_behind"] = max(0.0, behind)
+    row["stalled"] = row["bars_behind"] > STALE_BARS
+
+
+def _note_miss(row: dict, reason: str, now: float) -> None:
+    """Stamp a cycle that could not advance this row.
+
+    The row stays OPEN and unscored — correct, because scoring it on bars nobody
+    saw is the fabrication class. What changes is that the row now *says* so:
+    ``last_resolved_at`` stops moving while ``resolve_misses`` climbs, so a row
+    that will never resolve stops looking exactly like one emitted a minute ago.
+    """
+    row["resolve_misses"] = int(row.get("resolve_misses") or 0) + 1
+    row["resolve_miss_reason"] = reason
+    row["last_miss_at"] = now
+    row["stalled"] = True
+
+
+def _retire_unwalkable(row: dict, ts: float, now: float, horizon_sec: float) -> bool:
+    """Close a row that is past the horizon and cannot be walked. True if retired.
+
+    The horizon test lives inside the walked branch, so a row whose candles stop
+    arriving never reaches it: it stays OPEN, keeps a stale ``mfe_pct``, and
+    renders forever as a live trade. Retiring it as INSUFFICIENT is the honest
+    end — no fill, no loss, and explicitly **no score**, so it can be counted
+    without being averaged into anything.
+    """
+    if (now - ts) < horizon_sec:
+        return False
+    row["status"] = STATUS_INSUFFICIENT
+    row["closed_at"] = now
+    row["stalled"] = None
+    return True
 
 
 def resolve_open(
@@ -458,31 +628,51 @@ def resolve_open(
     did not lose. Rows whose candles cannot be fetched are left OPEN and counted
     as ``no_candles`` — an unresolved row must never be scored, because a
     loss-selected sample is worse than no sample.
+
+    Every outcome of a cycle is stamped **on the row** as well as in the tally
+    (``last_resolved_at`` / ``bars_behind`` / ``stalled`` / ``resolve_misses``).
+    The tally says the population is fine; only the row can say that *this* one
+    stopped advancing four hours ago, and a page that prints a live price beside
+    an unstamped open row is telling the reader something it does not know.
     """
     now = time.time() if now_ts is None else float(now_ts)
     book = ledger if ledger is not None else get_ledger()
-    tally = {"resolved": 0, "still_open": 0, "expired": 0, "no_candles": 0}
+    tally = {
+        "resolved": 0, "still_open": 0, "expired": 0, "no_candles": 0,
+        "stalled": 0, "insufficient": 0,
+    }
     try:
         for row in book.open_rows():
             ts = float(row.get("emitted_at") or 0.0)
             if ts <= 0:
                 continue
+            miss_reason = None
             try:
                 ohlc = fetch_ohlc_since(str(row.get("symbol") or ""), ts)
             except Exception as exc:
                 fail_open.record("dark_emission.fetch_ohlc", exc)
                 ohlc = None
+                miss_reason = MISS_FETCH_ERROR
             # None/len checks, never truthiness: the data store holds numpy
             # arrays and `not ohlc` raises on them, which is the class that
             # killed 8 features silently on 2026-07-14.
             if ohlc is None or len(ohlc) == 0:
+                _note_miss(row, miss_reason or MISS_NO_CANDLES, now)
                 tally["no_candles"] += 1
+                if _retire_unwalkable(row, ts, now, horizon_sec):
+                    tally["insufficient"] += 1
+                book.mark_dirty()
                 continue
             out = _walk(row, ohlc)
             if out is None:
+                _note_miss(row, MISS_UNUSABLE_WINDOW, now)
                 tally["no_candles"] += 1
+                if _retire_unwalkable(row, ts, now, horizon_sec):
+                    tally["insufficient"] += 1
+                book.mark_dirty()
                 continue
             row.update(out)
+            _note_advance(row, now)
             if out.get("status"):
                 row["closed_at"] = now
                 tally["resolved"] += 1
@@ -496,8 +686,21 @@ def resolve_open(
                 tally["expired"] += 1
             else:
                 tally["still_open"] += 1
+                if row.get("stalled"):
+                    tally["stalled"] += 1
+            if row.get("status") != STATUS_OPEN:
+                # Staleness is a property of a row still owed a verdict. A closed
+                # row is owed nothing, so it carries no verdict on its own
+                # currency rather than a False that would read as "checked".
+                row["stalled"] = None
             book.mark_dirty()
-        book.flush()
+        # Force: an idle lane still has to write. `flush()` only persists when
+        # something changed, so a window with no open rows and no new emissions
+        # left the file untouched — and a file that stops being written is
+        # exactly how a reader reports a fault that is not happening (#832, the
+        # bug this ledger's own flush docstring claims to have fixed and did
+        # not). One small write per resolve cycle, ~5 min.
+        book.flush(force=True)
     except Exception as exc:
         fail_open.record("dark_emission.resolve_open", exc)
     return tally
@@ -512,8 +715,8 @@ def summary(ledger: Optional[DarkLedger] = None) -> Dict[str, Any]:
         setup = str(row.get("setup_class") or "UNKNOWN")
         agg = out.setdefault(setup, {
             "setup_class": setup, "n": 0, "open": 0, "resolved": 0,
-            "tp1": 0, "sl": 0, "expired": 0, "sum_r": 0.0, "n_r": 0,
-            "gates": {},
+            "tp1": 0, "sl": 0, "expired": 0, "insufficient": 0,
+            "sum_r": 0.0, "n_r": 0, "gates": {},
         })
         agg["n"] += 1
         gate = str(row.get("dark_gate") or "")
@@ -521,6 +724,12 @@ def summary(ledger: Optional[DarkLedger] = None) -> Dict[str, Any]:
         status = row.get("status")
         if status == STATUS_OPEN:
             agg["open"] += 1
+            continue
+        if status == STATUS_INSUFFICIENT:
+            # Terminal but unmeasured. Counted so the shortfall is visible, and
+            # kept out of `resolved` so no rate is ever divided by a population
+            # that includes rows nobody scored.
+            agg["insufficient"] += 1
             continue
         agg["resolved"] += 1
         if status == STATUS_TP1:
@@ -540,3 +749,62 @@ def summary(ledger: Optional[DarkLedger] = None) -> Dict[str, Any]:
         # counting it as a loss is the #685 fabrication class.
         agg["win_rate"] = (agg["tp1"] / decided) if decided else None
     return out
+
+
+#: Cycles a row may fail to advance before it counts as unmeasured. The resolve
+#: loop runs ~every 5 min, so this is ~15 minutes of a row not moving while the
+#: page keeps drawing it as a live trade.
+STALL_MISS_LIMIT = 3
+
+#: How long after emission a row may go untouched by the resolver before its
+#: silence is a fault rather than a first cycle that has not run yet.
+FIRST_RESOLVE_GRACE_SEC = 900.0
+
+
+def resolution_health(
+    ledger: Optional[DarkLedger] = None, *, now_ts: Optional[float] = None
+) -> tuple:
+    """Are the rows that are owed a verdict actually being advanced?
+
+    Keyed on **the population that would be harmed** (#815): the open rows. A
+    tally of a healthy cycle says nothing about the one row whose symbol rotated
+    out four hours ago, and that row is the one rendering as a live trade with a
+    live price beside it.
+
+    Returns ``(ok, detail)`` for a ``PredicateProbe``. A disabled lane and an
+    empty book both return **True with a reason** — never a raise, which would
+    convert into a ``fail_open.record`` and bury a real failure in a counter full
+    of non-failures.
+    """
+    try:
+        if not enabled():
+            return True, "dark emission lane disabled"
+        now = time.time() if now_ts is None else float(now_ts)
+        book = ledger if ledger is not None else get_ledger()
+        open_rows = book.open_rows()
+        if not open_rows:
+            return True, "no dark rows owed a verdict"
+        stalled = [
+            r for r in open_rows
+            if int(r.get("resolve_misses") or 0) >= STALL_MISS_LIMIT
+            or r.get("stalled") is True
+        ]
+        untouched = [
+            r for r in open_rows
+            if r.get("last_resolved_at") is None
+            and (now - float(r.get("emitted_at") or now)) > FIRST_RESOLVE_GRACE_SEC
+        ]
+        bad = {id(r): r for r in stalled + untouched}
+        if not bad:
+            return True, f"{len(open_rows)} open rows, all advancing"
+        worst = max(bad.values(), key=lambda r: int(r.get("resolve_misses") or 0))
+        return False, (
+            f"{len(bad)} of {len(open_rows)} open dark rows are not being "
+            f"advanced (worst: {worst.get('symbol')} "
+            f"{worst.get('resolve_misses') or 0} missed cycles, "
+            f"{worst.get('resolve_miss_reason') or 'no fresh bars'}) — their "
+            "outcomes on the ops page describe bars that stopped arriving"
+        )
+    except Exception as exc:
+        fail_open.record("dark_emission.resolution_health", exc)
+        return True, "health check failed open"
