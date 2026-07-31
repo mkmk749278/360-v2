@@ -694,3 +694,118 @@ def test_the_probe_ignores_a_row_that_has_already_resolved(monkeypatch):
     row.update({"status": de.STATUS_SL, "resolve_misses": 9, "stalled": True})
     ok, _ = de.resolution_health(ledger, now_ts=ts + 10_000.0)
     assert ok is True
+
+
+# --------------------------------------------------------------------------- #
+# SR_FLIP longs (owner, 2026-07-31)
+#
+# The long side has been disabled since 2026-06-29 on a measured −21.8% / 19%
+# win, leaving only a `[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE` log line — a
+# candidate count with no outcome, which cannot settle a re-enable. Routing it
+# through the dark lane gives it a forward-resolved TP1/SL and an R.
+#
+# It is also the first *evaluator-internal* disable this lane carries, and that
+# is the risk: unlike setup_compat/execution it fires long before the gate
+# chain, so the candidate must be CARRIED (not published there), and an unmarked
+# carry would reach `signal_queue.put` and put the −21.8% path in front of paid
+# subscribers with no owner sign-off.
+# --------------------------------------------------------------------------- #
+
+
+def _sr_flip_source() -> str:
+    import inspect
+
+    import src.channels.scalp as _scalp
+
+    return inspect.getsource(_scalp)
+
+
+def test_the_long_disable_is_a_loosened_gate():
+    assert de.is_loosened_gate(de.GATE_SR_FLIP_LONG) is True
+    assert de.will_admit("SR_FLIP_RETEST", de.GATE_SR_FLIP_LONG) is True
+
+
+def test_the_lane_being_off_means_the_long_stays_rejected(monkeypatch):
+    """The tourniquet holds when the measurement is not there to catch it —
+    otherwise turning the dark lane off silently re-enables a losing long."""
+    from src import runtime_tunables as rt
+
+    monkeypatch.setattr(rt, "get", lambda key, *a, **k: False)
+    assert de.will_admit("SR_FLIP_RETEST", de.GATE_SR_FLIP_LONG) is False
+
+
+def test_an_excluded_path_is_still_excluded_through_the_signal_free_check():
+    assert de.will_admit("MOVER_TREND_PULLBACK", de.GATE_SR_FLIP_LONG) is False
+
+
+def test_the_evaluator_carries_rather_than_publishing_at_the_disable():
+    """Asserted against the real evaluator source. Publishing at the disable
+    point would produce rows that never ran scoring, MTF, min_confidence, the
+    context floors or staleness — while the page's first paragraph says every
+    row did. That claim is the difference between this feed and the suppression
+    audit."""
+    src = _sr_flip_source()
+    disable = src.index("if not SR_FLIP_LONG_ENABLED:")
+    ret = src.index("if _carry_long_dark:")
+    assert disable < ret
+    branch = src[disable:ret]
+    assert "dark_emission.publish" not in branch, (
+        "a dark row published from inside the evaluator has not been through "
+        "the gate chain the page says it has"
+    )
+    assert "will_admit" in branch
+
+
+def test_an_unmarkable_carry_is_refused_rather_than_emitted():
+    """The fail-closed half. `will_admit` answered sixty lines earlier and is
+    not permission — the lane can be toggled off mid-evaluation, and `mark`
+    records a failure rather than raising."""
+    src = _sr_flip_source()
+    guard = src.index("if _carry_long_dark:")
+    tail = src[guard:guard + 400]
+    assert "dark_emission.mark(sig, dark_emission.GATE_SR_FLIP_LONG)" in tail
+    assert "if not dark_emission.is_dark(sig):" in tail
+    assert 'return self._reject("long_disabled")' in tail, (
+        "an unmarked carry must not fall through to the enqueue site"
+    )
+
+
+def test_a_marked_long_is_diverted_by_the_same_single_branch():
+    """No second divert site: the enqueue guard is `is_dark`, which the mark
+    satisfies, so the long side inherits the existing safety property rather
+    than adding a parallel one that could drift from it."""
+    sig = _Sig()
+    sig.setup_class = "SR_FLIP_RETEST"
+    de.mark(sig, de.GATE_SR_FLIP_LONG)
+    assert de.is_dark(sig) is True
+    assert de.publish(sig) is True
+    (row,) = de.get_ledger().rows()
+    assert row["dark_gate"] == de.GATE_SR_FLIP_LONG
+    assert row["setup_class"] == "SR_FLIP_RETEST"
+
+
+def test_the_short_side_is_untouched():
+    """SHORT nets +5.1% and emits live. Nothing here may divert it."""
+    src = _sr_flip_source()
+    assert "_carry_long_dark = False" in src
+    carry = src.index("_carry_long_dark = True")
+    long_branch = src.rindex("if direction == Direction.LONG:", 0, carry)
+    assert long_branch < carry, "the carry must sit inside the LONG branch"
+
+
+def test_an_in_memory_ledger_writes_nothing_and_records_no_failure(tmp_path, monkeypatch):
+    """`path=""` means "do not persist". The atomic write used to run anyway:
+    it created `.tmp` in the process's cwd — the repo root under pytest, where
+    it was committed on every branch and conflicted on every merge — and then
+    raised into `fail_open` on `os.replace(".tmp", "")`, filling the counter
+    that exists to make real failures stand out."""
+    from src import fail_open
+
+    monkeypatch.chdir(tmp_path)
+    before = len(fail_open.snapshot()) if hasattr(fail_open, "snapshot") else 0
+    ledger = de.DarkLedger(path="")
+    ledger.add({"symbol": "AAAUSDT", "setup_class": "MEAN_REVERT", "status": "OPEN"})
+    ledger.flush(force=True)
+    assert list(tmp_path.iterdir()) == [], "an in-memory ledger touched the disk"
+    if hasattr(fail_open, "snapshot"):
+        assert len(fail_open.snapshot()) == before

@@ -64,6 +64,24 @@ Enrolment (owner, 2026-07-31)
 * Detector-level thresholds (``WHALE_MOMENTUM`` 0 of 118,642 on
   ``momentum_reject``) are a **separate** change: they live inside the
   evaluators, not the gate chain, and they need this lane to exist first.
+* **SR_FLIP longs are the first of those, admitted 2026-07-31 on owner
+  direction.**  The long side has been disabled since 2026-06-29 on a measured
+  −21.8% / 19% win, leaving a ``[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE`` log line
+  as its only evidence — a candidate *count*, which cannot settle a re-enable
+  because it says nothing about outcomes.  Here it earns a forward-resolved
+  TP1/SL and an R.
+
+  An evaluator-internal disable differs from the two gate-chain ones in a way
+  that dictates the implementation: it fires long *before* scoring, MTF,
+  min_confidence, the context floors and staleness.  Publishing there would
+  put rows on a page whose first sentence promises every row cleared all of
+  it.  So the candidate is **carried** — the evaluator finishes, every gate
+  above still applies, and the divert happens at the same single
+  ``signal_queue.put`` site as every other dark row.  ``will_admit`` answers
+  the carry question before a signal object exists; it is *not* permission,
+  and the mark is re-checked with ``is_dark`` before the evaluator returns,
+  because an unmarked carry would put the −21.8% path back in front of paid
+  subscribers.
 
 Nothing here places an order, posts to any channel, or is visible to a user.
 """
@@ -86,7 +104,13 @@ DARK_ATTR = "dark_gate"
 #: Gates whose rejection this lane overrides. Kept as prefixes because the token
 #: carries the reason (``setup_compat:regime_STRONG_TREND``), and the reason is
 #: what the owner reads.
-LOOSENED_GATE_PREFIXES = ("setup_compat:", "execution:")
+LOOSENED_GATE_PREFIXES = ("setup_compat:", "execution:", "evaluator:")
+
+#: The one evaluator-internal disable this lane carries (owner, 2026-07-31).
+#: Named as a constant because two files must agree on it exactly: the
+#: evaluator that carries the candidate and the fail-closed re-check that
+#: refuses to emit one it could not mark.
+GATE_SR_FLIP_LONG = "evaluator:sr_flip_long_disabled"
 
 #: Paths never admitted to this lane. MOVER_TREND_PULLBACK owns 64% of the
 #: delivered book and 24,327 of the 37,782 pre-scoring rejects in one window —
@@ -160,6 +184,33 @@ def enabled() -> bool:
         return bool(_rt.get("dark_emission_enabled"))
     except Exception as exc:
         fail_open.record("dark_emission.enabled", exc)
+        return False
+
+
+def will_admit(setup_class: Any, gate_name: str) -> bool:
+    """Would this lane take a candidate of *setup_class* carried past *gate_name*?
+
+    The signal-free half of ``should_mark``, for a caller that has to decide
+    *before* a signal object exists. The SR_FLIP long disable lives inside the
+    evaluator, well before the gate chain, so the choice there is whether to
+    keep building at all — and that choice has to be answerable without a
+    ``sig`` to inspect.
+
+    **This is not the safety boundary.** Answering True only starts the
+    candidate down a path; what keeps it away from users is the mark at the end
+    of the evaluator plus the ``is_dark`` re-check beside it. Treating this
+    answer as permission — deciding here and assuming it holds sixty lines
+    later — is how a disabled long side would emit live to paid subscribers if
+    the lane were toggled off mid-evaluation.
+    """
+    try:
+        if not enabled():
+            return False
+        if not is_loosened_gate(gate_name):
+            return False
+        return not is_excluded(setup_class)
+    except Exception as exc:
+        fail_open.record("dark_emission.will_admit", exc)
         return False
 
 
@@ -284,6 +335,15 @@ class DarkLedger:
                 "rows": [r for ring in self._paths.values() for r in ring],
             }
             self._dirty = False
+        if not self._path:
+            # `path=""` is the in-memory convention the tests construct with.
+            # Without this the atomic write still ran: it created `.tmp` in the
+            # process's cwd — the repo root under pytest, where `git add -A`
+            # then committed it on every branch, conflicting on every merge —
+            # and `os.replace(".tmp", "")` raised into `fail_open`, filling the
+            # counter with a non-failure. Returning True because nothing was
+            # asked to be persisted and nothing failed.
+            return True
         try:
             dirname = os.path.dirname(self._path)
             if dirname:

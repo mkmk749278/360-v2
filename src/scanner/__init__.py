@@ -5507,6 +5507,28 @@ class Scanner:
             self._suppression_counters[
                 f"dark_emitted:{getattr(sig, 'setup_class', 'UNKNOWN')}"
             ] += 1
+            # Open the SAR exit arm here, beside the row it belongs to, and for
+            # the same reason `observe_signal` is the only thing that reads a
+            # live signal: entry, SL, TP1, side and setup class are knowable
+            # only where the signal object exists. Anchoring later would anchor
+            # to a bar that is not the entry bar (#836).
+            #
+            # Its own ledger, never the live one — those arms are the evidence
+            # for adopting SAR on the money path and every one of them reached a
+            # subscriber. These reached nobody. Fail-open: a measurement must
+            # never break the divert that keeps this candidate away from users.
+            if _dark_ok:
+                try:
+                    from src import sar_live_shadow as _sar
+
+                    _sar.observe_signal(
+                        sig,
+                        self.data_store,
+                        ledger=_sar.get_dark_ledger(),
+                        lane=_sar.LANE_DARK,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    fail_open.record("scanner.dark_sar_observe", exc)
             return bool(_dark_ok)
 
         # Stamp cooldown on success.  Only persist after queue.put succeeds
