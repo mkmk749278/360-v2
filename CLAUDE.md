@@ -672,6 +672,26 @@ python -m src.main
   preceded. And when a degraded mode ships, **count it**: the probe fails when
   the whole open book is advancing on undatable windows, which is neither
   stalled nor healthy and was invisible to a probe watching only for stalls.
+- **A guard on "the first time" is not a guard on the object — #836's own rule,
+  broken by #836's own fix.** That entry says *"a freshness rule applied at one
+  end of an object's life is not applied to the object"*, and the fix it shipped
+  asked its question exactly twice: at the anchor, and at the arm's **first**
+  advance (`first_step_bars`). Owner data 2026-07-31 (#846): three arms stamped
+  `anchor=clean`, `anchor_bars_behind≈0`, `first_step_bars=1` had consumed 466,
+  159 and 63 bars against lifetimes of ~17, ~5 and ~9 — one contributing −1.644R
+  to the population an adoption decision reads. The over-walk happened on a
+  *later* advance, where nothing was looking.
+
+  The mechanism is worth knowing because it recurs: a **frozen-then-refreshed
+  series**. A rotated-out mover's klines stop and its bucket freezes;
+  `refresh_timeframe` then **replaces** that bucket (correctly — merging would
+  duplicate bars) with a fresh REST pull whose window still contains the
+  consumer's last bar. The index lookup succeeds, the walk is structurally
+  valid, and it crosses hours of history in one pass. **Any consumer holding a
+  position in an array that another module may replace must bound its step by
+  the clock, not only by the index.** And when it refuses, refuse the whole
+  advance: walking "just the recent tail" is a clamp, and it books fills on bars
+  chosen by us rather than by the market.
 - **A test hook that means "don't persist" must not touch the disk, and a
   non-failure must never reach `fail_open`.** Both ledgers take `path=""` as
   "in memory" — what every test constructs with — and neither checked it before

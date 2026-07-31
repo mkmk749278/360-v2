@@ -45,13 +45,48 @@ was the symptom; `os.replace(".tmp", "")` then raised into **`fail_open`** — a
 non-failure filling the counter that exists so real ones stand out, on every test
 run for two months. Both flushes now return early; `.tmp` is gitignored.
 
+### Both surfaces confirmed on screen, and the data found a bug (#846)
+
+Owner exported both pages at 15:16 UTC. The dark feed is healthy: 18 rows, 5
+open and **all being advanced**, `bars_behind ≈ 0.6`, `no candles` gone, pre-
+restart rows correctly reading `unverified · stamp_before_timestamps`. SAR arms
+show `running ×2` per row and the comparison panel correctly says nothing has
+both verdicts yet.
+
+The **live** SAR arms did not survive the same read. Three arms stamped
+`anchor=clean`, `anchor_bars_behind≈0`, `first_step_bars=1`:
+
+| arm | bars_seen | bars of life |
+|---|---|---|
+| `MVRTP-CF7DEF1F:15m` | 466 | ~17 |
+| `MVRTP-1C478092:15m` | 159 | ~5 — **contributed −1.644R** |
+| `MVRTP-7EDA88B4:5m` | 63 | ~9 |
+
+#836 asked this question at the anchor and at the *first* advance only, so a
+later over-walk was invisible. Cause: a frozen-then-refreshed series —
+`refresh_timeframe` replaces a rotated-out mover's bucket, the arm's last bar is
+still in the new window, and the walk crosses hours of history in one pass.
+Fixed by bounding **every** advance by the clock; refuses as
+`series_jumped_ahead`, stamped with `advance_replay_bars` /
+`advance_allowed_bars`.
+
+**Do not read the −0.034R mean over 44 scored arms** — at least one over-walked
+arm is in it. Needs a fresh window. One reassurance: the 23% INSUFFICIENT
+fraction is *not* loss-selected (mean MFE +2.54% unmeasured vs +2.71% scored),
+which is #832's check coming out clean for once.
+
 ### Open
 
 1. **#832's SAR verdict is owed a re-check** — `_ohlc_15m_detail` refused on the
    same undatable-bars condition #842 fixed, so "8 of 19 unresolved → starved
-   refresh budget" may have been that bug wearing another name.
+   refresh budget" may have been that bug wearing another name. Now doubly owed:
+   #846 changes what resolves.
 2. Elapsed-time candle slice still backs the suppression and invalidation audits.
-3. Neither new surface confirmed on screen — engine deploy #757, ops #119.
+3. **Ops does not yet render `series_jumped_ahead`** — the engine stamps it and
+   `/signals/sar-live` will show it as a plain INSUFFICIENT until the page
+   grades on the new stamps. Same "measured but nowhere to look" gap the dark
+   lane just closed.
+4. The dark feed's CSV export carries no SAR columns; the page does.
 
 ---
 
