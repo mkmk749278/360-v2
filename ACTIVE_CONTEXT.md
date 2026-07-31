@@ -73,8 +73,11 @@ larger only if it walked history — as the detector that reports on the guard.
 
 - **Do not adopt on this window.** 8 symbols is not a population; wait for one that
   spans regimes and setups beyond `MOVER_TREND_PULLBACK`.
-- Ops `/signals/sar-live` should surface `anchor_bars_behind` / `first_step_bars` and
-  a risk-adjusted R column beside the SL-denominated one. Not yet built.
+- Ops `/signals/sar-live` surfaces both (ops #109): an anchor panel grading every arm
+  `stepped` / `replayed` / `suspect` / `unverified` — replayed and suspect excluded from
+  every R, counted and named — and an `R @risk` column beside the SL-denominated one.
+  A missing stamp is `unverified`, not a pass, and the panel renders whether or not
+  anything failed.
 
 ---
 
