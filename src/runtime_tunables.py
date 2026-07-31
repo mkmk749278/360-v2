@@ -107,6 +107,7 @@ def _build_registry() -> Dict[str, Tunable]:
         NOISE_FLOOR_ATR_MULT,
         NOISE_FLOOR_MAX_SL_PCT,
         NOISE_FLOOR_STOPS_ENABLED,
+        DARK_EMISSION_ENABLED,
         PRESCORING_AUDIT_ENABLED,
         SHADOW_STRATEGIES_ENABLED,
         SUPPRESSION_AUDIT_ENABLED,
@@ -899,6 +900,27 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=SUPPRESSION_AUDIT_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="dark_emission_enabled",
+            label="Dark emission lane (owner-only feed from the silent paths)",
+            description=(
+                "Carry an enrolled path PAST the setup-compat and execution "
+                "gates so it actually emits, then divert the signal at the "
+                "single enqueue site into an owner-only ledger. Every other "
+                "gate still applies, so a dark row is a signal the scanner "
+                "was willing to send — not a counterfactual. It is NOT what a "
+                "user would have received: the router's second layer "
+                "(correlation lock, cooldowns, concurrency caps) is not "
+                "applied, so the count over-reports a feed size. "
+                "MOVER_TREND_PULLBACK is excluded — it already owns 64% of "
+                "the delivered book. Nothing here reaches a channel, a push, "
+                "the app feed or an order: a dark candidate never enters "
+                "signal_queue, and the queue is the only route to any of them."
+            ),
+            type="bool",
+            default=DARK_EMISSION_ENABLED,
             category="Measurement",
         ),
         Tunable(

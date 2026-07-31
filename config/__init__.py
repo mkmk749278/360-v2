@@ -526,6 +526,13 @@ SUPPRESSION_AUDIT_ENABLED: bool = _safe_bool("SUPPRESSION_AUDIT_ENABLED", "true"
 # It cannot reach a subscriber or the money path — the gates suppress exactly
 # as before and the rows are refused by the edge-matrix feed.
 PRESCORING_AUDIT_ENABLED: bool = _safe_bool("PRESCORING_AUDIT_ENABLED", "true")
+# Dark emission lane (owner-directed 2026-07-31).  Loosens setup_compat and
+# execution for the silent paths so they EMIT, and diverts every such signal at
+# the single enqueue site into an owner-only ledger.  Default ON: it is a
+# measurement, and it cannot reach a subscriber or place an order — a dark
+# candidate never enters signal_queue, which is the only route to the router,
+# Telegram, FCM, the app feed and signal_dispatch.
+DARK_EMISSION_ENABLED: bool = _safe_bool("DARK_EMISSION_ENABLED", "true")
 # Feature-liveness watchdog (2026-07-14 incident — 8 features dead silently).
 # Every 5-min audit cycle, compare each measurement pipeline's OUTPUT counter
 # against its UPSTREAM driver and publish data/feature_liveness.json; sustained

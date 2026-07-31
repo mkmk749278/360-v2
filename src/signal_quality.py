@@ -1218,7 +1218,13 @@ def execution_quality_check(
         # Anchor is the consolidation breakout level (consol_high for LONG,
         # consol_low for SHORT).  Stored on the signal by the evaluator to avoid
         # EMA21 anchoring which has no relationship to the PDC thesis.
-        anchor = getattr(signal, "pdc_breakout_level", signal.entry)
+        # ``getattr`` with a default only helps when the attribute is ABSENT.
+        # These are declared on ``Signal`` and default to None, so the default
+        # never fires and the comparison below raises on a None anchor. Latent
+        # until 2026-07-31: the setup-compat gate killed these candidates before
+        # scoring, so the crash was unreachable — a gate holding a bug up.
+        anchor = getattr(signal, "pdc_breakout_level", None)
+        anchor = signal.entry if anchor is None else anchor
         trigger_confirmed = (
             signal.entry > anchor if signal.direction == Direction.LONG
             else signal.entry < anchor
@@ -1233,7 +1239,8 @@ def execution_quality_check(
         # far_reclaim_level.  Trigger is confirmed when the current entry is
         # beyond that level in the reclaim direction (price is already inside
         # prior structure, not still below/above the tested level).
-        anchor = getattr(signal, "far_reclaim_level", signal.entry)
+        anchor = getattr(signal, "far_reclaim_level", None)
+        anchor = signal.entry if anchor is None else anchor
         trigger_confirmed = (
             signal.entry > anchor if signal.direction == Direction.LONG
             else signal.entry < anchor
