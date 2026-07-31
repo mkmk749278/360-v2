@@ -4,6 +4,55 @@
 
 ---
 
+## 🟢 SESSION 97 2026-07-31 — bar timestamps never survived a restart (engine #842, ops #113)
+
+Owner, from the live dark feed hours after Session 96 deployed: every open row
+read `stalled — no candles`, **zero rows being advanced**. One was BCHUSDT, a
+core pair whose candles were plainly arriving — so "the symbol rotated out"
+could not be the explanation, and the fault was ours.
+
+### The cause was in the snapshot, not the lane
+
+`_save_snapshot_sync` wrote open/high/low/close/volume; `load_snapshot` read
+back the same five. `open_time` had been added to the store without being added
+to either, so **timestamps did not survive a restart**. `_merge_candles` then
+correctly refused to merge the gap-fetch's timestamps onto a bucket with none,
+and the whole candle store came back undatable — which Session 96's
+`slice_window` refused, wholesale. The Session 96 deploy *was* the restart, so
+the lane went blank on its first cycle.
+
+**Not confined to the dark lane.** `_ohlc_15m_detail` refuses on the same
+condition. The SAR resolver has been losing windows after every restart for as
+long as it has located bars by time — **open item: re-read #832's "starved
+refresh budget" conclusion (8 of 19 unresolved, all four winners among them)
+against a post-fix window before trusting it.**
+
+### What shipped
+
+| Fix | Where |
+|---|---|
+| `open_time` saved when index-aligned; legacy npz loads as a NaN column, not an absent key | `historical_data._save_snapshot_sync` / `load_snapshot` |
+| `slice_window` degrades to an undated walk instead of blanking; hard refusal kept only for rolled-off history | `dark_emission` |
+| `searchsorted` now runs over the finite tail — a NaN prefix made it an unsorted array, which is undefined, not imprecise | `dark_emission` |
+| Probe fails when the whole open book is advancing on undatable windows | `dark_emission.resolution_health` |
+| An undated row reads `unverified` with its cause named, and is excluded from "still being advanced" | ops `dark_signals_live` |
+
+Two lessons in `CLAUDE.md`: **a field one writer populates and one serializer
+drops is invisible at both ends** (#817 one layer down — the round trip is a
+contract, pin it against the real serializer), and **refuse the claim, not the
+measurement** (an empty page is indistinguishable from a quiet market).
+
+### What the page should show now
+
+`no candles` gone; rows emitted before the restart read
+`unverified · stamp_before_timestamps` (their entry bars sit in the restored,
+untimestamped history) and resolve normally; rows emitted after it carry a real
+age and populate "still being advanced", which read 0 of 3. The NaN prefix rolls
+off the 1m ring over ~16h, after which everything is dated. **Not yet confirmed
+on screen** — the deploy landed 12:08 UTC.
+
+---
+
 ## 🟢 SESSION 96 2026-07-31 — the dark feed could not say what an open row was worth (engine #6709745, ops #4f96329)
 
 Owner, on the dark feed the same day it shipped: *"there is no live prices real

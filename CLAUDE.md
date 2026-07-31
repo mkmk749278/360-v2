@@ -641,6 +641,37 @@ python -m src.main
   the fault-that-is-not-happening the ledger's own flush docstring claimed to
   have fixed, because nothing ever called it with `force` (2026-07-31). **A
   docstring describing a heartbeat is not a heartbeat**; find the caller.
+- **A field one writer populates and one *serializer* drops is invisible at both
+  ends.** #817 was a field one repo read and no repo wrote. This is the same
+  shape one layer down and it is harder to see, because nothing is missing while
+  the process lives: `open_time` was added to the candle store, but
+  `_save_snapshot_sync` wrote five arrays and `load_snapshot` read back the same
+  five, so **bar timestamps did not survive a restart**. `_merge_candles` then
+  *correctly* refused to merge the gap-fetch's timestamps onto a bucket with
+  none — a misaligned timestamp is worse than an absent one — and the entire
+  store came back undatable. Every open dark row read `no candles`, on core
+  pairs whose candles were plainly arriving (owner-caught 2026-07-31, #842).
+  Every link was individually right. **A round trip is a contract: pin it with a
+  test that drives the real serializer**, and when you add a field to a
+  structure that is persisted, follow it all the way to disk and back.
+  Corollary: **the blast radius of a serializer is every consumer, not the one
+  that noticed** — `_ohlc_15m_detail` refuses on the same condition, so the SAR
+  resolver had been losing windows after every restart, and #832's "starved
+  refresh budget" reading of 8-unresolved-of-19 is owed a re-check on a fresh
+  window.
+- **Refuse the claim, not the measurement.** "A clamp is not a guard" says
+  refuse when the input cannot support the work — it does not license refusing
+  the *work* when only the *label* is unsupportable. `slice_window` could not
+  date its bars, so it returned nothing at all, and a lane that had been
+  resolving stopped: an empty page, which is indistinguishable from a quiet
+  market and strictly worse than the imprecision it was avoiding. Where the
+  measurement is possible but its provenance is not, **do the walk and mark the
+  row** (`window_undated_reason` → ops `unverified`), reserving the hard refusal
+  for inputs that would make the *answer* wrong — history rolled off before the
+  stamp, where a walk over what remains could book a TP1 that a missing SL
+  preceded. And when a degraded mode ships, **count it**: the probe fails when
+  the whole open book is advancing on undatable windows, which is neither
+  stalled nor healthy and was invisible to a probe watching only for stalls.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.
