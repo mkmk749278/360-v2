@@ -461,6 +461,10 @@ OPS_CONTRACT_KEYS = frozenset({
     # identically to one computed a minute ago.
     "last_swept_at", "last_advance_at", "series_bar_ms", "bars_behind",
     "stalled", "stalled_since", "stall_reason",
+    # Anchor integrity (#836). Ops grades every resolved row on these: an arm
+    # that anchored to a stale bar walked history in its first advance, and
+    # every freshness column above reads healthy on it because by then it was.
+    "anchor_bars_behind", "first_step_bars",
 })
 
 
