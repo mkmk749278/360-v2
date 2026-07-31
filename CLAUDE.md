@@ -629,6 +629,18 @@ python -m src.main
   actually parked, +0.348R is +0.292R and the worst arm's −1.90R is −0.71R. Both are
   defensible; publishing one silently is choosing the answer. Same rule as the two
   fills: **where two denominators are defensible, publish both.**
+- **A row owed a verdict needs a terminal state for "no verdict is possible",
+  and a heartbeat that only fires on change is not a heartbeat.** The dark
+  lane's horizon test sat *behind* a successful walk, so a row whose candles
+  stopped never reached it: OPEN forever, frozen MFE, rendering as a live trade
+  on the page an adoption decision reads. `INSUFFICIENT` is terminal and
+  deliberately unscored — an expiry is a walked window in which nothing
+  happened, this is the absence of a measurement, and folding them together
+  divides a rate by rows nobody scored. Beside it, `flush()` persisted only when
+  something changed, so an idle lane stopped writing and ops rendered STALE —
+  the fault-that-is-not-happening the ledger's own flush docstring claimed to
+  have fixed, because nothing ever called it with `force` (2026-07-31). **A
+  docstring describing a heartbeat is not a heartbeat**; find the caller.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

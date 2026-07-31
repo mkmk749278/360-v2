@@ -364,3 +364,250 @@ def test_an_open_row_is_not_pooled_into_the_verdict():
     agg = de.summary(ledger)["MEAN_REVERT"]
     assert agg["open"] == 1 and agg["resolved"] == 0
     assert agg["avg_r"] is None and agg["win_rate"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Currency of the measurement — which bar was last consumed, and when
+#
+# A dark row's ops page prints a live price beside an open row. That is only
+# honest if the row can say when it was last advanced: the file's age, the row's
+# age and the price feed's age are three clocks, and #108 was this repo
+# collapsing them into one on the SAR live tab.
+# --------------------------------------------------------------------------- #
+
+
+def _stamped_window(start_ms, bars):
+    """A window in the shape ``slice_window`` produces: bars plus their times."""
+    return {
+        "high": [b[0] for b in bars],
+        "low": [b[1] for b in bars],
+        "close": [b[2] for b in bars],
+        "open_time": [start_ms + i * 60_000.0 for i in range(len(bars))],
+    }
+
+
+def test_an_advanced_row_stamps_the_bar_it_last_consumed():
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    now = ts + 180.0
+    window = _stamped_window(ts * 1000.0, [(101.0, 99.5, 100.5), (101.5, 99.8, 101.0)])
+    de.resolve_open(lambda *_: window, now_ts=now, ledger=ledger)
+    (row,) = ledger.rows()
+    assert row["status"] == de.STATUS_OPEN
+    assert row["last_bar_ms"] == pytest.approx(ts * 1000.0 + 60_000.0)
+    assert row["last_resolved_at"] == now
+    assert row["resolve_misses"] == 0
+    # Two bars consumed, three minutes elapsed: one bar behind, not stalled.
+    assert row["bars_behind"] == pytest.approx(1.0)
+    assert row["stalled"] is False
+
+
+def test_a_row_whose_bars_stopped_arriving_is_marked_stalled_on_the_row():
+    """The tally says the population is fine; only the row can say that THIS
+    one stopped advancing (#815)."""
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    # Bars exist but end 40 minutes ago — the frozen-feed / rotated-out shape.
+    window = _stamped_window(ts * 1000.0, [(101.0, 99.5, 100.5)])
+    de.resolve_open(lambda *_: window, now_ts=ts + 2400.0, ledger=ledger)
+    (row,) = ledger.rows()
+    assert row["stalled"] is True
+    assert row["bars_behind"] > de.STALE_BARS
+
+
+def test_a_missed_cycle_counts_on_the_row_and_leaves_the_verdict_alone():
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    for _ in range(2):
+        de.resolve_open(lambda *_: None, now_ts=ts + 600.0, ledger=ledger)
+    (row,) = ledger.rows()
+    assert row["resolve_misses"] == 2
+    assert row["resolve_miss_reason"] == de.MISS_NO_CANDLES
+    assert row["last_resolved_at"] is None      # never advanced, never pretended to
+    assert row["stalled"] is True
+    assert row["status"] == de.STATUS_OPEN and row["r_multiple"] is None
+
+
+def test_a_fetch_that_raises_is_named_apart_from_an_empty_series():
+    """Different causes, different fixes — pooling them is how one hides."""
+    ledger = _published()
+
+    def _boom(*_):
+        raise RuntimeError("store went away")
+
+    de.resolve_open(_boom, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+    assert row["resolve_miss_reason"] == de.MISS_FETCH_ERROR
+
+
+def test_a_row_that_can_never_be_walked_retires_as_insufficient_not_expired():
+    """The horizon test lives behind a successful walk, so a row whose candles
+    die never reached it and sat OPEN forever. INSUFFICIENT is terminal and
+    deliberately unscored: an expiry is a walked window where nothing happened,
+    this is the absence of a measurement."""
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    tally = de.resolve_open(lambda *_: None, now_ts=ts + 7 * 3600.0, ledger=ledger)
+    (row,) = ledger.rows()
+    assert row["status"] == de.STATUS_INSUFFICIENT
+    assert tally["insufficient"] == 1
+    # Not 0R — that is the expiry's honest score, and this row earned no score.
+    assert row["r_multiple"] is None and row["pnl_pct"] is None
+
+
+def test_insufficient_rows_are_counted_apart_from_resolved_ones():
+    ledger = _published()
+    (row,) = ledger.rows()
+    row.update({"status": de.STATUS_INSUFFICIENT})
+    agg = de.summary(ledger)["MEAN_REVERT"]
+    assert agg["insufficient"] == 1
+    assert agg["resolved"] == 0 and agg["win_rate"] is None
+
+
+def test_the_resolve_cycle_writes_the_file_even_when_nothing_changed(tmp_path):
+    """`flush()` only persisted when something changed, so a lane with no open
+    rows stopped writing and ops read STALE — a fault that was not happening.
+    The ledger's own docstring claimed this was fixed; it was not."""
+    path = str(tmp_path / "dark.json")
+    ledger = de.DarkLedger(path=path)
+    de.reset_ledger(ledger)
+    de.resolve_open(lambda *_: None, now_ts=1_700_000_600.0, ledger=ledger)
+    import os
+
+    assert os.path.exists(path)
+
+
+def test_the_sl_denominator_is_stamped_where_it_becomes_true():
+    """Any reader turning an unrealized move into R divides by this. Stamping it
+    at publish keeps the denominator the engine's rather than one ops re-derived
+    from a rounded entry."""
+    ledger = _published(entry=100.0, sl=97.0)
+    (row,) = ledger.rows()
+    assert row["sl_distance_pct"] == pytest.approx(3.0)
+
+
+def test_a_window_without_timestamps_is_walked_but_stamps_nothing():
+    """A missing stamp is not a pass: the row reads `unknown`, never `current`."""
+    ledger = _published()
+    ohlc = {"high": [101.0], "low": [99.0], "close": [100.0]}
+    de.resolve_open(lambda *_: ohlc, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+    assert row["bars_seen"] == 1                 # walked
+    assert row["last_bar_ms"] is None            # but undatable
+    assert row["stalled"] is None                # unknown, not False
+
+
+# --------------------------------------------------------------------------- #
+# The window itself — located by timestamp, never by elapsed-time arithmetic
+# --------------------------------------------------------------------------- #
+
+
+def _store_candles(start_ms, n, *, pad_times=False):
+    """The store's real shape: numpy arrays, `open_time` in ms (NaN when the
+    bucket predates timestamp tracking)."""
+    import numpy as np
+
+    times = np.arange(n, dtype=np.float64) * 60_000.0 + start_ms
+    if pad_times:
+        times[:] = np.nan
+    return {
+        "high": np.full(n, 101.0),
+        "low": np.full(n, 99.0),
+        "close": np.full(n, 100.0),
+        "open_time": times,
+    }
+
+
+def test_the_window_starts_at_the_bar_containing_the_stamp():
+    start_ms = 1_700_000_000_000.0
+    candles = _store_candles(start_ms, 10)
+    # Emitted 30s into bar 6.
+    since = (start_ms + 6 * 60_000.0 + 30_000.0) / 1000.0
+    window = de.slice_window(candles, since)
+    assert window["open_time"][0] == pytest.approx(start_ms + 6 * 60_000.0)
+    assert len(window["high"]) == 4
+
+
+def test_a_frozen_series_yields_the_bars_it_has_rather_than_the_bars_it_should():
+    """The elapsed-time slice this replaces would hand back `elapsed // 60` bars
+    counted from the end — for a feed that stopped an hour ago, an hour of the
+    wrong bars, with nothing in the result able to say so."""
+    start_ms = 1_700_000_000_000.0
+    candles = _store_candles(start_ms, 5)        # series ends at bar 4
+    since = (start_ms + 2 * 60_000.0) / 1000.0
+    window = de.slice_window(candles, since)
+    assert len(window["high"]) == 3
+    # And the last bar is datable, which is what lets the row be called stalled.
+    assert window["open_time"][-1] == pytest.approx(start_ms + 4 * 60_000.0)
+
+
+def test_a_window_whose_history_rolled_off_is_refused():
+    start_ms = 1_700_000_000_000.0
+    candles = _store_candles(start_ms, 5)
+    since = (start_ms - 3600_000.0) / 1000.0     # stamp precedes the array
+    assert de.slice_window(candles, since) is None
+
+
+def test_padded_timestamps_are_refused_rather_than_guessed():
+    start_ms = 1_700_000_000_000.0
+    candles = _store_candles(start_ms, 5, pad_times=True)
+    assert de.slice_window(candles, start_ms / 1000.0) is None
+
+
+def test_a_ragged_series_is_refused_because_index_i_is_not_bar_i():
+    import numpy as np
+
+    candles = _store_candles(1_700_000_000_000.0, 5)
+    candles["low"] = np.full(4, 99.0)
+    assert de.slice_window(candles, 1_700_000_000.0) is None
+
+
+def test_slice_window_never_boolean_tests_a_numpy_array():
+    """`if not arr` raises on a numpy array — the class that killed 8 features
+    silently on 2026-07-14. Driving it with the store's real arrays is the
+    check."""
+    candles = _store_candles(1_700_000_000_000.0, 3)
+    assert de.slice_window(candles, 1_700_000_000.0) is not None
+    assert de.slice_window({}, 1_700_000_000.0) is None
+    assert de.slice_window(None, 1_700_000_000.0) is None
+
+
+# --------------------------------------------------------------------------- #
+# The probe: keyed on the rows owed a verdict
+# --------------------------------------------------------------------------- #
+
+
+def test_an_idle_or_disabled_lane_answers_true_with_a_reason(monkeypatch):
+    """Not a raise: a PredicateProbe converts one into a fail_open record, and
+    filling that counter with non-failures is how a real one stops standing
+    out."""
+    monkeypatch.setattr(de, "enabled", lambda: False)
+    ok, detail = de.resolution_health(de.DarkLedger(path=""))
+    assert ok is True and "disabled" in detail
+
+    monkeypatch.setattr(de, "enabled", lambda: True)
+    ok, detail = de.resolution_health(de.DarkLedger(path=""))
+    assert ok is True and "owed a verdict" in detail
+
+
+def test_the_probe_fails_on_a_row_that_stopped_advancing(monkeypatch):
+    monkeypatch.setattr(de, "enabled", lambda: True)
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    ok, _ = de.resolution_health(ledger, now_ts=ts + 60.0)
+    assert ok is True                      # inside the first-resolve grace
+    for _ in range(de.STALL_MISS_LIMIT):
+        de.resolve_open(lambda *_: None, now_ts=ts + 600.0, ledger=ledger)
+    ok, detail = de.resolution_health(ledger, now_ts=ts + 600.0)
+    assert ok is False
+    assert "not being advanced" in detail and "MEANUSDT" in detail
+
+
+def test_the_probe_ignores_a_row_that_has_already_resolved(monkeypatch):
+    monkeypatch.setattr(de, "enabled", lambda: True)
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    (row,) = ledger.rows()
+    row.update({"status": de.STATUS_SL, "resolve_misses": 9, "stalled": True})
+    ok, _ = de.resolution_health(ledger, now_ts=ts + 10_000.0)
+    assert ok is True

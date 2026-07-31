@@ -1694,6 +1694,38 @@ class CryptoSignalEngine:
                 "close": list(closes[-n_candles:]),
             }
 
+        def fetch_ohlc_1m_dark(symbol: str, since_ts: float):
+            """1m OHLC since a dark signal was emitted, located **by timestamp**.
+
+            ``fetch_ohlc_since`` above slices ``elapsed // 60`` bars off the end
+            of the array, which assumes the array is gap-free and that its last
+            bar is the current one.  Neither holds — feeds drop frames, and a
+            frozen feed keeps serving its last bar — and when the assumption
+            breaks the slice silently walks *different bars than the trade*.
+            That is the class that produced 172 confident fabricated rows on the
+            SAR arm (2026-07-26, #800); the dark lane must not inherit it,
+            because its rows are the ones the owner reads to decide whether a
+            silenced path deserves a live feed.
+
+            So: locate the entry bar by ``open_time``, refuse a window whose
+            timestamps are missing or non-finite, and hand the times back so the
+            resolver can stamp *which* bar it last consumed.  A refusal leaves
+            the row OPEN and counted rather than scored on bars nobody saw.
+
+            The window is deliberately **not** contiguity-checked the way the
+            15m SAR window is: this walk only asks "was a level touched", which
+            a missing bar can only make more conservative, whereas the SAR walk
+            steps a trailing level bar by bar and a gap would mis-date every
+            exit after it.
+
+            The slicing itself lives in ``dark_emission.slice_window`` so a test
+            can drive it against the store's real shape — a windowing bug that
+            returns plausible bars is not visible from its output.
+            """
+            from src import dark_emission as _de
+
+            return _de.slice_window(self.data_store.get_candles(symbol, "1m"), since_ts)
+
         def _ohlc_15m_detail(symbol: str, since_ts: float):
             """15m OHLC for the SAR exit ledger, with a pre-entry warmup prefix.
 
@@ -2040,8 +2072,11 @@ class CryptoSignalEngine:
             try:
                 from src import dark_emission as _de
                 if _de.enabled():
+                    # The timestamped fetch, not the elapsed-time one: these
+                    # rows carry an unrealized PnL on the ops page, and a mark
+                    # is only honest beside bars we can date.
                     _dark_counters = await asyncio.to_thread(
-                        _de.resolve_open, fetch_ohlc_since
+                        _de.resolve_open, fetch_ohlc_1m_dark
                     )
                     if any(_dark_counters.values()):
                         log.info("Dark emission resolved: {}", _dark_counters)
@@ -2636,6 +2671,31 @@ class CryptoSignalEngine:
             name="sar_live_arms",
             fn=_sar_live_arms,
             min_streak=12,         # 1 min sustained (monitor ticks every 5s)
+        ))
+
+        def _dark_resolution() -> Tuple[bool, str]:
+            """Are the dark lane's open rows still being advanced?
+
+            The lane shipped without a probe, which left its only failure mode
+            silent: a row whose candles stop arriving keeps its last ``mfe_pct``
+            and renders as a live trade forever.  Keyed on the rows owed a
+            verdict, never on the scan universe — a rotated-out symbol is by
+            definition absent from the latter and is exactly the row at risk
+            (#815).  A disabled lane and an empty book answer True with a
+            reason, because filling the fail-open counter with non-failures is
+            how a real one stops standing out.
+            """
+            from src import dark_emission as _de
+
+            ok, detail = _de.resolution_health()
+            return bool(ok), str(detail)
+
+        fl.add_predicate(PredicateProbe(
+            name="dark_resolution",
+            fn=_dark_resolution,
+            # The resolve loop runs every ~5 min; this ticks far faster, so the
+            # streak has to outlast a cycle rather than fire between two of them.
+            min_streak=120,
         ))
         # Suppression stamps themselves vs scanner activity.  Suppressions can
         # be legitimately sparse in a dead market, so the streak is long: six

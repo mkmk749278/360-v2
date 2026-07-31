@@ -4,6 +4,70 @@
 
 ---
 
+## 🟢 SESSION 96 2026-07-31 — the dark feed could not say what an open row was worth (engine #6709745, ops #4f96329)
+
+Owner, on the dark feed the same day it shipped: *"there is no live prices real
+PnL % etc"*. Correct, and it made the page unable to answer the question it was
+built for — three open rows, entry prices, dashes under PnL and R. A dark row
+resolves up to six hours later, and never at all if its candles stop, so until
+then the page showed a list of symbols.
+
+### What shipped
+
+**Ops** — open rows carry a live mark (`/fapi/v1/ticker/price`, one request for
+the whole book, TTL-cached, so cost does not scale with open trades), the
+unrealized move, unrealized R against the **engine's** stamped `sl_distance_pct`,
+and room to each level. An "Open right now" panel publishes two denominators —
+every marked open row, and only the rows the engine is still advancing — and
+calls neither "the" number. Unrealized never enters the per-path table; marks and
+results share the PnL/R columns but can never share a row.
+
+**Engine** — everything the page needs to know whether a row is still true:
+
+| Was | Now |
+|---|---|
+| `last_bar_ms` written at publish, never updated | stamped every cycle with the bar actually consumed |
+| resolver sliced `elapsed // 60` bars off the array end | `slice_window` locates the entry bar by `open_time`, refuses what it cannot place |
+| a miss counted only in the cycle tally | `resolve_misses` / `resolve_miss_reason` / `stalled` on the row |
+| horizon test behind a successful walk → unwalkable rows OPEN forever | retired as `INSUFFICIENT`, terminal and unscored |
+| `flush()` wrote only on change → idle lane read STALE | forced once per resolve cycle |
+| no liveness probe at all | `dark_resolution`, keyed on the rows owed a verdict |
+
+### Four old lessons that re-entered through a new lane
+
+Every one of these is already in `CLAUDE.md`; the lane shipped a day earlier and
+inherited them anyway, which is worth naming as a pattern rather than five
+separate bugs.
+
+1. **A field one repo reads and no repo writes** (#817) — `last_bar_ms` existed
+   in the row shape from day one and nothing ever set it.
+2. **An array consumed by *when* something happened must carry its own
+   timestamps** (#800) — the shared `fetch_ohlc_since` slices by elapsed time,
+   which is right only while the series is gap-free and current. The dark lane
+   now has its own timestamped fetch; **the suppression audit and the
+   invalidation audit still use the elapsed-time one** (see Open).
+3. **A fail-open `continue` with no per-row counter** (#815) — `no_candles`
+   incremented a tally and left the row indistinguishable from one emitted a
+   minute ago.
+4. **A heartbeat that only fires on change is not a heartbeat** (#832) — the
+   ledger's own flush docstring claimed this was fixed. It was not; nothing
+   called it with `force`.
+
+### Open
+
+- **`fetch_ohlc_since` (elapsed-time slice) still backs `suppression_audit` and
+  `invalidation_audit`.** Same latent fault, two consumers, both measurement-only.
+  Worth converting to `dark_emission.slice_window` — one function, one refusal
+  policy — rather than a third copy.
+- **The page will read `unverified` on every current open row** until the engine
+  redeploys and stamps them. That is the fallback working: a missing stamp is an
+  unknown, not a pass.
+- **Nothing about the lane's enrolment changed** — `setup_compat` + `execution`
+  loosened, `min_confidence` and the context floors live, `MOVER_TREND_PULLBACK`
+  excluded, no row reaching a channel, a push, the app feed or an order.
+
+---
+
 ## 🟢 SESSION 95 2026-07-31 — the arm that anchored to a 40-hour-old bar (#836)
 
 Owner delivered the first full read of the SAR exit mechanism: the live-arm CSV
