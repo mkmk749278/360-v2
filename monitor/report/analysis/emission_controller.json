@@ -80,6 +80,10 @@
       "TREND_PULLBACK_EMA": {
         "suppress_negative": false,
         "min_samples": null
+      },
+      "QUIET_COMPRESSION_BREAK@SAREXIT": {
+        "suppress_negative": null,
+        "min_samples": 20
       }
     },
     "history": {
@@ -104,9 +108,9 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -314,9 +318,9 @@
         "HOLD"
       ],
       "MOVER_AVWAP_SCALP|suppress_negative": [
-        "DROP",
-        "DROP",
-        "DROP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "MOVER_AVWAP_SCALP|min_samples": [
         "HOLD",
@@ -348,6 +352,16 @@
       ],
       "MOVER_TREND_PULLBACK@TUNED|min_samples": [
         "LOWER"
+      ],
+      "QUIET_COMPRESSION_BREAK@SAREXIT|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "QUIET_COMPRESSION_BREAK@SAREXIT|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ]
     },
     "last_change_cycle": {
@@ -371,9 +385,10 @@
       "FAILED_AUCTION_RECLAIM@ATR|min_samples": 264,
       "POST_DISPLACEMENT_CONTINUATION|min_samples": 273,
       "TREND_PULLBACK_EMA|suppress_negative": 362,
-      "MOVER_AVWAP_SCALP|suppress_negative": 412
+      "MOVER_AVWAP_SCALP|suppress_negative": 412,
+      "QUIET_COMPRESSION_BREAK@SAREXIT|min_samples": 437
     },
-    "cycle": 417
+    "cycle": 463
   },
   "ledger": [
     {
@@ -881,6 +896,32 @@
       "ev_per_suppression_r": -0.5281608640216814,
       "n": 126,
       "routable": true
+    },
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@SAREXIT",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=23)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 23,
+      "routable": false
+    },
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@SAREXIT",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=23)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 23,
+      "routable": false
     }
   ],
   "pending": [],
@@ -944,6 +985,9 @@
     },
     "TREND_PULLBACK_EMA": {
       "suppress_negative": false
+    },
+    "QUIET_COMPRESSION_BREAK@SAREXIT": {
+      "min_samples": 20
     }
   },
   "routability": {
@@ -957,6 +1001,7 @@
       "MOVER_TREND_PULLBACK@ATR",
       "QUIET_COMPRESSION_BREAK@ATR",
       "QUIET_COMPRESSION_BREAK@FIXED",
+      "QUIET_COMPRESSION_BREAK@SAREXIT",
       "SHADOW_FUNDING_FADE",
       "SHADOW_MEAN_REVERT",
       "SR_FLIP_RETEST@FIXED"
@@ -979,6 +1024,9 @@
       },
       "QUIET_COMPRESSION_BREAK@FIXED": {
         "min_samples": 15
+      },
+      "QUIET_COMPRESSION_BREAK@SAREXIT": {
+        "min_samples": 20
       },
       "SHADOW_FUNDING_FADE": {
         "min_samples": 15
