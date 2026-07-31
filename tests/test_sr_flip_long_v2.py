@@ -106,8 +106,34 @@ class TestLongV2EvidenceGates:
 
 
 class TestLongStillDarkByDefault:
-    def test_v2_passing_long_still_rejected_and_shadow_logged(self, monkeypatch):
+    """The long side is off (−21.8%, 19% win). Owner 2026-07-31 routed the
+    V2-passing candidates into the dark lane so the re-enable decision rests on
+    forward-resolved outcomes instead of a candidate count in a log line.
+
+    The safety contract has two halves and both are pinned here: without the
+    lane the candidate is rejected outright, and with it the candidate is
+    carried but **marked dark**, which is what keeps it out of `signal_queue`.
+    A carried-but-unmarked long would reach paid subscribers.
+    """
+
+    def _no_dark_lane(self, monkeypatch):
+        """Turn off only the dark lane, delegating every other tunable to the
+        real one — a blanket `lambda: False` would silently switch off whatever
+        else this evaluator happens to read."""
+        from src import runtime_tunables as rt
+
+        _real = rt.get
+        monkeypatch.setattr(
+            rt, "get",
+            lambda key, *a, **k: (
+                False if key == "dark_emission_enabled" else _real(key, *a, **k)
+            ),
+        )
+
+    def test_with_the_lane_off_the_long_is_rejected_and_shadow_logged(self, monkeypatch):
+        """The tourniquet does not depend on the measurement being switched on."""
         monkeypatch.setattr(scalp_mod, "SR_FLIP_LONG_ENABLED", False)
+        self._no_dark_lane(monkeypatch)
         from loguru import logger
 
         shadow_lines: list = []
@@ -121,6 +147,29 @@ class TestLongStillDarkByDefault:
         assert sig is None
         assert ch._active_no_signal_reason == "long_disabled"
         assert any("SR_FLIP_LONG_V2_WOULD_FIRE" in line for line in shadow_lines)
+        assert any("rejected" in line for line in shadow_lines)
+
+    def test_with_the_lane_on_the_long_is_carried_but_marked_dark(self, monkeypatch):
+        """Carried, so it runs the rest of the evaluator and the whole gate
+        chain — and dark, so the enqueue site diverts it. `is_dark` is the only
+        thing standing between this candidate and a real order."""
+        monkeypatch.setattr(scalp_mod, "SR_FLIP_LONG_ENABLED", False)
+        from src import dark_emission
+
+        ch, sig = _eval_long(_make_srflip_candles_long(n=60, flip_offset=3))
+        assert sig is not None, "the candidate should now be carried, not rejected"
+        assert dark_emission.is_dark(sig) is True, (
+            "an unmarked carry reaches signal_queue.put and puts a path measured "
+            "at -21.8% in front of paid subscribers"
+        )
+        assert getattr(sig, dark_emission.DARK_ATTR) == dark_emission.GATE_SR_FLIP_LONG
+
+    def test_the_carried_long_is_a_long(self, monkeypatch):
+        """Guards against the carry silently attaching to the short side, which
+        emits live and must never be diverted."""
+        monkeypatch.setattr(scalp_mod, "SR_FLIP_LONG_ENABLED", False)
+        _, sig = _eval_long(_make_srflip_candles_long(n=60, flip_offset=3))
+        assert sig.direction.value == "LONG"
 
     def test_config_default_still_disabled(self):
         from config import SR_FLIP_LONG_ENABLED

@@ -50,7 +50,7 @@ from config import (
     MEAN_REVERT_LIVE,
     RANGE_FADE_LIVE,
 )
-from src import fail_open
+from src import dark_emission, fail_open
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
     check_adx,
@@ -3911,6 +3911,10 @@ class ScalpChannel(BaseChannel):
         else:
             return self._reject("flip_close_not_confirmed")
 
+        # Set only on the long side, read at the single return below. Declared
+        # here so the short path — which never enters the block — still has it.
+        _carry_long_dark = False
+
         # ── SR_FLIP long V2 (S40, issue #674) — trap-discriminating evidence ──
         # The long/short code is symmetric; the LONG side bled (19% win, every
         # regime) because a break above resistance in leveraged crypto is
@@ -3944,16 +3948,34 @@ class ScalpChannel(BaseChannel):
             )
             if _closes_above < SR_FLIP_LONG_MIN_HOLD_CLOSES:
                 return self._reject("long_acceptance_not_held")
-            # 3. Enable gate — while off, V2-passing candidates are shadow-
-            #    logged so the re-enable decision is made on measured volume
-            #    and (via the backfill validator) measured outcomes.
+            # 3. Enable gate — while off, a V2-passing candidate is either
+            #    carried into the dark lane (measured forward to a real TP1/SL
+            #    with an R) or rejected outright, and the shadow line records
+            #    which. Owner directive 2026-07-31: route these to the dark
+            #    feed.
+            #
+            #    The carry deliberately does NOT publish here. This point sits
+            #    before the 1H break confirmation and before the entire scanner
+            #    chain — scoring, MTF, min_confidence, the context floors,
+            #    level_still_in_play, staleness. The dark feed's central claim
+            #    is that every row cleared all of that with one gate overridden;
+            #    a row published from inside an evaluator would not have, and
+            #    would quietly make that sentence false for the whole page. So
+            #    the candidate keeps building and is diverted at the same single
+            #    `signal_queue.put` site as every other dark row.
             if not SR_FLIP_LONG_ENABLED:
+                _long_dark = dark_emission.will_admit(
+                    "SR_FLIP_RETEST", dark_emission.GATE_SR_FLIP_LONG
+                )
                 log.info(
                     "[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE symbol={} level={:.6g} "
-                    "vol_ok={} closes_above={} — long side disabled",
+                    "vol_ok={} closes_above={} — long side disabled, {}",
                     symbol, level, _v2_vol_ok, _closes_above,
+                    "carried dark" if _long_dark else "rejected",
                 )
-                return self._reject("long_disabled")
+                if not _long_dark:
+                    return self._reject("long_disabled")
+                _carry_long_dark = True
 
         # 1H break confirmation (OWNER_BRIEF §3.4a — "HTF Structure, LTF
         # Entry").  Only enforced when the level came from LevelBook (HTF
@@ -4323,6 +4345,18 @@ class ScalpChannel(BaseChannel):
         )
         if total_penalty != 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
+
+        # A long carried past the disable must leave here dark or not at all.
+        # `will_admit` answered sixty lines ago and is not permission: the lane
+        # can be toggled off mid-evaluation, and `mark` records a failure rather
+        # than raising. So the mark is verified, not assumed — an unmarked
+        # candidate would reach `signal_queue.put` and put a path measured at
+        # −21.8% back in front of paid subscribers with no owner sign-off. This
+        # branch is the safety property for the long side; it fails closed.
+        if _carry_long_dark:
+            dark_emission.mark(sig, dark_emission.GATE_SR_FLIP_LONG)
+            if not dark_emission.is_dark(sig):
+                return self._reject("long_disabled")
 
         return sig
 
