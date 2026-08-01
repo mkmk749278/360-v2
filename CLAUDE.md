@@ -747,6 +747,22 @@ python -m src.main
   denominator) instead of re-deriving it, and a row that never delivered simply
   never joins. **Before building a resolver, ask whether the outcome you need is
   already recorded by something that owns it.**
+- **"Where it becomes true" is a point in the call graph, not a file.** The
+  entry-feature stamp read `sig.entry_regime` inside the evaluator, and the
+  scanner writes that attribute in `_populate_signal_context` — which runs
+  *after* the evaluator returns. Every row would have carried `""`, collapsing
+  the whole per-regime split into one nameless bucket: nothing crashed, nothing
+  was empty on screen, the page would simply have described nothing. Caught the
+  same day it shipped, by checking rather than assuming (2026-08-01). This is
+  #817's class one caller earlier, and the warning was already written at the
+  call site — `_populate_signal_context`'s own comment says the market-context
+  stamp *"previously ran with these fields still empty, so the Wyckoff phase
+  always classified AMBIGUOUS"*. **Before reading a field off a shared object,
+  find the line that writes it and confirm it runs first.** The evaluator had
+  the regime as a parameter the whole time. Corollary: when two layers can each
+  answer, let the later one be authoritative and keep the earlier one as its own
+  key — a disagreement is then information (the scanner reclassified between
+  evaluation and dispatch) rather than a silent overwrite.
 - **A literal route under a catch-all prefix must be registered first.**
   `signal_detail` owns `/signals/{signal_id}`, so `/signals/entry-features`
   404'd on the first cut while its own route object sat in `app.routes` looking

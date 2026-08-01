@@ -471,8 +471,33 @@ def enabled() -> bool:
         return os.getenv("ENTRY_FEATURES_ENABLED", "true").strip().lower() != "false"
 
 
-def stamp(sig: Any, features: Dict[str, Any], now_ts: Optional[float] = None) -> bool:
-    """Record one signal's entry-time features. Never raises into the scanner."""
+def stamp(
+    sig: Any,
+    features: Dict[str, Any],
+    now_ts: Optional[float] = None,
+    regime: str = "",
+) -> bool:
+    """Record one signal's entry-time features. Never raises into the scanner.
+
+    ``regime`` is passed in rather than read off ``sig``, and that is not a
+    style choice. ``sig.entry_regime`` is written by
+    ``scanner._populate_signal_context``, which runs **after** the evaluator has
+    returned — so at stamp time the attribute is still ``""``. Reading it here
+    put an empty regime on every row and would have bucketed the whole page into
+    one group (caught 2026-08-01, immediately after shipping).
+
+    That is #817's class one caller earlier, and the comment above
+    ``_populate_signal_context``'s call site already warns about it: the
+    market-context stamp *"previously ran with these fields still empty, so the
+    Wyckoff phase always classified AMBIGUOUS"*. The evaluator receives the
+    regime as a parameter, which is where it is genuinely known at this point.
+
+    The closed-signal record's ``entry_regime`` remains authoritative — it is
+    what the scanner finalised — and ops prefers it on the join. This value is
+    the evaluator's own view; where the two disagree, the scanner reclassified
+    between evaluation and dispatch, and that is information rather than a
+    conflict.
+    """
     if not enabled():
         return False
     try:
@@ -485,7 +510,9 @@ def stamp(sig: Any, features: Dict[str, Any], now_ts: Optional[float] = None) ->
                 "signal_id": sid,
                 "setup_class": str(getattr(sig, "setup_class", "") or ""),
                 "confidence": _f(getattr(sig, "confidence", None)),
-                "entry_regime": str(getattr(sig, "entry_regime", "") or ""),
+                "entry_regime": str(
+                    regime or getattr(sig, "entry_regime", "") or ""
+                ),
                 "stamped_at": time.time() if now_ts is None else float(now_ts),
                 "schema": SCHEMA,
             }

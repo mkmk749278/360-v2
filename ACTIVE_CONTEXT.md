@@ -57,6 +57,19 @@ two-winners rule that is noise. On the corrected denominator MVRTP is already
 **+0.253%/trade gross** (+11.62% over the window); the R subset reads +0.192R but
 is favourably selected, so the gross is the honest number.
 
+### Caught the same day (engine #850, ops #118)
+
+Owner: *"check entry_regime is stamped on MVRTP"*. It was not. The stamp read
+`sig.entry_regime` inside the evaluator; the scanner writes that attribute in
+`_populate_signal_context`, which runs **after** the evaluator returns. Every row
+would have carried `""` and the per-regime split would have been one nameless
+bucket — no crash, no empty panel, just a page describing nothing.
+
+The evaluator had `regime` as a parameter the whole time. Now passed explicitly,
+pinned by a test that fails against the old read, and ops prefers the
+closed-signal record's finalised value with the stamp as fallback (disagreement =
+the scanner reclassified between evaluation and dispatch, which is information).
+
 ### Open
 
 - Wait for a population that can decide, then read `/signals/entry-features`.
