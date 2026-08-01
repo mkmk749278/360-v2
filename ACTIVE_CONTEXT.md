@@ -4,7 +4,7 @@
 
 ---
 
-## 🟢 SESSION 97 2026-08-01 — the track record divided by a stop that had already moved
+## 🟢 SESSION 99 2026-08-01 — the track record divided by a stop that had already moved
 
 Owner supplied four exports (live feed, SAR live arms open + closed, dark feed)
 covering 2026-07-29→08-01. Reading them found a denominator bug, killed a
@@ -98,6 +98,141 @@ score that routes dispatch.
   denominator on a signal that had already closed SL_HIT at −5.24%.
 - Arm entry ≠ signal entry on 9 of 69 matched arms, up to 1.74% (a 31%
   denominator gap on the worst one). Worth pinning as a contract.
+
+---
+
+## 🟢 SESSION 98 2026-07-31 — two owner directives, and a test artifact in the repo (engine #844/#845, ops #114/#115)
+
+### SR_FLIP longs now emit into the dark feed (#844 + ops #114)
+
+Owner: *"enable sr flip longs to here at dark feed"*. The long side has been off
+since 2026-06-29 on a measured −21.8% / 19% win, and its only evidence since was
+a `[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE` log line — a candidate **count**, which
+cannot settle a re-enable. Dark rows give it forward-resolved outcomes.
+
+First *evaluator-internal* disable the lane admits, and that dictated the shape:
+`long_disabled` fires before the gate chain, so publishing there would produce
+rows the page's own first sentence describes falsely. The candidate is
+**carried** instead — evaluator finishes, every gate still applies, diverted at
+the one enqueue site. `will_admit` decides the carry; it is **not** permission,
+so the mark is re-checked with `is_dark` before returning. Both tests fail with
+that guard removed. Lane off ⇒ rejected as before.
+
+### SAR exit arms over the dark feed (#845 + ops #115)
+
+Owner: *"observe this dark feed too with SAR exit mechanism along with regular"*.
+Each dark row now carries two outcomes — its own SL/TP1, and a SAR handover from
+the same entry.
+
+- **Own ledger** (`dark_sar_arms_v1.json`). `sar_live_arms_v1.json` is the
+  adoption evidence and every arm in it reached a subscriber; these reached
+  nobody. A consumer pointed at a file it never opens cannot mix them.
+- **Health is per lane.** Was module-global — a dark stall would have paged as
+  though the delivered-signal arms froze. `dark_sar_arms` is its own probe.
+- **The comparison population is the trap.** Only rows decided by *both* count;
+  a row that resolved while its arm still runs describes one mechanism, not two.
+  Expect the panel to read empty for the first hours — that is designed.
+
+### `.tmp` — a test artifact committed since #839
+
+Surfaced as a merge conflict on every branch. Both ledgers take `path=""` to mean
+"in memory" and neither checked it before the atomic write, so `flush` wrote
+`.tmp` into pytest's cwd (the repo root) and `git add -A` committed it. The file
+was the symptom; `os.replace(".tmp", "")` then raised into **`fail_open`** — a
+non-failure filling the counter that exists so real ones stand out, on every test
+run for two months. Both flushes now return early; `.tmp` is gitignored.
+
+### Both surfaces confirmed on screen, and the data found a bug (#846)
+
+Owner exported both pages at 15:16 UTC. The dark feed is healthy: 18 rows, 5
+open and **all being advanced**, `bars_behind ≈ 0.6`, `no candles` gone, pre-
+restart rows correctly reading `unverified · stamp_before_timestamps`. SAR arms
+show `running ×2` per row and the comparison panel correctly says nothing has
+both verdicts yet.
+
+The **live** SAR arms did not survive the same read. Three arms stamped
+`anchor=clean`, `anchor_bars_behind≈0`, `first_step_bars=1`:
+
+| arm | bars_seen | bars of life |
+|---|---|---|
+| `MVRTP-CF7DEF1F:15m` | 466 | ~17 |
+| `MVRTP-1C478092:15m` | 159 | ~5 — **contributed −1.644R** |
+| `MVRTP-7EDA88B4:5m` | 63 | ~9 |
+
+#836 asked this question at the anchor and at the *first* advance only, so a
+later over-walk was invisible. Cause: a frozen-then-refreshed series —
+`refresh_timeframe` replaces a rotated-out mover's bucket, the arm's last bar is
+still in the new window, and the walk crosses hours of history in one pass.
+Fixed by bounding **every** advance by the clock; refuses as
+`series_jumped_ahead`, stamped with `advance_replay_bars` /
+`advance_allowed_bars`.
+
+**Do not read the −0.034R mean over 44 scored arms** — at least one over-walked
+arm is in it. Needs a fresh window. One reassurance: the 23% INSUFFICIENT
+fraction is *not* loss-selected (mean MFE +2.54% unmeasured vs +2.71% scored),
+which is #832's check coming out clean for once.
+
+### Open
+
+1. **#832's SAR verdict is owed a re-check** — `_ohlc_15m_detail` refused on the
+   same undatable-bars condition #842 fixed, so "8 of 19 unresolved → starved
+   refresh budget" may have been that bug wearing another name. Now doubly owed:
+   #846 changes what resolves.
+2. Elapsed-time candle slice still backs the suppression and invalidation audits.
+3. **Ops does not yet render `series_jumped_ahead`** — the engine stamps it and
+   `/signals/sar-live` will show it as a plain INSUFFICIENT until the page
+   grades on the new stamps. Same "measured but nowhere to look" gap the dark
+   lane just closed.
+4. The dark feed's CSV export carries no SAR columns; the page does.
+
+---
+
+## 🟢 SESSION 97 2026-07-31 — bar timestamps never survived a restart (engine #842, ops #113)
+
+Owner, from the live dark feed hours after Session 96 deployed: every open row
+read `stalled — no candles`, **zero rows being advanced**. One was BCHUSDT, a
+core pair whose candles were plainly arriving — so "the symbol rotated out"
+could not be the explanation, and the fault was ours.
+
+### The cause was in the snapshot, not the lane
+
+`_save_snapshot_sync` wrote open/high/low/close/volume; `load_snapshot` read
+back the same five. `open_time` had been added to the store without being added
+to either, so **timestamps did not survive a restart**. `_merge_candles` then
+correctly refused to merge the gap-fetch's timestamps onto a bucket with none,
+and the whole candle store came back undatable — which Session 96's
+`slice_window` refused, wholesale. The Session 96 deploy *was* the restart, so
+the lane went blank on its first cycle.
+
+**Not confined to the dark lane.** `_ohlc_15m_detail` refuses on the same
+condition. The SAR resolver has been losing windows after every restart for as
+long as it has located bars by time — **open item: re-read #832's "starved
+refresh budget" conclusion (8 of 19 unresolved, all four winners among them)
+against a post-fix window before trusting it.**
+
+### What shipped
+
+| Fix | Where |
+|---|---|
+| `open_time` saved when index-aligned; legacy npz loads as a NaN column, not an absent key | `historical_data._save_snapshot_sync` / `load_snapshot` |
+| `slice_window` degrades to an undated walk instead of blanking; hard refusal kept only for rolled-off history | `dark_emission` |
+| `searchsorted` now runs over the finite tail — a NaN prefix made it an unsorted array, which is undefined, not imprecise | `dark_emission` |
+| Probe fails when the whole open book is advancing on undatable windows | `dark_emission.resolution_health` |
+| An undated row reads `unverified` with its cause named, and is excluded from "still being advanced" | ops `dark_signals_live` |
+
+Two lessons in `CLAUDE.md`: **a field one writer populates and one serializer
+drops is invisible at both ends** (#817 one layer down — the round trip is a
+contract, pin it against the real serializer), and **refuse the claim, not the
+measurement** (an empty page is indistinguishable from a quiet market).
+
+### What the page should show now
+
+`no candles` gone; rows emitted before the restart read
+`unverified · stamp_before_timestamps` (their entry bars sit in the restored,
+untimestamped history) and resolve normally; rows emitted after it carry a real
+age and populate "still being advanced", which read 0 of 3. The NaN prefix rolls
+off the 1m ring over ~16h, after which everything is dated. **Not yet confirmed
+on screen** — the deploy landed 12:08 UTC.
 
 ---
 

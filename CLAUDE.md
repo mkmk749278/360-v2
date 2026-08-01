@@ -641,6 +641,70 @@ python -m src.main
   the fault-that-is-not-happening the ledger's own flush docstring claimed to
   have fixed, because nothing ever called it with `force` (2026-07-31). **A
   docstring describing a heartbeat is not a heartbeat**; find the caller.
+- **A field one writer populates and one *serializer* drops is invisible at both
+  ends.** #817 was a field one repo read and no repo wrote. This is the same
+  shape one layer down and it is harder to see, because nothing is missing while
+  the process lives: `open_time` was added to the candle store, but
+  `_save_snapshot_sync` wrote five arrays and `load_snapshot` read back the same
+  five, so **bar timestamps did not survive a restart**. `_merge_candles` then
+  *correctly* refused to merge the gap-fetch's timestamps onto a bucket with
+  none — a misaligned timestamp is worse than an absent one — and the entire
+  store came back undatable. Every open dark row read `no candles`, on core
+  pairs whose candles were plainly arriving (owner-caught 2026-07-31, #842).
+  Every link was individually right. **A round trip is a contract: pin it with a
+  test that drives the real serializer**, and when you add a field to a
+  structure that is persisted, follow it all the way to disk and back.
+  Corollary: **the blast radius of a serializer is every consumer, not the one
+  that noticed** — `_ohlc_15m_detail` refuses on the same condition, so the SAR
+  resolver had been losing windows after every restart, and #832's "starved
+  refresh budget" reading of 8-unresolved-of-19 is owed a re-check on a fresh
+  window.
+- **Refuse the claim, not the measurement.** "A clamp is not a guard" says
+  refuse when the input cannot support the work — it does not license refusing
+  the *work* when only the *label* is unsupportable. `slice_window` could not
+  date its bars, so it returned nothing at all, and a lane that had been
+  resolving stopped: an empty page, which is indistinguishable from a quiet
+  market and strictly worse than the imprecision it was avoiding. Where the
+  measurement is possible but its provenance is not, **do the walk and mark the
+  row** (`window_undated_reason` → ops `unverified`), reserving the hard refusal
+  for inputs that would make the *answer* wrong — history rolled off before the
+  stamp, where a walk over what remains could book a TP1 that a missing SL
+  preceded. And when a degraded mode ships, **count it**: the probe fails when
+  the whole open book is advancing on undatable windows, which is neither
+  stalled nor healthy and was invisible to a probe watching only for stalls.
+- **A guard on "the first time" is not a guard on the object — #836's own rule,
+  broken by #836's own fix.** That entry says *"a freshness rule applied at one
+  end of an object's life is not applied to the object"*, and the fix it shipped
+  asked its question exactly twice: at the anchor, and at the arm's **first**
+  advance (`first_step_bars`). Owner data 2026-07-31 (#846): three arms stamped
+  `anchor=clean`, `anchor_bars_behind≈0`, `first_step_bars=1` had consumed 466,
+  159 and 63 bars against lifetimes of ~17, ~5 and ~9 — one contributing −1.644R
+  to the population an adoption decision reads. The over-walk happened on a
+  *later* advance, where nothing was looking.
+
+  The mechanism is worth knowing because it recurs: a **frozen-then-refreshed
+  series**. A rotated-out mover's klines stop and its bucket freezes;
+  `refresh_timeframe` then **replaces** that bucket (correctly — merging would
+  duplicate bars) with a fresh REST pull whose window still contains the
+  consumer's last bar. The index lookup succeeds, the walk is structurally
+  valid, and it crosses hours of history in one pass. **Any consumer holding a
+  position in an array that another module may replace must bound its step by
+  the clock, not only by the index.** And when it refuses, refuse the whole
+  advance: walking "just the recent tail" is a clamp, and it books fills on bars
+  chosen by us rather than by the market.
+- **A test hook that means "don't persist" must not touch the disk, and a
+  non-failure must never reach `fail_open`.** Both ledgers take `path=""` as
+  "in memory" — what every test constructs with — and neither checked it before
+  running its atomic write. So `flush` created `.tmp` in the process's cwd,
+  which under pytest is the repo root, where `git add -A` committed it; it
+  differed on every branch and conflicted on every merge from #839 to #845.
+  The file was only the symptom. `os.replace(".tmp", "")` then raised into
+  `fail_open`, so **every test run recorded a failure that was not one**, for
+  two months, in the counter whose whole purpose is making a real failure stand
+  out. Same rule the `PredicateProbe` guidance above already carries, broken one
+  layer down: *do not signal a non-event by raising*. When a path is a no-op,
+  return before the side effect — and if a repo artifact keeps conflicting, ask
+  what wrote it rather than resolving it again.
 - **A denominator computed from mutable state is a different number every time
   you read it.** `R = pnl_pct / sl_distance_pct` is only meaningful if the SL
   distance is the one the trade was *sized for* — but `trade_monitor` moves
