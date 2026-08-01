@@ -4,6 +4,96 @@
 
 ---
 
+## 🟢 SESSION 101 2026-08-01 — the dark feed's verdict was a geometry problem, and every path's entry is a boolean
+
+Owner brought the 65-row dark-feed window (2026-07-31 08:25 → 08-01 08:10 UTC) and
+then: *"we need to concentrate on entry, on which bases entry is confirming
+especially on Trend pullback EMA and mover AVWAP"*.
+
+### What the window says
+
+56 scored rows, **−0.158R, bootstrap 95% CI [−0.40, +0.09]**. 48 decided, 42% win,
+−0.185R. Nothing in it clears zero.
+
+`FAILED_AUCTION_RECLAIM` reads +0.508R and its three decided rows are
+**+1.54 / +2.00 / −1.00** — bit-for-bit the population `CLAUDE.md` already
+records under *two winners are not a promotion*. The lane has added **zero** new
+decided FAR evidence since; the two that closed were expiries. Removing the two
+winners takes `execution:overextended` from +0.115R to +0.021R, and removing FAR
+entirely takes it to −0.062R. Still not a promotion.
+
+**The real finding is payoff geometry, not gates.**
+
+| setup | n dec | designed R:R | breakeven win% | actual |
+|---|---|---|---|---|
+| `TREND_PULLBACK_EMA` | 17 | **0.79** | 54% | 35% |
+| `MOVER_AVWAP_SCALP` | 19 | 1.05 | 52% | 42% |
+| `MEAN_REVERT` | 5 | 1.24 | 50% | 40% |
+
+TPE parks TP1 **nearer than its stop**: TP1 is the nearest 5m swing extreme,
+capped by ATR percentile, and `_enforce_tp_ladder_monotonicity` floors tp2 at
+2.0R and tp3 at 4.0R while **nothing floors tp1**. Median MFE on an SL row is 22%
+of the distance to TP1 and 16 of 28 never reached a quarter of it — these are not
+trades that were right and gave it back. Confidence has corr −0.019 with R.
+
+### Fixes shipped
+
+- **Duplicate bars on merge.** `_merge_candles` concatenated blindly while
+  `_estimate_gap_candles` over-fetches by design, so every gap fill re-appended
+  bars the bucket held. That double-weights fixed-bar-count indicators and makes
+  `open_time` non-monotonic — and `slice_window` uses `np.searchsorted`, which is
+  *undefined* on an unsorted array, while the resulting walk stamps `last_bar_ms`
+  and reads `current`. 7 of the 9 open dark rows carried ~21 more array entries
+  than elapsed minutes. Overlap now dropped and counted; the consumer keeps its
+  own guard.
+- **Expiries that never walked their window.** ROBOUSDT expired on 309 bars of a
+  362-minute window, ARBUSDT on 329 of 365 — 89 unexamined minutes reported as
+  "the setup did nothing" at 0R. Untouched rows stamp `window_coverage` and
+  retire `INSUFFICIENT` (terminal, unscored) below the floor. Ops counts the two
+  causes apart.
+
+### Entry features, per path
+
+Generalised `src/entry_features.py` from MVRTP to every dark-feed path.
+**The first cut copied MVRTP's feature list onto all of them and the owner caught
+it** — that list was chosen for MVRTP's blindness and measures nothing elsewhere.
+Now a small core (geometry, trigger-bar shape) plus per-path extras:
+
+| Path | What it confirms on | What it cannot see |
+|---|---|---|
+| `TREND_PULLBACK_EMA` | 1H EMA21/50, then six **booleans** on 5m | the magnitude of any of them |
+| `MOVER_AVWAP_SCALP` | AVWAP + slope + volume | where in the move it is |
+
+TPE stamps 1H trend separation, retrace of the impulse leg, RSI at entry, the
+size of the `prev_high` break, and which of its **two direction mechanisms** ran
+(the 1H path and the legacy 5m-regime fallback are different strategies sharing
+one `setup_class`, and nothing had ever distinguished them). MVAVW stamps anchor
+age, leg move %, prior returns to the anchor, slope magnitude and the exact
+volume ratio `vol_ok` thresholds on.
+
+`tp1_r_multiple` is stamped on every path and is the number to read first — it
+bounds what any entry filter can achieve.
+
+**Two defects found while reading:**
+- `cvd_slope` / `book_imbalance` were stored raw and split "higher is better",
+  scoring every SHORT backwards. Now signed toward the trade.
+- TPE's SMC gate says *"at least one FVG or orderblock in the pullback zone"* and
+  is `bool(fvgs) or bool(orderblocks)` — a global existence check a zone 40 ATR
+  away satisfies. Stamped (`smc_zone_dist_atr`), **not** fixed: it rejects, so
+  narrowing it changes what emits. A test pins the live behaviour.
+
+### Open — owner decisions
+
+1. **TPE's TP1 floor.** The 0.79 median R:R is the single biggest lever in the
+   window and it is TP/SL shape → owner sign-off. Nothing changed.
+2. **FAR needs rows, not a promotion** — 3 decided rows in 24h means a CI that
+   excludes zero is weeks away, which is itself a question about where the dark
+   lane's row budget points.
+3. Ops `/signals/entry-features` now has a per-path selector; the engine ships
+   the feature registry in the ledger's `spec` so ops holds no mirror.
+
+---
+
 ## 🟢 SESSION 100 2026-08-01 — MVRTP takes its entry off three SMAs, and now we can see what else was on the table
 
 Owner, after rejecting an exit-side fix: *"some days something will be benefits,
