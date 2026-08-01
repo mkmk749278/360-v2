@@ -278,9 +278,9 @@
         "HOLD"
       ],
       "WHALE_MOMENTUM|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "WHALE_MOMENTUM|min_samples": [
         "HOLD",
@@ -388,7 +388,7 @@
       "MOVER_AVWAP_SCALP|suppress_negative": 412,
       "QUIET_COMPRESSION_BREAK@SAREXIT|min_samples": 437
     },
-    "cycle": 463
+    "cycle": 509
   },
   "ledger": [
     {
