@@ -94,6 +94,12 @@ class HistoricalDataStore:
         # by construction rather than clean).
         self.merge_duplicate_bars_dropped: int = 0
         self.merge_undedupable: int = 0
+        # ``update_candle`` telemetry (2026-08-01). The merge counters above see
+        # only the REST paths; a WebSocket bar never passes through the merge, so
+        # without these a second source of out-of-order timestamps is invisible
+        # — which is exactly what happened after the merge dedupe shipped.
+        self.candle_appends_out_of_order: int = 0
+        self.candle_updates_in_place: int = 0
 
     # ------------------------------------------------------------------
     # OHLCV fetch
@@ -854,6 +860,56 @@ class HistoricalDataStore:
         n_existing = len(bucket.get("close", ()))
         if len(bucket.get("open_time", ())) != n_existing:
             bucket["open_time"] = np.full(n_existing, np.nan, dtype=np.float64)
+
+        # ── Ordering guard (2026-08-01) ───────────────────────────────────────
+        # This path appends blindly, and `_merge_candles`' dedupe cannot see it
+        # — a bar arriving here never passes through the merge. So the merge fix
+        # alone left a second source of non-monotonic `open_time`, and the dark
+        # lane's `timestamps_unsorted` guard kept firing after it shipped.
+        #
+        # The race is ordinary: `refresh_timeframe` REPLACES a bucket with a
+        # fresh REST pull while the WebSocket is still delivering, so a kline
+        # that closed before the pull's last bar lands here immediately after and
+        # is appended out of order. Promoted movers, which are re-seeded by REST
+        # while streaming, hit it routinely.
+        #
+        # It matters most for a **path-dependent** consumer. Parabolic SAR
+        # accumulates its acceleration factor and extreme point bar by bar, so a
+        # duplicated or out-of-order bar does not merely add noise — it corrupts
+        # the state and never self-corrects. `np.searchsorted` over the same
+        # array is undefined rather than imprecise.
+        #
+        # A same-timestamp bar is an *update* to a bar we already hold (the
+        # exchange revising a close), so it overwrites in place. An older one is
+        # a straggler after a replace, and appending it would reorder the array;
+        # it is dropped and counted. Neither case guesses.
+        incoming_t = candle.get("open_time")
+        if incoming_t is not None and n_existing > 0:
+            try:
+                t_new = float(incoming_t)
+            except (TypeError, ValueError):
+                t_new = float("nan")
+            prev_times = bucket["open_time"]
+            t_last = float(prev_times[-1]) if len(prev_times) else float("nan")
+            # NaN on either side means "cannot compare" — append as before
+            # rather than drop a bar on an unknown, because absence of knowledge
+            # is not permission to discard history.
+            if t_new == t_new and t_last == t_last:
+                if t_new == t_last:
+                    for key in keys:
+                        bucket[key][-1] = float(
+                            candle.get(key, np.nan if key == "open_time" else 0.0)
+                        )
+                    self.candle_updates_in_place += 1
+                    self._last_kline_update_ts.setdefault(symbol, {})[interval] = time.time()
+                    return
+                if t_new < t_last:
+                    self.candle_appends_out_of_order += 1
+                    log.debug(
+                        "Dropped out-of-order %s %s bar: %.0f behind last %.0f",
+                        symbol, interval, t_new, t_last,
+                    )
+                    return
         for key in keys:
             arr = bucket[key]
             arr = np.append(arr, float(candle.get(key, np.nan if key == "open_time" else 0.0)))

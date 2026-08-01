@@ -2579,6 +2579,58 @@ class CryptoSignalEngine:
             min_streak=6,          # 30 min sustained
         ))
 
+        def _candle_series_integrity() -> Tuple[bool, str]:
+            """Is the store handing consumers bars in order?
+
+            Two writers can disorder a bucket and they need different fixes, so
+            the counters are read apart rather than summed:
+
+            * ``candle_appends_out_of_order`` — a WebSocket bar arriving behind
+              the bucket's newest, which is the ``refresh_timeframe`` REPLACE
+              racing the socket. A trickle is normal operation; a flood means a
+              symbol is being re-seeded continuously.
+            * ``_series`` refusals — SAR declining a window it cannot walk. SAR
+              is path-dependent, so a duplicated bar corrupts every level after
+              it; refusing costs a measurement, walking would cost the answer.
+
+            Returns True while the lane is merely degraded, because a refusal is
+            the guard working. It fails when refusals are *sustained*, which
+            means the store is not recovering and the arms have stopped
+            measuring rather than paused.
+            """
+            try:
+                from src import sar_live_shadow as _sls
+                refusals = _sls.series_refusals()
+                corrupt = int(refusals.get("duplicate_bar", 0)) + int(
+                    refusals.get("out_of_order", 0)
+                )
+                store = getattr(self, "data_store", None)
+                ooo = int(getattr(store, "candle_appends_out_of_order", 0) or 0)
+                inplace = int(getattr(store, "candle_updates_in_place", 0) or 0)
+                undedupable = int(getattr(store, "merge_undedupable", 0) or 0)
+                dropped = int(getattr(store, "merge_duplicate_bars_dropped", 0) or 0)
+                detail = (
+                    f"merge dropped {dropped} dup bars, {undedupable} undedupable; "
+                    f"ws {ooo} out-of-order, {inplace} in-place; "
+                    f"SAR refused {corrupt} series"
+                )
+                # The guards absorb ordinary racing. A series still being
+                # refused after they have had time to work is the store failing
+                # to recover, and SAR is measuring nothing while it does.
+                prev = getattr(self, "_last_series_refusals", None)
+                self._last_series_refusals = corrupt
+                if prev is None:
+                    return True, detail
+                return corrupt <= prev, detail
+            except Exception as exc:  # noqa: BLE001
+                return True, f"probe unavailable ({type(exc).__name__})"
+
+        fl.add_predicate(PredicateProbe(
+            name="candle_series_integrity",
+            fn=_candle_series_integrity,
+            min_streak=6,          # 30 min of *rising* refusals, not a blip
+        ))
+
         def _entry_feature_inputs() -> Tuple[bool, str]:
             """Are the inputs MVRTP ignores actually arriving?
 

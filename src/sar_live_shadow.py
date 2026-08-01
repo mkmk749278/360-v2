@@ -168,7 +168,26 @@ EXIT_OPEN_AT_HORIZON = "still_open_at_horizon"
 #: A stall is described, never guessed at: "the store has no series for this
 #: symbol/timeframe" and "the series exists but its newest closed bar is hours
 #: old" are different faults with different fixes.
+#: Why ``_series`` handed back nothing, counted rather than merely logged. A
+#: refusal here reads downstream as "no series", which is indistinguishable from
+#: a symbol that simply has no candles — and the two have completely different
+#: fixes. Keyed so a rise in ``duplicate_bar`` points at the store's append path
+#: rather than at the feed.
+_SERIES_REFUSALS: Dict[str, int] = {"duplicate_bar": 0, "out_of_order": 0}
+
+
+def series_refusals() -> Dict[str, int]:
+    """Snapshot of why series were refused. For the liveness probe and ops."""
+    return dict(_SERIES_REFUSALS)
+
+
 STALL_NO_SERIES = "no_series"
+#: The series exists but cannot be trusted — duplicated or out-of-order bars.
+#: Named apart from ``no_series`` because the fixes are opposite: there the feed
+#: is not delivering, here it is delivering too much and the store's append path
+#: is the suspect. Pooling them would send anyone reading the probe to the wrong
+#: subsystem.
+STALL_SERIES_CORRUPT = "series_corrupt"
 STALL_BARS_BEHIND = "bars_behind"
 
 #: Why an arm was not opened at all. Refusing to open is not a stall — no arm
@@ -242,6 +261,14 @@ def reset_sar_cache() -> None:
 def _series(
     store: Any, symbol: str, timeframe: str, warmup: int
 ) -> Optional[Dict[str, List[float]]]:
+    """Thin wrapper over :func:`_series_with_reason` for callers that only need
+    the window itself."""
+    return _series_with_reason(store, symbol, timeframe, warmup)[0]
+
+
+def _series_with_reason(
+    store: Any, symbol: str, timeframe: str, warmup: int
+) -> Tuple[Optional[Dict[str, List[float]]], str]:
     """Closed-bar OHLC + open_time for one symbol/timeframe, or None.
 
     Returns None — never a truncated or padded series — when the store cannot
@@ -249,11 +276,24 @@ def _series(
     bucket seeded before timestamp tracking fills that slot with NaN, and a
     mechanism that decides *when* something happened cannot run on bars that
     cannot say when they are.
+
+    **It must also be strictly increasing** (2026-08-01). Parabolic SAR is
+    path-dependent: it carries an acceleration factor and an extreme point
+    forward bar by bar. A duplicated bar therefore does not add noise that
+    averages out — it advances the AF one extra step and moves the stop toward
+    price permanently, and every level after it is wrong with no way to recover.
+    An out-of-order bar is worse: ``times.index(last_seen)`` finds the *first*
+    occurrence, so the walk resumes behind itself and re-consumes bars it has
+    already priced.
+
+    This is the one consumer where "walk it anyway and mark the row" — right for
+    the dark lane, whose levels are fixed and whose walk is a pure scan — would
+    be wrong. There the imprecision is in the label; here it is in the answer.
     """
     try:
         candles = store.get_candles(symbol, timeframe)
         if candles is None:
-            return None
+            return None, STALL_NO_SERIES
         highs = candles.get("high")
         lows = candles.get("low")
         opens = candles.get("open")
@@ -261,12 +301,12 @@ def _series(
         times = candles.get("open_time")
         for arr in (highs, lows, opens, closes, times):
             if arr is None:
-                return None
+                return None, STALL_NO_SERIES
         n = len(highs)
         if n < warmup or len(lows) != n or len(opens) != n or len(closes) != n:
-            return None
+            return None, STALL_NO_SERIES
         if len(times) != n:
-            return None
+            return None, STALL_NO_SERIES
         out = {
             "high": [float(x) for x in highs],
             "low": [float(x) for x in lows],
@@ -276,11 +316,27 @@ def _series(
         }
         last_t = out["open_time"][-1]
         if not (last_t == last_t) or last_t <= 0:  # NaN-safe finiteness check
-            return None
-        return out
+            return None, STALL_NO_SERIES
+        # Strictly increasing, checked over the whole window rather than at the
+        # ends: one duplicate anywhere corrupts every SAR level after it, and
+        # the endpoints look perfectly healthy while it does.
+        ts = out["open_time"]
+        for i in range(1, len(ts)):
+            if not (ts[i] > ts[i - 1]):
+                _SERIES_REFUSALS[
+                    "duplicate_bar" if ts[i] == ts[i - 1] else "out_of_order"
+                ] += 1
+                log.warning(
+                    "SAR refused {} {} series: bar {} at {:.0f} does not follow "
+                    "{:.0f} — SAR is path-dependent, so walking it would corrupt "
+                    "every level after this point",
+                    symbol, timeframe, i, ts[i], ts[i - 1],
+                )
+                return None, STALL_SERIES_CORRUPT
+        return out, ""
     except Exception as exc:
         fail_open.record("sar_live_shadow._series", exc)
-        return None
+        return None, STALL_NO_SERIES
 
 
 # --------------------------------------------------------------------------- #
@@ -537,6 +593,7 @@ def new_arm(
         "r_confirm": None,
         "confirm_slippage_pct": None,
         "mfe_pct": 0.0,
+        "mae_pct": 0.0,
         "current_price": None,
         "unrealized_pct": None,
         "ambiguous_bar": False,
@@ -732,6 +789,15 @@ def step_arm(
             if entry > 0:
                 arm["mfe_pct"] = max(
                     float(arm.get("mfe_pct") or 0.0), fav / entry * 100.0
+                )
+                # ...and the adverse side, on the same bar and in the same
+                # units. Without it "would a tighter stop have helped" cannot
+                # be answered for this arm either: how far each trade went
+                # against us before it worked is the whole question, and no
+                # measurement lane here recorded it until now.
+                adv = (entry - lo) if is_long else (hi - entry)
+                arm["mae_pct"] = max(
+                    float(arm.get("mae_pct") or 0.0), adv / entry * 100.0
                 )
 
             if arm.get("governor") == GOV_GEOMETRY:
@@ -1229,7 +1295,7 @@ def sweep(
     ``current`` and ``stalled`` are the two the old code merged into one silent
     no-op, and the merge is why 2h19m of frozen arms read as healthy.
     """
-    tally = {"advanced": 0, "current": 0, "stalled": 0, "no_series": 0, "retired": 0}
+    tally = {"advanced": 0, "current": 0, "stalled": 0, "no_series": 0, "series_corrupt": 0, "retired": 0}
     try:
         from config import (
             SAR_EXIT_SHADOW_MAX_STEP,
@@ -1288,15 +1354,17 @@ def sweep(
                 )
                 continue
 
-            series = _series(store, symbol, tf, wu)
+            series, series_reason = _series_with_reason(store, symbol, tf, wu)
             if series is None:
                 tally["no_series"] += 1
-                record_step(symbol, False, f"{STALL_NO_SERIES}:{tf}", lane=lane)
+                if series_reason == STALL_SERIES_CORRUPT:
+                    tally["series_corrupt"] = tally.get("series_corrupt", 0) + 1
+                record_step(symbol, False, f"{series_reason}:{tf}", lane=lane)
                 if _note_series_state(
                     arm,
                     now=now,
                     latest_bar_ms=None,
-                    stall_reason=STALL_NO_SERIES,
+                    stall_reason=series_reason or STALL_NO_SERIES,
                     stall_bars=sb,
                     abandon_sec=ab,
                 ):
