@@ -4,6 +4,103 @@
 
 ---
 
+## 🟢 SESSION 97 2026-08-01 — the track record divided by a stop that had already moved
+
+Owner supplied four exports (live feed, SAR live arms open + closed, dark feed)
+covering 2026-07-29→08-01. Reading them found a denominator bug, killed a
+promotion, and split the two feeds' failure modes cleanly apart.
+
+### What shipped
+
+**Engine** — `SignalRecord.sl_distance_pct_at_entry`, stamped by both terminal
+paths (`trade_monitor._record_outcome` and the `main` expiry path) from
+`Signal.original_sl_distance` via the new `performance_tracker.entry_sl_distance_pct`.
+
+`trade_monitor` mutates `sig.stop_loss` **in place** — BE shift, TP1 park, trail —
+so the `stop_loss` reaching the record is the stop as of the *exit*, and ops
+divided by it. A trade BE-shifted and then stopped out for −0.1% therefore scored
+exactly **−1.00R**, identical to one that gave back its whole designed risk. Nine
+of 28 SL_HITs in the window were that row. The closed book read **−0.088R against
+a true +0.160R** — a sign flip on the headline of the page whose own docstring
+calls it "the number a subscription decision would rest on".
+
+The engine already knew the right denominator in two places
+(`snapshot._original_stop_loss` reconstructs it; the Layer-C writer divides by it
+for `risk_pct`). It simply never travelled onto the artifact the owner reads —
+the `entry_regime` failure class (#817) exactly: **a field one repo reads and no
+repo writes fails silently and looks full.** Pinned with a producing-side test,
+and the helper refuses rather than falling back to `stop_loss`, because that
+fallback returns the wrong number for precisely the rows that have the bug.
+
+**Ops** — `record_r` divides by the engine stamp; `unscored_reason` splits
+`awaiting_engine_stamp` (pre-deploy, ages out on its own) from `no_geometry`
+(current engine, still unstamped — a producer fault that does not age out), and
+the page names both. Pre-fix records are **not** backfilled: their stop has
+already been moved, so there is nothing honest to divide by.
+
+### What did NOT ship, and why
+
+Owner asked to promote `FAILED_AUCTION_RECLAIM` from the dark lane to the live
+feed on the strength of its dark numbers. Declined, with the numbers:
+
+- FAR is **already a live evaluator** — `FAR-1A5692AF` was delivered in this very
+  window and hit SL at −2.77%. "Move it to live" is not available; what was
+  actually being proposed is loosening a *gate*.
+- FAR's dark record is **3 resolved rows**: +1.54R, +2.00R, −1.00R. Bootstrap 95%
+  CI on that mean is **[−1.00, +2.00]**; 26% of resamples are ≤ 0.
+- Both winners sit behind `execution:overextended`. Strip FAR from that gate and
+  it goes **+0.146R → −0.149R** — the gate's positive read *is* the two FAR
+  winners, so using the gate to justify FAR is circular.
+- That gate carries 11 other resolved rows, 9 of them `MOVER_AVWAP_SCALP` at
+  −0.146R. Loosening it ships those too.
+- FAR's +0.846 beats a random 3-row draw from the lane 4.2% of the time — but it
+  is the best of 6 setups tested, so familywise that is ~22%. Not a finding.
+
+The correct move is more evidence, not promotion. **Open: give the dark lane a
+per-setup row budget** so the rare paths accumulate n instead of being crowded
+out by `TREND_PULLBACK_EMA` (20) and `MOVER_AVWAP_SCALP` (16). FAR produced 5
+rows in 20.7h.
+
+### The two feeds fail in opposite places — this is the entry-timing finding
+
+| | dark (gated) lane | delivered book |
+|---|---|---|
+| stop-outs that never got 0.25R in front | **68%** (median 0.18R) | — |
+| closed signals that reached the BE trigger | — | **61%** (30 of 49) |
+
+The delivered book, 49 closed: **16 wins** (+4.63% mean), **14 scratches** that
+got in front and finished flat (−0.06% mean), **19 full-risk losses** (−3.40%,
+−0.938R). Net +8.65% gross. So the gated paths are failing at the **entry** —
+the trigger fires and price goes against from the first bar — while the
+delivered path is failing at the **exit**: 29% of the whole book earned a
+break-even shift and then gave all of it back.
+
+Bars-to-decision separates them early: a full loss flips SAR at a median **4.5
+bars (5m) / 3.5 bars (15m)**; a winner takes **21 / 14**. A losing entry declares
+itself almost immediately. (Partly circular — SAR flips fast *because* price
+moved against — but the adverse move is demonstrably fast on losers.)
+
+Also standing, from the same read: **confidence is inverted** on the delivered
+book — (70,75] +0.156R / 50% win, monotone down to (85,100] −0.605R / 20% win.
+n is 4–14 per bucket over 60h, so it is a flag, not a verdict — but it is the
+score that routes dispatch.
+
+### Open items
+
+- **SAR live arm: do not activate.** Headline +0.133R over 73 resolved arms is
+  carried entirely by (a) the 36 of 87 arms with `anchor_engine_stamped=False`
+  (`unverified` by ops' own #109 rule) and (b) the 1000RATS/1000SATS cluster.
+  Anchor-verified and non-concentrated is **−0.213R over 23 arms**, 26% win. On
+  the clean population the live exit beats it (+0.252R vs +0.133R per arm).
+- 16.1% of arms terminate `INSUFFICIENT` (10 `bar_rolled_out_of_window`, 3
+  `candle_feed_stalled`, 1 `series_jumped_ahead`) — all rotated-out movers.
+- `MVRTP-DE816E32:15m` observed RUNNING at `bars_seen=0` with a 20.05% risk
+  denominator on a signal that had already closed SL_HIT at −5.24%.
+- Arm entry ≠ signal entry on 9 of 69 matched arms, up to 1.74% (a 31%
+  denominator gap on the worst one). Worth pinning as a contract.
+
+---
+
 ## 🟢 SESSION 96 2026-07-31 — the dark feed could not say what an open row was worth (engine #6709745, ops #4f96329)
 
 Owner, on the dark feed the same day it shipped: *"there is no live prices real
