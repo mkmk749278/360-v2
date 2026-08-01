@@ -120,6 +120,48 @@ Never push to `claude/general-session-*` or harness-assigned long-lived branches
 
 ---
 
+## Re-check Before You Test, Not After
+
+**A test proves the code does what you wrote. Nothing in the suite proves what
+you wrote was the right thing to do.** Every defect this file records was caught
+by someone reading the *claim* — usually the owner — not by CI.
+
+So before running the suite, and certainly before putting a recommendation into a
+PR body, a docstring, or this file, do a separate pass on the **conclusion**:
+
+1. **Re-read the diff as a reviewer who did not write it.** Not "does this work" —
+   "what is this asserting, and who checked that part?"
+2. **State the claim in one sentence, then try to falsify it with data you already
+   have.** If the falsifying query takes five minutes and the data is already on
+   disk, it is not optional and it does not wait for a later session.
+3. **Check the *direction* of every recommendation, not only its premise.** A true
+   observation and a correct fix are different findings, and the gap between them
+   is where a whole day goes.
+4. **Say which parts you verified and which you inferred.** An unlabelled
+   inference reads exactly like a measurement.
+
+Paid for on 2026-08-01, twice in one session:
+
+- `TREND_PULLBACK_EMA`'s TP1 has a cap and no floor, and its median designed R:R
+  measured 0.79. Every word of that is true, and "so floor TP1" went into a
+  merged PR body, a module docstring, this file and an ops page as *"the single
+  biggest lever"*. It is **wrong**: the winners barely clear their current
+  targets (median hit 0.59R against a 0.89R peak, only 27% of trades ever reach
+  1R, median excursion 0.53R), so raising the target takes the book from −0.081R
+  to as low as −0.836R — on the 11:00 window, and it reproduces on the 08:26 one.
+  One query against a CSV already open in the session would have caught it before
+  the claim was ever written down.
+- Generalising the entry-feature lane, the first cut copied MVRTP's feature list
+  onto every path — a list chosen for MVRTP's particular blindness. The tests
+  passed; the owner caught it. Reading each path's mechanism first was the check,
+  and it cost nothing.
+
+Corollary: **a finding and a fix are separate deliverables.** Report the finding
+when you have it; the fix needs its own evidence, and "the mechanism is clearly
+wrong" is not evidence about what happens when you change it.
+
+---
+
 ## Hard Limits
 
 - Never fabricate signal performance numbers

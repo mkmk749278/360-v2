@@ -4,6 +4,88 @@
 
 ---
 
+## 🟢 SESSION 102 2026-08-01 — the store had a second writer, SAR gets clean bars, and one recommendation was retracted
+
+Owner brought the 11:00 exports (dark feed, both SAR arm ledgers) and asked to
+fix the SAR data so the mechanism can be measured accurately.
+
+### The retraction, first
+
+Session 101 shipped *"floor TPE's TP1 — the single biggest lever"* into a merged
+PR body, a module docstring, `CLAUDE.md` and an ops page. **It is wrong.** The
+observation was right (median designed R:R 0.79, TP1 inside the stop, nothing
+floors tp1 while the ladder floors tp2/tp3); the recommendation was backwards.
+
+Simulated on the same window, both bounds:
+
+On the 11:00 window (55 decided rows), both bounds:
+
+| TP1 floored at | Win rate | Result per decided trade |
+|---|---|---|
+| left as-is | 47% | −0.081R |
+| 1.0R | 25% | −0.186R … −0.404R |
+| 1.5R | 18% | −0.245R … −0.536R |
+| 2.0R | 5% | −0.436R … −0.836R |
+
+It reproduces on the 08:26 window (48 rows, −0.135R → −0.252R…−0.460R at a 1.0R
+floor), so the direction is not one export's artefact. The winners barely clear
+their current targets — TPE's hit at a median 0.59R against a 0.89R peak, only
+27% of decided trades ever moved 1R in our favour, median excursion **0.53R**.
+The low target is what harvests a move that small.
+Corrected in all four places. `CLAUDE.md` gained **§ Re-check Before You Test,
+Not After** as the practice that would have caught it — one query against a CSV
+already open in the session.
+
+### The store had a second writer
+
+`timestamps_unsorted` kept firing after Session 101's merge dedupe because a
+WebSocket bar never passes through `_merge_candles`. `update_candle` appended
+blindly, and `refresh_timeframe` REPLACING a bucket while the socket is still
+delivering puts a bar behind the newest one — routine for promoted movers, which
+is exactly where the SAR arms live. Same-timestamp bars now update in place,
+older ones are dropped and counted, untimestamped ones still append.
+
+### SAR refuses rather than degrades
+
+The one consumer where "walk it and mark the row" is wrong. SAR is
+path-dependent: one duplicate advances the AF an extra step and every level after
+it is wrong with no recovery, and `times.index(last_seen)` finds the *first*
+occurrence so an out-of-order bar makes the walk resume behind itself. `_series`
+now checks the whole window (one interior duplicate leaves both endpoints
+looking fine) and a refusal is counted by cause instead of reporting as
+`no_series`.
+
+### MAE — the field that unblocks the stop question
+
+No lane recorded adverse excursion, so *"would a tighter stop have helped"* was
+unanswerable: the optimistic and pessimistic bounds differed by more than the
+whole edge under discussion, and the gap is exactly *did the winners survive it*.
+Now stamped on the dark walk and the SAR arm, rendered and exported on both
+pages. **Accrues from deploy forward** — historical rows cannot get one.
+
+### SAR verdict, on the owner's read
+
+Owner: *"SAR giving less losses also less profits too"* — correct. Losses average
+**−0.689R against a full −1.00R**; net **+0.143R** on 82 arms. But CI
+**[−0.09, +0.39]** spans zero, and the subgroup test kills it: where SAR
+**governed from entry** (60 arms) it is **−0.008R**; all the edge sits in the 22
+where SAR *opposed* at entry and the original stop ran until handover. Same shape
+as FAILED_AUCTION_RECLAIM. **Keep measuring, do not adopt.**
+
+### Open
+
+1. **`bar_rolled_out_of_window`** — 10 of the 15 unmeasurable arms, and *not*
+   addressed here. Cause is the arm's anchor bar vanishing when
+   `refresh_timeframe` replaces a bucket. Next thing to fix if it stays at ~10
+   per window.
+2. **Three levers**: cut losses (SAR measured, not adopted) · raise win rate
+   (entry features accumulating, needs a week) · tighten stops (**now measurable**
+   — needs a fresh MAE window).
+3. Watch that `timestamps_unsorted` stops appearing on rows created after this
+   deploy. If it does not, there is a third writer.
+
+---
+
 ## 🟢 SESSION 101 2026-08-01 — the dark feed's verdict was a geometry problem, and every path's entry is a boolean
 
 Owner brought the 65-row dark-feed window (2026-07-31 08:25 → 08-01 08:10 UTC) and
@@ -84,8 +166,9 @@ bounds what any entry filter can achieve.
 
 ### Open — owner decisions
 
-1. **TPE's TP1 floor.** The 0.79 median R:R is the single biggest lever in the
-   window and it is TP/SL shape → owner sign-off. Nothing changed.
+1. ~~**TPE's TP1 floor** — "the single biggest lever".~~ **Retracted the same
+   day, see Session 102.** The observation was right and the recommendation was
+   backwards: raising the target makes the book worse under both bounds.
 2. **FAR needs rows, not a promotion** — 3 decided rows in 24h means a CI that
    excludes zero is weeks away, which is itself a question about where the dark
    lane's row budget points.
