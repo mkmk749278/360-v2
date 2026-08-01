@@ -816,6 +816,38 @@ python -m src.main
   consumer, because a store is not the only thing that can hand us a bad series.
   Corollary: **an intentional over-fetch is a contract to deduplicate** — the
   buffer is correct, what was missing is that overlap is therefore expected.
+- **Fixing one writer is not fixing the field.** The merge dedupe shipped and
+  `timestamps_unsorted` kept firing on every open dark row, because a WebSocket
+  bar never passes through `_merge_candles` — `update_candle` appends blindly and
+  was the *other* writer. The race is ordinary: `refresh_timeframe` REPLACES a
+  bucket with a fresh REST pull while the socket is still delivering, so a kline
+  that closed before the pull's last bar lands immediately after. **When a
+  structure has an invariant, enumerate every path that writes it** — the same
+  audit `is_tradfi_perp` needed. Corollary: a same-timestamp bar is an *update*
+  and belongs in place; an older one is a straggler and is dropped and counted;
+  a bar with no timestamp still appends, because absence of knowledge is not
+  permission to discard history.
+- **Path-dependent consumers refuse where scanners degrade.** "Refuse the claim,
+  not the measurement" is right for the dark lane, whose levels are fixed and
+  whose walk is a pure scan — imprecision lands in the *label*. Parabolic SAR
+  carries an acceleration factor and an extreme point forward bar by bar, so one
+  duplicated bar advances the AF an extra step, moves the stop toward price
+  permanently, and every level after it is wrong with no recovery; and
+  `times.index(last_seen)` finds the *first* occurrence, so an out-of-order bar
+  makes the walk resume behind itself. There the imprecision lands in the
+  *answer*, so `_series` refuses. **Ask which half a corrupt input damages before
+  choosing degrade-or-refuse.** The check runs over the whole window, not the
+  ends: one interior duplicate leaves first and last timestamps perfectly
+  ordered.
+- **Record both halves of an excursion, or neither answers anything.** Every
+  measurement lane recorded MFE and none recorded MAE, so no question about stop
+  distance was answerable at all — on 2026-08-01 the optimistic reading of
+  "tighten the stop" (+0.203R) and the pessimistic one differed by more than the
+  entire edge under discussion, and the gap is exactly *did the winners survive
+  it*, which MAE counts and MFE cannot. A one-sided measurement looks complete
+  and silently bounds nothing. Corollary: **the fix for "we can't tell" is
+  usually a field, not an argument** — and it is cheapest at the moment the
+  resolver is already walking the bars.
 - **An expiry is only as good as the walk behind it.** A row past the horizon is
   scored 0R on the claim that its window was walked and nothing happened.
   ROBOUSDT expired on 309 bars of a 362-minute window and ARBUSDT on 329 of 365,
