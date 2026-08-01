@@ -561,3 +561,37 @@ class TestSelect:
         ]
         out = ef.split_by_feature(rows, "pullback_vol_ratio", 1.0)
         assert out["timeframes"] == ["15m", "5m"]
+
+
+class TestTheSpecShipsWithTheData:
+    """Ops renders splits; the directions that make them meaningful are decided
+    here, so they travel in the ledger rather than being copied into ops.
+
+    A mirror agrees right up until one side changes. ``MEASUREMENT_SUFFIXES``
+    drifted exactly that way and inflated the Strategy Lab rollup for a week.
+    """
+
+    def test_the_written_payload_carries_the_registry(self, tmp_path):
+        import json
+
+        path = str(tmp_path / "ef.json")
+        led = ef.EntryFeatureLedger(path=path)
+        led.add({"signal_id": "a", "setup_class": "TREND_PULLBACK_EMA"})
+        assert led.flush(force=True) is True
+
+        payload = json.loads(open(path, encoding="utf-8").read())
+        spec = payload["spec"]
+
+        assert spec["core"] == list(ef.CORE_FEATURES)
+        assert spec["paths"]["TREND_PULLBACK_EMA"] == list(
+            ef.PATH_FEATURES["TREND_PULLBACK_EMA"]
+        )
+        assert "tp1_r_multiple" in spec["keep_above"]
+
+    def test_the_spec_describes_every_feature_a_path_declares(self):
+        """A reader given the spec must be able to draw every column without
+        knowing anything this module has not told it."""
+        spec = ef.describe_features()
+        known = set(spec["core"]) | {f for fs in spec["paths"].values() for f in fs}
+        for setup in ef.PATH_FEATURES:
+            assert set(ef.features_for(setup)) <= known

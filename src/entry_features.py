@@ -741,7 +741,17 @@ class EntryFeatureLedger:
                 return False
             rows = list(self._rows)
             self._dirty = False
-        payload = {"schema": SCHEMA, "written_at": time.time(), "rows": rows}
+        payload = {
+            "schema": SCHEMA,
+            "written_at": time.time(),
+            "rows": rows,
+            # Shipped with the data so ops renders the split directions rather
+            # than keeping its own copy of them. Ops mirroring an engine list is
+            # the drift that silently inflated the Strategy Lab rollup for a
+            # week, and the lesson from it is that the fix for a drifting mirror
+            # is not a second mirror — it is one writer and one reader.
+            "spec": describe_features(),
+        }
         tmp = f"{self._path}.tmp"
         try:
             os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
@@ -977,6 +987,25 @@ PATH_FEATURES: Dict[str, Tuple[str, ...]] = {
 def features_for(setup_class: str) -> Tuple[str, ...]:
     """Core plus this path's own, in reading order. Unknown path → core only."""
     return CORE_FEATURES + tuple(PATH_FEATURES.get(str(setup_class or ""), ()))
+
+
+def describe_features() -> Dict[str, Any]:
+    """The registry, as data, written into the ledger for ops to render.
+
+    Ops needs three things to draw a split: which features belong to a path, in
+    what order, and which way a candidate rule filters. All three are decided
+    here, so all three ship from here.
+
+    The alternative — ops keeping its own copy — is the mirror that drifted on
+    ``MEASUREMENT_SUFFIXES`` and inflated the Strategy Lab rollup for a week
+    before anyone noticed. A reader that derives the direction itself will agree
+    with this module right up until one of them changes.
+    """
+    return {
+        "core": list(CORE_FEATURES),
+        "paths": {k: list(v) for k, v in PATH_FEATURES.items()},
+        "keep_above": sorted(_KEEP_ABOVE),
+    }
 
 
 def split_by_feature(
