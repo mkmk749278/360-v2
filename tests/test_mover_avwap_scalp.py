@@ -7,6 +7,7 @@ the slope/leg/shadow gates reject correctly.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.channels.scalp import ScalpChannel
 from src.smc import Direction
@@ -96,3 +97,126 @@ def test_shadow_mode_suppresses_when_disabled():
 def test_evaluator_method_exists():
     ch = ScalpChannel()
     assert callable(getattr(ch, "_evaluate_mover_avwap_scalp", None))
+
+
+# --------------------------------------------------------------------------- #
+# Entry-feature stamp (2026-08-01)
+# --------------------------------------------------------------------------- #
+
+
+class TestEntryFeatureStamp:
+    """The stamp reads; it must never be able to change what emits.
+
+    Same safety argument as MVRTP's, and the same method: drive the real
+    evaluator both ways and compare the emitted signal. A mock whose keys we
+    chose cannot verify a contract we might have got wrong.
+
+    The content assertions are the other half. This path's blindness is not
+    MVRTP's — it already gates on volume and AVWAP slope — so what has to be on
+    the row is *where in the move* the entry was taken: the anchor's age, how far
+    the leg had already run, and how many times price had come back to the
+    anchor before this one.
+    """
+
+    def _emit(self):
+        return ScalpChannel()._evaluate_mover_avwap_scalp(
+            "ABCUSDT", _short_mover_candles(), _IND, _SMC, 0.001, 50_000_000,
+            regime="TRENDING_DOWN",
+        )
+
+    @staticmethod
+    def _shape(sig):
+        return (
+            sig.direction, round(sig.entry, 10), round(sig.stop_loss, 10),
+            round(sig.tp1, 10), round(sig.tp2, 10), round(sig.tp3, 10),
+            round(sig.confidence, 10), sig.entry_trigger,
+            round(sig.original_sl_distance, 10),
+        )
+
+    def test_the_emitted_signal_is_identical_with_stamping_on_or_off(self):
+        import os
+
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            on = self._emit()
+            assert on is not None
+            stamped = len(led.rows())
+
+            prev = os.environ.get("ENTRY_FEATURES_ENABLED")
+            os.environ["ENTRY_FEATURES_ENABLED"] = "false"
+            try:
+                from src import runtime_tunables as rt
+
+                rt.reset_for_test()
+                off = self._emit()
+            finally:
+                if prev is None:
+                    os.environ.pop("ENTRY_FEATURES_ENABLED", None)
+                else:
+                    os.environ["ENTRY_FEATURES_ENABLED"] = prev
+
+            assert off is not None
+            assert self._shape(on) == self._shape(off), (
+                "the entry-feature stamp changed the emitted signal — it is "
+                "supposed to be a pure read"
+            )
+            assert stamped == 1
+        finally:
+            ef.reset_ledger(None)
+
+    def test_a_raising_stamp_costs_the_measurement_not_the_trade(self, monkeypatch):
+        """A broken measurement must never cost a signal."""
+        from src import entry_features as ef
+
+        def _boom(**_kwargs):
+            raise RuntimeError("capture exploded")
+
+        monkeypatch.setattr(ef, "capture", _boom)
+        assert self._emit() is not None
+
+    def test_it_records_where_in_the_move_the_entry_was_taken(self):
+        """The variables this path computes and then never consults.
+
+        The anchor is calculated to produce a VWAP and its *age* is discarded;
+        the leg's size is tested against a floor and then dropped; the number of
+        prior returns to the anchor is never counted at all. A first pullback
+        into a young leg and a fourth into an old one are the same object to the
+        evaluator, and until now to every artifact downstream of it.
+        """
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            sig = self._emit()
+            assert sig is not None
+            rows = led.rows()
+            assert len(rows) == 1
+            row = rows[0]
+
+            assert row["setup_class"] == "MOVER_AVWAP_SCALP"
+            assert row["tf_name"] == "15m"
+            assert row["entry_ref_name"] == "avwap_anchored"
+
+            # Path-specific: present, and actually measured rather than defaulted.
+            assert row["anchor_age_bars"] > 0
+            assert row["leg_move_pct"] > 0
+            assert row["avwap_touches_in_leg"] is not None
+            assert row["avwap_slope_pct"] is not None
+            # The exact ratio `vol_ok` thresholds on — the fixture spikes the
+            # trigger bar to 3x, so this must read well above 1.
+            assert row["vol_ratio_at_trigger"] > 1.0
+
+            # TP1 is `close +/- sl_dist` on this path, so the designed geometry
+            # is 1.0R by construction. Stamped anyway, so the constant is a fact
+            # in the data rather than something a reader must know from source.
+            assert row["tp1_r_multiple"] == pytest.approx(1.0, rel=1e-6)
+
+            # ...and no other path's questions leaked onto this row.
+            assert "h1_trend_sep_atr" not in row
+            assert "rsi_at_entry" not in row
+        finally:
+            ef.reset_ledger(None)

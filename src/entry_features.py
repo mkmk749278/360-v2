@@ -1,27 +1,74 @@
-"""Entry-time features for MOVER_TREND_PULLBACK — stamped, never applied.
+"""Entry-time features for every path the dark feed measures — stamped, never applied.
 
 Owner, 2026-08-01: *"taking entry is matter, how we are taking entry based on
-only EMA or what, what if we add some more data to that"*.
+only EMA or what, what if we add some more data to that"*, and then, on the dark
+feed: *"we need to concentrate on entry, on which bases entry is confirming
+especially on Trend pullback EMA and mover AVWAP"*.
 
-The answer to the first half is: essentially yes.  ``_evaluate_mover_trend_pullback``
-decides direction from ``SMA25 vs SMA99`` on 15m, triggers on the previous bar
-tagging ``SMA7`` within a band while this bar closes back above it, and sizes the
-stop from ``min(SMA25, prev_low) - ATR×buffer``.  Price against three simple
-moving averages plus one ATR.  It reads ``vols`` but hands them only to
-``_mover_consol_break`` — the two triggers that produce almost all the volume,
-``fast_pullback`` and ``deep_pullback``, never look at volume at all.  A pullback
-on collapsing bid into a liquidation cluster is, to this path, the same object as
-a pullback being absorbed at a level.
+The answer to the first half is: essentially yes, on every path.
 
-Meanwhile ``smc_data`` is built once per symbol per scan and handed to every
-evaluator carrying ``cvd`` / ``cvd_15m``, ``order_book``, ``funding_rate``,
+* ``_evaluate_mover_trend_pullback`` decides direction from ``SMA25 vs SMA99`` on
+  15m and triggers on the previous bar tagging ``SMA7``.
+* ``_evaluate_trend_pullback`` (TREND_PULLBACK_EMA) sources trend from 1H
+  EMA21/50 and triggers on a 5m EMA21 tag plus an EMA9/21 reclaim close, with an
+  RSI 40–60 band and a close-position-in-range test.
+* ``_evaluate_mover_avwap_scalp`` anchors a VWAP at the leg origin and triggers
+  on a pullback into it reclaimed on the next close, volume-confirmed.
+
+All three decide on **price against a moving reference, plus one ATR**.  Meanwhile
+``smc_data`` is built once per symbol per scan and handed to every evaluator
+carrying ``cvd`` / ``cvd_15m``, ``order_book``, ``funding_rate``,
 ``liquidation_clusters``, ``orderblocks``, ``sweeps``, ``mss``, ``fvg``,
-``level_book_levels`` and ``recent_ticks``.  MOVER_TREND_PULLBACK touches two
-keys from it — ``pair_profile`` and ``regime_context`` — and uses both only for
-display stamps on the outgoing signal.
+``level_book_levels`` and ``recent_ticks``.  These paths touch at most
+``pair_profile`` and ``regime_context``, and use both only for display stamps on
+the outgoing signal.  A pullback on collapsing bid into a liquidation cluster is,
+to any of them, the same object as a pullback being absorbed at a level.
 
-This module records what those inputs *said* at the moment each MVRTP signal was
+This module records what those inputs *said* at the moment each signal was
 created, and applies none of it.
+
+A small shared core, and per-path features that are the actual point
+--------------------------------------------------------------------
+The first cut of this generalisation copied MVRTP's feature list onto every path
+and was wrong for a reason worth writing down: **that list was chosen for
+MVRTP's particular blindness**, which is a three-SMA pullback trigger that never
+looks at volume.  TPE and MVAVW are blind in different places, so the same
+columns measure nothing on them while the variables their entries actually turn
+on go unrecorded.  A feature set is not portable just because the code that
+computes it is.
+
+So there are two layers:
+
+* **Core** — true of every path by construction, not by hypothesis: the designed
+  geometry (``tp1_r_multiple``, ``sl_dist_pct``), where the entry sat relative to
+  the level the trigger is defined against (``entry_ref_dist_atr``), and the
+  trigger bar's own shape.  These are comparable across paths because they are
+  facts about the trade, not readings of the market.
+* **Extras** — supplied by each evaluator from variables already in its scope,
+  and different per path because the mechanisms are different.  TPE's entry
+  hinges on the maturity of a 1H trend, how much of the impulse leg the pullback
+  gave back, and where in the 40–60 RSI band it fired.  MVAVW's hinges on how old
+  the leg is, how far it has already travelled, and how many times price has
+  already come back to the anchor.  Neither list means anything on the other
+  path.
+
+What is **not** shared is the series the features are read from: TPE triggers on
+5m, the mover paths on 15m.  A volume ratio over 5m bars and one over 15m bars
+are different measurements, so every row carries ``tf_name`` and no surface may
+pool them without splitting on it.  Two arms named for the same mechanism can
+measure different mechanisms (``CLAUDE.md``), and the cheapest place to prevent
+that is the row itself.
+
+One gate is stamped because it does not do what it says
+-------------------------------------------------------
+``_evaluate_trend_pullback``'s SMC check reads *"require at least one FVG or
+orderblock in the pullback zone"* and is implemented as
+``bool(fvgs) or bool(orderblocks)`` — a global existence test.  Any symbol
+carrying any fair-value gap anywhere passes it, so on a live path it rejects
+almost nothing and certainly not what it claims to.  ``smc_zone_dist_atr``
+records the distance to the nearest such zone, which is the measurement the gate
+was written to make.  It is **not** enforced here: this gate rejects, so
+narrowing it changes what emits, which is dark-first plus owner sign-off.
 
 Why stamping rather than filtering
 ----------------------------------
@@ -32,6 +79,28 @@ doing so by chance.  That window cannot choose a filter, and choosing one from i
 would be the FAILED_AUCTION_RECLAIM mistake at larger n (``CLAUDE.md``: *two
 winners are not a promotion*).  So: stamp every candidate input, wait for a
 population that can decide, and let the measurement pick.
+
+The geometry feature is the one to read first
+---------------------------------------------
+``tp1_r_multiple`` is the designed reward-to-risk of the trade as the evaluator
+shaped it, and it is not a candidate discriminator like the others — it is a
+property of the setup rather than of the market, knowable with certainty at
+stamp time, and it bounds what every other feature can achieve.
+
+Dark-feed data 2026-08-01, 65 rows over 23.8h: TREND_PULLBACK_EMA ran a **median
+designed R:R of 0.79** — TP1 nearer than the stop — needing a 54% win rate to
+break even and posting 35% over 17 decided rows.  MOVER_AVWAP_SCALP sets
+``tp1 = close ± sl_dist``, exactly 1.0R by construction, needing 52% and posting
+42%.  Reading the code confirms the mechanism for TPE: TP1 is the nearest 5m
+swing extreme, then *capped* by ATR percentile
+(``_tp1_cap_tpe``), and ``_enforce_tp_ladder_monotonicity`` floors tp2 at 2.0R
+and tp3 at 4.0R — **but nothing floors tp1**.  A swing sitting half a stop away
+becomes a 0.5R target and no gate downstream knows.
+
+Recording it here does not change it.  TP/SL shape is an owner-sign-off item
+(``CLAUDE.md`` § Change-management), so the number goes on the row, the split
+goes on the ops page, and the geometry decision waits for the owner and a
+population — which is the whole point of having a lane that can produce one.
 
 Design decisions worth keeping
 ------------------------------
@@ -73,7 +142,14 @@ log = get_logger("entry_features")
 #: Ledger schema. Readers gate on this, never on a date (#802) — a migration
 #: keyed on a timestamp that predicts a future deploy trusted 88 rows of
 #: old-code stamps once already.
-SCHEMA = 1
+#:
+#: 2 (2026-08-01): generalised from MVRTP-only to every dark-feed path. Rows gain
+#: ``setup_class`` as a first-class split, ``tf_name`` (a 5m volume ratio and a
+#: 15m one are different features), ``entry_ref_*`` in place of the SMA-specific
+#: extension, and ``tp1_r_multiple``. Bumping drops the schema-1 rows, which cost
+#: about an hour of MVRTP stamps — redefining a live measurement is only cheap
+#: while its population is nearly empty, and this was the last moment it was.
+SCHEMA = 2
 
 _DEFAULT_PATH: str = os.getenv("ENTRY_FEATURES_PATH", "data/entry_features_v1.json")
 
@@ -88,6 +164,11 @@ _PULLBACK_LOOKBACK: int = int(os.getenv("ENTRY_FEATURES_PULLBACK_BARS", "6"))
 #: Baseline window for the volume ratio — what "normal" volume is for this pair
 #: right now, so the ratio is self-normalising across pairs of any size.
 _VOL_BASELINE_BARS: int = int(os.getenv("ENTRY_FEATURES_VOL_BASELINE_BARS", "20"))
+
+#: Bars defining "the impulse leg" for the retrace measurement. Long enough to
+#: contain the move a pullback is pulling back from, short enough that it is
+#: still the current leg rather than the last three.
+_LEG_LOOKBACK: int = int(os.getenv("ENTRY_FEATURES_LEG_BARS", "24"))
 
 
 # --------------------------------------------------------------------------- #
@@ -106,6 +187,17 @@ def _f(value: Any) -> Optional[float]:
         return out
     except (TypeError, ValueError):
         return None
+
+
+def _align(value: Optional[float], is_long: bool) -> Optional[float]:
+    """Re-sign a directional reading so positive always means "favours this trade".
+
+    ``None`` stays ``None`` — an absent reading has no sign, and returning 0.0
+    would turn a missing order book into perfectly balanced depth.
+    """
+    if value is None:
+        return None
+    return value if is_long else -value
 
 
 def _series(tf: Any, key: str) -> Optional[List[float]]:
@@ -259,6 +351,193 @@ def level_distance_r(
     return best / sl_dist
 
 
+def tp1_r_multiple(
+    entry: Optional[float], tp1: Optional[float], sl_dist: Optional[float]
+) -> Optional[float]:
+    """The trade's designed reward:risk — distance to TP1 over the stop distance.
+
+    Not a market reading: this is what the evaluator *chose*, known exactly at
+    stamp time and never revised. It is the ceiling on everything else, because a
+    path whose TP1 sits inside 1R needs a win rate above 50% before any entry
+    filter has done anything at all.
+
+    Divided by the stop distance the trade is **sized** for, which is the same
+    denominator ``sl_distance_pct_at_entry`` carries on the closed-signal record
+    (#848) — so this is directly comparable with the realised R it will be
+    joined to, rather than being a second definition wearing the same letter.
+    """
+    e, t, d = _f(entry), _f(tp1), _f(sl_dist)
+    if e is None or t is None or d is None or d <= 0:
+        return None
+    return abs(t - e) / d
+
+
+def entry_ref_distance_atr(
+    entry: Optional[float], reference: Optional[float], atr: Optional[float]
+) -> Optional[float]:
+    """How far the entry was taken from the level it is defined against, in ATR.
+
+    Every path in this lane enters against a moving reference — TPE's EMA21,
+    MVAVW's anchored VWAP, MVRTP's SMA99, MEAN_REVERT's rolling mean,
+    RANGE_FADE's faded edge. "Price reclaimed the level" is true one tick past it
+    and true again two ATR past it, and only one of those is the setup the path
+    is named for. Unsigned: the question is how far, not which side — the trigger
+    already fixed the side.
+    """
+    e, r, a = _f(entry), _f(reference), _f(atr)
+    if e is None or r is None or a is None or a <= 0:
+        return None
+    return abs(e - r) / a
+
+
+def bar_range_atr(
+    high: Optional[float], low: Optional[float], atr: Optional[float]
+) -> Optional[float]:
+    """The trigger bar's own range, in ATR. A proxy for entering into a spike."""
+    h, low_v, a = _f(high), _f(low), _f(atr)
+    if h is None or low_v is None or a is None or a <= 0:
+        return None
+    return (h - low_v) / a
+
+
+def close_position_in_bar(
+    close: Optional[float],
+    high: Optional[float],
+    low: Optional[float],
+    is_long: bool,
+) -> Optional[float]:
+    """Where the trigger bar closed within its own range, 0…1 in trade direction.
+
+    TREND_PULLBACK_EMA already gates on exactly this at 0.50 and calls it
+    ``body_conviction``; no other path tests it and nothing records it. Stamping
+    it lets the existing threshold be checked against outcomes instead of being
+    trusted — a live gate parameter nobody has ever measured is the same risk as
+    a gate that stamps no suppression (``CLAUDE.md``).
+    """
+    c, h, low_v = _f(close), _f(high), _f(low)
+    if c is None or h is None or low_v is None:
+        return None
+    rng = h - low_v
+    if rng <= 0:
+        return None
+    return (c - low_v) / rng if is_long else (h - c) / rng
+
+
+def retrace_fraction(
+    highs: Optional[List[float]],
+    lows: Optional[List[float]],
+    entry: Optional[float],
+    is_long: bool,
+    *,
+    leg_bars: int = _LEG_LOOKBACK,
+) -> Optional[float]:
+    """How much of the recent impulse leg the pullback gave back, 0…1+.
+
+    This is the question a pullback entry actually rests on and no path in this
+    lane asks it. A 30% retrace into a rising trend is the setup; a 90% retrace
+    is a trend that has already failed and is about to be bought at the worst
+    price in the leg. Both satisfy "price tagged the EMA and closed back above
+    it", which is all TREND_PULLBACK_EMA checks.
+
+    Measured against the leg extreme over *leg_bars*: for a LONG, the leg runs
+    from its low to its high and the retrace is how far back down from the high
+    the entry sits. Values above 1.0 are possible and meaningful — the entry is
+    below where the leg began.
+
+    ``None`` when the leg has no height; a retrace of a flat leg is a division
+    by nothing, not a zero.
+    """
+    if highs is None or lows is None or entry is None:
+        return None
+    if len(highs) < leg_bars or len(lows) < leg_bars:
+        return None
+    hi = max(highs[-leg_bars:])
+    lo = min(lows[-leg_bars:])
+    height = hi - lo
+    if height <= 0:
+        return None
+    return (hi - entry) / height if is_long else (entry - lo) / height
+
+
+def zone_distance_atr(
+    zones: Any,
+    entry: Optional[float],
+    atr: Optional[float],
+) -> Optional[float]:
+    """Distance from entry to the nearest FVG / orderblock edge, in ATR.
+
+    The measurement ``_evaluate_trend_pullback``'s SMC gate says it makes. That
+    gate tests ``bool(fvgs) or bool(orderblocks)`` — whether the symbol has any
+    such zone at all, anywhere, at any price — so it passes on structure that may
+    be 20 ATR away and unrelated to the pullback being entered.
+
+    Accepts the several shapes these carry in ``smc_data`` (mappings with
+    ``top``/``bottom``, ``high``/``low``, or a single ``price``), and skips
+    anything it cannot read rather than guessing a coordinate.
+    """
+    e, a = _f(entry), _f(atr)
+    if e is None or a is None or a <= 0 or not zones:
+        return None
+    best: Optional[float] = None
+    for zone in zones:
+        if isinstance(zone, dict):
+            get = zone.get
+        else:
+            def get(key: str, _z: Any = zone) -> Any:
+                return getattr(_z, key, None)
+        edges: List[float] = [
+            v
+            for v in (
+                _f(get("top")), _f(get("bottom")),
+                _f(get("high")), _f(get("low")),
+                _f(get("price")),
+            )
+            if v is not None
+        ]
+        if len(edges) == 0:
+            continue
+        # Inside the zone is distance zero, which is the strongest reading there
+        # is and must not be reported as the gap to its nearer edge.
+        lo, hi = min(edges), max(edges)
+        gap = 0.0 if lo <= e <= hi else min(abs(e - lo), abs(e - hi))
+        if best is None or gap < best:
+            best = gap
+    if best is None:
+        return None
+    return best / a
+
+
+def anchor_touch_count(
+    highs: Optional[List[float]],
+    lows: Optional[List[float]],
+    anchor: Optional[float],
+    *,
+    band_pct: float,
+) -> Optional[int]:
+    """How many bars of this leg already came back to the anchor.
+
+    MOVER_AVWAP_SCALP treats every pullback into the anchored VWAP identically.
+    The first return to it is the reload the strategy is named for; the fourth is
+    a level that keeps failing to hold, which is distribution wearing the same
+    shape. Nothing in the path distinguishes them.
+
+    Counts bars whose range intersects the same band the trigger uses, so this
+    is the count of prior *trigger-eligible* touches rather than a looser notion
+    of "near".
+    """
+    a = _f(anchor)
+    if a is None or a <= 0 or highs is None or lows is None:
+        return None
+    n = min(len(highs), len(lows))
+    if n == 0:
+        return None
+    band = a * (band_pct / 100.0)
+    lo_edge, hi_edge = a - band, a + band
+    return sum(
+        1 for i in range(n) if float(lows[i]) <= hi_edge and float(highs[i]) >= lo_edge
+    )
+
+
 def book_imbalance(order_book: Any) -> Optional[float]:
     """Top-of-book depth imbalance: (bids - asks) / (bids + asks), in [-1, 1].
 
@@ -289,31 +568,78 @@ def capture(
     sl_dist: float,
     tp1: float,
     trigger: str,
-    ma_fast: float,
-    ma_mid: float,
-    ma_slow: float,
-    stack_sep_pct: float,
+    tf: Any,
+    tf_name: str,
     atr: Optional[float],
-    tf_15m: Any,
     smc_data: Optional[Dict[str, Any]],
+    entry_ref: Optional[float] = None,
+    entry_ref_name: str = "",
+    ma_slow: Optional[float] = None,
+    stack_sep_pct: Optional[float] = None,
     profile_would_reject: Optional[bool] = None,
+    extras: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Every entry-time input the path currently ignores, read once.
+    """The core entry-time facts, plus whatever *extras* this path supplies.
 
     Pure: no I/O, no mutation of anything passed in. Each feature independently
     degrades to ``None`` with a reason in ``missing`` rather than failing the
     whole capture — one absent order book must not cost us the volume reading
     beside it.
+
+    ``entry_ref`` is the level this path's entry is defined against, and
+    ``entry_ref_name`` says which one it is. The name is recorded rather than
+    inferred because the same distance means different things against an EMA and
+    against an anchored VWAP, and a reader that cannot tell them apart will
+    average them.
+
+    ``tf`` is the candle mapping the trigger fired on and ``tf_name`` its label.
+    Both are required: the series features below are only comparable across rows
+    that share a timeframe, and a row that cannot say which one it read is a row
+    no split can safely use.
+
+    ``extras`` carries the path-specific measurements — the ones that are the
+    actual point, computed by the evaluator from variables already in its scope
+    because that is the only place they exist. They are merged flat into the row
+    and share the ``missing`` accounting, so a path-specific feature that stops
+    computing is as visible as a core one.
     """
     smc = smc_data or {}
-    closes = _series(tf_15m, "close")
-    highs = _series(tf_15m, "high")
-    lows = _series(tf_15m, "low")
-    vols = _series(tf_15m, "volume")
+    closes = _series(tf, "close")
+    highs = _series(tf, "high")
+    lows = _series(tf, "low")
+    vols = _series(tf, "volume")
+    # None/len, never truthiness. `_series` returns lists so these are in fact
+    # safe today — but the hard limit is written against the *pattern*, because
+    # the day one of these starts arriving as a numpy array the failure is
+    # silent, and eight features died to exactly that on 2026-07-14.
+    last_high = highs[-1] if highs is not None and len(highs) > 0 else None
+    last_low = lows[-1] if lows is not None and len(lows) > 0 else None
+    last_close = closes[-1] if closes is not None and len(closes) > 0 else None
 
     feats: Dict[str, Any] = {
+        # Geometry — chosen by the evaluator, exact at stamp time, and the
+        # ceiling on what any entry filter can achieve. Read this one first.
+        "tp1_r_multiple": tp1_r_multiple(entry, tp1, sl_dist),
+        # Where the entry sits relative to the level it is defined against.
+        "entry_ref_dist_atr": entry_ref_distance_atr(entry, entry_ref, atr),
+        # The trigger bar itself.
+        "entry_bar_range_atr": bar_range_atr(last_high, last_low, _f(atr)),
+        "close_position_in_bar": close_position_in_bar(
+            last_close, last_high, last_low, direction_is_long
+        ),
+        # The tape, none of which any of these paths consults.
         "pullback_vol_ratio": pullback_volume_ratio(vols),
-        "cvd_slope": cvd_slope(smc.get("cvd_15m") or smc.get("cvd")),
+        # Signed **in favour of this trade**, not in favour of price. A CVD
+        # slope of −500 is the dip being sold, which is bad for a long and
+        # exactly what a short wants; storing the raw number and then splitting
+        # it with one "higher is better" rule scores every short backwards. The
+        # schema-1 lane did precisely that on both this and the book imbalance
+        # (2026-08-01) — the delivered book is ~50/50 by side, so the error was
+        # not visible as an obviously empty column, it just made both features
+        # look like noise.
+        "cvd_slope_aligned": _align(
+            cvd_slope(smc.get("cvd_15m") or smc.get("cvd")), direction_is_long
+        ),
         "pullback_depth_atr": pullback_depth_atr(
             closes, lows, highs, _f(atr), direction_is_long
         ),
@@ -321,7 +647,13 @@ def capture(
         "level_dist_r": level_distance_r(
             smc.get("level_book_levels"), _f(entry), _f(tp1), _f(sl_dist), direction_is_long
         ),
-        "book_imbalance": book_imbalance(smc.get("order_book")),
+        "book_imbalance_aligned": _align(
+            book_imbalance(smc.get("order_book")), direction_is_long
+        ),
+        # Raw and deliberately unsigned: funding is a market state, not a
+        # directional read. "Crowded long" is not automatically good for a short
+        # — inventing an alignment here would bake in a hypothesis nobody has
+        # measured, which is the thing this lane exists to avoid.
         "funding_rate": _f(smc.get("funding_rate")),
         "liq_clusters_n": (
             len(smc["liquidation_clusters"])
@@ -329,12 +661,18 @@ def capture(
             else None
         ),
     }
+    # Path-specific, merged before the missing-accounting so an extra that stops
+    # computing shows up in exactly the same place a core feature would.
+    for key, value in (extras or {}).items():
+        feats[key] = value
     feats["missing"] = sorted(k for k, v in feats.items() if v is None)
     feats.update(
         {
             "symbol": str(symbol),
             "side": "LONG" if direction_is_long else "SHORT",
             "entry_trigger": str(trigger or ""),
+            "tf_name": str(tf_name or ""),
+            "entry_ref_name": str(entry_ref_name or ""),
             "stack_sep_pct": _f(stack_sep_pct),
             "sl_dist_pct": (
                 (_f(sl_dist) / _f(entry) * 100.0)
@@ -403,7 +741,17 @@ class EntryFeatureLedger:
                 return False
             rows = list(self._rows)
             self._dirty = False
-        payload = {"schema": SCHEMA, "written_at": time.time(), "rows": rows}
+        payload = {
+            "schema": SCHEMA,
+            "written_at": time.time(),
+            "rows": rows,
+            # Shipped with the data so ops renders the split directions rather
+            # than keeping its own copy of them. Ops mirroring an engine list is
+            # the drift that silently inflated the Strategy Lab rollup for a
+            # week, and the lesson from it is that the fix for a drifting mirror
+            # is not a second mirror — it is one writer and one reader.
+            "spec": describe_features(),
+        }
         tmp = f"{self._path}.tmp"
         try:
             os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
@@ -529,7 +877,135 @@ def stamp(
 
 #: Features where a LOWER value is the suspected problem, so a candidate rule
 #: would keep rows ABOVE the threshold. Everything else keeps rows below.
-_KEEP_ABOVE = frozenset({"pullback_vol_ratio", "level_dist_r", "cvd_slope"})
+#:
+#: The two ``_aligned`` features are here because alignment has already put
+#: "favours this trade" on the positive side for both directions — which is the
+#: only reason a single rule can be correct for longs and shorts at once.
+_KEEP_ABOVE = frozenset(
+    {
+        "pullback_vol_ratio",
+        "level_dist_r",
+        "cvd_slope_aligned",
+        "book_imbalance_aligned",
+        "tp1_r_multiple",
+        "close_position_in_bar",
+        "h1_trend_sep_atr",
+        "prev_extreme_break_atr",
+        "vol_ratio_at_trigger",
+        "avwap_slope_pct",
+        "stack_sep_pct",
+        "sigma_at_entry",
+        "range_width_atr",
+    }
+)
+
+#: The core, true of every path by construction: geometry first (it bounds
+#: everything else), then the trigger bar, then the free order-flow reads.
+CORE_FEATURES: Tuple[str, ...] = (
+    "tp1_r_multiple",
+    "entry_ref_dist_atr",
+    "entry_bar_range_atr",
+    "close_position_in_bar",
+    "pullback_vol_ratio",
+    "cvd_slope_aligned",
+    "level_dist_r",
+    "book_imbalance_aligned",
+)
+
+#: What each path contributes on top, and why it is *that* path's question.
+#: Ordered so the mechanism-critical ones come first — a reader scanning the
+#: page should meet the variable the entry actually turns on before the
+#: hypotheses.
+#:
+#: The lists are deliberately short. A path that stamps twelve features invites
+#: twelve thresholds, and twelve cells against a book this size is a familywise
+#: error rate that guarantees a spurious winner (``CLAUDE.md``: count how many
+#: cells you looked at before calling one special).
+PATH_FEATURES: Dict[str, Tuple[str, ...]] = {
+    "TREND_PULLBACK_EMA": (
+        # The pullback question the path never asks: a 30% giveback is the setup,
+        # a 90% giveback is a failed trend, and "tagged EMA21 and closed back
+        # above" is true of both.
+        "retrace_frac_of_leg",
+        # Direction comes from 1H EMA21 vs EMA50 with no notion of how far apart
+        # they are. A barely-crossed pair and a widely separated one are the
+        # same input to this evaluator.
+        "h1_trend_sep_atr",
+        # The measurement its own SMC gate claims to make and does not.
+        "smc_zone_dist_atr",
+        # It gates RSI to 40-60 rising; where in the band is unrecorded, so the
+        # band's edges have never been checked against outcomes.
+        "rsi_at_entry",
+        # The trigger requires close > prev_high. By how much is the difference
+        # between a break and a nudge.
+        "prev_extreme_break_atr",
+        # Which of the two direction mechanisms actually ran. The 1H path and the
+        # legacy 5m-regime fallback are different strategies sharing a name, and
+        # nothing downstream could tell which produced a given signal.
+        "uses_1h_trend",
+    ),
+    "MOVER_AVWAP_SCALP": (
+        # How old the leg is. The anchor's whole meaning depends on it and the
+        # evaluator uses the anchor only to compute a VWAP.
+        "anchor_age_bars",
+        # How far the move has already gone. `execution:overextended` is the gate
+        # carried past on 21 of the dark rows, so this is literally the question
+        # the dark data is asking.
+        "leg_move_pct",
+        # First return to the anchor is the reload; the fourth is a level that
+        # keeps failing. Identical to this path today.
+        "avwap_touches_in_leg",
+        # Gated against a floor only, so its magnitude has never been read.
+        "avwap_slope_pct",
+        # The exact ratio `vol_ok` thresholds on, so the threshold itself becomes
+        # checkable rather than trusted.
+        "vol_ratio_at_trigger",
+    ),
+    "MOVER_TREND_PULLBACK": (
+        # The stack's separation is the path's own trend-strength proxy and it is
+        # gated at a floor; the value is what lets the floor be tested.
+        "stack_sep_pct",
+        "retrace_frac_of_leg",
+        "extension_pct",
+    ),
+    "MEAN_REVERT": (
+        # The entry IS an extension measurement, so how extended is not a
+        # hypothesis here — it is the setup, and the 2.5 sigma threshold has
+        # never been read against outcomes.
+        "sigma_at_entry",
+        "retrace_frac_of_leg",
+    ),
+    "RANGE_FADE": (
+        # A range edge is only an edge while it holds; how many times it has been
+        # tested is the difference between a fade and a breakout about to happen.
+        "edge_touches",
+        "range_width_atr",
+    ),
+}
+
+
+def features_for(setup_class: str) -> Tuple[str, ...]:
+    """Core plus this path's own, in reading order. Unknown path → core only."""
+    return CORE_FEATURES + tuple(PATH_FEATURES.get(str(setup_class or ""), ()))
+
+
+def describe_features() -> Dict[str, Any]:
+    """The registry, as data, written into the ledger for ops to render.
+
+    Ops needs three things to draw a split: which features belong to a path, in
+    what order, and which way a candidate rule filters. All three are decided
+    here, so all three ship from here.
+
+    The alternative — ops keeping its own copy — is the mirror that drifted on
+    ``MEASUREMENT_SUFFIXES`` and inflated the Strategy Lab rollup for a week
+    before anyone noticed. A reader that derives the direction itself will agree
+    with this module right up until one of them changes.
+    """
+    return {
+        "core": list(CORE_FEATURES),
+        "paths": {k: list(v) for k, v in PATH_FEATURES.items()},
+        "keep_above": sorted(_KEEP_ABOVE),
+    }
 
 
 def split_by_feature(
@@ -597,7 +1073,45 @@ def split_by_feature(
         # A rule that keeps almost everything has not been tested by this window,
         # whatever its delta reads.
         "kept_fraction": (keep["n"] / now["n"]) if now["n"] else None,
+        # Which series these rows were read from. One entry is a clean split;
+        # more than one means the threshold is being applied across timeframes
+        # that do not share a scale, and the surface must say so rather than
+        # letting the reader assume a single population.
+        "timeframes": sorted(
+            {str(r.get("tf_name") or "") for r in (joined or [])} - {""}
+        ),
+        "setups": sorted(
+            {str(r.get("setup_class") or "") for r in (joined or [])} - {""}
+        ),
     }
+
+
+def select(rows: List[Dict[str, Any]], setup_class: str = "") -> List[Dict[str, Any]]:
+    """Rows for one setup, or all of them when *setup_class* is empty.
+
+    Splitting on the path is not a convenience filter — the paths do not share a
+    trigger, a timeframe or a stop geometry, so a threshold that helps one can
+    be meaningless on another. Pooling them would produce a number whose value
+    moves with the setup mix rather than with the feature.
+    """
+    if not setup_class:
+        return list(rows or [])
+    want = str(setup_class)
+    return [r for r in (rows or []) if str(r.get("setup_class") or "") == want]
+
+
+def setups_present(rows: List[Dict[str, Any]]) -> List[Tuple[str, int]]:
+    """``(setup_class, n)`` for every path in *rows*, most rows first.
+
+    Drives the page's selector from the data rather than from a hardcoded list,
+    so a path that starts or stops stamping is visible instead of silently
+    absent — a fixed list of names shows exactly the paths someone typed.
+    """
+    counts: Dict[str, int] = {}
+    for row in rows or []:
+        key = str(row.get("setup_class") or "UNKNOWN")
+        counts[key] = counts.get(key, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 def join_outcomes(
@@ -642,6 +1156,28 @@ def join_outcomes(
     }
 
 
+def missing_by_setup(
+    ledger: Optional[EntryFeatureLedger] = None,
+) -> Dict[str, Tuple[int, Dict[str, int]]]:
+    """``{setup_class: (n_rows, {feature: n_missing})}``.
+
+    The denominator a liveness probe has to use. The paths are wildly uneven —
+    MVRTP alone is ~94% of the delivered book — so a TPE-only input that has
+    gone dark contributes a handful of Nones against a ledger-wide row count and
+    can never reach it. Keyed per path, "absent on every row of its own path" is
+    reachable and means what it says.
+    """
+    led = ledger if ledger is not None else get_ledger()
+    out: Dict[str, Tuple[int, Dict[str, int]]] = {}
+    for row in led.rows():
+        setup = str(row.get("setup_class") or "UNKNOWN")
+        n_rows, missing = out.get(setup, (0, {}))
+        for key in row.get("missing") or []:
+            missing[key] = missing.get(key, 0) + 1
+        out[setup] = (n_rows + 1, missing)
+    return out
+
+
 def summary(ledger: Optional[EntryFeatureLedger] = None) -> Dict[str, Any]:
     """Liveness-facing shape: is this lane stamping, and how complete is it?"""
     led = ledger if ledger is not None else get_ledger()
@@ -661,4 +1197,8 @@ def summary(ledger: Optional[EntryFeatureLedger] = None) -> Dict[str, Any]:
         # is a dead upstream, and it looks identical to a feature nobody uses
         # unless the count is on screen.
         "missing_by_feature": per_feature_missing,
+        # Per-path, because the lane now covers several and a healthy total can
+        # hide a path that stopped stamping entirely. A watchdog keyed on the
+        # aggregate cannot see one path go dark (#815, the same shape).
+        "rows_by_setup": dict(setups_present(rows)),
     }

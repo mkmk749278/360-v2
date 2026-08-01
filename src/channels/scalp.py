@@ -1931,6 +1931,101 @@ class ScalpChannel(BaseChannel):
         sig.partial_close_pct = 0.0
         # High-probability setup: trend pullback to EMA in trend direction
         sig.confidence = min(100.0, sig.confidence + 8.0)
+        # Entry-time feature stamp (2026-08-01, owner: "on which bases entry is
+        # confirming especially on Trend pullback EMA").
+        #
+        # What this path actually confirms on: 1H EMA21-vs-EMA50 for direction,
+        # then on 5m an EMA21 tag by the previous bar, a close back above both
+        # EMAs, close > prev_close, close > prev_high, RSI inside 40-60 and
+        # rising, close in the trend-direction half of its own range, and one
+        # momentum sign.  Every one of those is a *boolean* — the evaluator
+        # records that each threshold was crossed and never how far.
+        #
+        # So the extras below are the magnitudes behind its own gates, not a
+        # wishlist of new indicators: how mature the 1H trend is, how much of
+        # the leg the pullback gave back, where in the RSI band it fired, how
+        # decisively prev_high broke, and the distance to the SMC zone its
+        # `missing_fvg_or_orderblock` gate claims to require but does not check.
+        # `uses_1h_trend` records which of the two direction mechanisms ran —
+        # the 1H path and the legacy 5m-regime fallback are different strategies
+        # sharing one setup_class, and no artifact has ever distinguished them.
+        try:
+            from src import entry_features as _ef
+
+            # Only meaningful on the 1H path: on the legacy 5m-regime fallback
+            # there is no 1H trend to measure the separation of. Resolved here
+            # rather than inline so the None-ness is settled once — the two EMAs
+            # are non-None exactly when `_uses_1h_trend` is true, which is that
+            # flag's definition.
+            _atr_1h = ind_1h.get("atr_last")
+            _h1_sep: Optional[float] = None
+            if (
+                _uses_1h_trend
+                and _atr_1h is not None
+                and ema21_1h is not None
+                and ema50_1h is not None
+                and float(_atr_1h) > 0
+            ):
+                _h1_sep = abs(float(ema21_1h) - float(ema50_1h)) / float(_atr_1h)
+            _prev_extreme = prev_high if direction == Direction.LONG else prev_low
+            _ef.stamp(
+                sig,
+                # sig.entry_regime is still "" here — the scanner writes it in
+                # _populate_signal_context, after this returns (#850).
+                regime=regime,
+                features=_ef.capture(
+                    symbol=symbol,
+                    direction_is_long=(direction == Direction.LONG),
+                    entry=close,
+                    sl_dist=sl_dist,
+                    tp1=tp1,
+                    trigger="ema21_tag_reclaim",
+                    tf=m5,
+                    tf_name="5m",
+                    atr=atr_val,
+                    smc_data=smc_data,
+                    # The level the trigger is literally defined against.
+                    entry_ref=ema21,
+                    entry_ref_name="ema21_5m",
+                    ma_slow=ema50,
+                    profile_would_reject=(
+                        not self._pass_basic_filters(
+                            spread_pct, volume_24h_usd, regime=regime, profile=profile
+                        )
+                        if profile is not None
+                        else None
+                    ),
+                    extras={
+                        "retrace_frac_of_leg": _ef.retrace_fraction(
+                            [float(h) for h in highs],
+                            [float(low_v) for low_v in lows],
+                            close,
+                            direction == Direction.LONG,
+                        ),
+                        "h1_trend_sep_atr": _h1_sep,
+                        "smc_zone_dist_atr": _ef.zone_distance_atr(
+                            list(fvgs or []) + list(orderblocks or []),
+                            close,
+                            atr_val,
+                        ),
+                        "rsi_at_entry": (
+                            float(rsi_val) if rsi_val is not None else None
+                        ),
+                        "prev_extreme_break_atr": (
+                            abs(close - _prev_extreme) / float(atr_val)
+                            if atr_val and float(atr_val) > 0
+                            else None
+                        ),
+                        # Stamped as a number so it splits like every other
+                        # feature; a bool would need its own rendering path.
+                        "uses_1h_trend": 1.0 if _uses_1h_trend else 0.0,
+                    },
+                ),
+            )
+        except Exception as _exc:  # noqa: BLE001 — never let a stamp kill a scan
+            from src import fail_open as _fo
+
+            _fo.record("scalp.tpe_entry_features", _exc)
         return sig
 
     # ------------------------------------------------------------------
@@ -3239,13 +3334,16 @@ class ScalpChannel(BaseChannel):
                     sl_dist=sl_dist,
                     tp1=tp1,
                     trigger=trigger,
-                    ma_fast=ma_fast,
-                    ma_mid=ma_mid,
+                    tf=tf,
+                    # The literal this evaluator opens with: candles.get("15m").
+                    tf_name="15m",
+                    atr=atr_val,
+                    smc_data=smc_data,
+                    # The MA the trigger is defined against on this path.
+                    entry_ref=ma_fast,
+                    entry_ref_name="sma7_15m",
                     ma_slow=ma_slow,
                     stack_sep_pct=stack_sep_pct,
-                    atr=atr_val,
-                    tf_15m=tf,
-                    smc_data=smc_data,
                     # The argument 19 of 20 call sites omit: this path calls
                     # _pass_basic_filters WITHOUT `profile`, so the pair-tier
                     # liquidity/spread adjustment is inert for 94% of the book.
@@ -3458,6 +3556,78 @@ class ScalpChannel(BaseChannel):
         sig.htf_trend_aligned = True
         sig.entry_trigger = trigger
         sig.confidence = min(100.0, sig.confidence + 8.0)
+        # Entry-time feature stamp (2026-08-01, owner: "…especially on Trend
+        # pullback EMA and mover AVWAP").
+        #
+        # This path is not blind the way MVRTP is — it already gates on volume
+        # (`vol_ok`) and on AVWAP slope.  What it does not have is any sense of
+        # *where in the move it is*.  The anchor is computed and then used only
+        # to produce a VWAP: how many bars ago the leg started, how far it has
+        # already travelled, and how many times price has already returned to
+        # the anchor are all available at this point and none of them is
+        # consulted or recorded.  A first pullback into a 6-bar-old leg and a
+        # fourth pullback into a 90-bar-old one are the same object here.
+        #
+        # That matters for this data specifically: `execution:overextended` is
+        # the gate carried past on 21 of the 65 dark rows, and `leg_move_pct` is
+        # the quantity that gate is about.
+        #
+        # `vol_ratio_at_trigger` and `avwap_slope_pct` are the exact values the
+        # live gates threshold on, so recording them makes those thresholds
+        # checkable instead of trusted.  `tp1_r_multiple` will read 1.000 on
+        # every row here (tp1 = close +/- sl_dist) — stamped anyway, so the
+        # constant is visible in the data rather than being something a reader
+        # has to know from the source.
+        try:
+            from src import entry_features as _ef
+
+            _ef.stamp(
+                sig,
+                regime=regime,
+                features=_ef.capture(
+                    symbol=symbol,
+                    direction_is_long=(direction == Direction.LONG),
+                    entry=close,
+                    sl_dist=sl_dist,
+                    tp1=tp1,
+                    trigger=trigger,
+                    tf=tf,
+                    tf_name=MOVER_AVWAP_TF,
+                    atr=atr_val,
+                    smc_data=smc_data,
+                    entry_ref=avwap,
+                    entry_ref_name="avwap_anchored",
+                    profile_would_reject=(
+                        not self._pass_basic_filters(
+                            spread_pct, volume_24h_usd, regime=regime, profile=profile
+                        )
+                        if profile is not None
+                        else None
+                    ),
+                    extras={
+                        # Bars since the leg's origin swing — the anchor's age,
+                        # which is what makes an anchored VWAP mean anything.
+                        "anchor_age_bars": float(len(closes) - anchor_idx),
+                        # How far the move has already run, the same number the
+                        # MIN_MOVE_PCT floor is applied to and nothing caps.
+                        "leg_move_pct": float(
+                            up_move if direction == Direction.LONG else down_move
+                        ),
+                        "avwap_touches_in_leg": _ef.anchor_touch_count(
+                            seg_h, seg_l, avwap,
+                            band_pct=MOVER_AVWAP_PULLBACK_BAND_PCT,
+                        ),
+                        "avwap_slope_pct": float(slope_pct),
+                        "vol_ratio_at_trigger": (
+                            float(vols[-1]) / avg_vol if avg_vol > 0 else None
+                        ),
+                    },
+                ),
+            )
+        except Exception as _exc:  # noqa: BLE001 — never let a stamp kill a scan
+            from src import fail_open as _fo
+
+            _fo.record("scalp.mvavw_entry_features", _exc)
         log.info(
             "MOVER_AVWAP_FIRED: symbol={} dir={} close={:.6f} avwap={:.6f} "
             "slope_pct={:.3f} sl_dist_pct={:.3f} conf={:.1f}",
@@ -6784,6 +6954,51 @@ class ScalpChannel(BaseChannel):
         # collapse it to the 15-minute channel default at dispatch.
         sig.valid_for_minutes = 180
         sig.entry_trigger = "mean_revert_z"
+        # Entry-time feature stamp (2026-08-01).  Thin path — 9 dark rows, 5
+        # decided — so this accumulates, it is not readable yet.
+        #
+        # The entry here *is* an extension measurement, so unlike the pullback
+        # paths there is no hidden variable to go looking for: the z-score the
+        # detector fired on is the whole thesis, and the 2.5-sigma trigger has
+        # never been checked against outcomes. It comes off `cand.metrics`
+        # rather than being recomputed — the detector already holds it exactly,
+        # and a second computation of the same quantity is only a detector when
+        # it is kept beside the first, never when it silently replaces it.
+        # The reference is the 20-bar mean, which is also TP1.
+        try:
+            from src import entry_features as _ef
+
+            _ef.stamp(
+                sig,
+                regime=regime,
+                features=_ef.capture(
+                    symbol=symbol,
+                    direction_is_long=(direction == Direction.LONG),
+                    entry=close,
+                    sl_dist=sl_dist,
+                    tp1=tp1,
+                    trigger="mean_revert_z",
+                    tf=tf,
+                    tf_name="15m",
+                    atr=atr_val,
+                    smc_data=smc_data,
+                    entry_ref=tp1,
+                    entry_ref_name="rolling_mean_20",
+                    extras={
+                        "sigma_at_entry": cand.metrics.get("sigma_at_entry"),
+                        "retrace_frac_of_leg": _ef.retrace_fraction(
+                            [float(h) for h in highs],
+                            [float(low_v) for low_v in lows],
+                            close,
+                            direction == Direction.LONG,
+                        ),
+                    },
+                ),
+            )
+        except Exception as _exc:  # noqa: BLE001 — never let a stamp kill a scan
+            from src import fail_open as _fo
+
+            _fo.record("scalp.mean_revert_entry_features", _exc)
         log.info(
             "MEAN_REVERT_FIRED: symbol={} dir={} close={:.6f} sl_dist_pct={:.3f} "
             "conf={:.1f} ({})",
@@ -6934,6 +7149,44 @@ class ScalpChannel(BaseChannel):
         # collapse it to the 15-minute channel default at dispatch.
         sig.valid_for_minutes = 240
         sig.entry_trigger = "range_fade_edge"
+        # Entry-time feature stamp (2026-08-01).  One dark row in the window, so
+        # purely accumulative.
+        #
+        # A range edge is only an edge while it holds, so the number that
+        # matters is how many times it has already been tested — the detector
+        # counts exactly that to qualify the range and then discards it into a
+        # reason string. Range width in ATR sits beside it because a 4-ATR range
+        # and a 12-ATR range are different trades with the same geometry.
+        # Reference is the range mid (also TP1).
+        try:
+            from src import entry_features as _ef
+
+            _ef.stamp(
+                sig,
+                regime=regime,
+                features=_ef.capture(
+                    symbol=symbol,
+                    direction_is_long=(direction == Direction.LONG),
+                    entry=close,
+                    sl_dist=sl_dist,
+                    tp1=tp1,
+                    trigger="range_fade_edge",
+                    tf=tf,
+                    tf_name="15m",
+                    atr=atr_val,
+                    smc_data=smc_data,
+                    entry_ref=tp1,
+                    entry_ref_name="range_mid",
+                    extras={
+                        "edge_touches": cand.metrics.get("edge_touches"),
+                        "range_width_atr": cand.metrics.get("range_width_atr"),
+                    },
+                ),
+            )
+        except Exception as _exc:  # noqa: BLE001 — never let a stamp kill a scan
+            from src import fail_open as _fo
+
+            _fo.record("scalp.range_fade_entry_features", _exc)
         log.info(
             "RANGE_FADE_FIRED: symbol={} dir={} close={:.6f} sl_dist_pct={:.3f} "
             "conf={:.1f} ({})",

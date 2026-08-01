@@ -257,7 +257,7 @@ Telegram are both acceptable paging paths.
 | Dispatch-staleness V2 (geometry-aware, `@DSV2` shadow) | `src/staleness_v2.py` |
 | SAR exit shadow arm (`@SARBASE`/`@SAREXIT`, dark, **replay**) | `src/sar_exit_shadow.py` |
 | SAR exit mechanism (**live**, forward-stepped in the monitor loop, dark) | `src/sar_live_shadow.py` |
-| MVRTP entry-feature stamps (observe-only, joined to the closed-signal record) | `src/entry_features.py` |
+| Per-path entry-feature stamps (observe-only, joined to the closed-signal record) | `src/entry_features.py` |
 
 ---
 
@@ -769,6 +769,62 @@ python -m src.main
   registered — the route list said yes and the request said no, and the route
   list is not the authority. Same shape as trusting a probe over the population
   it claims to watch. Ops pins the ordering in a test rather than a comment.
+- **A feature set is not portable just because the code that computes it is.**
+  Generalising the entry-feature lane past MVRTP, the first cut copied MVRTP's
+  feature list onto every path — and that list was chosen for MVRTP's particular
+  blindness, a three-SMA pullback trigger that never looks at volume. TPE and
+  MVAVW are blind in different places, so the copied columns measure nothing on
+  them while the variables their entries actually turn on go unrecorded
+  (owner-caught 2026-08-01, mid-implementation). Read the mechanism, then pick
+  the features: `TREND_PULLBACK_EMA` applies nothing but **booleans** — EMA21
+  tagged, close back above both EMAs, close > prev_close, close > prev_high, RSI
+  in 40–60 and rising — recording *that* each threshold was crossed and never by
+  how much, so its features are the magnitudes behind its own gates.
+  `MOVER_AVWAP_SCALP` already gates on volume and slope; what it has no notion of
+  is *where in the move it is*, because the anchor is computed and then used only
+  to produce a VWAP. Corollary: **a small shared core plus per-path extras beats
+  one wide table** — a path stamping twelve features invites twelve thresholds,
+  and twelve cells against a book this size guarantees a spurious winner.
+- **Sign a directional reading toward the trade, or half the book scores
+  backwards.** `cvd_slope` and `book_imbalance` were stored raw and split with a
+  single "higher is better" rule. A falling CVD is the dip being *sold* — bad for
+  a long, exactly what a short wants — so every SHORT was judged inverted. The
+  delivered book is ~50/50 by side, so this never showed up as an empty column or
+  a crash; it just made both features look like noise, which is indistinguishable
+  from a feature that genuinely does not discriminate. Ask of every signed
+  feature whether positive means "good for price" or "good for *this trade*".
+- **A gate whose comment and code disagree is a gate that does nothing.**
+  `_evaluate_trend_pullback`'s SMC check reads *"require at least one FVG or
+  orderblock in the pullback zone"* and is `bool(fvgs) or bool(orderblocks)` — a
+  global existence test that a zone 40 ATR away satisfies. It has been rejecting
+  almost nothing while reading as a structural filter. Same class as the
+  `is_tradfi_perp` audit: **when a filter is described as structural, check that
+  the code performs the check the sentence claims.** Stamped
+  (`smc_zone_dist_atr`) rather than fixed, because narrowing a rejecting gate
+  changes what emits — dark-first plus sign-off — and a test now pins the live
+  behaviour so changing it is deliberate.
+- **A guard belongs where the assumption is made, even after the source is
+  fixed.** `_merge_candles` concatenated blindly while `_estimate_gap_candles`
+  over-fetches by design, so every gap fill re-appended bars the bucket already
+  held — duplicate bars that double-weight any fixed-bar-count indicator, and a
+  **non-monotonic `open_time`**. `slice_window` locates its entry bar with
+  `np.searchsorted`, which is *undefined* on an unsorted array rather than merely
+  imprecise, and the walk that follows is structurally valid, stamps
+  `last_bar_ms` and reads `current`. Nothing downstream could tell. Owner data
+  2026-08-01: 7 of 9 open dark rows carried ~21 more array entries than there had
+  been minutes since their entry. Fixed at the merge *and* guarded at the
+  consumer, because a store is not the only thing that can hand us a bad series.
+  Corollary: **an intentional over-fetch is a contract to deduplicate** — the
+  buffer is correct, what was missing is that overlap is therefore expected.
+- **An expiry is only as good as the walk behind it.** A row past the horizon is
+  scored 0R on the claim that its window was walked and nothing happened.
+  ROBOUSDT expired on 309 bars of a 362-minute window and ARBUSDT on 329 of 365,
+  so 89 minutes of unexamined bars were reported as the setup doing nothing — and
+  a touch inside them would have been booked as a zero, the fabrication class
+  arriving as a rate rather than as a number. Untouched rows now stamp
+  `window_coverage` and retire `INSUFFICIENT` below a floor. The separation was
+  clean (the other six expiries walked 99.9–102%), which is the tell that the two
+  populations were always distinguishable and simply never distinguished.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

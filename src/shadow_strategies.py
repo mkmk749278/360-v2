@@ -22,8 +22,8 @@ Design notes:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence
 
 from src.strategy_portfolio import (
     SHADOW_CASCADE_REVERSAL,
@@ -58,6 +58,16 @@ class ShadowCandidate:
     tp1: float
     valid_for_minutes: float
     reason: str
+    #: The numbers the detection actually turned on — z-score, edge touches,
+    #: range width — as data rather than as text inside ``reason``.
+    #:
+    #: They were only ever formatted into that string, so the one consumer that
+    #: needs them (``entry_features``, 2026-08-01) would have had to parse a
+    #: display field to recover a value the detector held exactly. A fact
+    #: belongs where it becomes true, and a format string is not a place.
+    #: Optional with a default so every existing construction site and test is
+    #: unaffected.
+    metrics: Dict[str, float] = field(default_factory=dict)
 
 
 def _simple_atr(
@@ -104,12 +114,20 @@ def evaluate_range_fade(
             strategy=SHADOW_RANGE_FADE, side="SHORT", entry=price,
             stop_loss=rng_hi + atr, tp1=mid, valid_for_minutes=240.0,
             reason=f"fade range-high {rng_hi:.6g} (touches={hi_touches})",
+            metrics={
+                "edge_touches": float(hi_touches),
+                "range_width_atr": width / atr,
+            },
         )
     if price - rng_lo <= _RANGE_EDGE_PROXIMITY_ATR * atr:
         return ShadowCandidate(
             strategy=SHADOW_RANGE_FADE, side="LONG", entry=price,
             stop_loss=rng_lo - atr, tp1=mid, valid_for_minutes=240.0,
             reason=f"fade range-low {rng_lo:.6g} (touches={lo_touches})",
+            metrics={
+                "edge_touches": float(lo_touches),
+                "range_width_atr": width / atr,
+            },
         )
     return None
 
@@ -137,12 +155,14 @@ def evaluate_mean_revert(
             strategy=SHADOW_MEAN_REVERT, side="SHORT", entry=price,
             stop_loss=price + 1.5 * atr, tp1=mean, valid_for_minutes=180.0,
             reason=f"z={z:.2f} above {_MEANREV_LOOKBACK}-bar mean",
+            metrics={"sigma_at_entry": z},
         )
     if z <= -_MEANREV_Z_TRIGGER:
         return ShadowCandidate(
             strategy=SHADOW_MEAN_REVERT, side="LONG", entry=price,
             stop_loss=price - 1.5 * atr, tp1=mean, valid_for_minutes=180.0,
             reason=f"z={z:.2f} below {_MEANREV_LOOKBACK}-bar mean",
+            metrics={"sigma_at_entry": z},
         )
     return None
 

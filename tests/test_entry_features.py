@@ -139,21 +139,21 @@ class TestCapture:
         upstream died."""
         feats = ef.capture(
             symbol="BTCUSDT", direction_is_long=True, entry=100.0, sl_dist=3.0,
-            tp1=103.0, trigger="fast_pullback", ma_fast=100.0, ma_mid=99.0,
-            ma_slow=95.0, stack_sep_pct=5.0, atr=1.0, tf_15m=_tf(),
+            tp1=103.0, trigger="fast_pullback", tf=_tf(), tf_name="15m",
+            atr=1.0, ma_slow=95.0, stack_sep_pct=5.0,
             smc_data={"order_book": None, "cvd_15m": list(range(30))},
         )
-        assert feats["book_imbalance"] is None
+        assert feats["book_imbalance_aligned"] is None
         assert feats["pullback_vol_ratio"] is not None
-        assert feats["cvd_slope"] is not None
-        assert "book_imbalance" in feats["missing"]
+        assert feats["cvd_slope_aligned"] is not None
+        assert "book_imbalance_aligned" in feats["missing"]
         assert "pullback_vol_ratio" not in feats["missing"]
 
     def test_missing_lists_exactly_the_none_features(self):
         feats = ef.capture(
             symbol="BTCUSDT", direction_is_long=True, entry=100.0, sl_dist=3.0,
-            tp1=103.0, trigger="fast_pullback", ma_fast=100.0, ma_mid=99.0,
-            ma_slow=95.0, stack_sep_pct=5.0, atr=1.0, tf_15m=_tf(), smc_data={},
+            tp1=103.0, trigger="fast_pullback", tf=_tf(), tf_name="15m",
+            atr=1.0, ma_slow=95.0, stack_sep_pct=5.0, smc_data={},
         )
         none_keys = {
             k for k, v in feats.items()
@@ -166,11 +166,162 @@ class TestCapture:
         not care whether order flow is up."""
         feats = ef.capture(
             symbol="BTCUSDT", direction_is_long=False, entry=100.0, sl_dist=3.0,
-            tp1=97.0, trigger="deep_pullback", ma_fast=100.0, ma_mid=101.0,
-            ma_slow=105.0, stack_sep_pct=5.0, atr=None, tf_15m=None, smc_data=None,
+            tp1=97.0, trigger="deep_pullback", tf=None, tf_name="15m",
+            atr=None, ma_slow=105.0, stack_sep_pct=5.0, smc_data=None,
         )
         assert feats["side"] == "SHORT"
         assert feats["entry_trigger"] == "deep_pullback"
+
+    def test_the_series_timeframe_travels_with_the_row(self):
+        """A 5m volume ratio and a 15m one are different measurements. Without
+        ``tf_name`` on the row nothing downstream can refuse to pool them."""
+        feats = ef.capture(
+            symbol="BTCUSDT", direction_is_long=True, entry=100.0, sl_dist=3.0,
+            tp1=103.0, trigger="ema21_tag_reclaim", tf=_tf(), tf_name="5m",
+            atr=1.0, smc_data={}, entry_ref=99.0, entry_ref_name="ema21_5m",
+        )
+        assert feats["tf_name"] == "5m"
+        assert feats["entry_ref_name"] == "ema21_5m"
+
+    def test_a_directional_read_is_signed_toward_the_trade(self):
+        """A falling CVD is the dip being sold: bad for a long, and exactly what
+        a short wants. Stored raw and split with one "higher is better" rule, it
+        scores every short backwards — which is what schema 1 did."""
+        smc = {"cvd_15m": [float(i) for i in range(30)]}  # rising CVD
+        long_row = ef.capture(
+            symbol="X", direction_is_long=True, entry=100.0, sl_dist=3.0,
+            tp1=103.0, trigger="t", tf=_tf(), tf_name="15m", atr=1.0, smc_data=smc,
+        )
+        short_row = ef.capture(
+            symbol="X", direction_is_long=False, entry=100.0, sl_dist=3.0,
+            tp1=97.0, trigger="t", tf=_tf(), tf_name="15m", atr=1.0, smc_data=smc,
+        )
+        assert long_row["cvd_slope_aligned"] > 0
+        assert short_row["cvd_slope_aligned"] < 0
+        assert long_row["cvd_slope_aligned"] == -short_row["cvd_slope_aligned"]
+
+    def test_extras_merge_flat_and_share_the_missing_accounting(self):
+        """A path-specific feature that stops computing must be as visible as a
+        core one — otherwise the interesting half of the row fails silently."""
+        feats = ef.capture(
+            symbol="X", direction_is_long=True, entry=100.0, sl_dist=3.0,
+            tp1=103.0, trigger="t", tf=_tf(), tf_name="5m", atr=1.0, smc_data={},
+            extras={"h1_trend_sep_atr": 2.5, "rsi_at_entry": None},
+        )
+        assert feats["h1_trend_sep_atr"] == 2.5
+        assert "rsi_at_entry" in feats["missing"]
+        assert "h1_trend_sep_atr" not in feats["missing"]
+
+    def test_designed_geometry_is_recorded_not_inferred(self):
+        """The finding this lane exists to make legible: TP1 inside the stop.
+        R divides by the distance the trade is *sized* for, the same denominator
+        the closed-signal record carries, so the two are comparable."""
+        tight = ef.capture(
+            symbol="X", direction_is_long=True, entry=100.0, sl_dist=4.0,
+            tp1=102.0, trigger="t", tf=_tf(), tf_name="5m", atr=1.0, smc_data={},
+        )
+        assert tight["tp1_r_multiple"] == pytest.approx(0.5)
+        even = ef.capture(
+            symbol="X", direction_is_long=False, entry=100.0, sl_dist=3.0,
+            tp1=97.0, trigger="t", tf=_tf(), tf_name="15m", atr=1.0, smc_data={},
+        )
+        assert even["tp1_r_multiple"] == pytest.approx(1.0)
+
+
+class TestPathFeatureHelpers:
+    """The per-path measurements, which are the point of the generalisation.
+
+    A feature set is not portable just because the code that computes it is —
+    these exist because TPE and MVAVW fail in different places than MVRTP.
+    """
+
+    def test_retrace_reads_the_giveback_not_the_depth(self):
+        # Leg runs 100 -> 120; entry at 110 has given back half of it.
+        highs = [100.0 + i for i in range(21)] + [120.0] * 3
+        lows = [h - 1.0 for h in highs]
+        got = ef.retrace_fraction(highs, lows, 110.0, True, leg_bars=24)
+        assert got == pytest.approx((120.0 - 110.0) / (120.0 - 99.0), rel=1e-3)
+
+    def test_retrace_refuses_a_flat_leg_rather_than_returning_zero(self):
+        flat = [100.0] * 30
+        assert ef.retrace_fraction(flat, flat, 100.0, True) is None
+
+    def test_zone_distance_is_zero_inside_a_zone_not_the_gap_to_its_edge(self):
+        """Inside the zone is the strongest reading there is; reporting the
+        distance to the nearer edge would make it look like a near miss."""
+        zones = [{"top": 105.0, "bottom": 95.0}]
+        assert ef.zone_distance_atr(zones, 100.0, 2.0) == 0.0
+
+    def test_zone_distance_measures_the_nearest_of_several(self):
+        zones = [{"top": 130.0, "bottom": 125.0}, {"high": 104.0, "low": 103.0}]
+        assert ef.zone_distance_atr(zones, 100.0, 1.5) == pytest.approx(3.0 / 1.5)
+
+    def test_an_absent_zone_book_refuses(self):
+        """The gate this replaces passes on *any* zone anywhere. Absent must not
+        read as 'nothing overhead'."""
+        assert ef.zone_distance_atr([], 100.0, 1.0) is None
+        assert ef.zone_distance_atr(None, 100.0, 1.0) is None
+
+    def test_anchor_touches_count_trigger_eligible_returns(self):
+        """First return to the anchor is the reload; the fourth is a level that
+        keeps failing. MOVER_AVWAP_SCALP cannot tell them apart today."""
+        highs = [101.0, 110.0, 101.0, 112.0]
+        lows = [99.0, 108.0, 99.0, 110.0]
+        # band 2% of 100 -> [98, 102]; bars 0 and 2 intersect it.
+        assert ef.anchor_touch_count(highs, lows, 100.0, band_pct=2.0) == 2
+
+    def test_anchor_touches_refuse_without_an_anchor(self):
+        assert ef.anchor_touch_count([1.0], [1.0], None, band_pct=2.0) is None
+
+
+class TestFeatureRegistry:
+    def test_each_path_gets_core_plus_its_own(self):
+        tpe = ef.features_for("TREND_PULLBACK_EMA")
+        mvavw = ef.features_for("MOVER_AVWAP_SCALP")
+        assert set(ef.CORE_FEATURES) <= set(tpe)
+        assert "retrace_frac_of_leg" in tpe
+        assert "anchor_age_bars" in mvavw
+        # The point of splitting: neither path's own features leak onto the other.
+        assert "anchor_age_bars" not in tpe
+        assert "h1_trend_sep_atr" not in mvavw
+
+    def test_an_unknown_path_degrades_to_core_rather_than_raising(self):
+        assert ef.features_for("NOT_A_SETUP") == ef.CORE_FEATURES
+
+    def test_every_declared_feature_has_a_split_direction(self):
+        """A feature with no entry in the keep-above set is silently treated as
+        'lower is better'. That is a real choice and it must be a deliberate one
+        for every feature, not a default nobody looked at."""
+        undirected = {
+            "uses_1h_trend",       # a flag, not a magnitude
+            "funding_rate",        # deliberately unsigned — see capture()
+            "liq_clusters_n",
+        }
+        for setup in ef.PATH_FEATURES:
+            for feature in ef.features_for(setup):
+                if feature in undirected:
+                    continue
+                assert (
+                    feature in ef._KEEP_ABOVE
+                    or feature in _LOWER_IS_BETTER
+                ), f"{feature} has no deliberate split direction"
+
+
+#: Features where keeping rows BELOW the threshold is the intended rule. Listed
+#: explicitly so the assertion above cannot pass by defaulting.
+_LOWER_IS_BETTER = {
+    "entry_ref_dist_atr",
+    "entry_bar_range_atr",
+    "pullback_depth_atr",
+    "extension_pct",
+    "retrace_frac_of_leg",
+    "smc_zone_dist_atr",
+    "rsi_at_entry",
+    "anchor_age_bars",
+    "leg_move_pct",
+    "avwap_touches_in_leg",
+    "edge_touches",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -345,3 +496,102 @@ class TestSummary:
         assert s["rows"] == 3
         assert s["missing_by_feature"]["book_imbalance"] == 3
         assert s["schema"] == ef.SCHEMA
+
+
+class TestPerPathLiveness:
+    """A dead input on a rare path must not hide behind a busy one.
+
+    MVRTP alone is ~94% of the delivered book. A TPE-only feature that has gone
+    dark contributes a handful of Nones against a ledger-wide row count and can
+    never reach it, so a probe dividing by the total reports healthy forever.
+    #815's rule: key on the population that would be harmed.
+    """
+
+    def test_missing_is_counted_against_each_path_s_own_rows(self):
+        led = ef.EntryFeatureLedger(path="")
+        for i in range(50):
+            led.add({
+                "signal_id": f"mv-{i}",
+                "setup_class": "MOVER_TREND_PULLBACK",
+                "missing": [],
+            })
+        for i in range(12):
+            led.add({
+                "signal_id": f"tpe-{i}",
+                "setup_class": "TREND_PULLBACK_EMA",
+                "missing": ["h1_trend_sep_atr"],   # dead on every TPE row
+            })
+
+        per_setup = ef.missing_by_setup(led)
+        tpe_rows, tpe_missing = per_setup["TREND_PULLBACK_EMA"]
+        assert tpe_rows == 12
+        assert tpe_missing["h1_trend_sep_atr"] == 12
+        # Reachable per path...
+        assert tpe_missing["h1_trend_sep_atr"] >= tpe_rows
+        # ...and unreachable against the ledger total, which is the bug.
+        assert tpe_missing["h1_trend_sep_atr"] < len(led.rows())
+
+    def test_summary_reports_rows_per_path(self):
+        led = ef.EntryFeatureLedger(path="")
+        led.add({"signal_id": "a", "setup_class": "MOVER_AVWAP_SCALP", "missing": []})
+        led.add({"signal_id": "b", "setup_class": "MOVER_AVWAP_SCALP", "missing": []})
+        led.add({"signal_id": "c", "setup_class": "TREND_PULLBACK_EMA", "missing": []})
+
+        got = ef.summary(led)["rows_by_setup"]
+
+        assert got == {"MOVER_AVWAP_SCALP": 2, "TREND_PULLBACK_EMA": 1}
+
+
+class TestSelect:
+    def test_it_splits_the_book_by_path(self):
+        rows = [
+            {"setup_class": "TREND_PULLBACK_EMA", "r": 1.0},
+            {"setup_class": "MOVER_AVWAP_SCALP", "r": -1.0},
+            {"setup_class": "TREND_PULLBACK_EMA", "r": 0.5},
+        ]
+        assert len(ef.select(rows, "TREND_PULLBACK_EMA")) == 2
+        assert len(ef.select(rows, "")) == 3
+
+    def test_a_split_reports_the_timeframes_it_pooled(self):
+        """A threshold applied across 5m and 15m rows is being applied to two
+        scales at once, and the surface has to be able to say so."""
+        rows = [
+            {"tf_name": "5m", "pullback_vol_ratio": 1.2, "r": 1.0},
+            {"tf_name": "15m", "pullback_vol_ratio": 0.8, "r": -1.0},
+        ]
+        out = ef.split_by_feature(rows, "pullback_vol_ratio", 1.0)
+        assert out["timeframes"] == ["15m", "5m"]
+
+
+class TestTheSpecShipsWithTheData:
+    """Ops renders splits; the directions that make them meaningful are decided
+    here, so they travel in the ledger rather than being copied into ops.
+
+    A mirror agrees right up until one side changes. ``MEASUREMENT_SUFFIXES``
+    drifted exactly that way and inflated the Strategy Lab rollup for a week.
+    """
+
+    def test_the_written_payload_carries_the_registry(self, tmp_path):
+        import json
+
+        path = str(tmp_path / "ef.json")
+        led = ef.EntryFeatureLedger(path=path)
+        led.add({"signal_id": "a", "setup_class": "TREND_PULLBACK_EMA"})
+        assert led.flush(force=True) is True
+
+        payload = json.loads(open(path, encoding="utf-8").read())
+        spec = payload["spec"]
+
+        assert spec["core"] == list(ef.CORE_FEATURES)
+        assert spec["paths"]["TREND_PULLBACK_EMA"] == list(
+            ef.PATH_FEATURES["TREND_PULLBACK_EMA"]
+        )
+        assert "tp1_r_multiple" in spec["keep_above"]
+
+    def test_the_spec_describes_every_feature_a_path_declares(self):
+        """A reader given the spec must be able to draw every column without
+        knowing anything this module has not told it."""
+        spec = ef.describe_features()
+        known = set(spec["core"]) | {f for fs in spec["paths"].values() for f in fs}
+        for setup in ef.PATH_FEATURES:
+            assert set(ef.features_for(setup)) <= known

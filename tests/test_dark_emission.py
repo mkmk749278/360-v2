@@ -318,17 +318,90 @@ def test_a_same_bar_touch_resolves_pessimistically_and_is_flagged():
     assert row["ambiguous_bar"] is True
 
 
+def _quiet_window(bars: int):
+    """A walked window in which nothing touched either level."""
+    return {"high": [101.0] * bars, "low": [99.0] * bars, "close": [100.0] * bars}
+
+
 def test_a_row_past_the_horizon_expires_at_0R_not_as_a_loss():
     """An expiry is the mechanism doing nothing, not losing. Counting it as a
-    loss is the #685 fabrication class."""
+    loss is the #685 fabrication class.
+
+    The window here is the ~420 bars a 7-hour lifetime actually produces. The
+    original fixture passed one bar, which no production path ever hands the
+    resolver and which the coverage guard below now correctly refuses to call an
+    expiry.
+    """
     ledger = _published()
-    ohlc = {"high": [101.0], "low": [99.0], "close": [100.0]}
     de.resolve_open(
-        lambda *_: ohlc, now_ts=1_700_000_000.0 + 7 * 3600.0, ledger=ledger
+        lambda *_: _quiet_window(420),
+        now_ts=1_700_000_000.0 + 7 * 3600.0,
+        ledger=ledger,
     )
     (row,) = ledger.rows()
     assert row["status"] == de.STATUS_EXPIRED
     assert row["r_multiple"] == 0.0
+    assert row["window_coverage"] >= de.MIN_WINDOW_COVERAGE
+
+
+def test_an_untouched_row_whose_walk_missed_the_window_is_not_an_expiry():
+    """0R on an expiry is a claim that the window was walked and nothing
+    happened, and that claim is only as good as the walk.
+
+    Owner data 2026-08-01: ROBOUSDT expired on 309 bars of a 362-minute window
+    and ARBUSDT on 329 of 365 — 89 minutes of unexamined bars reported as "the
+    setup did nothing". A touch inside them would have been booked as a zero,
+    which is the fabrication class arriving as a rate rather than as a number.
+    Terminal and unscored is the honest end.
+    """
+    ledger = _published()
+    de.resolve_open(
+        lambda *_: _quiet_window(300),          # 300 bars of a 420-bar window
+        now_ts=1_700_000_000.0 + 7 * 3600.0,
+        ledger=ledger,
+    )
+    (row,) = ledger.rows()
+    assert row["status"] == de.STATUS_INSUFFICIENT
+    assert row["insufficient_reason"] == de.INSUFFICIENT_PARTIAL_WINDOW
+    # Unscored, so no rate anywhere can be divided by it.
+    assert row.get("r_multiple") is None
+    assert row["window_coverage"] < de.MIN_WINDOW_COVERAGE
+
+
+def test_partial_window_is_counted_apart_from_a_missing_series():
+    """Different causes, different fixes: a series that never arrived and a
+    series with holes must never be pooled into one number."""
+    ledger = _published()
+    tally = de.resolve_open(
+        lambda *_: _quiet_window(300),
+        now_ts=1_700_000_000.0 + 7 * 3600.0,
+        ledger=ledger,
+    )
+    assert tally["partial_window"] == 1
+    assert tally["insufficient"] == 1
+    assert tally["expired"] == 0
+
+    rollup = de.summary(ledger=ledger)
+    (agg,) = rollup.values()
+    assert agg["insufficient_partial_window"] == 1
+    assert agg["insufficient_no_walk"] == 0
+    # Kept out of `resolved` so no rate is divided by a row nobody scored.
+    assert agg["resolved"] == 0
+
+
+def test_a_touched_row_is_scored_however_short_its_walk():
+    """Coverage gates the *expiry* verdict only. A row that hit a level was
+    decided by the market, and the bars after the touch are irrelevant — the
+    walk stops there by design, so its bar count is where the outcome was, not
+    how much was examined."""
+    ledger = _published()
+    ohlc = {"high": [107.0] * 3, "low": [99.0] * 3, "close": [100.0] * 3}
+    de.resolve_open(
+        lambda *_: ohlc, now_ts=1_700_000_000.0 + 7 * 3600.0, ledger=ledger
+    )
+    (row,) = ledger.rows()
+    assert row["status"] == de.STATUS_TP1
+    assert row["r_multiple"] is not None
 
 
 def test_a_row_with_no_candles_stays_open_and_is_counted():

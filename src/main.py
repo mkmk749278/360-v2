@@ -2607,16 +2607,35 @@ class CryptoSignalEngine:
                 rows = int(s.get("rows") or 0)
                 if rows < 20:
                     return True, f"only {rows} stamps so far — too few to judge"
-                missing = s.get("missing_by_feature") or {}
-                # Every one of these is meant to be present on a healthy scan.
-                dead = [k for k, n in missing.items() if n >= rows]
+
+                # Per path, not per ledger.  Since 2026-08-01 this lane covers
+                # several setups with *different* feature sets, and the paths are
+                # wildly uneven — MVRTP alone is ~94% of the delivered book.  A
+                # TPE-only input that has gone dark shows up as `n` Nones against
+                # a denominator dominated by mover rows, so `n >= rows` can never
+                # be true and the probe reports healthy forever.  That is #815's
+                # shape exactly: key on the population that would be harmed, not
+                # on the one that happens to be convenient.
+                per_setup = _ef.missing_by_setup()
+                dead: List[str] = []
+                for setup, (n_rows, missing) in sorted(per_setup.items()):
+                    if n_rows < 10:
+                        continue          # too few of this path to judge yet
+                    dead.extend(
+                        f"{setup}.{k}"
+                        for k, n in missing.items()
+                        if n >= n_rows
+                    )
                 if dead:
                     return False, (
-                        f"{len(dead)} feature(s) absent on ALL {rows} stamps: "
-                        f"{','.join(sorted(dead))} — upstream is dark, and the "
-                        "panel cannot tell that from 'unused'"
+                        f"{len(dead)} feature(s) absent on EVERY stamp of their "
+                        f"path: {','.join(sorted(dead))} — upstream is dark, and "
+                        "the panel cannot tell that from 'unused'"
                     )
-                return True, f"{rows} stamps, no feature wholly absent"
+                counts = ", ".join(
+                    f"{k}={v}" for k, v in sorted((s.get("rows_by_setup") or {}).items())
+                )
+                return True, f"{rows} stamps ({counts}), no feature wholly absent"
             except Exception as exc:  # noqa: BLE001
                 return True, f"probe unavailable ({type(exc).__name__})"
 

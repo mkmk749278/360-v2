@@ -168,6 +168,31 @@ MISS_NO_CANDLES = "no_candles"
 MISS_UNUSABLE_WINDOW = "unusable_window"
 MISS_FETCH_ERROR = "fetch_error"
 
+#: Fraction of a row's elapsed window that must actually have been walked before
+#: an untouched row may be called EXPIRED.
+#:
+#: An expiry is scored 0R on the claim that the window was walked and nothing
+#: happened. That claim is only as good as the walk: owner data 2026-08-01 had
+#: ROBOUSDT expiring on 309 bars of a 362-minute window and ARBUSDT on 329 of
+#: 365, so between them 89 minutes of unexamined bars were being reported as
+#: "the setup did nothing". A touch inside those minutes would have been booked
+#: as a zero — the fabrication class, arriving as a rate rather than a number.
+#:
+#: The separation in that window was clean: the other six expiries walked
+#: 99.9–102% of theirs. Binance emits a kline per minute for a listed perp, so a
+#: healthy walk lands at or just above 1.0 and only a series with holes falls
+#: materially below it. Below this floor the row retires INSUFFICIENT — terminal
+#: and deliberately unscored — rather than being handed a 0R it did not earn.
+MIN_WINDOW_COVERAGE: float = float(
+    os.getenv("DARK_MIN_WINDOW_COVERAGE", "0.98")
+)
+
+#: Retired because the walk did not cover the window, as opposed to there being
+#: no series at all. Different causes, different fixes, so they are never pooled
+#: — "blank needs a cause before it gets a caption".
+INSUFFICIENT_PARTIAL_WINDOW = "partial_window"
+INSUFFICIENT_NO_WALK = "no_walk"
+
 
 def is_excluded(setup_class: Any) -> bool:
     """Is this path barred from the dark lane?"""
@@ -446,6 +471,12 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         "stalled": None,
         "resolve_misses": 0,
         "resolve_miss_reason": None,
+        # How much of the elapsed window the walk covered, and — when the row
+        # ends without a touch — whether that was enough to call it an expiry.
+        # Present from creation so a reader never has to tell "this row predates
+        # the field" from "this row has not been advanced yet" (#817's class).
+        "window_coverage": None,
+        "insufficient_reason": None,
     }
     # Recorded where it becomes true (#802): the SL distance is knowable the
     # instant the geometry exists and never changes afterwards. Any reader
@@ -578,6 +609,19 @@ def slice_window(candles: Any, since_ts: float) -> Optional[Dict[str, Any]]:
     if not np.all(np.isfinite(tail)):
         # Interleaved NaNs: not a prefix, so no contiguous region can be trusted.
         return _undated("timestamps_interleaved")
+    if tail.size > 1 and not np.all(np.diff(tail) >= 0):
+        # ``searchsorted`` on an unsorted array is **undefined**, not imprecise:
+        # it returns an index with no relationship to the bar we asked for, and
+        # the walk that follows is structurally valid, stamps ``last_bar_ms``
+        # and reads ``current``. Nothing downstream could tell.
+        #
+        # This is reachable whenever a bucket carries duplicate or out-of-order
+        # bars — which `_merge_candles` produced on every gap fill until
+        # 2026-08-01, because `_estimate_gap_candles` over-fetches on purpose
+        # and the merge appended the overlap. That is fixed at the source; this
+        # stays because the guard belongs where the assumption is made, and a
+        # store is not the only thing that can hand us a bad series.
+        return _undated("timestamps_unsorted")
     if since_ms < float(tail[0]):
         # The entry bar is inside the undated prefix (or older than the array).
         # Undatable here, but still walkable — unless the array itself begins
@@ -713,9 +757,35 @@ def _retire_unwalkable(row: dict, ts: float, now: float, horizon_sec: float) -> 
     if (now - ts) < horizon_sec:
         return False
     row["status"] = STATUS_INSUFFICIENT
+    row["insufficient_reason"] = INSUFFICIENT_NO_WALK
     row["closed_at"] = now
     row["stalled"] = None
     return True
+
+
+def _window_coverage(row: dict, ts: float, now: float) -> Optional[float]:
+    """Fraction of this row's elapsed window the walk actually covered.
+
+    Only meaningful for a row that walked to the **end** of its window without
+    touching a level: a row that hit stops at the hit bar, so its ``bars_seen``
+    is where the outcome was, not how much was examined. The caller stamps this
+    on untouched rows only.
+
+    ``None`` when it cannot be computed, which is not the same as low coverage
+    and must not be rendered as it — a row too young to have a meaningful
+    denominator is simply young.
+    """
+    elapsed = now - ts
+    if elapsed < BAR_SECONDS:
+        return None
+    seen = row.get("bars_seen")
+    if seen is None:
+        return None
+    try:
+        expected = elapsed / BAR_SECONDS
+        return float(seen) / expected if expected > 0 else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
 
 
 def resolve_open(
@@ -748,7 +818,7 @@ def resolve_open(
     book = ledger if ledger is not None else get_ledger()
     tally = {
         "resolved": 0, "still_open": 0, "expired": 0, "no_candles": 0,
-        "stalled": 0, "insufficient": 0, "undated": 0,
+        "stalled": 0, "insufficient": 0, "undated": 0, "partial_window": 0,
     }
     try:
         for row in book.open_rows():
@@ -793,14 +863,31 @@ def resolve_open(
                 row["closed_at"] = now
                 tally["resolved"] += 1
             elif (now - ts) >= horizon_sec:
-                row["status"] = STATUS_EXPIRED
-                row["closed_at"] = now
-                # No fill, no loss. Scored 0R deliberately: the honest cost of a
-                # setup that never resolved is nothing happening, not a stop.
-                row["pnl_pct"] = 0.0
-                row["r_multiple"] = 0.0
-                tally["expired"] += 1
+                # How much of the window this verdict is actually standing on.
+                # Stamped before the branch, so a row that expires and a row
+                # that retires both carry the number the decision was made on.
+                coverage = _window_coverage(row, ts, now)
+                row["window_coverage"] = coverage
+                if coverage is not None and coverage < MIN_WINDOW_COVERAGE:
+                    # The walk did not cover the window, so "nothing happened"
+                    # is a claim about bars nobody looked at. Terminal and
+                    # unscored, counted apart from a real expiry.
+                    row["status"] = STATUS_INSUFFICIENT
+                    row["insufficient_reason"] = INSUFFICIENT_PARTIAL_WINDOW
+                    row["closed_at"] = now
+                    tally["insufficient"] += 1
+                    tally["partial_window"] += 1
+                else:
+                    row["status"] = STATUS_EXPIRED
+                    row["closed_at"] = now
+                    # No fill, no loss. Scored 0R deliberately: the honest cost
+                    # of a setup that never resolved is nothing happening, not a
+                    # stop.
+                    row["pnl_pct"] = 0.0
+                    row["r_multiple"] = 0.0
+                    tally["expired"] += 1
             else:
+                row["window_coverage"] = _window_coverage(row, ts, now)
                 tally["still_open"] += 1
                 if row.get("stalled"):
                     tally["stalled"] += 1
@@ -832,6 +919,7 @@ def summary(ledger: Optional[DarkLedger] = None) -> Dict[str, Any]:
         agg = out.setdefault(setup, {
             "setup_class": setup, "n": 0, "open": 0, "resolved": 0,
             "tp1": 0, "sl": 0, "expired": 0, "insufficient": 0,
+            "insufficient_partial_window": 0, "insufficient_no_walk": 0,
             "sum_r": 0.0, "n_r": 0, "gates": {},
         })
         agg["n"] += 1
@@ -846,6 +934,13 @@ def summary(ledger: Optional[DarkLedger] = None) -> Dict[str, Any]:
             # kept out of `resolved` so no rate is ever divided by a population
             # that includes rows nobody scored.
             agg["insufficient"] += 1
+            # Split by cause: a series that never arrived and a series with
+            # holes are different faults with different fixes, and pooling them
+            # reports whichever one happens to be smaller as the whole story.
+            if row.get("insufficient_reason") == INSUFFICIENT_PARTIAL_WINDOW:
+                agg["insufficient_partial_window"] += 1
+            else:
+                agg["insufficient_no_walk"] += 1
             continue
         agg["resolved"] += 1
         if status == STATUS_TP1:
