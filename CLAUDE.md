@@ -641,6 +641,35 @@ python -m src.main
   the fault-that-is-not-happening the ledger's own flush docstring claimed to
   have fixed, because nothing ever called it with `force` (2026-07-31). **A
   docstring describing a heartbeat is not a heartbeat**; find the caller.
+- **A denominator computed from mutable state is a different number every time
+  you read it.** `R = pnl_pct / sl_distance_pct` is only meaningful if the SL
+  distance is the one the trade was *sized for* — but `trade_monitor` moves
+  `sig.stop_loss` in place (BE shift, TP1 park, trail), and the closed-signal
+  record stamped that final value. Ops divided by it, so a trade BE-shifted and
+  then stopped out for −0.1% scored exactly **−1.00R**, indistinguishable from
+  one that gave back its whole designed risk: 9 of 28 SL_HITs in the
+  2026-07-29→08-01 window, moving the closed book from +0.160R to −0.088R.
+  The sign of the headline was an artifact of the denominator (2026-08-01).
+  This is #817's class with a numeric twist — the field the reader wanted
+  existed on `Signal` (`original_sl_distance`) and was already used correctly by
+  `snapshot._original_stop_loss` and the Layer-C writer; it just never travelled
+  onto the artifact the owner reads. **Ask of every ratio: is the denominator
+  still the thing it was when the numerator started?** Corollary: the tempting
+  fallback is the bug. `abs(entry - stop_loss)` returns the wrong number for
+  *precisely* the rows that have the defect, so the helper refuses (0.0 → no R)
+  and the surface names why it refused.
+- **Two winners are not a promotion.** `FAILED_AUCTION_RECLAIM` read +0.846R in
+  the dark lane and the promotion request followed within the day. It was 3
+  resolved rows (+1.54 / +2.00 / −1.00), bootstrap 95% CI **[−1.00, +2.00]**;
+  both winners sat behind one gate, and removing them flipped that gate from
+  +0.146R to −0.149R — so the gate's evidence *was* the two rows it was being
+  used to justify. It also beat a random 3-row draw 4.2% of the time while being
+  the best of 6 setups tested (~22% familywise). Three habits, all cheap: state
+  the CI, not the mean; **check whether a subgroup's edge survives removing it
+  from its own parent**; and count how many cells you looked at before calling
+  one special. And the answer to a thin cell is *more evidence*, never a
+  promotion — a dark lane whose row budget is consumed by the two highest-volume
+  paths starves exactly the rare paths it exists to measure.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.
