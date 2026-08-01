@@ -492,6 +492,11 @@ class TestEntryFeatureStampIsInert:
             # the input the two primary triggers never look at.
             assert row["pullback_vol_ratio"] is not None
             # ...and the absent ones are named rather than zeroed.
-            assert "book_imbalance" in row["missing"]
+            assert "book_imbalance_aligned" in row["missing"]
+            # The series the features were read from travels with the row: a 5m
+            # volume ratio and a 15m one are different measurements.
+            assert row["tf_name"] == "15m"
+            # Designed geometry, recorded where it is exactly known.
+            assert row["tp1_r_multiple"] is not None
         finally:
             ef.reset_ledger(None)

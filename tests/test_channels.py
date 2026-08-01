@@ -6176,3 +6176,160 @@ class TestTrendPullbackHtfFlag:
         assert sig is not None
         assert sig.direction == Direction.LONG
         assert sig.htf_trend_aligned is True
+
+
+# --------------------------------------------------------------------------- #
+# TREND_PULLBACK_EMA entry-feature stamp (2026-08-01)
+# --------------------------------------------------------------------------- #
+
+
+class TestTrendPullbackEntryFeatureStamp:
+    """Owner: *"on which bases entry is confirming especially on Trend pullback EMA"*.
+
+    Every gate this path applies is a **boolean**: EMA21 was tagged, close got
+    back above both EMAs, close beat prev_close, close beat prev_high, RSI is
+    inside 40-60 and rising, the close sat in the trend-direction half of its
+    range. It records that each threshold was crossed and never by how much, so
+    no artifact downstream can distinguish a decisive reclaim from a nudge.
+
+    The stamp records those magnitudes and applies none of them. These drive the
+    real evaluator, because a mock whose keys we chose would assert our
+    assumption back at us.
+    """
+
+    def _emit(self):
+        indicators = _trend_pullback_indicators_long()
+        indicators["1h"] = _h1_indicators_bullish()
+        candles = {
+            "5m": _make_trend_pullback_candles_long(),
+            "1h": _h1_candles_with_pullback_to_ema21(),
+        }
+        return ScalpChannel()._evaluate_trend_pullback(
+            "BTCUSDT", candles, indicators,
+            {"fvg": [{"top": 100.1, "bottom": 99.8}]},
+            0.01, 10_000_000, regime="",
+        )
+
+    @staticmethod
+    def _shape(sig):
+        return (
+            sig.direction, round(sig.entry, 10), round(sig.stop_loss, 10),
+            round(sig.tp1, 10), round(sig.tp2, 10), round(sig.tp3, 10),
+            round(sig.confidence, 10),
+        )
+
+    def test_the_emitted_signal_is_identical_with_stamping_on_or_off(self):
+        import os
+
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            on = self._emit()
+            assert on is not None
+            stamped = len(led.rows())
+
+            prev = os.environ.get("ENTRY_FEATURES_ENABLED")
+            os.environ["ENTRY_FEATURES_ENABLED"] = "false"
+            try:
+                from src import runtime_tunables as rt
+
+                rt.reset_for_test()
+                off = self._emit()
+            finally:
+                if prev is None:
+                    os.environ.pop("ENTRY_FEATURES_ENABLED", None)
+                else:
+                    os.environ["ENTRY_FEATURES_ENABLED"] = prev
+
+            assert off is not None
+            assert self._shape(on) == self._shape(off), (
+                "the entry-feature stamp changed the emitted signal — it is "
+                "supposed to be a pure read"
+            )
+            assert stamped == 1
+        finally:
+            ef.reset_ledger(None)
+
+    def test_a_raising_stamp_costs_the_measurement_not_the_trade(self, monkeypatch):
+        from src import entry_features as ef
+
+        def _boom(**_kwargs):
+            raise RuntimeError("capture exploded")
+
+        monkeypatch.setattr(ef, "capture", _boom)
+        assert self._emit() is not None
+
+    def test_it_records_the_magnitudes_behind_this_path_s_own_gates(self):
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            sig = self._emit()
+            assert sig is not None
+            row = led.rows()[0]
+
+            assert row["setup_class"] == "TREND_PULLBACK_EMA"
+            # This path triggers on 5m, unlike the mover paths' 15m. Pooling a
+            # 5m volume ratio with a 15m one would compare different things.
+            assert row["tf_name"] == "5m"
+            assert row["entry_ref_name"] == "ema21_5m"
+
+            # The 1H trend's strength. Direction comes from EMA21 vs EMA50 with
+            # no notion of how far apart they are.
+            assert row["h1_trend_sep_atr"] is not None
+            # Which of the two direction mechanisms ran — the 1H path and the
+            # legacy 5m-regime fallback are different strategies sharing a name.
+            assert row["uses_1h_trend"] == 1.0
+            # Where inside the 40-60 band it fired.
+            assert 40.0 <= row["rsi_at_entry"] <= 60.0
+            # How decisively prev_high broke, in ATR.
+            assert row["prev_extreme_break_atr"] is not None
+            # The measurement `missing_fvg_or_orderblock` claims to make. That
+            # gate tests bool(fvgs) — whether the symbol has any zone anywhere,
+            # at any price — so it cannot see that this one is 0.3 away.
+            assert row["smc_zone_dist_atr"] is not None
+            # The pullback question the path never asks.
+            assert "retrace_frac_of_leg" in row
+
+            # ...and the mover paths' questions did not leak onto this row.
+            assert "anchor_age_bars" not in row
+            assert "leg_move_pct" not in row
+        finally:
+            ef.reset_ledger(None)
+
+    def test_the_smc_gate_passes_on_a_zone_nowhere_near_the_entry(self):
+        """Not a regression test — a *record* of live behaviour, so that changing
+        it is a deliberate act.
+
+        `has_smc_support = bool(fvgs) or bool(orderblocks)` is a global existence
+        check whose comment says "in the pullback zone". A zone 40 ATR away
+        satisfies it. The stamp measures the real distance; enforcing it would
+        change what emits, which is dark-first plus owner sign-off.
+        """
+        from src import entry_features as ef
+
+        indicators = _trend_pullback_indicators_long()
+        indicators["1h"] = _h1_indicators_bullish()
+        candles = {
+            "5m": _make_trend_pullback_candles_long(),
+            "1h": _h1_candles_with_pullback_to_ema21(),
+        }
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            sig = ScalpChannel()._evaluate_trend_pullback(
+                "BTCUSDT", candles, indicators,
+                # A fair-value gap at 500 on a ~100 instrument.
+                {"fvg": [{"top": 505.0, "bottom": 495.0}]},
+                0.01, 10_000_000, regime="",
+            )
+            assert sig is not None, "the gate still passes — this is the point"
+            row = led.rows()[0]
+            assert row["smc_zone_dist_atr"] > 100.0, (
+                "the stamp must show how far the 'supporting' zone really was"
+            )
+        finally:
+            ef.reset_ledger(None)

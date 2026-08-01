@@ -85,6 +85,15 @@ class HistoricalDataStore:
         self._last_kline_update_ts: Dict[str, Dict[str, float]] = {}
         self._client = BinanceClient("spot")
         self._futures_client = BinanceClient("futures")
+        # Merge telemetry (2026-08-01).  ``_merge_candles`` used to concatenate
+        # blindly, and ``_estimate_gap_candles`` over-fetches by
+        # ``_GAP_BUFFER_CANDLES`` *on purpose*, so every gap fill re-appended
+        # bars the bucket already had.  Dedupe is the fix; these counters are
+        # how we know it is doing work and how we see the case it cannot fix
+        # (a merge where one side carries no ``open_time``, which is undedupable
+        # by construction rather than clean).
+        self.merge_duplicate_bars_dropped: int = 0
+        self.merge_undedupable: int = 0
 
     # ------------------------------------------------------------------
     # OHLCV fetch
@@ -653,12 +662,90 @@ class HistoricalDataStore:
             return _FULL_FETCH_SENTINEL
 
     @staticmethod
+    def _first_new_index(
+        existing: Dict[str, np.ndarray], new_data: Dict[str, np.ndarray]
+    ) -> Optional[int]:
+        """Index into *new_data* of the first bar newer than *existing*'s last.
+
+        ``None`` means the question cannot be answered — one side carries no
+        usable ``open_time`` — and the caller must then concatenate as before
+        rather than guess.  Absence of knowledge is not permission to drop bars
+        (``CLAUDE.md``); dropping the wrong ones loses history, which is strictly
+        worse than the duplicates this exists to prevent.
+        """
+        old_t = existing.get("open_time")
+        new_t = new_data.get("open_time")
+        # None/len, never truthiness — numpy arrays raise on bool() (hard limit).
+        if old_t is None or new_t is None:
+            return None
+        if len(old_t) != len(existing.get("close", ())) or len(old_t) == 0:
+            return None
+        if len(new_t) != len(new_data.get("close", ())) or len(new_t) == 0:
+            return None
+        try:
+            old_arr = np.asarray(old_t, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        finite_old = old_arr[np.isfinite(old_arr)]
+        # An all-NaN bucket is the restored-legacy-history case (#842): there is
+        # nothing to compare against, so no bar can be shown to be a duplicate.
+        # Checked before nanmax rather than after, because nanmax on an all-NaN
+        # slice warns — and a warning fired on an expected, handled condition is
+        # how a real one stops standing out.
+        if finite_old.size == 0:
+            return None
+        last_old = float(finite_old.max())
+        arr = np.asarray(new_t, dtype=np.float64)
+        if not np.all(np.isfinite(arr)):
+            return None
+        return int(np.searchsorted(arr, last_old, side="right"))
+
     def _merge_candles(
+        self,
         existing: Dict[str, np.ndarray],
         new_data: Dict[str, np.ndarray],
         limit: int,
     ) -> Dict[str, np.ndarray]:
-        """Append *new_data* arrays to *existing* and trim to *limit* candles."""
+        """Append *new_data* arrays to *existing* and trim to *limit* candles.
+
+        **Overlap is dropped, not concatenated** (2026-08-01).  This used to
+        append blindly, and ``_estimate_gap_candles`` adds ``_GAP_BUFFER_CANDLES``
+        deliberately — so every gap fill re-appended bars the bucket already held.
+        Two consequences, and the second is the dangerous one:
+
+        * the bucket carried duplicate bars, so any indicator averaging over a
+          fixed bar count (SMA7/25/99, ATR, SAR) silently double-weighted the
+          overlap window;
+        * ``open_time`` came back **non-monotonic**, and
+          ``dark_emission.slice_window`` locates its entry bar with
+          ``np.searchsorted``, which is undefined — not merely imprecise — on an
+          unsorted array.  A dark row could therefore walk from the wrong bar
+          while stamping ``last_bar_ms`` and reading ``freshness: current``.
+
+        Owner data 2026-08-01: 7 of the 9 open dark rows carried ~21 more array
+        entries than there had been minutes since their entry, on a 1m bucket.
+
+        The buffer itself is correct and stays — it protects against a genuine
+        gap.  What was missing is that overlap is *expected*, so it must be
+        removed on the way in rather than trusted to be absent.
+        """
+        start = self._first_new_index(existing, new_data)
+        if start is None:
+            # Undedupable: one side has no usable timestamps, so there is no way
+            # to tell an overlapping bar from a new one. Concatenate as before —
+            # and count it, because this is the degraded mode, not the healthy
+            # one, and a silent degraded mode is how #842 stayed invisible.
+            self.merge_undedupable += 1
+        elif start > 0:
+            # Every array in a bucket is built from the same Binance rows and is
+            # index-aligned, so one offset trims them all. A key shorter than
+            # the offset slices to empty, which the branches below already skip.
+            self.merge_duplicate_bars_dropped += start
+            new_data = {
+                key: value[start:]
+                for key, value in new_data.items()
+                if value is not None
+            }
         result: Dict[str, np.ndarray] = {}
         core_keys = ("open", "high", "low", "close", "volume")
         extended_keys = ("volume_usd", "taker_buy_vol_usd")

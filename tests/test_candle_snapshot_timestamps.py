@@ -110,7 +110,9 @@ def test_a_gap_fetch_carries_its_timestamps_onto_a_legacy_bucket(store):
         "low": np.full(2, 99.0), "close": np.full(2, 100.5),
         "volume": np.full(2, 10.0), "open_time": fresh_times,
     }
-    merged = hd.HistoricalDataStore._merge_candles(existing, new_data, 100)
+    # Instance method since 2026-08-01: the merge counts what it drops, and a
+    # counter needs somewhere to live.
+    merged = hd.HistoricalDataStore()._merge_candles(existing, new_data, 100)
 
     assert len(merged["open_time"]) == len(merged["close"]) == 6
     assert np.all(np.isnan(merged["open_time"][:4]))
@@ -135,3 +137,171 @@ def test_the_dark_resolver_can_place_a_stamp_in_the_merged_bucket():
     undated = de.slice_window(candles, 1_700_000_100.0)
     assert "open_time" not in undated
     assert undated["undated_reason"] == "stamp_before_timestamps"
+
+
+# --------------------------------------------------------------------------- #
+# Overlap on merge (2026-08-01)
+# --------------------------------------------------------------------------- #
+
+
+class TestMergeDropsOverlapRatherThanAppendingIt:
+    """``_merge_candles`` used to concatenate blindly, and the gap fetch
+    over-fetches **on purpose**.
+
+    ``_estimate_gap_candles`` adds ``_GAP_BUFFER_CANDLES`` to cover partial bars
+    and clock skew, which is correct — a gap fill that comes up short leaves a
+    hole. What was missing is that the overlap is therefore *expected*, so it has
+    to be removed on the way in. Appending it had two consequences:
+
+    * duplicate bars in the bucket, so any indicator averaging a fixed bar count
+      (SMA7/25/99, ATR, SAR) double-weighted the overlap window;
+    * a **non-monotonic** ``open_time``, and ``dark_emission.slice_window``
+      locates its entry bar with ``np.searchsorted``, which is undefined — not
+      imprecise — on an unsorted array. The walk that follows is structurally
+      valid, stamps ``last_bar_ms`` and reads ``freshness: current``.
+
+    Owner data 2026-08-01: 7 of the 9 open dark rows carried ~21 more array
+    entries than there had been minutes since their entry, on a 1m bucket.
+    """
+
+    @staticmethod
+    def _bucket(start_ms: int, n: int, price: float = 100.0):
+        t = np.array([start_ms + i * 60_000 for i in range(n)], dtype=float)
+        return {
+            "open": np.full(n, price),
+            "high": np.full(n, price + 1.0),
+            "low": np.full(n, price - 1.0),
+            "close": np.full(n, price),
+            "volume": np.full(n, 10.0),
+            "open_time": t,
+        }
+
+    def test_an_overlapping_gap_fetch_does_not_duplicate_bars(self):
+        store = hd.HistoricalDataStore()
+        existing = self._bucket(1_000_000_000_000, 30)
+        # The gap fetch re-pulls the last 5 bars plus 5 genuinely new ones —
+        # exactly the shape `_GAP_BUFFER_CANDLES` produces.
+        incoming = self._bucket(1_000_000_000_000 + 25 * 60_000, 10, price=101.0)
+
+        merged = store._merge_candles(existing, incoming, 500)
+
+        assert len(merged["close"]) == 35, "5 overlapping bars should be dropped"
+        assert store.merge_duplicate_bars_dropped == 5
+        assert store.merge_undedupable == 0
+
+    def test_the_merged_timestamps_are_strictly_increasing(self):
+        """The property `searchsorted` needs and never had."""
+        store = hd.HistoricalDataStore()
+        existing = self._bucket(1_000_000_000_000, 30)
+        incoming = self._bucket(1_000_000_000_000 + 25 * 60_000, 10, price=101.0)
+
+        merged = store._merge_candles(existing, incoming, 500)
+
+        t = merged["open_time"]
+        assert np.all(np.diff(t) > 0), (
+            "duplicate bars make open_time non-monotonic, which makes every "
+            "searchsorted over it undefined"
+        )
+
+    def test_new_bars_survive_and_keep_their_values(self):
+        """Dropping the overlap must not cost the bars that are genuinely new."""
+        store = hd.HistoricalDataStore()
+        existing = self._bucket(1_000_000_000_000, 30, price=100.0)
+        incoming = self._bucket(1_000_000_000_000 + 25 * 60_000, 10, price=101.0)
+
+        merged = store._merge_candles(existing, incoming, 500)
+
+        assert merged["close"][-1] == 101.0
+        assert merged["close"][29] == 100.0
+        assert merged["open_time"][-1] == incoming["open_time"][-1]
+
+    def test_a_fully_stale_fetch_adds_nothing(self):
+        """Every incoming bar already held: the correct merge is a no-op, not a
+        doubling of the tail."""
+        store = hd.HistoricalDataStore()
+        existing = self._bucket(1_000_000_000_000, 30)
+        incoming = self._bucket(1_000_000_000_000, 10)
+
+        merged = store._merge_candles(existing, incoming, 500)
+
+        assert len(merged["close"]) == 30
+        assert np.all(np.diff(merged["open_time"]) > 0)
+
+    def test_a_disjoint_fetch_is_appended_whole(self):
+        store = hd.HistoricalDataStore()
+        existing = self._bucket(1_000_000_000_000, 30)
+        incoming = self._bucket(1_000_000_000_000 + 100 * 60_000, 10)
+
+        merged = store._merge_candles(existing, incoming, 500)
+
+        assert len(merged["close"]) == 40
+        assert store.merge_duplicate_bars_dropped == 0
+
+    def test_an_undedupable_merge_is_counted_not_guessed(self):
+        """One side without timestamps cannot be deduped, and dropping bars on a
+        guess loses history — strictly worse than the duplicates it prevents.
+
+        Absence of knowledge is not permission (``CLAUDE.md``): concatenate as
+        before, and *count* it, because a silent degraded mode is exactly how
+        the dropped ``open_time`` in #842 stayed invisible.
+        """
+        store = hd.HistoricalDataStore()
+        existing = self._bucket(1_000_000_000_000, 30)
+        del existing["open_time"]
+        incoming = self._bucket(1_000_000_000_000 + 25 * 60_000, 10)
+
+        merged = store._merge_candles(existing, incoming, 500)
+
+        assert len(merged["close"]) == 40, "no dedupe possible, so nothing dropped"
+        assert store.merge_undedupable == 1
+        assert store.merge_duplicate_bars_dropped == 0
+
+
+class TestSliceWindowRefusesAnUnsortedSeries:
+    """``searchsorted`` on an unsorted array returns an index with no
+    relationship to the bar asked for, and every downstream stamp then describes
+    the wrong bar while looking healthy.
+
+    The source is fixed above; this guard stays because it belongs where the
+    assumption is made, and a store is not the only thing that can hand us a bad
+    series.
+    """
+
+    @staticmethod
+    def _series(times):
+        n = len(times)
+        return {
+            "high": [101.0] * n,
+            "low": [99.0] * n,
+            "close": [100.0] * n,
+            "open_time": [float(t) for t in times],
+        }
+
+    def test_a_duplicated_tail_is_walked_but_never_claims_to_be_dated(self):
+        from src import dark_emission as de
+
+        base = 1_000_000_000_000
+        # 10 clean bars, then 3 that repeat earlier timestamps — the exact shape
+        # a blind merge of an overlapping gap fetch produced.
+        times = [base + i * 60_000 for i in range(10)]
+        times += [base + i * 60_000 for i in range(7, 10)]
+
+        out = de.slice_window(self._series(times), (base + 5 * 60_000) / 1000.0)
+
+        assert out is not None, "refusing the measurement outright is the #842 mistake"
+        assert out.get("undated_reason") == "timestamps_unsorted"
+        assert "open_time" not in out, (
+            "an undated window must not carry timestamps a reader would trust"
+        )
+
+    def test_a_clean_series_still_dates_its_window(self):
+        from src import dark_emission as de
+
+        base = 1_000_000_000_000
+        times = [base + i * 60_000 for i in range(10)]
+
+        out = de.slice_window(self._series(times), (base + 5 * 60_000) / 1000.0)
+
+        assert out is not None
+        assert out.get("undated_reason") is None
+        assert out["open_time"][0] == float(base + 5 * 60_000)
