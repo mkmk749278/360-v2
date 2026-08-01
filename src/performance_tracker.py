@@ -25,6 +25,26 @@ log = get_logger("performance_tracker")
 _DEFAULT_STORAGE_PATH = "data/signal_performance.json"
 
 
+def entry_sl_distance_pct(sig: Any) -> float:
+    """The entry→SL distance the signal was sized for, in percent, or 0.0.
+
+    Reads ``Signal.original_sl_distance`` — stamped by every evaluator at emit
+    and the same quantity the Layer-C writer already divides by for its
+    ``risk_pct``.  It deliberately does **not** fall back to
+    ``abs(entry - sig.stop_loss)``: by the time a terminal transition calls
+    this, ``stop_loss`` may have been moved to entry or to TP1, and that
+    fallback would silently return the very number this field exists to
+    replace.  Where the distance was never stamped (signals in flight across
+    the deploy) the answer is "not knowable" — return 0.0 and let the reader
+    refuse an R rather than compute a wrong one.
+    """
+    entry = float(getattr(sig, "entry", 0.0) or 0.0)
+    dist = float(getattr(sig, "original_sl_distance", 0.0) or 0.0)
+    if entry <= 0.0 or dist <= 0.0:
+        return 0.0
+    return (dist / entry) * 100.0
+
+
 @dataclass
 class SignalRecord:
     """A single completed signal record."""
@@ -62,6 +82,32 @@ class SignalRecord:
     max_favorable_excursion_pct: float = 0.0
     max_adverse_excursion_pct: float = 0.0
     stop_loss: float = 0.0                 # stop-loss price for SL-geometry analysis
+    # The entry→SL distance the trade was actually sized for, in percent, stamped
+    # where it becomes true (2026-08-01).
+    #
+    # ``stop_loss`` above is NOT this.  TradeMonitor mutates ``sig.stop_loss`` in
+    # place as a trade progresses — BE shift, TP1 park, trail — so the value that
+    # reaches this record is the stop as of the *exit*, not the risk that was
+    # taken.  Ops divides by it (``R = pnl_pct / sl_distance_pct``), so a trade
+    # that was BE-shifted and then stopped out for −0.1% scored exactly −1.00R,
+    # identically to a trade that gave back its full designed risk.  Over the
+    # 2026-07-29→08-01 window that was 9 of 28 SL_HITs, and it moved the closed
+    # book from +0.160R to −0.088R — a sign flip on the headline number that
+    # ``/track-record`` exists to report.
+    #
+    # The engine already knew the right denominator in two other places:
+    # ``snapshot._original_stop_loss`` reconstructs it, and the Layer-C writer at
+    # ``trade_monitor.py`` divides by it for ``risk_pct``.  It simply never
+    # travelled onto the artifact the owner reads.  Like ``entry_regime`` this is
+    # knowable exactly once — no later pass can recover a stop that has already
+    # been moved — so records written before this ships stay 0.0 and are refused
+    # an R rather than handed a guess.
+    #
+    # Caveat, stated because it is load-bearing: when DCA recalculates a signal
+    # (``dca.py``) it rewrites ``original_sl_distance`` to the new averaged-entry
+    # buffer.  This field then carries the risk actually carried after the fill,
+    # which is the honest denominator for the PnL that was realised.
+    sl_distance_pct_at_entry: float = 0.0
     timestamp: float = field(default_factory=time.time)
     signal_quality_pnl_pct: float = 0.0   # TP-based PnL for signal quality stats
     signal_quality_hit_tp: int = 0         # highest TP reached (for signal quality classification)
@@ -162,6 +208,7 @@ class PerformanceTracker:
         max_favorable_excursion_pct: float = 0.0,
         max_adverse_excursion_pct: float = 0.0,
         stop_loss: float = 0.0,
+        sl_distance_pct_at_entry: float = 0.0,
         signal_quality_pnl_pct: Optional[float] = None,
         signal_quality_hit_tp: Optional[int] = None,
         session_name: str = "",
@@ -210,6 +257,7 @@ class PerformanceTracker:
             max_favorable_excursion_pct=max_favorable_excursion_pct,
             max_adverse_excursion_pct=max_adverse_excursion_pct,
             stop_loss=stop_loss,
+            sl_distance_pct_at_entry=float(sl_distance_pct_at_entry or 0.0),
             signal_quality_pnl_pct=normalize_pnl_pct(sq_pnl),
             signal_quality_hit_tp=sq_hit_tp,
             session_name=session_name,
@@ -1096,6 +1144,11 @@ class PerformanceTracker:
                     item["session_name"] = ""
                 if "stop_loss" not in item:
                     item["stop_loss"] = 0.0
+                # 0.0 means "the risk taken is not knowable for this record", and
+                # readers must refuse it an R.  There is no honest backfill: the
+                # stop these rows carry has already been moved (2026-08-01).
+                if "sl_distance_pct_at_entry" not in item:
+                    item["sl_distance_pct_at_entry"] = 0.0
                 for _field in (
                     "create_timestamp",
                     "dispatch_timestamp",
