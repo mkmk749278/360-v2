@@ -305,3 +305,92 @@ class TestSliceWindowRefusesAnUnsortedSeries:
         assert out is not None
         assert out.get("undated_reason") is None
         assert out["open_time"][0] == float(base + 5 * 60_000)
+
+
+class TestUpdateCandleRefusesToDisorderTheBucket:
+    """The WebSocket append path is the *second* source of unsorted timestamps,
+    and the merge dedupe cannot see it.
+
+    A bar arriving here never passes through ``_merge_candles``, so after that
+    fix shipped the dark lane's ``timestamps_unsorted`` guard kept firing. The
+    race is ordinary: ``refresh_timeframe`` REPLACES a bucket with a fresh REST
+    pull while the socket is still delivering, so a kline that closed before the
+    pull's last bar lands here immediately afterwards.
+
+    It matters most for a **path-dependent** consumer. Parabolic SAR carries an
+    acceleration factor and an extreme point forward bar by bar, so a duplicated
+    bar corrupts every level after it and never self-corrects.
+    """
+
+    @staticmethod
+    def _bar(t, close=100.0):
+        return {"open": close, "high": close + 1, "low": close - 1,
+                "close": close, "volume": 5.0, "open_time": float(t)}
+
+    def test_a_late_bar_is_dropped_rather_than_appended_out_of_order(self):
+        store = hd.HistoricalDataStore()
+        base = 1_700_000_000_000
+        for i in range(3):
+            store.update_candle("BTCUSDT", "1m", self._bar(base + i * 60_000))
+
+        store.update_candle("BTCUSDT", "1m", self._bar(base + 60_000, close=999.0))
+
+        b = store.candles["BTCUSDT"]["1m"]
+        assert len(b["close"]) == 3, "the straggler must not extend the bucket"
+        assert np.all(np.diff(b["open_time"]) > 0)
+        assert 999.0 not in list(b["close"]), "and must not overwrite a later bar"
+        assert store.candle_appends_out_of_order == 1
+
+    def test_a_repeat_of_the_newest_bar_updates_it_in_place(self):
+        """The exchange revising the bar we already hold is an update, not a new
+        bar. Appending it would duplicate; dropping it would lose the revision."""
+        store = hd.HistoricalDataStore()
+        base = 1_700_000_000_000
+        store.update_candle("BTCUSDT", "1m", self._bar(base))
+        store.update_candle("BTCUSDT", "1m", self._bar(base, close=123.0))
+
+        b = store.candles["BTCUSDT"]["1m"]
+        assert len(b["close"]) == 1
+        assert b["close"][-1] == 123.0
+        assert store.candle_updates_in_place == 1
+        assert store.candle_appends_out_of_order == 0
+
+    def test_bars_in_order_still_append_normally(self):
+        store = hd.HistoricalDataStore()
+        base = 1_700_000_000_000
+        for i in range(5):
+            store.update_candle("BTCUSDT", "1m", self._bar(base + i * 60_000))
+
+        b = store.candles["BTCUSDT"]["1m"]
+        assert len(b["close"]) == 5
+        assert store.candle_appends_out_of_order == 0
+        assert store.candle_updates_in_place == 0
+
+    def test_a_bar_without_a_timestamp_is_never_dropped_on_a_guess(self):
+        """Absence of knowledge is not permission to discard history — a bucket
+        that cannot be compared appends exactly as it did before."""
+        store = hd.HistoricalDataStore()
+        base = 1_700_000_000_000
+        store.update_candle("BTCUSDT", "1m", self._bar(base))
+        store.update_candle("BTCUSDT", "1m", {"open": 1, "high": 2, "low": 0, "close": 1, "volume": 1})
+
+        assert len(store.candles["BTCUSDT"]["1m"]["close"]) == 2
+        assert store.candle_appends_out_of_order == 0
+
+    def test_the_guarded_bucket_is_walkable_by_the_dark_resolver(self):
+        """End to end: the property the guard exists to protect."""
+        from src import dark_emission as de
+
+        store = hd.HistoricalDataStore()
+        base = 1_700_000_000_000
+        for i in range(10):
+            store.update_candle("BTCUSDT", "1m", self._bar(base + i * 60_000))
+        store.update_candle("BTCUSDT", "1m", self._bar(base + 3 * 60_000))  # straggler
+
+        candles = store.candles["BTCUSDT"]["1m"]
+        out = de.slice_window(candles, (base + 5 * 60_000) / 1000.0)
+
+        assert out is not None
+        assert out.get("undated_reason") is None, (
+            "the bucket stayed ordered, so the window is datable"
+        )

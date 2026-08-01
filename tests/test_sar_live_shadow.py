@@ -647,7 +647,10 @@ def test_a_stalled_arm_says_so_instead_of_publishing_a_stale_stop_as_current():
     )
 
     assert tally == {
-        "advanced": 0, "current": 0, "stalled": 1, "no_series": 0, "retired": 0
+        "advanced": 0, "current": 0, "stalled": 1, "no_series": 0,
+        # A series the store refuses as corrupt is counted apart from one that
+        # is simply absent (2026-08-01) — opposite fixes, so never one number.
+        "series_corrupt": 0, "retired": 0,
     }
     arm = ledger.get("SIG-STALL:15m")
     assert arm["status"] == live.STATUS_RUNNING
@@ -1030,3 +1033,70 @@ def test_first_step_bars_detects_an_arm_that_walked_history():
         live.step_arm(arm, _series(bars + _rising(13, start=220.0)),
                       step=STEP, max_step=MAX_STEP)
     assert arm["first_step_bars"] == before
+
+
+class TestTheSeriesReaderRefusesACorruptedWindow:
+    """SAR is path-dependent, and that changes what "degrade gracefully" means.
+
+    The dark lane walks fixed levels, so an imprecise window costs precision in
+    the *label* — walk it and mark the row. SAR carries an acceleration factor
+    and an extreme point forward bar by bar, so a duplicated bar advances the AF
+    one extra step and moves the stop toward price permanently. Every level after
+    it is wrong and nothing recovers. Here the imprecision is in the *answer*, so
+    the reader refuses.
+    """
+
+    @staticmethod
+    def _store(times):
+        n = len(times)
+
+        class _S:
+            def get_candles(self, symbol, tf):
+                return {
+                    "high": [101.0] * n, "low": [99.0] * n,
+                    "open": [100.0] * n, "close": [100.0] * n,
+                    "open_time": [float(t) for t in times],
+                }
+        return _S()
+
+    def test_a_clean_series_is_returned(self):
+        base = 1_700_000_000_000
+        times = [base + i * 60_000 for i in range(30)]
+        out = live._series(self._store(times), "BTCUSDT", "5m", warmup=5)
+        assert out is not None
+        assert len(out["open_time"]) == 30
+
+    def test_a_duplicated_bar_is_refused_not_walked(self):
+        base = 1_700_000_000_000
+        times = [base + i * 60_000 for i in range(30)]
+        times[17] = times[16]                      # one duplicate, mid-window
+        before = live.series_refusals()["duplicate_bar"]
+
+        out = live._series(self._store(times), "BTCUSDT", "5m", warmup=5)
+
+        assert out is None
+        assert live.series_refusals()["duplicate_bar"] == before + 1
+
+    def test_an_out_of_order_bar_is_refused_and_named_separately(self):
+        """Different cause, different fix: a duplicate points at the store's
+        append path, an inversion points at the feed."""
+        base = 1_700_000_000_000
+        times = [base + i * 60_000 for i in range(30)]
+        times[20] = base                            # far out of order
+        before = live.series_refusals()["out_of_order"]
+
+        out = live._series(self._store(times), "BTCUSDT", "5m", warmup=5)
+
+        assert out is None
+        assert live.series_refusals()["out_of_order"] == before + 1
+
+    def test_the_endpoints_look_healthy_while_the_middle_is_corrupt(self):
+        """Why the check runs over the whole window rather than the ends: a
+        single interior duplicate leaves first and last timestamps perfectly
+        ordered, and that is precisely the window that must be refused."""
+        base = 1_700_000_000_000
+        times = [base + i * 60_000 for i in range(30)]
+        times[10] = times[9]
+
+        assert times[-1] > times[0], "endpoints are fine — that is the point"
+        assert live._series(self._store(times), "BTCUSDT", "5m", warmup=5) is None

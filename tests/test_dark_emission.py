@@ -882,3 +882,66 @@ def test_an_in_memory_ledger_writes_nothing_and_records_no_failure(tmp_path, mon
     assert list(tmp_path.iterdir()) == [], "an in-memory ledger touched the disk"
     if hasattr(fail_open, "snapshot"):
         assert len(fail_open.snapshot()) == before
+
+
+# --------------------------------------------------------------------------- #
+# Maximum adverse excursion — the field that makes the stop question answerable
+# --------------------------------------------------------------------------- #
+
+
+def test_the_walk_records_how_far_the_trade_went_against_us():
+    """Every lane recorded MFE and none recorded MAE, so no question about stop
+    distance could be answered at all.
+
+    On the 2026-08-01 window the optimistic reading of "tighten the stop"
+    (+0.203R) and the pessimistic one differed by more than the entire edge under
+    discussion, and nothing in the record could separate them — the difference is
+    exactly "did the winners survive a tighter stop", which is what MAE counts.
+    """
+    ledger = _published()          # LONG, entry 100, sl 97, tp1 106
+    # Dips to 98 (1% adverse) before running to TP1.
+    ohlc = {"high": [101.0, 107.0], "low": [98.0, 100.0], "close": [100.0, 106.0]}
+    de.resolve_open(lambda *_: ohlc, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+
+    assert row["status"] == de.STATUS_TP1
+    assert row["mae_pct"] == pytest.approx(2.0)     # 100 -> 98
+    assert row["mfe_pct"] >= 6.0
+
+
+def test_mae_is_measured_in_the_trade_s_own_direction():
+    """A SHORT's adverse move is upward. Signing it by side is the whole point —
+    unsigned, half the book would read backwards."""
+    ledger = _published(side="SHORT", entry=100.0, sl=103.0, tp1=94.0)
+    ohlc = {"high": [102.0], "low": [99.0], "close": [100.0]}
+    de.resolve_open(lambda *_: ohlc, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+
+    assert row["mae_pct"] == pytest.approx(2.0)     # 100 -> 102 is against a short
+
+
+def test_mae_never_decreases_across_advances():
+    """It is a running maximum over the life of the row, like MFE — a later quiet
+    bar must not erase the excursion that already happened."""
+    ledger = _published()
+    de.resolve_open(
+        lambda *_: {"high": [101.0], "low": [98.5], "close": [100.0]},
+        now_ts=1_700_000_300.0, ledger=ledger,
+    )
+    first = ledger.rows()[0]["mae_pct"]
+    assert first == pytest.approx(1.5)
+
+    de.resolve_open(
+        lambda *_: {"high": [101.0, 100.5], "low": [98.5, 100.0], "close": [100.0, 100.0]},
+        now_ts=1_700_000_600.0, ledger=ledger,
+    )
+    assert ledger.rows()[0]["mae_pct"] >= first
+
+
+def test_a_row_carries_mae_from_creation_so_blank_means_not_yet():
+    """Present from the start, so a reader never has to tell "this row predates
+    the field" from "this row has not been advanced yet"."""
+    ledger = _published()
+    (created,) = ledger.rows()
+    assert created["mae_pct"] == 0.0
+    assert created["mfe_pct"] == 0.0

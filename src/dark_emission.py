@@ -458,6 +458,10 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         "pnl_pct": None,
         "r_multiple": None,
         "mfe_pct": 0.0,
+        # The adverse half of the same geometry, present from creation for the
+        # same reason every other stamp is: a reader must never have to tell
+        # "this row predates the field" from "this row has not moved yet".
+        "mae_pct": 0.0,
         "bars_seen": 0,
         # Currency of the measurement, one per row. ``last_bar_ms`` is the newest
         # bar the resolver actually consumed for THIS row and ``last_resolved_at``
@@ -674,10 +678,26 @@ def _walk(row: dict, ohlc: Dict[str, List[float]]) -> Optional[dict]:
     is_long = str(row.get("side") or "").upper() == "LONG"
     sl_dist_pct = abs(entry - sl) / entry * 100.0
     mfe = float(row.get("mfe_pct") or 0.0)
+    # Maximum ADVERSE excursion, added 2026-08-01 beside the favourable one.
+    #
+    # Without it no question about stop distance can be answered at all. We
+    # could see how far a trade ran in our favour and never how far it went
+    # against us first, so "would a tighter stop have helped" was unanswerable:
+    # the optimistic reading (every winner survives) and the pessimistic one
+    # (winners are cut first) differ by more than the entire edge being argued
+    # about, and nothing in the record could separate them.
+    #
+    # Measured to the same bar as MFE and in the same units, so the pair reads
+    # as one geometry rather than two measurements: with both, the fraction of
+    # winners whose adverse excursion exceeded a candidate stop is a count, not
+    # an assumption.
+    mae = float(row.get("mae_pct") or 0.0)
     for i in range(len(highs)):
         hi, lo = float(highs[i]), float(lows[i])
         fav = (hi - entry) if is_long else (entry - lo)
         mfe = max(mfe, fav / entry * 100.0)
+        adv = (entry - lo) if is_long else (hi - entry)
+        mae = max(mae, adv / entry * 100.0)
         sl_hit = (lo <= sl) if is_long else (hi >= sl)
         tp_hit = (hi >= tp1) if is_long else (lo <= tp1)
         if sl_hit or tp_hit:
@@ -692,13 +712,14 @@ def _walk(row: dict, ohlc: Dict[str, List[float]]) -> Optional[dict]:
                 "pnl_pct": pnl,
                 "r_multiple": (pnl / sl_dist_pct) if sl_dist_pct > 0 else None,
                 "mfe_pct": mfe,
+                "mae_pct": mae,
                 "ambiguous_bar": ambiguous,
                 "bars_seen": i + 1,
             }
             if times is not None:
                 out["last_bar_ms"] = float(times[i])
             return out
-    out = {"mfe_pct": mfe, "bars_seen": len(highs)}
+    out = {"mfe_pct": mfe, "mae_pct": mae, "bars_seen": len(highs)}
     if times is not None:
         out["last_bar_ms"] = float(times[-1])
     return out
