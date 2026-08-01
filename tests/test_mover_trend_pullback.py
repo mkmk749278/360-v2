@@ -435,6 +435,40 @@ class TestEntryFeatureStampIsInert:
         sig = self._emit()
         assert sig is not None, "a broken measurement must never suppress a signal"
 
+    def test_the_regime_is_the_one_the_evaluator_was_given(self):
+        """Caught the day this shipped, and it is #817's class one caller earlier.
+
+        ``sig.entry_regime`` is written by ``scanner._populate_signal_context``,
+        which runs AFTER the evaluator returns — so reading it at stamp time
+        recorded "" on every row and would have collapsed the whole per-regime
+        split into one bucket. Nothing would have crashed; the page would just
+        have described nothing, which is the failure mode this repo keeps
+        paying for.
+
+        Reverting the fix (reading ``sig.entry_regime`` instead of the
+        parameter) fails this test with ''.
+        """
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            candles, indicators, smc_data = _inputs(up=True)
+            sig = ScalpChannel()._evaluate_mover_trend_pullback(
+                "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+                regime="TRENDING_UP",
+            )
+            assert sig is not None
+            # The attribute the naive read would have used is still empty here.
+            assert getattr(sig, "entry_regime", "") == "", (
+                "if the scanner starts stamping entry_regime before the "
+                "evaluator returns, this test's premise is dead — remove it "
+                "rather than letting it rot"
+            )
+            assert led.rows()[0]["entry_regime"] == "TRENDING_UP"
+        finally:
+            ef.reset_ledger(None)
+
     def test_the_stamp_records_the_inputs_the_evaluator_ignores(self):
         """Positive control: the lane is actually capturing something.
 

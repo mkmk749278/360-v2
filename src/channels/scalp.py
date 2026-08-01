@@ -3228,7 +3228,11 @@ class ScalpChannel(BaseChannel):
 
             _ef.stamp(
                 sig,
-                _ef.capture(
+                # sig.entry_regime is still "" here — the scanner writes it in
+                # _populate_signal_context, which runs after this returns. Pass
+                # the label the evaluator was given (2026-08-01).
+                regime=regime,
+                features=_ef.capture(
                     symbol=symbol,
                     direction_is_long=(direction == Direction.LONG),
                     entry=close,
