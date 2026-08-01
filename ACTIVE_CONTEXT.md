@@ -4,6 +4,69 @@
 
 ---
 
+## 🟢 SESSION 100 2026-08-01 — MVRTP takes its entry off three SMAs, and now we can see what else was on the table
+
+Owner, after rejecting an exit-side fix: *"some days something will be benefits,
+that's not the correct solution, taking entry is matter, how we are taking entry
+based on only EMA or what, what if we add some more data to that"* — plus *"we
+need to know the difference as of now vs later"*.
+
+### What MVRTP actually reads (`src/channels/scalp.py:2997`)
+
+| Decision | Input |
+|---|---|
+| Direction | `SMA25 > SMA99` on 15m — two simple MAs, the whole thesis |
+| Mover gate | `max(15m SMA7↔SMA99 sep, 1h EMA21/50 fan)` — a magnitude |
+| Trigger | prev bar tagged SMA7 within a band, this close > SMA7 and > prev close |
+| Stop | `min(SMA25, prev_low) − ATR×buffer`; TPs fixed at 1.0/1.6/2.5× |
+
+Not even EMA — SMAs. `vols` **is** read in the function and handed only to
+`_mover_consol_break`; `fast_pullback` and `deep_pullback`, which carry nearly
+all the volume, never look at it. Meanwhile `smc_data` arrives at that call with
+`cvd`/`cvd_15m`, `order_book`, `funding_rate`, `liquidation_clusters`,
+`orderblocks`, `sweeps`, `mss`, `fvg`, `level_book_levels`, `recent_ticks` — and
+MVRTP touches two keys from it, both only for display stamps.
+
+**Live defect found while reading it:** MVRTP calls `_pass_basic_filters` without
+`profile`. One of 20 call sites passes it, and the path that is 94% of the book
+is not that one — so the pair-tier liquidity/spread adjustment is inert for
+almost everything we ship. Stamped as `profile_would_reject`, **not** fixed:
+changing it changes what emits.
+
+### What shipped
+
+`src/entry_features.py` — stamps pullback volume ratio, CVD slope, pullback depth
+in ATR, extension from SMA99, distance to the nearest opposing level in R, book
+imbalance, funding and the profile shadow, at the moment each MVRTP signal is
+created. Measurement flag **ON**, nothing applied. Ops `/signals/entry-features`
+renders "now vs later": the book as it shipped beside the book each candidate
+rule would produce, on the same rows.
+
+**No resolver.** Outcomes join from `signal_performance.json` on `signal_id`.
+Every lane that grew its own resolution machinery cost a session — #839
+INSUFFICIENT rows, #835 stalled arms, #836 stale anchors, #846 over-walks, #842
+undatable windows, all in the *scoring* half, none in the *stamping* half. This
+one inherits `trade_monitor`'s correctness (including #848's denominator).
+
+### Why no filter shipped
+
+46 closed MVRTP signals, 19 tested cells, ~62% familywise chance of a spurious
+95% hit — and exactly one cell cleared, **in the backwards direction** (SAR
+*disagreeing* at entry reading better than agreeing). By this repo's own
+two-winners rule that is noise. On the corrected denominator MVRTP is already
+**+0.253%/trade gross** (+11.62% over the window); the R subset reads +0.192R but
+is favourably selected, so the gross is the honest number.
+
+### Open
+
+- Wait for a population that can decide, then read `/signals/entry-features`.
+- The `profile` omission is stamped, not fixed — dark-first + sign-off.
+- Exit-side ideas remain closed: Session 34 measured pre-TP partials + invalidation
+  at −25.79% vs −6.65% for TP1-full on **494** signals. My +3.10R partial-take
+  sizing was a 46-row counterfactual against that; the owner's study stands.
+
+---
+
 ## 🟢 SESSION 99 2026-08-01 — the track record divided by a stop that had already moved
 
 Owner supplied four exports (live feed, SAR live arms open + closed, dark feed)

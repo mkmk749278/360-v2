@@ -2119,6 +2119,27 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Dark SAR sweep error (fail-open): {}", exc)
 
+            # ── Entry-feature stamps: persist the ring ─────────────────────
+            # Stamping happens in the evaluator, where the facts become true.
+            # This only writes them down. Forced every cycle so an idle lane
+            # still refreshes the file's mtime — ops cannot tell "no MVRTP
+            # signals fired" from "the engine stopped stamping" otherwise, and
+            # that exact ambiguity made the dark page report a fault that was
+            # not happening (2026-07-31).
+            #
+            # There is deliberately NO resolver here: outcomes are joined from
+            # signal_performance.json by signal_id. Every lane in this repo that
+            # grew its own forward-resolution machinery cost a session to
+            # unresolvable rows, and this one needs none.
+            try:
+                from src import entry_features as _ef
+                if _ef.enabled():
+                    _ef.get_ledger().flush(force=True)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Entry-feature flush error (fail-open): {}", exc)
+
             # ── Stop-geometry A/B: classify the FIXED/ATR pair ledger ──────
             # Same forward measure, dedicated store; both arms land in the
             # edge matrix as X@FIXED / X@ATR shadow rows so ops + the truth
@@ -2555,6 +2576,53 @@ class CryptoSignalEngine:
         fl.add_predicate(PredicateProbe(
             name="sar_ledger_candles",
             fn=_sar_ledger_candles,
+            min_streak=6,          # 30 min sustained
+        ))
+
+        def _entry_feature_inputs() -> Tuple[bool, str]:
+            """Are the inputs MVRTP ignores actually arriving?
+
+            The failure this catches is specific and silent: the lane keeps
+            stamping rows, the file keeps refreshing, the ops panel keeps
+            rendering — and every value inside is None because an upstream
+            (OrderFlowStore, the level book, the depth snapshot) went dark.
+            A feature absent on every row looks exactly like a feature nobody
+            uses, and the whole point of this lane is deciding which of them
+            carries signal.  So the probe keys on the *content* of the stamps,
+            not on whether stamping happened.
+
+            Keyed on the population that would be harmed — the rows we intend
+            to analyse — not on the convenient one (#815).  A lane with no rows
+            yet returns True: an empty ledger is a quiet market or a fresh
+            deploy, and signalling "idle" by failing is how a real failure stops
+            standing out.  Do not raise here; a PredicateProbe exception becomes
+            a fail_open record, and filling that counter with non-events is the
+            same mistake one layer down.
+            """
+            try:
+                from src import entry_features as _ef
+                if not _ef.enabled():
+                    return True, "entry-feature stamping disabled"
+                s = _ef.summary()
+                rows = int(s.get("rows") or 0)
+                if rows < 20:
+                    return True, f"only {rows} stamps so far — too few to judge"
+                missing = s.get("missing_by_feature") or {}
+                # Every one of these is meant to be present on a healthy scan.
+                dead = [k for k, n in missing.items() if n >= rows]
+                if dead:
+                    return False, (
+                        f"{len(dead)} feature(s) absent on ALL {rows} stamps: "
+                        f"{','.join(sorted(dead))} — upstream is dark, and the "
+                        "panel cannot tell that from 'unused'"
+                    )
+                return True, f"{rows} stamps, no feature wholly absent"
+            except Exception as exc:  # noqa: BLE001
+                return True, f"probe unavailable ({type(exc).__name__})"
+
+        fl.add_predicate(PredicateProbe(
+            name="entry_feature_inputs",
+            fn=_entry_feature_inputs,
             min_streak=6,          # 30 min sustained
         ))
 

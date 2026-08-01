@@ -924,6 +924,25 @@ def _build_registry() -> Dict[str, Tunable]:
             category="Measurement",
         ),
         Tunable(
+            key="entry_features_enabled",
+            label="MVRTP entry-feature stamps (observe-only)",
+            description=(
+                "Record what CVD, order-book depth, funding, the level book, "
+                "pullback volume and pullback depth said at the moment each "
+                "MOVER_TREND_PULLBACK signal was created. MVRTP decides on "
+                "price against three SMAs and one ATR; every one of those "
+                "inputs was already in smc_data and unread. Nothing is "
+                "applied — the signal emitted is identical with this on or "
+                "off — and outcomes are joined from the closed-signal record "
+                "rather than resolved by a second forward-measurement lane. "
+                "ON by default: a measurement shipped OFF produces an empty "
+                "panel and a decision that keeps being deferred."
+            ),
+            type="bool",
+            default=True,
+            category="Measurement",
+        ),
+        Tunable(
             key="prescoring_audit_enabled",
             label="Pre-scoring gate audit (setup_compat / execution)",
             description=(
