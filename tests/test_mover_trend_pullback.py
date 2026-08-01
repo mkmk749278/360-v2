@@ -358,3 +358,106 @@ class TestMoverTrendPullback:
             "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="RANGING",
         )
         assert sig is None
+
+
+class TestEntryFeatureStampIsInert:
+    """The stamp added 2026-08-01 must not be able to change what emits.
+
+    MOVER_TREND_PULLBACK is ~94% of the delivered book, so the entry-feature
+    lane rides the single busiest money path in the engine. Its whole safety
+    argument is that it only *reads*: the signal returned must be identical with
+    stamping on or off, and a broken stamp must cost a measurement, never a
+    trade.
+
+    These drive the real evaluator rather than asserting on a mock, because a
+    mock whose keys we chose cannot verify the property we actually care about.
+    """
+
+    def _emit(self):
+        candles, indicators, smc_data = _inputs(up=True)
+        return ScalpChannel()._evaluate_mover_trend_pullback(
+            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="TRENDING_UP",
+        )
+
+    def _shape(self, sig):
+        return (
+            sig.direction, round(sig.entry, 10), round(sig.stop_loss, 10),
+            round(sig.tp1, 10), round(sig.tp2, 10), round(sig.tp3, 10),
+            round(sig.confidence, 10), sig.entry_trigger,
+            round(sig.original_sl_distance, 10),
+        )
+
+    def test_the_emitted_signal_is_identical_with_stamping_on_or_off(self):
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            on = self._emit()
+            assert on is not None
+            stamped = len(led.rows())
+
+            import os
+            prev = os.environ.get("ENTRY_FEATURES_ENABLED")
+            os.environ["ENTRY_FEATURES_ENABLED"] = "false"
+            try:
+                from src import runtime_tunables as rt
+                rt.reset_for_test()
+                off = self._emit()
+            finally:
+                if prev is None:
+                    os.environ.pop("ENTRY_FEATURES_ENABLED", None)
+                else:
+                    os.environ["ENTRY_FEATURES_ENABLED"] = prev
+
+            assert off is not None
+            assert self._shape(on) == self._shape(off), (
+                "the entry-feature stamp changed the emitted signal — it is "
+                "supposed to be a pure read on the busiest money path in the engine"
+            )
+            assert stamped >= 1, "stamping was on; the row should have been recorded"
+        finally:
+            ef.reset_ledger(None)
+
+    def test_a_raising_stamp_costs_the_measurement_not_the_signal(self, monkeypatch):
+        """If capture() blows up, the trade still goes out.
+
+        Verified by breaking it on purpose: without the guard at the call site
+        this test fails with the injected error instead of returning a signal.
+        """
+        from src import entry_features as ef
+
+        def _boom(**_kw):
+            raise RuntimeError("injected: order-flow shape changed")
+
+        monkeypatch.setattr(ef, "capture", _boom)
+        sig = self._emit()
+        assert sig is not None, "a broken measurement must never suppress a signal"
+
+    def test_the_stamp_records_the_inputs_the_evaluator_ignores(self):
+        """Positive control: the lane is actually capturing something.
+
+        A test that only proves "nothing changed" would still pass if the stamp
+        never ran at all.
+        """
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            sig = self._emit()
+            assert sig is not None
+            rows = led.rows()
+            assert len(rows) == 1
+            row = rows[0]
+            assert row["signal_id"] == sig.signal_id
+            assert row["setup_class"] == "MOVER_TREND_PULLBACK"
+            assert row["entry_trigger"] == sig.entry_trigger
+            # Volume is present in the fixture, so this one must compute — it is
+            # the input the two primary triggers never look at.
+            assert row["pullback_vol_ratio"] is not None
+            # ...and the absent ones are named rather than zeroed.
+            assert "book_imbalance" in row["missing"]
+        finally:
+            ef.reset_ledger(None)

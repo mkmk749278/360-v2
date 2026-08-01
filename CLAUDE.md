@@ -257,6 +257,7 @@ Telegram are both acceptable paging paths.
 | Dispatch-staleness V2 (geometry-aware, `@DSV2` shadow) | `src/staleness_v2.py` |
 | SAR exit shadow arm (`@SARBASE`/`@SAREXIT`, dark, **replay**) | `src/sar_exit_shadow.py` |
 | SAR exit mechanism (**live**, forward-stepped in the monitor loop, dark) | `src/sar_live_shadow.py` |
+| MVRTP entry-feature stamps (observe-only, joined to the closed-signal record) | `src/entry_features.py` |
 
 ---
 
@@ -734,6 +735,24 @@ python -m src.main
   one special. And the answer to a thin cell is *more evidence*, never a
   promotion — a dark lane whose row budget is consumed by the two highest-volume
   paths starves exactly the rare paths it exists to measure.
+- **A measurement lane does not need a resolver, and the ones that grew their
+  own each cost a session.** Every forward-measurement arm before
+  `entry_features.py` carried its own resolution machinery, and the bill was
+  `INSUFFICIENT` rows (#839), stalled arms (#835), stale anchors (#836),
+  over-walked series (#846) and undatable windows (#842) — six sessions of
+  defects in the *scoring* half, none in the *stamping* half. The entry-feature
+  lane stamps a row keyed by `signal_id` and joins outcomes from
+  `signal_performance.json`, which `trade_monitor` already writes correctly at
+  the terminal transition. It inherits that correctness (including #848's
+  denominator) instead of re-deriving it, and a row that never delivered simply
+  never joins. **Before building a resolver, ask whether the outcome you need is
+  already recorded by something that owns it.**
+- **A literal route under a catch-all prefix must be registered first.**
+  `signal_detail` owns `/signals/{signal_id}`, so `/signals/entry-features`
+  404'd on the first cut while its own route object sat in `app.routes` looking
+  registered — the route list said yes and the request said no, and the route
+  list is not the authority. Same shape as trusting a probe over the population
+  it claims to watch. Ops pins the ordering in a test rather than a comment.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

@@ -3216,6 +3216,50 @@ class ScalpChannel(BaseChannel):
         sig.htf_trend_aligned = True
         sig.entry_trigger = trigger
         sig.confidence = min(100.0, sig.confidence + 8.0)
+        # Entry-time feature stamp (2026-08-01, owner: "taking entry is matter…
+        # what if we add some more data to that").  This path decides on price
+        # against three SMAs and one ATR; smc_data has been carrying CVD, book
+        # depth, funding, liquidation clusters and the level book past it all
+        # along.  Record what they said here — where the facts become true and
+        # nowhere else can recover them — and apply none of it.  Nothing below
+        # reads these values; the signal returned is byte-identical either way.
+        try:
+            from src import entry_features as _ef
+
+            _ef.stamp(
+                sig,
+                _ef.capture(
+                    symbol=symbol,
+                    direction_is_long=(direction == Direction.LONG),
+                    entry=close,
+                    sl_dist=sl_dist,
+                    tp1=tp1,
+                    trigger=trigger,
+                    ma_fast=ma_fast,
+                    ma_mid=ma_mid,
+                    ma_slow=ma_slow,
+                    stack_sep_pct=stack_sep_pct,
+                    atr=atr_val,
+                    tf_15m=tf,
+                    smc_data=smc_data,
+                    # The argument 19 of 20 call sites omit: this path calls
+                    # _pass_basic_filters WITHOUT `profile`, so the pair-tier
+                    # liquidity/spread adjustment is inert for 94% of the book.
+                    # Stamp what it *would* have said; changing the live call
+                    # changes what emits, which is dark-first + sign-off.
+                    profile_would_reject=(
+                        not self._pass_basic_filters(
+                            spread_pct, volume_24h_usd, regime=regime, profile=profile
+                        )
+                        if profile is not None
+                        else None
+                    ),
+                ),
+            )
+        except Exception as _exc:  # noqa: BLE001 — never let a stamp kill a scan
+            from src import fail_open as _fo
+
+            _fo.record("scalp.mvrtp_entry_features", _exc)
         log.info(
             "MOVER_TP_FIRED: symbol={} dir={} trigger={} close={:.6f} "
             "sl_dist_pct={:.3f} conf={:.1f}",
