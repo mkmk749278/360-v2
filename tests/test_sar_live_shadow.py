@@ -1100,3 +1100,103 @@ class TestTheSeriesReaderRefusesACorruptedWindow:
 
         assert times[-1] > times[0], "endpoints are fine — that is the point"
         assert live._series(self._store(times), "BTCUSDT", "5m", warmup=5) is None
+
+
+class TestARegressedSeriesIsNotARolledOutBar:
+    """Owner data 2026-08-02: `bar_rolled_out_of_window` killed 10 of the 15
+    unmeasurable arms, at a **median of four bars**, on arms that had opened on
+    a current bar and were measuring fine. Nine of the ten were mover paths.
+
+    The cause is `seed_symbol`, which REPLACES a bucket wholesale — and promoted
+    movers are re-seeded on a throttle because they carry no WS kline
+    subscription. A REST pull that has not yet caught up with a bar the socket
+    already delivered leaves the arm's `last_bar_ms` past the end of the array.
+    Nothing is lost; the bar comes back on the next write.
+
+    Two causes, opposite fixes, and they were one death. Declining to advance is
+    not a clamp — it is exactly what the arm does on any cycle with no new bars.
+    """
+
+    @staticmethod
+    def _series(times, price=100.0):
+        n = len(times)
+        return {
+            "high": [price + 1] * n, "low": [price - 1] * n,
+            "open": [price] * n, "close": [price] * n,
+            "open_time": [float(t) for t in times],
+        }
+
+    @staticmethod
+    def _arm(last_bar_ms):
+        return {
+            "arm_id": "A:5m", "symbol": "AIOUSDT", "timeframe": "5m",
+            "side": "LONG", "status": live.STATUS_RUNNING,
+            "entry": 100.0, "stop_loss": 97.0, "tp1": 103.0,
+            "governor": live.GOV_GEOMETRY, "sar_up": True,
+            "last_bar_ms": float(last_bar_ms), "bars_seen": 4,
+            "mfe_pct": 0.0, "mae_pct": 0.0, "series_regressions": 0,
+            "opened_at": 1_700_000_000.0, "last_advance_at": 1_700_000_000.0,
+        }
+
+    def test_a_window_ending_before_our_bar_makes_the_arm_wait(self):
+        base = 1_700_000_000_000
+        # Store re-seeded and came back one bar SHORT of what we consumed.
+        arm = self._arm(base + 10 * 60_000)
+        series = self._series([base + i * 60_000 for i in range(10)])
+
+        changed = live.step_arm(arm, series, step=STEP, max_step=MAX_STEP, now_ts=1_700_000_600.0)
+
+        assert changed is False
+        assert arm["status"] == live.STATUS_RUNNING, "the arm must survive"
+        assert arm.get("exit_reason") is None
+        assert arm["series_regressions"] == 1
+
+    def test_history_rolling_off_the_front_still_retires_the_arm(self):
+        """The genuinely unrecoverable case: bars we never saw are gone, so a
+        starting index would have to be invented."""
+        base = 1_700_000_000_000
+        arm = self._arm(base)                      # our bar is oldest
+        series = self._series([base + i * 60_000 for i in range(50, 60)])
+
+        changed = live.step_arm(arm, series, step=STEP, max_step=MAX_STEP, now_ts=1_700_000_600.0)
+
+        assert changed is True
+        assert arm["status"] == live.STATUS_INSUFFICIENT
+        assert arm["exit_reason"] == live.EXIT_BAR_ROLLED_OUT
+
+    def test_a_bar_inside_the_range_but_off_the_grid_is_named_separately(self):
+        """Different fault, different fix: the history is not gone, the grid
+        changed under us. Pooling it with a roll-out would send the reader to
+        the wrong subsystem."""
+        base = 1_700_000_000_000
+        arm = self._arm(base + 5 * 60_000 + 17_000)   # between two bars
+        series = self._series([base + i * 60_000 for i in range(10)])
+
+        changed = live.step_arm(arm, series, step=STEP, max_step=MAX_STEP, now_ts=1_700_000_600.0)
+
+        assert changed is True
+        assert arm["status"] == live.STATUS_INSUFFICIENT
+        assert arm["exit_reason"] == live.EXIT_BAR_NOT_ON_GRID
+
+    def test_a_recovered_series_resumes_where_the_arm_left_off(self):
+        """The whole point: the arm waited, the bar came back, and it continues
+        rather than having been thrown away over a transient."""
+        base = 1_700_000_000_000
+        arm = self._arm(base + 9 * 60_000)
+
+        live.step_arm(arm, self._series([base + i * 60_000 for i in range(9)]),
+                      step=STEP, max_step=MAX_STEP, now_ts=1_700_000_600.0)
+        assert arm["status"] == live.STATUS_RUNNING
+        assert arm["series_regressions"] == 1
+
+        # Next write brings the bar back, plus two new ones.
+        live.step_arm(arm, self._series([base + i * 60_000 for i in range(12)]),
+                      step=STEP, max_step=MAX_STEP, now_ts=1_700_000_900.0)
+
+        # It resumed and consumed them. Whether it then stayed open or exited on
+        # a SAR flip is the mechanism's business — the property under test is
+        # that the arm was still alive to make that decision, instead of having
+        # been retired as unmeasurable over a transient.
+        assert arm["bars_seen"] > 4, "it consumed the new bars"
+        assert arm["last_bar_ms"] == float(base + 11 * 60_000)
+        assert arm["exit_reason"] != live.EXIT_BAR_ROLLED_OUT

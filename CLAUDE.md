@@ -899,6 +899,20 @@ python -m src.main
   `window_coverage` and retire `INSUFFICIENT` below a floor. The separation was
   clean (the other six expiries walked 99.9–102%), which is the tell that the two
   populations were always distinguishable and simply never distinguished.
+- **"Not where I left it" has two causes, and only one of them is fatal.** The
+  SAR arm located itself with `times.index(last_bar_ms)` and treated every miss
+  as history having rolled off the window — so it retired. `seed_symbol`
+  REPLACES a bucket wholesale and promoted movers are re-seeded on a throttle
+  (they carry no WS kline subscription), so a REST pull that has not caught up
+  with a bar the socket already delivered leaves the arm's bar **past the end of
+  the array**. Nothing is lost; the bar returns on the next write. That killed
+  **10 of the 15 unmeasurable arms on 2026-08-02, at a median of four bars**, on
+  arms that had opened cleanly and were measuring fine — 9 of the 10 on mover
+  paths, which is exactly the population that gets re-seeded. Declining to
+  advance is **not** a clamp: it is what the arm already does on any cycle with
+  no new bars. Ask which side of the window the miss is on before killing
+  anything — past the end is a wait, before the start is a refusal, and inside
+  the range but off the grid is a third fault with a third fix.
 - **A normalised unit is only honest if the thing it normalises by is what you
   actually varied.** `R = pnl / sl_distance` equalises trades *only* when
   position size scales inversely to the stop. `signal_dispatch` sizes at a fixed

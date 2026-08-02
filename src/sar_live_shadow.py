@@ -150,6 +150,11 @@ EXIT_STATIC_TP1 = "static_tp1"
 #: and every one of them is excluded from the verdict rather than scored.
 EXIT_NO_SAR_AT_ENTRY = "no_sar_at_entry"
 EXIT_BAR_ROLLED_OUT = "bar_rolled_out_of_window"
+#: The arm's bar sits inside the window's time range but is not one of its bars,
+#: so the grid itself changed under us (a re-seed on a different alignment).
+#: Named apart from a roll-out because the fix is different: there the history is
+#: gone, here it was never the history we thought we had.
+EXIT_BAR_NOT_ON_GRID = "bar_not_on_grid"
 #: One advance tried to consume more bars than wall-clock time could have
 #: produced since the arm last moved. The bars are real, but they closed while
 #: this arm's series was frozen — walking them computes SAR levels and fills
@@ -594,6 +599,10 @@ def new_arm(
         "confirm_slippage_pct": None,
         "mfe_pct": 0.0,
         "mae_pct": 0.0,
+        # How often the store handed back a window ending BEFORE this arm's last
+        # bar — a re-seed that had not caught up, not lost history. Present from
+        # creation so blank means "never happened", never "predates the field".
+        "series_regressions": 0,
         "current_price": None,
         "unrealized_pct": None,
         "ambiguous_bar": False,
@@ -711,11 +720,44 @@ def step_arm(
         try:
             idx = times.index(float(last_seen))
         except ValueError:
-            # The bar we last processed has rolled out of the store's window.
-            # We cannot know what happened in between, and inventing a starting
+            # The arm's bar is not in this window. Two very different causes,
+            # and pooling them killed 10 of the 15 unmeasurable arms on
+            # 2026-08-02 at a median of **four bars** — arms that had opened on
+            # a current bar and were measuring fine.
+            #
+            # `seed_symbol` REPLACES a bucket wholesale, and promoted movers are
+            # re-seeded on a throttle because they have no WS kline
+            # subscription. So a REST pull that has not yet caught up with a bar
+            # the socket already delivered leaves `last_seen` **past the end of
+            # the array**. Nothing was lost: the store went backwards for a
+            # moment and the bar returns on the next write.
+            #
+            # Declining to advance is not a clamp — it is what the arm already
+            # does on every cycle with no new bars. Killing it here threw away a
+            # measurement over a transient.
+            newest = float(times[-1]) if times else None
+            oldest = float(times[0]) if times else None
+            if newest is not None and float(last_seen) > newest:
+                arm["series_regressions"] = int(
+                    arm.get("series_regressions") or 0
+                ) + 1
+                arm["last_regression_at"] = now
+                log.debug(
+                    "SAR arm {} waiting: last bar {:.0f} is newer than the "
+                    "store's newest {:.0f} — series regressed, not rolled out",
+                    arm.get("arm_id"), float(last_seen), newest,
+                )
+                return False
+            # Genuinely gone: the window now starts after the bar we last
+            # consumed, so bars we never saw have rolled off the front. We
+            # cannot know what happened in between and inventing a starting
             # index would be a clamp. The arm stops measuring and says why.
             arm["status"] = STATUS_INSUFFICIENT
-            arm["exit_reason"] = EXIT_BAR_ROLLED_OUT
+            arm["exit_reason"] = (
+                EXIT_BAR_ROLLED_OUT
+                if oldest is not None and float(last_seen) < oldest
+                else EXIT_BAR_NOT_ON_GRID
+            )
             arm["closed_at"] = now
             return True
         n = len(times)
