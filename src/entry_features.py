@@ -94,12 +94,40 @@ break even and posting 35% over 17 decided rows.  MOVER_AVWAP_SCALP sets
 42%.  Reading the code confirms the mechanism for TPE: TP1 is the nearest 5m
 swing extreme, then *capped* by ATR percentile
 (``_tp1_cap_tpe``), and ``_enforce_tp_ladder_monotonicity`` floors tp2 at 2.0R
-and tp3 at 4.0R — **but nothing floors tp1**.  A swing sitting half a stop away
-becomes a 0.5R target and no gate downstream knows.
+and tp3 at 4.0R — **but nothing floors tp1**.
 
-Recording it here does not change it.  TP/SL shape is an owner-sign-off item
-(``CLAUDE.md`` § Change-management), so the number goes on the row, the split
-goes on the ops page, and the geometry decision waits for the owner and a
+**Do not read that as "raise TP1".**  It was written here as though it were, and
+it is wrong — checked against the same data hours later, in one query that could
+have been run first.  Raising the target makes the book *worse*, on the
+2026-08-01 11:00 dark window (55 decided rows) under both bounds:
+
+===================  =========  ==========================
+TP1 floored at       Win rate   Result per decided trade
+===================  =========  ==========================
+left as-is              47%     −0.081R
+1.0R                    25%     −0.186R to −0.404R
+1.5R                    18%     −0.245R to −0.536R
+2.0R                     5%     −0.436R to −0.836R
+===================  =========  ==========================
+
+It reproduces on the earlier 08:26 window (48 rows: −0.135R as-is, falling to
+−0.252R…−0.460R at a 1.0R floor), so the direction is not an artefact of one
+export.
+
+The winners barely clear their targets — TPE's hit at a median 0.59R against a
+0.89R median peak — and only 27% of decided trades ever moved 1R in our favour at
+all.  The low target is not a defect; it is the only thing harvesting a move this
+small.  Median MFE across the decided book is **0.53R**, and 26 of 55 trades
+never got 0.5R in favour.
+
+So ``tp1_r_multiple`` is still the first row to read, but as a **description of
+what the book can possibly earn**, not as a lever.  It says the trades are small
+relative to the risk they are sized for — which points at entry quality and at
+loss size, and away from the targets.
+
+Recording it here changes nothing either way.  TP/SL shape is an owner-sign-off
+item (``CLAUDE.md`` § Change-management), so the number goes on the row, the
+split goes on the ops page, and any geometry decision waits for the owner and a
 population — which is the whole point of having a lane that can produce one.
 
 Design decisions worth keeping
