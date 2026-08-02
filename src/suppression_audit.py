@@ -1045,7 +1045,23 @@ class SuppressedCandidateStore:
             if not os.path.exists(self._persist_path):
                 return
             with open(self._persist_path, "r", encoding="utf-8") as fh:
-                raw = json.load(fh)
+                payload = json.load(fh)
+            # Schema 2 (2026-08-02) wraps the records so the per-gate eviction
+            # counts survive the round trip. They are what turns "n=396" into
+            # "396 of 24,000", and without them a reader in another process —
+            # the truth report is built by a separate script — sees every gate
+            # as unsampled, which is exactly wrong for the gates sitting at the
+            # cap. A list is the pre-schema file and still loads.
+            if isinstance(payload, dict):
+                raw = payload.get("records") or []
+                _ev = payload.get("evicted_by_gate")
+                if isinstance(_ev, dict):
+                    self.evicted_by_gate.update(
+                        {str(k): int(v) for k, v in _ev.items()}
+                    )
+                self.stamped_total = int(payload.get("stamped_total") or 0)
+            else:
+                raw = payload
             if isinstance(raw, list):
                 with self._lock:
                     # Bucket by gate on the way in. Truncating the raw list
@@ -1073,7 +1089,14 @@ class SuppressedCandidateStore:
             return
         try:
             with self._lock:
-                payload = self._buffer
+                payload = {
+                    "schema": 2,
+                    "records": self._buffer,
+                    # Not decoration: a per-gate EV computed on a capped ring is
+                    # a sample, and the reader has to be told the denominator.
+                    "evicted_by_gate": dict(self.evicted_by_gate),
+                    "stamped_total": int(self.stamped_total),
+                }
             dirname = os.path.dirname(self._persist_path)
             if dirname:
                 os.makedirs(dirname, exist_ok=True)

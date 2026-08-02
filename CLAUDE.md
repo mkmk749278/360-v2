@@ -998,6 +998,25 @@ python -m src.main
   one hop that decides what a subscriber receives (2026-08-02). **When you
   cannot find where output went, check whether the last artifact that counted
   it is measuring the stage you think it is.**
+- **A `docker exec` one-shot cannot read a live ops tunable — it reads the boot
+  default.** `runtime_tunables.get()` returns `tun.default` whenever `_client is
+  None`, and a fresh exec'd process never initialises the Firestore client. The
+  cohort-edge census printed `GATE enabled=True` and was believed; the engine's
+  own in-process counter then showed `cohort_edge:evaluated == cohort_edge:disabled`
+  on every candidate — the gate was **off**, and had been suppressing nothing
+  while five armed cohorts made it look like the prime suspect for a thin feed
+  (2026-08-02). Any diagnostic run outside the engine process reports what the
+  image was built with, not what the owner set. **Read live state from a counter
+  the engine itself increments**, never from a tunable lookup in a side process.
+- **A capped ring makes every verdict on it a sample, and the cap is invisible
+  unless printed.** The Suppression Quality Audit's per-gate rings hold 400
+  records; `dispatch_cooldown` read `n=396` and nothing on screen distinguished
+  "396 suppressions" from "396 of 24,000". The store had computed the eviction
+  counts all along (`sampling()`) — they were neither persisted nor rendered, so
+  a reader in the truth-report process (a separate script) saw every gate as
+  unsampled. Two halves, and fixing only the render would have shipped a column
+  reading "all" forever. **When a bounded buffer feeds a statistic, persist the
+  eviction count with the data and put the denominator beside the verdict.**
 - **Ask what a gate's suppression stamp anchors to before trusting its
   verdict.** `dispatch_staleness_v2` read the worst verdict in the audit —
   DROP, −0.28R, 166.4R missed against 68.6 saved — and that number cannot be

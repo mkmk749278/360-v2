@@ -935,10 +935,28 @@ def summarize_suppression_audit(records: List[Dict[str, Any]]) -> Dict[str, Any]
         "pending": pending,
         "by_setup": by_setup,
         "by_gate": compute_gate_suppression_metrics(clean),
+        # Held vs evicted per gate. A gate sitting at its ring cap has an EV
+        # measured on a SAMPLE, and "n=396" reads exactly like a census unless
+        # the denominator is beside it.
+        "sampling": _audit_sampling(),
         # Which gate kills which path (#781) — the per-gate table pools setups
         # and so cannot answer "this path emits nothing, what is stopping it?"
         "by_setup_gate": gate_metrics_by_setup(clean),
     }
+
+
+def _audit_sampling() -> Dict[str, Dict[str, int]]:
+    """Per-gate held/evicted from the store, or empty when unavailable.
+
+    The counts are persisted with the records (schema 2) precisely because this
+    report is built by a separate process — an in-memory-only counter would read
+    zero here and quietly promote every sampled verdict to a census.
+    """
+    try:
+        from src.suppression_audit import get_store
+        return get_store().sampling()
+    except Exception:
+        return {}
 
 
 def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
@@ -2013,19 +2031,38 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         by_gate = sup.get("by_gate") or {}
         if by_gate:
             lines.append("")
+            sampling = sup.get("sampling") or {}
             lines.append(
-                "| Gate | n | WOULD_WIN% | Saved R | Missed R | EV/suppression (R) | Verdict |"
+                "| Gate | n | measured | WOULD_WIN% | Saved R | Missed R | "
+                "EV/suppression (R) | Verdict |"
             )
-            lines.append("|---|---:|---:|---:|---:|---:|---|")
+            lines.append("|---|---:|---:|---:|---:|---:|---:|---|")
+            _sampled_gates = []
             for gate in sorted(by_gate.keys()):
                 row = by_gate[gate]
+                _s = sampling.get(gate) or {}
+                _evicted = int(_s.get("evicted", 0) or 0)
+                _held = int(_s.get("held", 0) or 0)
+                _seen = _held + _evicted
+                if _evicted > 0 and _seen > 0:
+                    _cov = f"{_held / _seen * 100.0:.0f}% of {_seen}"
+                    _sampled_gates.append(gate)
+                else:
+                    _cov = "all"
                 lines.append(
-                    f"| {gate} | {row.get('n', 0)} | "
+                    f"| {gate} | {row.get('n', 0)} | {_cov} | "
                     f"{row.get('would_win_pct', 0.0):.1f}% | "
                     f"{row.get('saved_r', 0.0):.1f} | "
                     f"{row.get('missed_r', 0.0):.1f} | "
                     f"{row.get('ev_per_suppression_r', 0.0):+.2f} | "
                     f"**{row.get('verdict', '?')}** |"
+                )
+            if _sampled_gates:
+                lines.append(
+                    "- _**measured** is the share of this gate's suppressions the "
+                    "ring still holds. Anything under 100% is a SAMPLE, and its "
+                    "EV is an estimate whose error nobody has bounded: "
+                    f"{', '.join(_sampled_gates)}._"
                 )
     else:
         lines.append(
