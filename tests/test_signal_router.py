@@ -1416,3 +1416,114 @@ class TestPublishDailyRecap:
         }
         await r.publish_daily_recap(mock_tracker)
         assert sent_messages == []
+
+
+class TestRouterDropTelemetry:
+    """The router drops most of what it dequeues, and used to say nothing.
+
+    Every rejection in ``_process`` was a bare ``return`` after a ``log.info``:
+    no counter, no suppression stamp, no funnel stage, and no truth-report
+    section parsing those lines. Twelve live gates with no row in the
+    Suppression Quality Audit, on the one hop that decides what a subscriber
+    receives — while the path funnel's ``emitted`` column, incremented straight
+    after ``_enqueue_signal``, counts *enqueues* and stops one layer above.
+
+    These drive the real router through the real ``_process``; a mock whose keys
+    we chose could not tell us a drop went uncounted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_delivered_signal_is_counted_as_delivered(self, router):
+        await router._process(_make_signal(confidence=90))
+        stats = router.delivery_stats()
+        assert stats["processed"] == 1
+        assert stats["delivered"] == 1
+        assert stats["dropped"] == 0
+        assert stats["delivery_rate"] == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_the_correlation_lock_drop_is_counted_and_named(self, router):
+        """The second signal on a symbol with an open position. Previously this
+        left no trace anywhere."""
+        await router._process(_make_signal(symbol="BTCUSDT"))
+        second = _make_signal(symbol="BTCUSDT")
+        second.signal_id = "TEST-BTCUSDT-002"
+        await router._process(second)
+
+        stats = router.delivery_stats()
+        assert stats["delivered"] == 1
+        assert stats["dropped"] == 1
+        assert stats["drops_by_reason"]["correlation_lock"] == 1
+        assert stats["delivery_rate"] == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_tp_sanity_rejection_is_counted(self, router):
+        bad = _make_signal(symbol="ETHUSDT")
+        bad.tp1 = bad.entry - 10          # LONG with TP1 below entry
+        await router._process(bad)
+        assert router.delivery_stats()["drops_by_reason"]["tp_sanity"] == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_are_keyed_by_setup_so_a_starved_path_is_visible(self, router):
+        """'This path never reaches a user' and 'the market was quiet' produce
+        the same total otherwise."""
+        first = _make_signal(symbol="SOLUSDT")
+        first.setup_class = "MOVER_TREND_PULLBACK"
+        await router._process(first)
+        second = _make_signal(symbol="SOLUSDT")
+        second.signal_id = "TEST-SOLUSDT-002"
+        second.setup_class = "MOVER_TREND_PULLBACK"
+        await router._process(second)
+
+        by_setup = router.delivery_stats()["drops_by_reason_setup"]
+        assert by_setup["correlation_lock:MOVER_TREND_PULLBACK"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_drop_stamps_the_suppression_audit_under_its_own_gate_name(
+        self, router, monkeypatch
+    ):
+        """The counter says how much volume a gate costs; only the audit says
+        whether it cost money. A gate that cannot be measured cannot earn its
+        place — and none of these could."""
+        stamped = []
+        import src.suppression_audit as sa
+
+        monkeypatch.setattr(
+            sa, "stamp_candidate", lambda **kw: stamped.append(kw) or None
+        )
+        monkeypatch.setattr(
+            "src.runtime_tunables.get", lambda key, *a, **k: True
+        )
+        await router._process(_make_signal(symbol="XRPUSDT"))
+        second = _make_signal(symbol="XRPUSDT")
+        second.signal_id = "TEST-XRPUSDT-002"
+        await router._process(second)
+
+        assert [s["gate_name"] for s in stamped] == ["router:correlation_lock"]
+        assert stamped[0]["symbol"] == "XRPUSDT"
+        assert stamped[0]["entry"] > 0 and stamped[0]["tp1"] > 0
+
+    @pytest.mark.asyncio
+    async def test_a_failing_stamp_never_costs_the_drop_decision(self, router, monkeypatch):
+        """A measurement must never change what the router does."""
+        import src.suppression_audit as sa
+
+        def _boom(**kw):
+            raise RuntimeError("audit down")
+
+        monkeypatch.setattr(sa, "stamp_candidate", _boom)
+        monkeypatch.setattr("src.runtime_tunables.get", lambda key, *a, **k: True)
+
+        await router._process(_make_signal(symbol="ADAUSDT"))
+        second = _make_signal(symbol="ADAUSDT")
+        second.signal_id = "TEST-ADAUSDT-002"
+        await router._process(second)
+
+        assert router.delivery_stats()["drops_by_reason"]["correlation_lock"] == 1
+        assert router.delivery_stats()["delivered"] == 1
+
+    def test_an_idle_router_logs_nothing(self, router, caplog):
+        """A row of zeros every minute is how a real drop-off stops standing
+        out."""
+        router._log_delivery_stats()
+        assert "ROUTER_DELIVERY" not in caplog.text
