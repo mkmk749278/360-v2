@@ -2697,6 +2697,85 @@ class CryptoSignalEngine:
             min_streak=6,          # 30 min sustained
         ))
 
+        def _entry_quality_effective() -> Tuple[bool, str]:
+            """An ENFORCING rule must be able to see the feature it enforces on.
+
+            The failure this exists for is not a crash and not an empty page: a
+            rule whose feature stops computing **abstains on every candidate**,
+            passes everything, and reads exactly like a rule that is working.
+            An inert gate wearing a live gate's label is the shape of half the
+            defects in ``CLAUDE.md`` — a probe reading healthy over a population
+            it cannot see.
+
+            So this checks the two states that are indistinguishable from
+            healthy on any counter you would naturally look at:
+
+            * an enforcing rule that is ``unknown`` on most of its population —
+              the input died, the gate is decorative;
+            * a gate parked over its blast-radius cap — it *wanted* to suppress,
+              the cap held it back, and every downstream count looks like a gate
+              that simply chose not to fire.
+
+            Shadow rules are deliberately not judged: abstaining costs nothing
+            when nothing is being enforced, and paging on it would fill the
+            counter that is supposed to make a real fault stand out.  Same
+            reason this returns True rather than raising when the lane is off or
+            too young — a ``PredicateProbe`` exception becomes a
+            ``fail_open.record``, and a non-event must never land there.
+            """
+            try:
+                from src import entry_quality as _eq
+                params = _eq.EntryQualityParams.from_config()
+                if not params.enabled:
+                    return True, "entry-quality evaluation disabled"
+                snap = _eq.snapshot(params)
+                totals = snap.get("totals") or {}
+                evaluated = int(totals.get("evaluated_total") or 0)
+                if evaluated < 20:
+                    return True, f"only {evaluated} candidates evaluated — too few to judge"
+
+                blind: List[str] = []
+                for rule in snap.get("rules") or []:
+                    if not rule.get("live"):
+                        continue
+                    stats = rule.get("stats") or {}
+                    seen = int(stats.get("seen") or 0)
+                    if seen < 20:
+                        continue
+                    frac = stats.get("unknown_frac")
+                    if frac is not None and float(frac) >= 0.8:
+                        blind.append(f"{rule.get('key')}={float(frac):.0%} unknown")
+                if blind:
+                    return False, (
+                        "enforcing rule(s) cannot read their own feature: "
+                        + ", ".join(blind)
+                        + " — the gate is inert and reads as passing"
+                    )
+
+                budget = snap.get("budget") or {}
+                if not _eq.get_budget().allows() and int(budget.get("suspended_total") or 0) > 0:
+                    return False, (
+                        "entry-quality gate is over its blast-radius cap "
+                        f"({budget.get('recent_rejected')}/{budget.get('recent_decisions')} "
+                        f"recent decisions rejected, cap {budget.get('max_reject_frac')}) "
+                        "— suppression is held back and the rule reads as passing"
+                    )
+                live_rules = [r.get("key") for r in (snap.get("rules") or []) if r.get("live")]
+                return True, (
+                    f"{evaluated} evaluated, "
+                    f"{totals.get('enforced_total')} suppressed, "
+                    f"{totals.get('shadow_reject_total')} shadow-rejected; "
+                    f"live rules: {','.join(str(k) for k in live_rules) or 'none'}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                return True, f"probe unavailable ({type(exc).__name__})"
+
+        fl.add_predicate(PredicateProbe(
+            name="entry_quality_effective",
+            fn=_entry_quality_effective,
+            min_streak=6,          # 30 min sustained
+        ))
+
         def _sar_resolution_progress() -> Tuple[bool, str]:
             """The ledger must actually produce verdicts, not merely fetch data.
 

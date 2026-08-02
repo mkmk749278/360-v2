@@ -77,6 +77,12 @@ def _build_registry() -> Dict[str, Tunable]:
         DISPATCH_STALENESS_V2_LIVE,
         DISPATCH_STALENESS_V2_TOWARD_SL_MAX_FRAC,
         DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC,
+        ENTRY_QUALITY_BUDGET_WINDOW,
+        ENTRY_QUALITY_ENABLED,
+        ENTRY_QUALITY_LIVE,
+        ENTRY_QUALITY_MAX_REJECT_FRAC,
+        ENTRY_QUALITY_RULE_LIVE,
+        ENTRY_QUALITY_RULE_THRESHOLD,
         CONTEXT_EMISSION_MIN_SAMPLES,
         CONTEXT_EMISSION_POLICY_ENABLED,
         CONTEXT_EMISSION_POSITIVE_RELAX,
@@ -583,6 +589,71 @@ def _build_registry() -> Dict[str, Tunable]:
             type="bool",
             default=CONTEXT_EMISSION_GATE_OVERRIDE_LIVE,
             category="Signal gating",
+        ),
+        # ── Entry quality (src/entry_quality.py) ─────────────────────────────
+        # Registered from the rule registry rather than typed out one by one:
+        # the rules, their thresholds and their boot defaults all live in the
+        # module that decides them, and a hand-written copy here would be the
+        # third spelling of the same knob. Appended below the static list.
+        Tunable(
+            key="entry_quality_enabled",
+            label="Entry quality — measure",
+            description=(
+                "ON = evaluate the entry-quality rules against each "
+                "candidate's stamped entry features and record what each rule "
+                "WOULD have rejected. Changes nothing on its own — the "
+                "measurement half, and the population every promotion decision "
+                "reads. OFF = the gate is inert and the ops panel goes empty."
+            ),
+            type="bool",
+            default=ENTRY_QUALITY_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="entry_quality_live",
+            label="Entry quality — apply live (master)",
+            description=(
+                "Master money-path switch for the entry-quality gate. A rule "
+                "suppresses only when this AND its own 'apply live' flag are "
+                "ON, so this is the single lever that stops the whole gate "
+                "without touching per-rule state. Suppressions are stamped "
+                "into the suppression audit, so the gate keeps earning or "
+                "losing its place on forward-measured candles."
+            ),
+            type="bool",
+            default=ENTRY_QUALITY_LIVE,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="entry_quality_max_reject_frac",
+            label="Entry quality — blast-radius cap (frac)",
+            description=(
+                "Over the last N enforcement-eligible decisions, once this "
+                "fraction has been rejected the gate degrades to shadow until "
+                "the window recovers — it keeps stamping and stops "
+                "suppressing. Neither rule's rejection volume has ever been "
+                "measured, and a feed running at single digits per day cannot "
+                "afford to discover it live. 1.0 disables the cap."
+            ),
+            type="float",
+            default=ENTRY_QUALITY_MAX_REJECT_FRAC,
+            category="Signal gating",
+            min_value=0.05,
+            max_value=1.0,
+        ),
+        Tunable(
+            key="entry_quality_budget_window",
+            label="Entry quality — cap window (decisions)",
+            description=(
+                "How many enforcement-eligible decisions the blast-radius cap "
+                "measures over. Decisions, not seconds: a quiet hour must not "
+                "refill a budget that nothing spent."
+            ),
+            type="int",
+            default=ENTRY_QUALITY_BUDGET_WINDOW,
+            category="Signal gating",
+            min_value=10,
+            max_value=5000,
         ),
         Tunable(
             key="dispatch_staleness_v2_enabled",
@@ -1100,6 +1171,64 @@ def _build_registry() -> Dict[str, Tunable]:
             category="Execution",
         ),
     ]
+
+    # ── Per-rule entry-quality knobs, generated from the rule registry ───────
+    # Not typed out above on purpose. The rules, their comparison direction and
+    # their boot defaults are decided in ``src/entry_quality.py``; a
+    # hand-maintained copy here would be a second spelling of the same knob and
+    # would drift the first time a rule is added — the ``MEASUREMENT_SUFFIXES``
+    # lesson, which cost a week of an inflated ops rollup. One writer, one
+    # reader: adding a Rule there surfaces its controls in ops with no edit here.
+    try:
+        from src.entry_quality import CMP_FLAG, RULES as _EQ_RULES
+
+        for _rule in _EQ_RULES:
+            _scope = _rule.setup_class or "every path"
+            items.append(
+                Tunable(
+                    key=_rule.live_key,
+                    label=f"Entry quality · {_rule.label} — apply live",
+                    description=(
+                        f"{_rule.rationale} Applies to {_scope}. Suppresses "
+                        "only while the entry-quality master switch is also ON; "
+                        "OFF leaves the rule stamping what it would have "
+                        "rejected."
+                    ),
+                    type="bool",
+                    default=bool(
+                        ENTRY_QUALITY_RULE_LIVE.get(_rule.key, _rule.live_default)
+                    ),
+                    category="Signal gating",
+                )
+            )
+            if _rule.compare == CMP_FLAG:
+                # A boolean shadow has nothing to compare against; registering a
+                # threshold for it would put a knob in ops that changes nothing.
+                continue
+            items.append(
+                Tunable(
+                    key=_rule.threshold_key,
+                    label=f"Entry quality · {_rule.label} — threshold",
+                    description=(
+                        f"Rejects when {_rule.feature} is "
+                        f"{'above' if _rule.compare == 'max' else 'below'} this "
+                        f"value. Applies to {_scope}."
+                    ),
+                    type="float",
+                    default=float(
+                        ENTRY_QUALITY_RULE_THRESHOLD.get(
+                            _rule.key, _rule.threshold_default
+                        )
+                    ),
+                    category="Signal gating",
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        # A registry that cannot describe a rule must not take the whole tunable
+        # panel down with it — every other knob still renders, and the failure
+        # is loud rather than a silently missing control.
+        log.error("runtime_tunables: entry-quality rule registration failed: {}", exc)
+
     return {t.key: t for t in items}
 
 

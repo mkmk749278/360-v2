@@ -4,6 +4,66 @@
 
 ---
 
+## 🟢 SESSION 103 2026-08-02 — the entry-feature lane gets a consumer
+
+Owner: *"make entry features live, not only measurement"*, against #849 and #851.
+
+### What shipped
+
+`src/entry_quality.py` — a real gate in the scanner's post-scoring chain that can
+suppress a candidate on its stamped entry features. Wired end-to-end: no scaffold,
+no stored-but-unconsumed setting. It runs **after the confidence floor**, so a
+rejection is always a candidate that would otherwise have emitted — the counter
+means "signals this gate cost us", and the shadow population is the emitting book.
+
+### Which rules are live, and why only one
+
+The lane's own PR bodies say a filter cannot be chosen from its window: 19 cells
+on 46 closed signals, exactly one CI excluding zero and *in the backwards
+direction*, ~62% familywise. That has not changed. **Building the gate and
+choosing its rules are separable, and only the second needs evidence.**
+
+| Rule | Mode | Why |
+|---|---|---|
+| `profile_reject` | **enforcing** | A repair. `_pass_basic_filters` computes pair-tier volume/spread thresholds and 19 of 20 call sites discard them — including the path that is ~94% of the delivered book. Enforcing invents no number. |
+| `tpe_smc_zone` | shadow | The repair is known (the gate's comment says "in the pullback zone"; the code says `bool(fvgs)`), the threshold is not. Promotable from ops in one click once the panel has evidence. |
+
+### Three safety properties, each a rule from `CLAUDE.md` arriving from the other side
+
+- **The gate starves its own evidence** unless every live rejection is stamped —
+  a suppressed candidate never delivers, so it can never join the closed-signal
+  record. `_stamp_suppressed(sig, "entry_quality:<rule>")` + its own
+  `REASON_ENTRY_QUALITY`, so the suppression audit ranks it beside every other
+  gate rather than folding it into one.
+- **Unknown abstains** (fail-open) — a fail-closed rule here would kill the feed
+  the moment an order book went dark, which is indistinguishable from a quiet
+  market. Cost: an inert rule reads like a working one, so `unknown_frac` is a
+  column and an enforcing rule blind on ≥80% of its own population pages
+  `entry_quality_effective`.
+- **A rolling blast-radius cap** (`ENTRY_QUALITY_MAX_REJECT_FRAC`, 0.35 over 200
+  decisions) — no rule's rejection *volume* has ever been measured, the ledger is
+  on the VPS, and the first live window is the first look. Over the cap the gate
+  degrades to shadow. Order-dependent by construction, so counted and rendered as
+  its own state.
+
+### Control and reading
+
+Every knob is a runtime tunable, **generated from the rule registry** — adding a
+`Rule` surfaces its ops controls with no second edit. Ops `/signals/entry-features`
+gains a **Live entry-quality rules** panel (ops #122) reading the `eq_*`
+annotations off the ledger rows, and its old "Nothing on this page is applied"
+copy is gone — that sentence became false the moment this shipped.
+
+### Open
+
+Neither rule's live behaviour has been observed yet. **First thing to read next
+session**: the ops panel's Suppressed / Would-have-removed / Unknown columns and
+whether the cap ever suspended. If `profile_reject` is rejecting a large share,
+that is a finding about the mover admission path, not a reason to switch it off
+without looking.
+
+---
+
 ## 🟢 SESSION 102 2026-08-01 — the store had a second writer, SAR gets clean bars, and one recommendation was retracted
 
 Owner brought the 11:00 exports (dark feed, both SAR arm ledgers) and asked to
