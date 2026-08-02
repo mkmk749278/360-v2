@@ -1,4 +1,24 @@
-"""Entry-time features for every path the dark feed measures — stamped, never applied.
+"""Entry-time features for every path the dark feed measures — stamped here, consumed next door.
+
+**2026-08-02: this lane now has a consumer.** ``src/entry_quality.py`` is a real
+gate in the scanner's post-scoring chain that can suppress a candidate on what
+these stamps say, and the owner's directive was exactly that — *"make entry
+features live, not only measurement"*.  The division of labour is deliberate and
+worth keeping: **this module records, that one decides.**  Nothing below applies
+anything, every helper still refuses rather than clamps, and the row a rule reads
+is the row that was written at signal creation.
+
+What changed here is only that a row is now *findable and annotatable*
+(``row_for`` / ``annotate``): the gate runs later than the stamp, in the scanner,
+because that is where suppression and its audit stamp live.  Its verdict is
+merged back onto the row under ``eq_*`` keys so the ops page joins one artifact
+rather than two.  The schema is deliberately **not** bumped for those keys — a
+bump drops the population, and this lane finally has one; a row stamped before
+the gate existed simply carries no ``eq_*``, which ops renders as "not
+evaluated" and never as "passed".  A missing stamp is not a pass.
+
+Everything below this line describes the stamping half, unchanged.
+
 
 Owner, 2026-08-01: *"taking entry is matter, how we are taking entry based on
 only EMA or what, what if we add some more data to that"*, and then, on the dark
@@ -151,7 +171,11 @@ reason recorded in ``missing``, never a zero or a midpoint.  A zero here would b
 a *reading*, and a reading nobody took is worse than an admitted gap: it would
 make an absent order book look like perfectly balanced depth.
 
-Nothing here changes what emits, what a subscriber sees, or what any order does.
+Nothing **in this module** changes what emits: the signal an evaluator returns is
+identical with the stamping on or off, and tests drive the real evaluators both
+ways to pin that.  What emits is now decided one module over, by
+``entry_quality``, reading these rows — and only through rules the owner has
+flipped live from ops.
 """
 from __future__ import annotations
 
@@ -728,9 +752,16 @@ class EntryFeatureLedger:
         self._path = _DEFAULT_PATH if path is None else path
         self._rows: Deque[dict] = deque(maxlen=max_rows or _MAX_ROWS)
         self._seen: set = set()
+        # signal_id -> the row object itself. The deque already holds it; this
+        # is the same object, not a copy, so an annotation written through here
+        # is the row ops reads. Pruned against the ring on every append —
+        # a map that outlives its deque is a slow leak and a lookup that returns
+        # a row nobody will ever flush.
+        self._by_id: Dict[str, dict] = {}
         self._lock = threading.RLock()
         self._dirty = False
         self.duplicate_skips = 0
+        self.annotate_misses = 0
 
     def add(self, row: dict) -> bool:
         sid = str(row.get("signal_id") or "")
@@ -743,8 +774,55 @@ class EntryFeatureLedger:
                 # a fault worth counting rather than silently overwriting.
                 self.duplicate_skips += 1
                 return False
+            evicted = self._rows[0] if len(self._rows) == self._rows.maxlen else None
             self._seen.add(sid)
             self._rows.append(row)
+            self._by_id[sid] = row
+            if evicted is not None:
+                old = str(evicted.get("signal_id") or "")
+                if old:
+                    self._by_id.pop(old, None)
+                    self._seen.discard(old)
+            self._dirty = True
+            return True
+
+    def row_for(self, signal_id: str) -> Optional[dict]:
+        """The stamped row for one signal, or None. O(1), no I/O.
+
+        Returns the live object rather than a copy: the entry-quality gate runs
+        in the scanner, after the evaluator has already stamped, and it needs to
+        read what was stamped and write back what it decided. A copy would give
+        the gate a private view and leave the ledger — the thing ops reads —
+        describing a decision that was never made.
+        """
+        sid = str(signal_id or "")
+        if not sid:
+            return None
+        with self._lock:
+            return self._by_id.get(sid)
+
+    def annotate(self, signal_id: str, values: Dict[str, Any]) -> bool:
+        """Merge *values* into an already-stamped row.
+
+        For facts that become true *after* the evaluator returns — today, the
+        entry-quality verdict, which is decided in the scanner because that is
+        where suppression lives. It is still "record a fact where it becomes
+        true": the gate's own moment is later than the stamp's, and the
+        alternative (re-deriving the decision at read time in ops) is the
+        drifting mirror this lane already refuses.
+
+        A miss is **counted**, not swallowed. A signal whose row is gone means
+        the ring rotated or the stamp never happened, and an annotation quietly
+        landing nowhere is how an ops panel comes to describe a population that
+        does not exist.
+        """
+        sid = str(signal_id or "")
+        with self._lock:
+            row = self._by_id.get(sid) if sid else None
+            if row is None:
+                self.annotate_misses += 1
+                return False
+            row.update(values)
             self._dirty = True
             return True
 
@@ -809,6 +887,20 @@ class EntryFeatureLedger:
                     if sid and sid not in self._seen:
                         self._seen.add(sid)
                         self._rows.append(row)
+                        # Same object the deque holds — a reloaded row must be
+                        # annotatable, or a restart would silently split the
+                        # ledger into rows the gate can write to and rows it
+                        # cannot, with nothing on screen saying which.
+                        self._by_id[sid] = row
+                # A payload longer than the ring evicts from the left as it is
+                # appended, so the maps are rebuilt from what actually survived
+                # rather than from what was read.
+                self._by_id = {
+                    str(r.get("signal_id") or ""): r
+                    for r in self._rows
+                    if r.get("signal_id")
+                }
+                self._seen = set(self._by_id)
         except Exception as exc:  # noqa: BLE001
             fail_open.record("entry_features.load", exc)
 

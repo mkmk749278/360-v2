@@ -224,6 +224,7 @@ from src.suppression_telemetry import (
     REASON_CONFIDENCE,
     REASON_PAIR_ANALYSIS,
     REASON_COHORT_EDGE,
+    REASON_ENTRY_QUALITY,
 )
 
 # --- PR 01-08 new module imports ------------------------------------------
@@ -1367,6 +1368,15 @@ class Scanner:
         self._context_floor_would_emit_total: int = 0
         self._context_floor_would_suppress_total: int = 0
         self._context_floor_applied_total: int = 0
+
+        # Entry-quality gate (src/entry_quality.py) monotonic counters. Three,
+        # not one, because "a rule fired", "a rule suppressed" and "a rule was
+        # held back by the blast-radius cap" are three different states and a
+        # single total would make the second indistinguishable from the third.
+        # Drive the entry_quality liveness probe and the ops panel.
+        self._entry_quality_would_reject_total: int = 0
+        self._entry_quality_enforced_total: int = 0
+        self._entry_quality_budget_suspended_total: int = 0
 
         # Scoring tier telemetry: accumulates candidate counts per setup_class
         # and score tier across cycles; logged every 100 scan cycles to diagnose
@@ -8268,6 +8278,82 @@ class Scanner:
             ))
             self._stamp_suppressed(sig, _reason)
             return _reject("filtered", cross_verified)
+        # ── ENTRY QUALITY — the consuming half of the entry-feature lane ─────
+        # #849/#851 stamped what every path could have looked at and applied
+        # none of it; this is where a stamp can cost a candidate its emission.
+        # See src/entry_quality.py for why only a repair of an already-intended
+        # filter ships enforcing, and why the discriminators the ops splits rank
+        # do not.
+        #
+        # It runs HERE, after the confidence floor, on purpose: an entry_quality
+        # rejection is therefore always a candidate that would otherwise have
+        # emitted, so the counter means "signals this gate cost us" and the
+        # shadow population is the emitting book — the only population a
+        # promotion decision may read ("emitted" means DELIVERED).
+        #
+        # Fail-open around the whole block: a measurement lane must never be the
+        # reason a scan dies, and the failure is counted rather than swallowed.
+        try:
+            from src import entry_features as _eqf
+            from src import entry_quality as _eq
+
+            _eq_row = _eqf.get_ledger().row_for(str(getattr(sig, "signal_id", "") or ""))
+            _eq_decision = _eq.decide(
+                _eq_row, str(getattr(sig, "setup_class", "") or "")
+            )
+            if _eq_decision.evaluated:
+                # Written back onto the stamped row so ops joins one artifact.
+                # The gate's verdict becomes true here, not in the evaluator —
+                # so it is recorded here (`record a fact where it becomes true`).
+                _eqf.get_ledger().annotate(
+                    str(getattr(sig, "signal_id", "") or ""), _eq_decision.as_row()
+                )
+                if _eq_decision.would_reject_by:
+                    self._entry_quality_would_reject_total += 1
+                if _eq_decision.budget_suspended:
+                    # A distinct state, never a silence: the cap held back a
+                    # rejection the gate wanted to make, and an ops panel that
+                    # could not tell this from "the rule passed" would read a
+                    # suspended gate as a healthy one.
+                    self._entry_quality_budget_suspended_total += 1
+                    self._suppression_counters["entry_quality_budget_suspended"] += 1
+                    log.warning(
+                        "[ENTRY_QUALITY] budget suspended — {} {} {} would reject on {} "
+                        "but the rolling cap is spent; passing through",
+                        symbol, chan_name, sig.setup_class,
+                        ",".join(_eq_decision.would_reject_by),
+                    )
+                if _eq_decision.enforced_by:
+                    self._entry_quality_enforced_total += 1
+                    self._suppression_counters[
+                        f"entry_quality:{_eq_decision.enforced_by}"
+                    ] += 1
+                    log.info(
+                        "ENTRY_QUALITY suppressed {} {} {}: rule {} ({})",
+                        symbol, chan_name, sig.setup_class,
+                        _eq_decision.enforced_by,
+                        ",".join(_eq_decision.would_reject_by),
+                    )
+                    self.suppression_tracker.record(SuppressionEvent(
+                        symbol=symbol,
+                        channel=chan_name,
+                        reason=REASON_ENTRY_QUALITY,
+                        regime=_regime_key,
+                        would_be_confidence=sig.confidence,
+                    ))
+                    self._increment_path_funnel(
+                        "gate_reject:entry_quality", chan_name, sig.setup_class
+                    )
+                    # Every live gate stamps, no exceptions — and this one needs
+                    # it more than most: an enforcing entry rule starves its own
+                    # evidence (cohort_edge's absorbing state), so the forward
+                    # measurement on suppressed candidates is the ONLY way its
+                    # verdict keeps arriving after enforcement starts.
+                    self._stamp_suppressed(sig, f"entry_quality:{_eq_decision.enforced_by}")
+                    return _reject("filtered", cross_verified)
+        except Exception as _eq_exc:  # noqa: BLE001
+            fail_open.record("scanner.entry_quality", _eq_exc)
+
         # Reset failed-detection counter — this symbol+channel produced a valid signal
         self._conf_fail_tracker.pop((symbol, chan_name), None)
         _record_confidence_gate_decision(

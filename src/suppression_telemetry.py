@@ -48,6 +48,12 @@ REASON_PAIR_QUALITY: str = "pair_quality"
 REASON_RANGING_ADX: str = "ranging_adx"
 REASON_PAIR_ANALYSIS: str = "pair_analysis"
 REASON_COHORT_EDGE: str = "cohort_edge"
+#: Entry-quality policy (``src/entry_quality.py``, 2026-08-02) — the consuming
+#: half of the entry-feature lane.  Its own reason rather than a borrowed
+#: ``spread_gate``: the rules are per-path and independently switchable, and a
+#: gate folded into another gate's bucket cannot be ranked apart from it in the
+#: suppression audit — which is the only way it earns or loses its place.
+REASON_ENTRY_QUALITY: str = "entry_quality"
 
 # Default rolling window (4 hours)
 _DEFAULT_WINDOW_SECONDS: float = 4 * 3600.0

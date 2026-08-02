@@ -300,6 +300,7 @@ Telegram are both acceptable paging paths.
 | SAR exit shadow arm (`@SARBASE`/`@SAREXIT`, dark, **replay**) | `src/sar_exit_shadow.py` |
 | SAR exit mechanism (**live**, forward-stepped in the monitor loop, dark) | `src/sar_live_shadow.py` |
 | Per-path entry-feature stamps (observe-only, joined to the closed-signal record) | `src/entry_features.py` |
+| Entry-quality gate — the consuming half of that lane (**LIVE**, per-rule ops switches) | `src/entry_quality.py` |
 
 ---
 
@@ -928,6 +929,39 @@ python -m src.main
   constant, or did we hold the thing it divides into constant?** Corollary: a
   percentage needs no denominator, so it cannot silently shrink its own
   population the way R does.
+- **"Make it live" is a question about which rules, not about whether to have a
+  gate.** Owner, 2026-08-02: *"make entry features live, not only
+  measurement"* — against a lane (#849/#851) whose own PR bodies say a filter
+  cannot be chosen from its window: nineteen cells on 46 closed signals, one CI
+  excluding zero *in the backwards direction*, ~62% familywise. Building the
+  gate and picking its rules are separable, and only the second needs evidence.
+  `src/entry_quality.py` ships the mechanism wired end-to-end — a real gate in
+  the post-scoring chain, suppression-stamped, per-rule switchable from ops —
+  and enforces exactly one rule: `profile_reject`, which is **a repair, not a
+  discovery**. `_pass_basic_filters` computes pair-tier liquidity and spread
+  thresholds and 19 of 20 call sites throw them away, including the path that is
+  ~94% of the book; enforcing it invents no number. `tpe_smc_zone` knows its
+  repair and not its threshold ("how many ATR is *in the pullback zone*"), so it
+  ships shadow. **Ask of any rule about to go live: does its threshold come from
+  code that already exists, or from this window?** Three corollaries, each one a
+  rule from this file arriving from the other side:
+  - **An enforcing gate starves its own evidence** (`cohort_edge`'s absorbing
+    state). A suppressed candidate never delivers, so it can never join the
+    closed-signal record the promotion argument is measured on. Every live
+    rejection therefore stamps `_stamp_suppressed`, and the suppression audit's
+    forward measurement is where the rule keeps earning its place.
+  - **Unknown abstains, and the direction of that fail is a per-path decision.**
+    `crypto_perp_admission` is fail-closed because its input is the whole
+    exchange; this gate is fail-open because its input is a measurement lane, and
+    a fail-closed rule here would kill the feed the moment an order book went
+    dark — indistinguishable from a quiet market. The cost is that an inert rule
+    reads exactly like a working one, so `unknown_frac` is a column and an
+    enforcing rule blind on 80% of its own population pages the watchdog.
+  - **A bound you cannot compute in advance is a blast-radius cap, and it is
+    counted.** No rule's rejection *volume* had been measured — the ledger is on
+    the VPS. Over a rolling cap the gate degrades to shadow rather than
+    suppressing, which is order-dependent by construction and therefore its own
+    named state on the panel, never a silence.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

@@ -1378,6 +1378,42 @@ DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC: float = _safe_float(
     "DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC", "0.35"
 )
 
+# ── Entry quality — the consuming half of the entry-feature lane (2026-08-02) ─
+# #849 and #851 stamped what every path could have looked at and applied none of
+# it.  ``src/entry_quality.py`` is the gate that consumes those stamps; see its
+# docstring for why only a *repair of an already-intended filter* ships
+# enforcing, and why the discriminators the ops splits rank do not.
+#
+# ENABLED = shadow evaluation on every candidate (measurement flag, ON — a
+# measurement shipped OFF produces an empty panel and a deferred decision).
+# LIVE = the master money-path switch; a rule suppresses only when this AND its
+# own per-rule flag are set, so there is one lever for the gate and one per rule.
+ENTRY_QUALITY_ENABLED: bool = _safe_bool("ENTRY_QUALITY_ENABLED", "true")
+ENTRY_QUALITY_LIVE: bool = _safe_bool("ENTRY_QUALITY_LIVE", "true")
+#: Blast-radius cap.  Neither rule's rejection *volume* has ever been measured —
+#: the ledger lives on the VPS and the first live window is the first look.  Over
+#: the last ENTRY_QUALITY_BUDGET_WINDOW enforcement-eligible decisions, once this
+#: fraction is rejected the gate degrades to shadow until the window recovers.
+#: Counted and rendered, never silent: a suspended gate is its own state on the
+#: ops panel, not a quiet market.
+ENTRY_QUALITY_MAX_REJECT_FRAC: float = _safe_float("ENTRY_QUALITY_MAX_REJECT_FRAC", "0.35")
+#: Decisions, not seconds — a quiet hour must not refill a budget nothing spent.
+ENTRY_QUALITY_BUDGET_WINDOW: int = _safe_int("ENTRY_QUALITY_BUDGET_WINDOW", "200")
+#: Per-rule enforcement flags, keyed by ``entry_quality.Rule.key``.  Env override
+#: is ``ENTRY_QUALITY_<KEY>_LIVE``; the ops tunable of the same name wins at
+#: runtime.  ``profile_reject`` is live because enforcing it invents no number —
+#: it applies the pair-tier thresholds ``_pass_basic_filters`` already computes
+#: and 19 of 20 call sites discard.  ``tpe_smc_zone`` is shadow because "how many
+#: ATR counts as in the pullback zone" is a number nobody has measured.
+ENTRY_QUALITY_RULE_LIVE: dict = {
+    "profile_reject": _safe_bool("ENTRY_QUALITY_PROFILE_REJECT_LIVE", "true"),
+    "tpe_smc_zone": _safe_bool("ENTRY_QUALITY_TPE_SMC_ZONE_LIVE", "false"),
+}
+#: Per-rule thresholds (ignored by ``flag`` rules, which have nothing to compare).
+ENTRY_QUALITY_RULE_THRESHOLD: dict = {
+    "tpe_smc_zone": _safe_float("ENTRY_QUALITY_TPE_SMC_ZONE_THRESHOLD", "1.5"),
+}
+
 # ── Dispatch cooldown — per-(symbol, setup, direction) re-emission guard ─────
 # Gate audit (2026-07-19) read it DROP: 312 blocked, 100% would-win, 235.1R
 # missed, EV −0.75 — the 30-min window blocked profitable re-entries on
