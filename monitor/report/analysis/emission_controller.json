@@ -268,9 +268,9 @@
         "HOLD"
       ],
       "VOLUME_SURGE_BREAKOUT|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "VOLUME_SURGE_BREAKOUT|min_samples": [
         "HOLD",
@@ -362,6 +362,12 @@
         "HOLD",
         "HOLD",
         "HOLD"
+      ],
+      "SR_FLIP_RETEST@ATR|suppress_negative": [
+        "SKIP"
+      ],
+      "SR_FLIP_RETEST@ATR|min_samples": [
+        "LOWER"
       ]
     },
     "last_change_cycle": {
@@ -388,7 +394,7 @@
       "MOVER_AVWAP_SCALP|suppress_negative": 412,
       "QUIET_COMPRESSION_BREAK@SAREXIT|min_samples": 437
     },
-    "cycle": 509
+    "cycle": 555
   },
   "ledger": [
     {

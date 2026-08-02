@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-01T04:07:24.912691+00:00",
-  "generated_at_ts": 1785557244.9126914,
+  "generated_at": "2026-08-02T04:10:16.129519+00:00",
+  "generated_at_ts": 1785643816.1295185,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "f89fdc7d6fcd07d2c5f1ccd4520907238d9d3d26",
+  "git_sha": "45d6a34d643fb2b18d61056af815b60456fc0e7a",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,10 +15,10 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 7487,
-    "strategy_matrix_scored_cells": 2784,
+    "strategy_matrix_cells": 7799,
+    "strategy_matrix_scored_cells": 2892,
     "performance_setups": 14,
-    "suppression_gates": 22
+    "suppression_gates": 23
   },
   "headlines": {
     "strongest_cells": [
@@ -69,8 +69,8 @@
       {
         "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
         "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -6.863687534985752,
-        "n": 29,
+        "edge_r": -6.71085218475079,
+        "n": 30,
         "verdict": "NEGATIVE"
       },
       {
@@ -82,27 +82,27 @@
       },
       {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
-        "context_key": "ASIA/ACCUMULATION/NORMAL/BTC_NEUTRAL",
-        "edge_r": -4.653023522543216,
-        "n": 18,
+        "context_key": "LONDON/QUIET/COMPRESSED/BTC_NEUTRAL",
+        "edge_r": -4.496467092115662,
+        "n": 32,
         "verdict": "NEGATIVE"
       },
       {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
-        "context_key": "LONDON/QUIET/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": -4.6159164868547045,
-        "n": 31,
+        "context_key": "LONDON/MARKDOWN/NORMAL/BTC_NEUTRAL",
+        "edge_r": -4.45327406019581,
+        "n": 33,
         "verdict": "NEGATIVE"
       }
     ],
     "gate_verdict_counts": {
-      "KEEP": 17,
-      "TUNE": 1,
-      "INSUFFICIENT_SAMPLE": 3,
+      "TUNE": 2,
+      "KEEP": 18,
+      "INSUFFICIENT_SAMPLE": 2,
       "DROP": 1
     },
     "drop_gates": [
-      "level_still_in_play"
+      "dispatch_staleness_v2"
     ]
   }
 }
