@@ -4,6 +4,59 @@
 
 ---
 
+## 🟢 SESSION 106 2026-08-02 — the feed's biggest gate had no counter
+
+Owner: *"take the cohort_edge feed issue"* (~16 delivered signals/day). The
+diagnosis moved the target.
+
+### cohort_edge is not the culprit — and nothing could have told us
+
+- **The funnel's "Emitted" column counts ENQUEUES.**
+  `_increment_path_funnel("emitted", …)` fires right after `_enqueue_signal`
+  succeeds (`scanner:8940`, `:8959`). `CLAUDE.md` already said *"emitted" means
+  DELIVERED, and only the router knows that* — the artifact had been reading the
+  wrong stage the whole time.
+- **`SignalRouter._process` had zero instrumentation.** Twelve rejection
+  conditions, every one a bare `return` after a `log.info`. `grep -c` for any
+  counter in that file returned 0, and no truth-report section parsed those
+  lines. Twelve live gates with no row in the Suppression Quality Audit, on the
+  one hop that decides what a subscriber receives.
+- **cohort_edge has no audit row at all**, despite 5 armed cohorts (4 of them
+  every MVRTP side×regime combination). All 27 cohorts still end `/DECLINE` —
+  the least-varying-component cliff from 2026-07-30, unchanged. `macro_direction()`
+  needs a `closes` argument, so the quick check failed; **still unanswered
+  whether the gate is armed under today's macro**.
+- **`dispatch_staleness_v2`'s DROP verdict is not trustworthy.** −0.28R with
+  166.4R missed, the loudest signal in the report — but its suppression stamp
+  anchors `entry=sig.entry`, the very price the gate declared stale. Scored on a
+  fill nobody could have got, biased against exactly this gate.
+- The 8,498 MVRTP confidence-passes → 309 enqueues is **not** loss: a 27×
+  collapse matching the 20–48 re-detections per move measured in Session 104.
+
+### What shipped
+
+Router drop telemetry (`src/signal_router.py`): a `_drop(signal, reason)` helper
+replacing all 16 bare returns across 12 reasons. Each one now increments a
+monotonic counter keyed `reason` and `reason:setup_class`, and stamps the
+suppression audit as `router:<reason>` — so every router gate gets a WOULD_WIN%,
+an EV and a KEEP/TUNE/DROP verdict beside every other gate. `delivery_stats()`
+publishes processed / delivered / dropped / delivery_rate; `_log_delivery_stats()`
+writes one `ROUTER_DELIVERY` line a minute on the existing cleanup tick (silent
+while idle). Measurement-only — nothing changes about what emits.
+
+### Open
+
+1. **Read the first window**: `docker logs 360scalp-v2-engine | grep ROUTER_DELIVERY | tail -5`
+   and the new `router:*` rows in the Suppression Quality Audit. That is the
+   answer to where the feed goes, with an EV attached.
+2. The funnel's `emitted` stage should be renamed `enqueued` — not done, it
+   would break the truth-report parser and wants its own change.
+3. Re-anchor the staleness suppression stamp to dispatch-time price, or mark
+   those rows so the audit flags rather than silently mis-scores them.
+4. Is cohort_edge armed under today's macro? Unanswered.
+
+---
+
 ## 🟢 SESSION 105 2026-08-02 — the SMC gate was fine, and the live gate filters nothing
 
 Owner ran the checks the previous session asked for. Both answers were the

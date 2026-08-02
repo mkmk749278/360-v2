@@ -981,6 +981,35 @@ python -m src.main
     the VPS. Over a rolling cap the gate degrades to shadow rather than
     suppressing, which is order-dependent by construction and therefore its own
     named state on the panel, never a silence.
+- **The gate that drops the most had no counter at all, because the artifact
+  above it stopped one layer too early.** Asked why the delivered feed sat at
+  ~16/day, the funnel said `MOVER_TREND_PULLBACK … Emitted 309` — and
+  `_increment_path_funnel("emitted", …)` fires immediately after
+  `_enqueue_signal` succeeds, so that column counts **enqueues**. This file
+  already said *"emitted" means DELIVERED, and only the router knows that*;
+  the funnel had been reading enqueue and calling it emitted the whole time.
+  Downstream, `SignalRouter._process` rejects on twelve conditions —
+  correlation lock, per-symbol cooldown, per-channel cap, correlation group
+  limit, `MAX_SAME_DIRECTION_GLOBAL`, TP/SL sanity, four staleness checks,
+  channel min-confidence — and every one was a bare `return` after a
+  `log.info`: no counter, no `_stamp_suppressed`, no truth-report section
+  parsing those lines (`grep -c` for any counter in that file returned **0**).
+  Twelve live gates, zero rows in the Suppression Quality Audit, sitting on the
+  one hop that decides what a subscriber receives (2026-08-02). **When you
+  cannot find where output went, check whether the last artifact that counted
+  it is measuring the stage you think it is.**
+- **Ask what a gate's suppression stamp anchors to before trusting its
+  verdict.** `dispatch_staleness_v2` read the worst verdict in the audit —
+  DROP, −0.28R, 166.4R missed against 68.6 saved — and that number cannot be
+  taken at face value: `_stamp_suppressed` records `entry=sig.entry`, and this
+  gate suppresses *precisely because price has drifted away from `sig.entry`*.
+  The audit then forward-measures the candidate from a fill nobody could have
+  got. The bias is gate-specific (no other gate rejects *because of* price
+  drift) and points in exactly the direction that makes the gate look guilty,
+  so acting on it would have widened a staleness bound off a number built on an
+  unavailable price. Same class as the R-denominator bug: **ask whether the
+  quantity a measurement is anchored to is still the thing it was when the
+  measurement started.**
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

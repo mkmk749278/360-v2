@@ -18,6 +18,7 @@ import inspect
 import json
 import os
 import time
+from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
@@ -206,6 +207,29 @@ class SignalRouter:
         self._ai_scorer: Optional[AIConfidenceScorer] = None
         # Signal pulse: post periodic status messages for open signals
         self._signal_pulse_enabled: bool = True
+
+        # ── Router drop telemetry (2026-08-02) ──────────────────────────────
+        # Every rejection in ``_process`` was a bare ``return`` after a
+        # ``log.info``: no counter, no suppression stamp, no funnel stage, and
+        # nothing in the truth report parsing those lines. Twelve live gates
+        # with no row in the Suppression Quality Audit, sitting on the one hop
+        # that decides what a subscriber actually receives.
+        #
+        # It mattered because the artifact upstream is mislabelled: the path
+        # funnel's "Emitted" column is incremented right after
+        # ``_enqueue_signal`` succeeds, so it counts ENQUEUES. Enqueue is not
+        # dispatch — this method drops most of what it dequeues — so the only
+        # numbers anyone could read stopped one layer above the layer that does
+        # the work. "When output drops, list the gates and check which ones
+        # have no row" (``CLAUDE.md``): all of these had no row.
+        #
+        # Monotonic since boot, keyed ``reason`` and ``reason:setup_class`` so a
+        # path that never reaches users can be told apart from a market that is
+        # quiet. Never reset — a counter the reader has to catch mid-window is
+        # a counter that reports a fault which is not happening.
+        self._drop_counters: Dict[str, int] = defaultdict(int)
+        self._delivered_total: int = 0
+        self._processed_total: int = 0
         # Optional callback: called after a paid signal is successfully posted.
         # Signature: async (symbol: str, bias: str) -> None
         # Wired to FreeWatchService.on_paid_signal in main.py.
@@ -631,6 +655,7 @@ class SignalRouter:
                 if _cleanup_counter >= 60:  # roughly every 60 seconds
                     self.cleanup_expired()
                     _cleanup_counter = 0
+                    self._log_delivery_stats()
                 continue
             except asyncio.CancelledError:
                 break
@@ -699,13 +724,116 @@ class SignalRouter:
         except Exception as exc:
             log.debug("Failed to write dispatch log: {}", exc)
 
+    def _drop(self, signal: Signal, reason: str) -> None:
+        """Count a router rejection and stamp it for forward measurement.
+
+        Returns ``None`` so a call site reads ``return self._drop(sig, "...")``
+        and stays a one-line change from the bare ``return`` it replaces.
+
+        Two things happen, and they answer different questions:
+
+        * **The counter** says how much this gate costs in volume. Keyed by
+          reason and by ``reason:setup_class``, because "this path never reaches
+          a user" and "the market was quiet" produce the same total otherwise.
+        * **The suppression stamp** says whether it cost anything in money. The
+          audit forward-measures the candidate on real candles and gives the
+          gate a WOULD_WIN% and an EV, which is the only way a gate earns or
+          loses its place (``CLAUDE.md``). Every other live gate in the engine
+          stamps; none of these did.
+
+        Fail-open and silent on error: a measurement must never be the reason a
+        signal is mishandled, and ``stamp_candidate`` already refuses cleanly on
+        geometry it cannot score.
+        """
+        setup = str(getattr(signal, "setup_class", "") or "UNKNOWN")
+        self._drop_counters[reason] += 1
+        self._drop_counters[f"{reason}:{setup}"] += 1
+        try:
+            from src import runtime_tunables as _rt
+            if not bool(_rt.get("suppression_audit_enabled")):
+                return None
+            from src import suppression_audit as _sa
+            _direction = getattr(signal, "direction", None)
+            _sa.stamp_candidate(
+                gate_name=f"router:{reason}",
+                symbol=str(getattr(signal, "symbol", "") or ""),
+                channel=str(getattr(signal, "channel", "") or ""),
+                setup_class=setup,
+                side=(getattr(_direction, "value", None) or str(_direction or "")),
+                entry=float(getattr(signal, "entry", 0.0) or 0.0),
+                stop_loss=float(getattr(signal, "stop_loss", 0.0) or 0.0),
+                tp1=float(getattr(signal, "tp1", 0.0) or 0.0),
+                confidence=float(getattr(signal, "confidence", 0.0) or 0.0),
+                context_key=str(getattr(signal, "mc_context_key", "") or ""),
+                regime=str(getattr(signal, "entry_regime", "") or ""),
+                valid_for_minutes=float(getattr(signal, "valid_for_minutes", 0.0) or 0.0),
+                pair_cohort=str(getattr(signal, "mc_pair_cohort", "") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            from src import fail_open as _fo
+            _fo.record("signal_router.drop_stamp", exc)
+        return None
+
+    def _log_delivery_stats(self) -> None:
+        """One line a minute naming where the dequeued signals went.
+
+        The truth report is built from logs by a separate script, so it cannot
+        reach these counters on the live object — a log line is how the volume
+        gets into the same artifact the rest of the funnel lives in. The EV side
+        needs no wiring: ``_drop`` stamps the suppression audit, so each reason
+        shows up as a ``router:<reason>`` gate with a KEEP/TUNE/DROP verdict
+        beside every other gate.
+
+        Silent while nothing has been processed — a router with an empty queue
+        must not fill the log with a row of zeros, which is how a real drop-off
+        stops standing out.
+        """
+        if self._processed_total <= 0:
+            return
+        stats = self.delivery_stats()
+        rate = stats["delivery_rate"]
+        log.info(
+            "ROUTER_DELIVERY processed={} delivered={} ({}) dropped={} | {}",
+            stats["processed"],
+            stats["delivered"],
+            f"{rate:.1%}" if rate is not None else "n/a",
+            stats["dropped"],
+            ", ".join(f"{k}={v}" for k, v in stats["drops_by_reason"].items()) or "none",
+        )
+
+    def delivery_stats(self) -> Dict[str, Any]:
+        """What the router did with what it dequeued.
+
+        The path funnel's ``emitted`` stage is incremented right after
+        ``_enqueue_signal`` succeeds, so it counts **enqueues** — this method is
+        the other half, and the two together are the enqueue→delivery ratio
+        nobody could previously read.
+        """
+        drops = {k: v for k, v in self._drop_counters.items() if ":" not in k}
+        by_setup = {k: v for k, v in self._drop_counters.items() if ":" in k}
+        dropped = sum(drops.values())
+        return {
+            "processed": self._processed_total,
+            "delivered": self._delivered_total,
+            "dropped": dropped,
+            "delivery_rate": (
+                self._delivered_total / self._processed_total
+                if self._processed_total else None
+            ),
+            "drops_by_reason": dict(sorted(drops.items(), key=lambda kv: -kv[1])),
+            "drops_by_reason_setup": dict(
+                sorted(by_setup.items(), key=lambda kv: -kv[1])
+            ),
+        }
+
     async def _process(self, signal: Signal) -> None:
+        self._processed_total += 1
         # WATCHLIST tier was removed in the app-era doctrine reset; sub-65
         # confidence signals never reach this path because the scanner drops
         # them at the min_confidence gate.  Defensive: should anything tier
         # a signal as WATCHLIST going forward, drop it silently here too.
         if getattr(signal, "signal_tier", "") == "WATCHLIST":
-            return
+            return self._drop(signal, "watchlist_tier")
 
         # Correlation lock – block any signal for a symbol that already has an
         # open position (regardless of direction to prevent same-dir duplicates)
@@ -715,7 +843,7 @@ class SignalRouter:
                 "Blocked {} {} – existing {} position open",
                 signal.symbol, signal.direction.value, existing_dir.value,
             )
-            return
+            return self._drop(signal, "correlation_lock")
 
         # Per-symbol + per-channel cooldown check
         cooldown_key = (signal.symbol, signal.channel)
@@ -729,7 +857,7 @@ class SignalRouter:
                     signal.symbol, signal.channel,
                     cooldown_secs - elapsed, cooldown_secs,
                 )
-                return
+                return self._drop(signal, "symbol_channel_cooldown")
 
         # Per-channel concurrent position cap
         channel_count = sum(
@@ -742,7 +870,7 @@ class SignalRouter:
                 signal.channel, channel_count, channel_max,
                 signal.symbol, signal.direction.value,
             )
-            return
+            return self._drop(signal, "per_channel_cap")
 
         # Correlation-aware position limiting (group-based)
         active_positions = {
@@ -759,7 +887,7 @@ class SignalRouter:
                 "Blocked {} {} – {}",
                 signal.symbol, signal.direction.value, corr_reason,
             )
-            return
+            return self._drop(signal, "correlation_group_limit")
 
         # Global same-direction cap (Correlation Throttle).
         # Top-75 USDT-M alts are 0.85-0.95 correlated to BTC; when BTC
@@ -776,7 +904,7 @@ class SignalRouter:
                 signal.symbol, signal.direction.value,
                 same_dir_count, MAX_SAME_DIRECTION_GLOBAL,
             )
-            return
+            return self._drop(signal, "same_direction_throttle")
 
         # TP direction sanity – reject signals where TP1 is on wrong side of entry
         if signal.direction == Direction.LONG and signal.tp1 <= signal.entry:
@@ -784,13 +912,13 @@ class SignalRouter:
                 "Signal {} {} LONG has TP1 {:.8f} <= entry {:.8f} – rejected",
                 signal.symbol, signal.channel, signal.tp1, signal.entry,
             )
-            return
+            return self._drop(signal, "tp_sanity")
         if signal.direction == Direction.SHORT and signal.tp1 >= signal.entry:
             log.warning(
                 "Signal {} {} SHORT has TP1 {:.8f} >= entry {:.8f} – rejected",
                 signal.symbol, signal.channel, signal.tp1, signal.entry,
             )
-            return
+            return self._drop(signal, "tp_sanity")
 
         # SL direction sanity – reject signals where SL is on wrong side of entry
         if signal.direction == Direction.LONG and signal.stop_loss >= signal.entry:
@@ -798,13 +926,13 @@ class SignalRouter:
                 "Signal {} {} LONG has SL {:.8f} >= entry {:.8f} – rejected",
                 signal.symbol, signal.channel, signal.stop_loss, signal.entry,
             )
-            return
+            return self._drop(signal, "sl_sanity")
         if signal.direction == Direction.SHORT and signal.stop_loss <= signal.entry:
             log.warning(
                 "Signal {} {} SHORT has SL {:.8f} <= entry {:.8f} – rejected",
                 signal.symbol, signal.channel, signal.stop_loss, signal.entry,
             )
-            return
+            return self._drop(signal, "sl_sanity")
 
         # ── Stale signal gate ───────────────────────────────────────────────
         # Check whether the signal is still actionable before posting.
@@ -824,7 +952,7 @@ class SignalRouter:
                     signal.channel, signal.symbol, signal.direction.value,
                     elapsed_s, stale_threshold,
                 )
-                return
+                return self._drop(signal, "stale_age")
 
             # Price-based staleness: check against detection-time price (current_price).
             # This catches the case where the price was already past TP1 or SL
@@ -838,14 +966,14 @@ class SignalRouter:
                             "TP1 {:.8f} – suppressed",
                             signal.channel, signal.symbol, cp, signal.tp1,
                         )
-                        return
+                        return self._drop(signal, "stale_past_tp1")
                     if cp < signal.stop_loss:
                         log.warning(
                             "STALE signal {} {} LONG: detection-time price {:.8f} already below "
                             "SL {:.8f} – suppressed",
                             signal.channel, signal.symbol, cp, signal.stop_loss,
                         )
-                        return
+                        return self._drop(signal, "stale_past_sl")
                 else:  # SHORT
                     if cp < signal.tp1:
                         log.warning(
@@ -853,14 +981,14 @@ class SignalRouter:
                             "TP1 {:.8f} – suppressed",
                             signal.channel, signal.symbol, cp, signal.tp1,
                         )
-                        return
+                        return self._drop(signal, "stale_past_tp1")
                     if cp > signal.stop_loss:
                         log.warning(
                             "STALE signal {} {} SHORT: detection-time price {:.8f} already above "
                             "SL {:.8f} – suppressed",
                             signal.channel, signal.symbol, cp, signal.stop_loss,
                         )
-                        return
+                        return self._drop(signal, "stale_past_sl")
 
         # ── AI enrichment ───────────────────────────────────────────────
         signal = await self._enrich_with_ai(signal)
@@ -875,7 +1003,7 @@ class SignalRouter:
                 signal.channel, signal.symbol,
                 signal.confidence, chan_cfg.min_confidence,
             )
-            return
+            return self._drop(signal, "channel_min_confidence")
 
         # Risk assessment: use the signal's own volume/spread fields so the risk
         # classifier has accurate data (set by the scanner before enqueuing).
@@ -1020,6 +1148,7 @@ class SignalRouter:
                 )
 
         # Register only after confirmed delivery
+        self._delivered_total += 1
         self._active_signals[signal.signal_id] = signal
         self._position_lock[signal.symbol] = signal.direction
         self._schedule_persist()
