@@ -79,16 +79,30 @@ pool them without splitting on it.  Two arms named for the same mechanism can
 measure different mechanisms (``CLAUDE.md``), and the cheapest place to prevent
 that is the row itself.
 
-One gate is stamped because it does not do what it says
--------------------------------------------------------
+One gate is stamped because its comment and its code disagree — and the
+measurement then cleared the gate
+---------------------------------------------------------------------------
 ``_evaluate_trend_pullback``'s SMC check reads *"require at least one FVG or
 orderblock in the pullback zone"* and is implemented as
-``bool(fvgs) or bool(orderblocks)`` — a global existence test.  Any symbol
-carrying any fair-value gap anywhere passes it, so on a live path it rejects
-almost nothing and certainly not what it claims to.  ``smc_zone_dist_atr``
-records the distance to the nearest such zone, which is the measurement the gate
-was written to make.  It is **not** enforced here: this gate rejects, so
-narrowing it changes what emits, which is dark-first plus owner sign-off.
+``bool(fvgs) or bool(orderblocks)`` — a global existence test.  On paper any
+symbol carrying any fair-value gap anywhere passes it, so it was stamped on the
+expectation that it admits structure far from the entry.
+
+**It does not.**  Measured on the first 89 TPE signals after
+``zone_distance_atr`` was repaired (2026-08-02 — until then this feature
+returned ``None`` on every row and could answer nothing): median **0.13 ATR**,
+p90 0.42, **max 0.52**, 88 of 89 inside half an ATR, no tail.  The cause is
+``detect_fvg``'s ``lookback=10`` — it only finds gaps in the last ~12 bars, and
+a gap that recent is still near price.  The narrow lookback is what makes the
+loose gate behave like the strict one its comment describes.
+
+So the gate is doing roughly what it claims: it rejects symbols with no recent
+gap, and when it passes, the structure is at the entry.  The candidate rule
+built on this feature (``entry_quality.tpe_smc_zone``) was retired the same day
+— no threshold can discriminate on that distribution.
+
+The feature stays stamped.  It is what settled the question, and it is what
+would show the gate drifting if ``lookback`` or the detector ever changed.
 
 Why stamping rather than filtering
 ----------------------------------

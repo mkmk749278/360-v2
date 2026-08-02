@@ -38,20 +38,62 @@ exists, not from a p-value read off this window:
     applying the tier adjustment it already computes and then discards.  Ships
     live.
 
-``tpe_smc_zone``
-    ``_evaluate_trend_pullback``'s SMC check reads *"require at least one FVG or
-    orderblock in the pullback zone"* and is ``bool(fvgs) or bool(orderblocks)``
-    — a global existence test a zone forty ATR away satisfies.  #851 stamped
-    ``smc_zone_dist_atr``, the measurement the comment describes.  But *how many
-    ATR counts as "in the zone"* is a number nobody has measured, so this one
-    ships in ``shadow``: it stamps ``would_reject_by`` on every candidate and
-    changes nothing until the owner promotes it from ops.
+    **First live window, 2026-08-02: 900 candidates judged, 900 passed, 0
+    rejected, 0 unknown.**  So the argument was right and empty — the rule reads
+    its input on every single candidate (not blind, ``pair_profile`` is always
+    present) and changes no outcome, because the profile-free
+    ``_pass_basic_filters`` call upstream already rejects everything the
+    tier-adjusted one would.  It is kept live: it is proven safe rather than
+    merely argued safe, it costs nothing, and it starts filtering by itself the
+    day a tier multiplier does bite.  But **this gate currently filters nothing
+    on the money path**, and no panel should be read as though it does.
 
-Two rules, deliberately.  A gate carrying twelve of them is twelve thresholds
+One rule, deliberately.  A gate carrying twelve of them is twelve thresholds
 against a book this size, which guarantees a spurious winner (``CLAUDE.md``:
 count how many cells you looked at before calling one special).  The ops
 now-vs-later page remains where arbitrary thresholds are *explored*; a rule
 arrives here only when it is a candidate for enforcement.
+
+The rule that was retired, and why it matters more than the one that stayed
+---------------------------------------------------------------------------
+``tpe_smc_zone`` shipped here on 2026-08-02 and was removed the same day.  It
+existed because ``_evaluate_trend_pullback``'s SMC check reads *"require at
+least one FVG or orderblock in the pullback zone"* while the code is
+``bool(fvgs) or bool(orderblocks)`` — a global existence test which, in this
+module's own words, *"a zone forty ATR away satisfies"*.
+
+**No such candidate exists.**  Once ``smc_zone_dist_atr`` was actually
+computable (it had been returning ``None`` on every row until the same day's fix
+to ``zone_distance_atr``), the first 89 TPE signals measured:
+
+===========  ==========
+percentile   distance
+===========  ==========
+p0           0.00 ATR
+p50          0.13 ATR
+p90          0.42 ATR
+p100         **0.52 ATR**
+===========  ==========
+
+88 of 89 inside half an ATR, and no tail at all.  The mechanism is
+``detect_fvg``'s own ``lookback=10``: it only finds gaps in the last ~12 bars,
+and a gap that recent is necessarily still near price.  **The narrow lookback is
+what makes the loose gate behave like the strict one its comment describes.**
+So the gate rejects symbols with no recent gap — real work — and when it passes,
+the structure genuinely is at the entry.
+
+No threshold can discriminate on that distribution: anything above 0.52 keeps
+every row, anything below cuts arbitrarily into a tight cluster.  A rule that
+cannot discriminate is not a shadow rule waiting for evidence, it is noise on a
+panel, so it is gone rather than left to look promotable.
+
+The lesson is not about SMC.  A gate whose comment and code disagree is worth
+*checking*; it is not thereby a gate that does nothing.  Reading the code
+produced a confident story about 40-ATR zones, and one query against the
+measurement — which had to be repaired before it could answer — showed the
+harm never happened.  ``smc_zone_dist_atr`` is still stamped, because the
+measurement is the thing that settled this and is what would show the gate
+drifting later.
 
 Where the gate runs, and why it runs last
 ------------------------------------------
@@ -77,11 +119,16 @@ in the same table that ranks every other gate.
 
 The budget is a blast-radius cap, not a filter
 -----------------------------------------------
-Neither rule's rejection *volume* has been measured — the ledger lives on the
-VPS and the first live window is the first look anyone gets.  A rule that turns
-out to reject 60% of the book would starve a feed already running at single
-digits per day, and "the owner notices the feed went quiet" is not a detection
-mechanism (the deny-list lesson, one subsystem over).
+No rule's rejection *volume* had been measured when this shipped — the ledger
+lives on the VPS and the first live window was the first look anyone got.  A
+rule that turned out to reject 60% of the book would have starved a feed already
+running at single digits per day, and "the owner notices the feed went quiet" is
+not a detection mechanism (the deny-list lesson, one subsystem over).
+
+That first window has now been read: ``profile_reject`` rejected **0 of 900**
+and the cap was never approached.  The cap stays, because it is a bound on the
+*next* rule as much as this one, and because a rule that bites zero times today
+can bite on a different pair mix tomorrow.
 
 So enforcement carries a rolling cap: over the last ``window`` candidates the
 gate **could** have suppressed, if the rejected fraction exceeds
@@ -194,25 +241,6 @@ RULES: Tuple[Rule, ...] = (
             "already computes."
         ),
         live_default=True,
-    ),
-    Rule(
-        key="tpe_smc_zone",
-        feature="smc_zone_dist_atr",
-        compare=CMP_MAX,
-        setup_class="TREND_PULLBACK_EMA",
-        label="SMC zone actually near the pullback",
-        rationale=(
-            "The gate's comment says 'in the pullback zone'; the code says "
-            "bool(fvgs) or bool(orderblocks), which a zone 40 ATR away "
-            "satisfies. The repair is known; how many ATR counts as 'in the "
-            "zone' is not, so this ships in shadow until the owner promotes it. "
-            "Note the orderblock half is inert engine-wide — no code assigns "
-            "SMCResult.orderblocks and its detector_status is "
-            "'not_implemented' — so both this rule and the gate it repairs "
-            "read fair-value gaps only."
-        ),
-        live_default=False,
-        threshold_default=1.5,
     ),
 )
 
