@@ -35,7 +35,7 @@ def _params(**over):
     if rules is None:
         rules = tuple(
             eq.RuleParams(rule=r, live=r.live_default, threshold=r.threshold_default)
-            for r in eq.RULES
+            for r in _TEST_RULES.values()
         )
     base = {
         "enabled": True,
@@ -48,8 +48,29 @@ def _params(**over):
     return eq.EntryQualityParams(rules=rules, **{k: v for k, v in base.items() if k != "rules"})
 
 
+#: Behaviour fixtures: real ``Rule`` objects, deliberately NOT the shipping
+#: registry. A test about how a max-comparison rule reads its feature must not
+#: break because the shipping rule set changed — ``tpe_smc_zone`` was retired
+#: the day it shipped (its feature turned out to have no discriminating range)
+#: and would have taken a dozen unrelated tests with it. Assertions *about* the
+#: shipping set read ``eq.RULES`` directly, which is where they belong.
+_TEST_RULES = {
+    "profile_reject": eq.RULES_BY_KEY["profile_reject"],
+    "zone_near_demo": eq.Rule(
+        key="zone_near_demo",
+        feature="demo_zone_dist_atr",
+        compare=eq.CMP_MAX,
+        setup_class="TREND_PULLBACK_EMA",
+        label="Synthetic thresholded rule",
+        rationale="Test fixture — exercises the max-comparison path.",
+        live_default=False,
+        threshold_default=1.5,
+    ),
+}
+
+
 def _rule(key: str, live: bool, threshold: float = 0.0) -> eq.RuleParams:
-    return eq.RuleParams(rule=eq.RULES_BY_KEY[key], live=live, threshold=threshold)
+    return eq.RuleParams(rule=_TEST_RULES[key], live=live, threshold=threshold)
 
 
 # --------------------------------------------------------------------------- #
@@ -82,19 +103,19 @@ class TestRuleReading:
         assert out.unknown_reason == "feature_absent"
 
     def test_a_max_rule_fires_above_its_threshold(self):
-        rp = _rule("tpe_smc_zone", live=True, threshold=1.5)
-        assert eq.evaluate_rule(rp, {"smc_zone_dist_atr": 40.0}).verdict == eq.VERDICT_REJECT
-        assert eq.evaluate_rule(rp, {"smc_zone_dist_atr": 0.4}).verdict == eq.VERDICT_PASS
+        rp = _rule("zone_near_demo", live=True, threshold=1.5)
+        assert eq.evaluate_rule(rp, {"demo_zone_dist_atr": 40.0}).verdict == eq.VERDICT_REJECT
+        assert eq.evaluate_rule(rp, {"demo_zone_dist_atr": 0.4}).verdict == eq.VERDICT_PASS
 
     def test_a_boundary_value_passes(self):
         """Exactly at the threshold is inside the zone, not outside it — the
         comparison is stated once here so a later edit cannot flip it silently."""
-        rp = _rule("tpe_smc_zone", live=True, threshold=1.5)
-        assert eq.evaluate_rule(rp, {"smc_zone_dist_atr": 1.5}).verdict == eq.VERDICT_PASS
+        rp = _rule("zone_near_demo", live=True, threshold=1.5)
+        assert eq.evaluate_rule(rp, {"demo_zone_dist_atr": 1.5}).verdict == eq.VERDICT_PASS
 
     def test_a_non_numeric_feature_is_unknown_rather_than_coerced(self):
-        rp = _rule("tpe_smc_zone", live=True, threshold=1.5)
-        out = eq.evaluate_rule(rp, {"smc_zone_dist_atr": "wide"})
+        rp = _rule("zone_near_demo", live=True, threshold=1.5)
+        out = eq.evaluate_rule(rp, {"demo_zone_dist_atr": "wide"})
         assert out.verdict == eq.VERDICT_UNKNOWN
         assert out.unknown_reason == "feature_not_numeric"
 
@@ -106,9 +127,9 @@ class TestRuleReading:
 
 class TestShadowAndEnforceAreDifferentFacts:
     def test_a_shadow_rule_records_what_it_would_have_killed_and_kills_nothing(self):
-        params = _params(rules=(_rule("tpe_smc_zone", live=False, threshold=1.5),))
-        d = eq.evaluate({"smc_zone_dist_atr": 40.0}, "TREND_PULLBACK_EMA", params)
-        assert d.would_reject_by == ("tpe_smc_zone",)
+        params = _params(rules=(_rule("zone_near_demo", live=False, threshold=1.5),))
+        d = eq.evaluate({"demo_zone_dist_atr": 40.0}, "TREND_PULLBACK_EMA", params)
+        assert d.would_reject_by == ("zone_near_demo",)
         assert d.enforced_by is None
         assert d.suppressed is False
 
@@ -139,10 +160,10 @@ class TestShadowAndEnforceAreDifferentFacts:
         """Two rules firing on one candidate is one dead signal, not two — a
         gate table that double-counts cannot be ranked against its neighbours."""
         params = _params(
-            rules=(_rule("profile_reject", live=True), _rule("tpe_smc_zone", live=True, threshold=1.5)),
+            rules=(_rule("profile_reject", live=True), _rule("zone_near_demo", live=True, threshold=1.5)),
         )
         d = eq.evaluate(
-            {"profile_would_reject": True, "smc_zone_dist_atr": 40.0},
+            {"profile_would_reject": True, "demo_zone_dist_atr": 40.0},
             "TREND_PULLBACK_EMA",
             params,
         )
@@ -152,8 +173,8 @@ class TestShadowAndEnforceAreDifferentFacts:
     def test_a_rule_scoped_to_a_path_does_not_judge_another(self):
         """The paths share no trigger, timeframe or stop geometry, so a
         threshold that is right on one is meaningless on another."""
-        params = _params(rules=(_rule("tpe_smc_zone", live=True, threshold=1.5),))
-        d = eq.evaluate({"smc_zone_dist_atr": 40.0}, "MOVER_TREND_PULLBACK", params)
+        params = _params(rules=(_rule("zone_near_demo", live=True, threshold=1.5),))
+        d = eq.evaluate({"demo_zone_dist_atr": 40.0}, "MOVER_TREND_PULLBACK", params)
         assert d.evaluated is False
         assert d.reason == "no_rules_for_path"
 
@@ -272,10 +293,10 @@ class TestRejectBudget:
         params = _params(
             max_reject_frac=0.35,
             budget_window=10,
-            rules=(_rule("tpe_smc_zone", live=False, threshold=1.5),),
+            rules=(_rule("zone_near_demo", live=False, threshold=1.5),),
         )
         for _ in range(20):
-            eq.decide({"smc_zone_dist_atr": 40.0}, "TREND_PULLBACK_EMA", params)
+            eq.decide({"demo_zone_dist_atr": 40.0}, "TREND_PULLBACK_EMA", params)
         assert eq.get_budget().snapshot()["considered_total"] == 0
         eq.reset_state()
 
@@ -318,10 +339,10 @@ class TestCounters:
     def test_shadow_rejections_and_suppressions_are_counted_apart(self):
         eq.reset_state()
         params = _params(
-            rules=(_rule("profile_reject", live=False), _rule("tpe_smc_zone", live=True, threshold=1.5)),
+            rules=(_rule("profile_reject", live=False), _rule("zone_near_demo", live=True, threshold=1.5)),
         )
-        eq.decide({"profile_would_reject": True, "smc_zone_dist_atr": 0.2}, "TREND_PULLBACK_EMA", params)
-        eq.decide({"profile_would_reject": False, "smc_zone_dist_atr": 40.0}, "TREND_PULLBACK_EMA", params)
+        eq.decide({"profile_would_reject": True, "demo_zone_dist_atr": 0.2}, "TREND_PULLBACK_EMA", params)
+        eq.decide({"profile_would_reject": False, "demo_zone_dist_atr": 40.0}, "TREND_PULLBACK_EMA", params)
         totals = eq.snapshot(params)["totals"]
         assert totals["shadow_reject_total"] == 1
         assert totals["enforced_total"] == 1
@@ -438,7 +459,11 @@ class TestOpsControlsComeFromTheRegistry:
 
     def test_the_snapshot_ships_the_registry_so_ops_holds_no_mirror(self):
         """``MEASUREMENT_SUFFIXES`` drifted for a week. One writer, one reader."""
-        snap = eq.snapshot(_params())
+        shipping = tuple(
+            eq.RuleParams(rule=r, live=r.live_default, threshold=r.threshold_default)
+            for r in eq.RULES
+        )
+        snap = eq.snapshot(_params(rules=shipping))
         assert {r["key"] for r in snap["rules"]} == {r.key for r in eq.RULES}
         for row in snap["rules"]:
             assert row["rationale"]
@@ -446,10 +471,13 @@ class TestOpsControlsComeFromTheRegistry:
             assert row["compare"] in (eq.CMP_FLAG, eq.CMP_MAX, eq.CMP_MIN)
 
     def test_a_flag_rule_advertises_no_threshold_key_to_ops(self):
+        """A knob in ops that changes nothing is worse than no knob."""
         snap = eq.snapshot(_params())
         by_key = {r["key"]: r for r in snap["rules"]}
         assert by_key["profile_reject"]["threshold_key"] == ""
-        assert by_key["tpe_smc_zone"]["threshold_key"] == "entry_quality_tpe_smc_zone_threshold"
+        assert by_key["zone_near_demo"]["threshold_key"] == (
+            "entry_quality_zone_near_demo_threshold"
+        )
 
 
 class TestOnlyRepairsShipEnforcing:
@@ -458,8 +486,7 @@ class TestOnlyRepairsShipEnforcing:
     #849 tested nineteen cells on 46 closed signals against a ~62% familywise
     chance of a spurious hit; that window cannot choose a threshold. A rule
     ships live only when enforcing it invents no number — ``profile_reject``
-    applies thresholds ``_pass_basic_filters`` already computes. ``tpe_smc_zone``
-    knows the repair and not the number, so it ships in shadow.
+    applies thresholds ``_pass_basic_filters`` already computes.
     """
 
     def test_profile_reject_ships_live_and_needs_no_threshold(self):
@@ -467,8 +494,30 @@ class TestOnlyRepairsShipEnforcing:
         assert rule.live_default is True
         assert rule.compare == eq.CMP_FLAG
 
-    def test_the_rule_whose_threshold_is_a_judgement_ships_in_shadow(self):
-        assert eq.RULES_BY_KEY["tpe_smc_zone"].live_default is False
+    def test_a_rule_that_cannot_discriminate_is_retired_not_left_in_shadow(self):
+        """``tpe_smc_zone`` shipped and was removed the same day.
+
+        Its feature measured median 0.13 ATR, max **0.52**, over 89 TPE signals
+        — 88 of 89 inside half an ATR, no tail. No threshold separates anything
+        on that distribution, so the rule was never going to earn promotion. A
+        rule that cannot discriminate is noise on a panel, not a shadow rule
+        awaiting evidence, and leaving it in place would have implied otherwise
+        every time someone read the gate table.
+        """
+        assert "tpe_smc_zone" not in eq.RULES_BY_KEY
+        assert all(r.key != "tpe_smc_zone" for r in eq.RULES)
+
+    def test_the_shipping_set_has_no_rule_that_currently_filters_anything(self):
+        """Stated as a fact rather than left implied by an empty panel.
+
+        ``profile_reject`` passed 900 of 900 candidates in its first live
+        window: it reads its input on every row and changes no outcome, because
+        the profile-free ``_pass_basic_filters`` call upstream already rejects
+        everything the tier-adjusted one would. It stays live — proven safe, and
+        it starts filtering by itself the day a tier multiplier bites — but the
+        gate filters nothing today and no reader should infer otherwise.
+        """
+        assert [r.key for r in eq.RULES] == ["profile_reject"]
 
     def test_the_rule_set_stays_small(self):
         """Twelve rules is twelve thresholds against a book this size, which
@@ -601,7 +650,7 @@ class TestABlindRuleIsAFaultInEitherMode:
 
     def test_a_shadow_rule_blind_on_everything_is_visible_in_the_snapshot(self):
         eq.reset_state()
-        params = _params(rules=(_rule("tpe_smc_zone", live=False, threshold=1.5),))
+        params = _params(rules=(_rule("zone_near_demo", live=False, threshold=1.5),))
         for i in range(25):
             eq.decide({"signal_id": f"s{i}"}, "TREND_PULLBACK_EMA", params)
         stats = eq.snapshot(params)["rules"][0]["stats"]
@@ -613,13 +662,13 @@ class TestABlindRuleIsAFaultInEitherMode:
         """Paging on a rule that is working is how a real fault stops standing
         out — only *total* blindness is judged in shadow."""
         eq.reset_state()
-        params = _params(rules=(_rule("tpe_smc_zone", live=False, threshold=1.5),))
+        params = _params(rules=(_rule("zone_near_demo", live=False, threshold=1.5),))
         for i in range(25):
             # A non-empty row without the feature — an EMPTY dict is "no stamp"
             # and is not a judged row at all, which is a different state.
             feats = {"signal_id": f"s{i}"}
             if i % 5 == 0:
-                feats["smc_zone_dist_atr"] = 2.0
+                feats["demo_zone_dist_atr"] = 2.0
             eq.decide(feats, "TREND_PULLBACK_EMA", params)
         frac = eq.snapshot(params)["rules"][0]["stats"]["unknown_frac"]
         assert 0.0 < frac < 1.0
@@ -630,5 +679,5 @@ class TestABlindRuleIsAFaultInEitherMode:
         blind" without naming the feature sends the reader hunting."""
         snap = eq.snapshot(_params())
         by_key = {r["key"]: r for r in snap["rules"]}
-        assert by_key["tpe_smc_zone"]["feature"] == "smc_zone_dist_atr"
+        assert by_key["zone_near_demo"]["feature"] == "demo_zone_dist_atr"
         assert by_key["profile_reject"]["feature"] == "profile_would_reject"

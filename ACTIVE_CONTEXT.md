@@ -4,6 +4,63 @@
 
 ---
 
+## 🟢 SESSION 105 2026-08-02 — the SMC gate was fine, and the live gate filters nothing
+
+Owner ran the checks the previous session asked for. Both answers were the
+opposite of what had been written down.
+
+### The SMC gate is doing its job
+
+Once `zone_distance_atr` could compute (Session 104's fix), the first 89 TPE
+signals measured **median 0.13 ATR, p90 0.42, max 0.52** — 88 of 89 inside half
+an ATR, no tail. The "a zone 40 ATR away satisfies it" claim, which was in a PR
+body, two module docstrings, `CLAUDE.md` and an ops page, describes **no
+candidate that exists**. Cause: `detect_fvg` uses `lookback=10`, so it only
+finds gaps in the last ~12 bars, and a gap that recent is still near price. The
+narrow lookback is what makes the loose gate behave like the strict one.
+
+`entry_quality.tpe_smc_zone` is **retired** — no threshold discriminates on that
+distribution, and a rule that cannot discriminate is noise on a panel rather
+than a shadow rule awaiting evidence. The *feature* stays stamped: it is what
+settled this, and what would catch the gate drifting if `lookback` changes.
+
+The retraction is written into `CLAUDE.md` beside the original rule, which still
+stands in its checking form: a gate whose comment and code disagree is worth
+**checking**, not thereby a gate that does nothing. Two lessons attached —
+reading code produces a hypothesis, never a measurement; and a broken
+measurement is worse than none while it looks like agreement, because this
+feature returned `None` on every row for its whole life and nothing could
+challenge the claim.
+
+### The live gate filters nothing
+
+`profile_reject`: **900 candidates judged, 900 passed, 0 rejected, 0 unknown**,
+feature present on 900/900. Not blind — it reads its input on every row and
+changes no outcome, because the profile-free `_pass_basic_filters` call upstream
+already rejects everything the tier-adjusted one would. Kept live (proven safe
+rather than argued safe; starts filtering by itself if a tier multiplier ever
+bites), but **the entry-quality gate is currently a no-op on the money path** and
+that is now stated in code, tests and the panel rather than implied by an empty
+table.
+
+### Cleared, and the real problem
+
+Delivered signals ran **1–2/hour flat across the whole 24h**, with the gate going
+live at 10:28 UTC and no step change — 15 created before, 1 after in the partial
+hour. The thin feed (~16/day) is **not** caused by anything in this lane.
+
+**That is the open item worth a session**: ~16 delivered signals/day against a
+scanner producing ~60 distinct setups per 110 minutes. `CLAUDE.md` already
+records the feed falling ~48/day → ~9/day in July with `cohort_edge`'s absorbing
+state implicated.
+
+### Also still open
+
+`entry_feature_inputs` should have paged on `smc_zone_dist_atr` missing from
+57/57 TPE rows — was it firing and unnoticed, or not firing? Unanswered.
+
+---
+
 ## 🟢 SESSION 104 2026-08-02 — `smc_zone_dist_atr` never worked, and orderblocks do not exist
 
 Owner asked for a VPS command proving FVGs and orderblocks are really read from
@@ -76,7 +133,7 @@ choosing its rules are separable, and only the second needs evidence.**
 | Rule | Mode | Why |
 |---|---|---|
 | `profile_reject` | **enforcing** | A repair. `_pass_basic_filters` computes pair-tier volume/spread thresholds and 19 of 20 call sites discard them — including the path that is ~94% of the delivered book. Enforcing invents no number. |
-| `tpe_smc_zone` | shadow | The repair is known (the gate's comment says "in the pullback zone"; the code says `bool(fvgs)`), the threshold is not. Promotable from ops in one click once the panel has evidence. |
+| `tpe_smc_zone` | shadow | The repair is known (the gate's comment says "in the pullback zone"; the code says `bool(fvgs)`), the threshold is not. **Retired next session — measured max 0.52 ATR, nothing to discriminate.** |
 
 ### Three safety properties, each a rule from `CLAUDE.md` arriving from the other side
 

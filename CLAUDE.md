@@ -836,16 +836,35 @@ python -m src.main
   a crash; it just made both features look like noise, which is indistinguishable
   from a feature that genuinely does not discriminate. Ask of every signed
   feature whether positive means "good for price" or "good for *this trade*".
-- **A gate whose comment and code disagree is a gate that does nothing.**
-  `_evaluate_trend_pullback`'s SMC check reads *"require at least one FVG or
-  orderblock in the pullback zone"* and is `bool(fvgs) or bool(orderblocks)` — a
-  global existence test that a zone 40 ATR away satisfies. It has been rejecting
-  almost nothing while reading as a structural filter. Same class as the
-  `is_tradfi_perp` audit: **when a filter is described as structural, check that
-  the code performs the check the sentence claims.** Stamped
+- **A gate whose comment and code disagree is worth CHECKING — it is not
+  thereby a gate that does nothing.** `_evaluate_trend_pullback`'s SMC check
+  reads *"require at least one FVG or orderblock in the pullback zone"* and is
+  `bool(fvgs) or bool(orderblocks)` — a global existence test that, on paper, a
+  zone 40 ATR away satisfies. Same class as the `is_tradfi_perp` audit, and the
+  rule it produced still holds: **when a filter is described as structural,
+  check that the code performs the check the sentence claims.** Stamped
   (`smc_zone_dist_atr`) rather than fixed, because narrowing a rejecting gate
-  changes what emits — dark-first plus sign-off — and a test now pins the live
-  behaviour so changing it is deliberate.
+  changes what emits.
+
+  **The verdict attached to it was wrong, and this file carried it for a day.**
+  Measured on the first 89 TPE signals once `zone_distance_atr` could actually
+  compute (2026-08-02): median **0.13 ATR**, p90 0.42, **max 0.52**, 88 of 89
+  inside half an ATR, no tail. No 40-ATR candidate exists. The cause is
+  `detect_fvg`'s `lookback=10` — it only finds gaps in the last ~12 bars, and a
+  gap that recent is still near price, so **the narrow lookback is what makes
+  the loose gate behave like the strict one**. The gate rejects symbols with no
+  recent gap and otherwise admits structure at the entry.
+  `entry_quality.tpe_smc_zone`, built to repair it, was retired the same day it
+  shipped: no threshold discriminates on that distribution, and a rule that
+  cannot discriminate is noise on a panel, not a shadow rule awaiting evidence.
+
+  Two things to take from it. **Reading code produces a hypothesis about
+  behaviour, never a measurement of it** — the confident story about 40-ATR
+  zones came entirely from the source and survived into a PR body, a module
+  docstring and this file. And **a broken measurement is worse than none while
+  it looks like agreement**: this feature returned `None` on every row for its
+  whole life, so the claim went unchallenged not because anyone checked it but
+  because nothing could.
 - **A guard belongs where the assumption is made, even after the source is
   fixed.** `_merge_candles` concatenated blindly while `_estimate_gap_candles`
   over-fetches by design, so every gap fill re-appended bars the bucket already
