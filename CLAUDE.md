@@ -971,3 +971,32 @@ python -m src.main
   (2026-07-26, #798). Where a seam must be faked, fake it from the real
   producer's output, and **verify a fix by reverting it**: if the new test does
   not fail against the old code, it is not testing the fix.
+
+  **It happened again, and the second time the rule was already written down**
+  (owner-run VPS check, 2026-08-02). `entry_features.zone_distance_atr` reads a
+  zone's edges by guessing key names — `top`/`bottom`/`high`/`low`/`price`.
+  `smc.FVGZone` is the *only* thing in this engine that produces zones and it
+  carries `gap_high`/`gap_low`, none of those five. So every zone yielded no
+  edges, was skipped, and a full book returned `None`: `smc_zone_dist_atr` was
+  uncomputable from the day it shipped, **0 of 57 TPE rows**. Its two tests
+  passed on `{"top": 105.0, "bottom": 95.0}` — a shape nothing has ever
+  produced. Three lessons beyond the original:
+  - **A "flexible" reader that accepts several shapes is a guess wearing a
+    feature's clothes.** It cannot fail loudly, because skipping an unreadable
+    zone is indistinguishable from having no zones. Read the real producer's
+    fields by name, and keep speculative shapes clearly labelled as speculative
+    — `orderblocks` has **no writer at all** (`orderblocks_detector_status ==
+    "not_implemented"`; the VPS truth report counts 474,467 observations, 100%
+    empty), so `bool(fvgs) or bool(orderblocks)` has always been `bool(fvgs)`.
+  - **A shadow rule can be dead and nobody is watching.** The entry-quality
+    probe judged only *enforcing* rules blind, on the reasoning that abstaining
+    costs nothing while nothing is enforced. Wrong: a shadow rule that never
+    reads its feature can never accumulate the evidence its own promotion
+    depends on — a measurement flat-lining without paging. Total blindness is
+    now a fault in either mode (0.8 enforcing, 1.0 shadow).
+  - **An all-zero column is a claim about your reader before it is a claim
+    about the market**, and the caption written over it inherits that. The
+    diagnostic that surfaced this printed *"FVG list empty on every TPE signal;
+    the gate passed them all anyway"* — self-contradictory on its face, since an
+    empty list would have made that gate **reject**. Ask what would have to be
+    true for the number to mean what the sentence says.

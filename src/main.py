@@ -2734,22 +2734,48 @@ class CryptoSignalEngine:
                 if evaluated < 20:
                     return True, f"only {evaluated} candidates evaluated — too few to judge"
 
+                # Two thresholds, because a blind rule is a different fault
+                # depending on whether it is enforcing.
+                #
+                # An ENFORCING rule mostly-abstaining is an inert gate wearing a
+                # live gate's label — 0.8 catches it while it still has some
+                # sight left.
+                #
+                # A SHADOW rule at *totally* blind is not a money-path fault at
+                # all, and the first cut of this probe skipped shadow rules for
+                # exactly that reason. That was wrong, and `smc_zone_dist_atr`
+                # is why: `zone_distance_atr` read key names `FVGZone` does not
+                # have, so the feature was uncomputable from the day it shipped
+                # and `tpe_smc_zone` abstained on 100% of its population. A
+                # shadow rule that never reads its feature can never accumulate
+                # the evidence its own promotion depends on — it is a
+                # measurement flat-lining without paging, which this repo bans.
+                # Only 1.0 is judged there: a shadow rule with any sight is
+                # working, and paging on it would fill the counter whose job is
+                # making a real fault stand out.
                 blind: List[str] = []
                 for rule in snap.get("rules") or []:
-                    if not rule.get("live"):
-                        continue
                     stats = rule.get("stats") or {}
                     seen = int(stats.get("seen") or 0)
                     if seen < 20:
                         continue
                     frac = stats.get("unknown_frac")
-                    if frac is not None and float(frac) >= 0.8:
-                        blind.append(f"{rule.get('key')}={float(frac):.0%} unknown")
+                    if frac is None:
+                        continue
+                    live = bool(rule.get("live"))
+                    limit = 0.8 if live else 1.0
+                    if float(frac) >= limit:
+                        blind.append(
+                            f"{rule.get('key')} ({'enforcing' if live else 'shadow'}, "
+                            f"feature {rule.get('feature')}) = {float(frac):.0%} unknown "
+                            f"over {seen}"
+                        )
                 if blind:
                     return False, (
-                        "enforcing rule(s) cannot read their own feature: "
-                        + ", ".join(blind)
-                        + " — the gate is inert and reads as passing"
+                        "entry-quality rule(s) cannot read their own feature: "
+                        + "; ".join(blind)
+                        + " — an enforcing rule in this state is inert and reads "
+                        "as passing; a shadow one can never earn its promotion"
                     )
 
                 budget = snap.get("budget") or {}

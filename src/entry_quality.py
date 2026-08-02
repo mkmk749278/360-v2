@@ -205,7 +205,11 @@ RULES: Tuple[Rule, ...] = (
             "The gate's comment says 'in the pullback zone'; the code says "
             "bool(fvgs) or bool(orderblocks), which a zone 40 ATR away "
             "satisfies. The repair is known; how many ATR counts as 'in the "
-            "zone' is not, so this ships in shadow until the owner promotes it."
+            "zone' is not, so this ships in shadow until the owner promotes it. "
+            "Note the orderblock half is inert engine-wide — no code assigns "
+            "SMCResult.orderblocks and its detector_status is "
+            "'not_implemented' — so both this rule and the gate it repairs "
+            "read fair-value gaps only."
         ),
         live_default=False,
         threshold_default=1.5,
