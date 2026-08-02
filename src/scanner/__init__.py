@@ -7623,6 +7623,9 @@ class Scanner:
                 _existing_flags = sig.soft_gate_flags or ""
                 sig.soft_gate_flags = (_existing_flags + f",{_sf_reason}").lstrip(",")
         except Exception as _sf_exc:
+            # Same hard limit, same silence, one gate up.
+            self._suppression_counters["stat_filter:error"] += 1
+            fail_open.record("scanner.stat_filter", _sf_exc)
             log.debug("stat_filter error for {} {} (fail open): {}", symbol, chan_name, _sf_exc)
 
         # ── COHORT_EDGE gate — STEP 2 ACTIVE (owner-approved 2026-07-07) ──
@@ -7661,11 +7664,36 @@ class Scanner:
                 # Fail-open toward the store's own default window — never
                 # toward "no expiry", which would restore the absorbing state.
                 fail_open.record("scanner.cohort_edge_max_age", _cage_exc)
+            # Why each candidate did or did not get suppressed. Without this the
+            # gate has exactly one observable state — the INFO line on a
+            # suppression — so "armed and firing", "armed but never reached",
+            # "no history for this key" and "raised and failed open" all look
+            # identical from outside: silence.
+            #
+            # That is not hypothetical. On 2026-08-02 the census showed 5 armed
+            # cohorts including ALL FOUR MOVER_TREND_PULLBACK side×regime
+            # combinations, BTC macro confirmed DECLINE (matching every stored
+            # cohort key), and yet MVRTP candidates walked the whole chain to
+            # the confidence gate and `cohort_edge` had no row in the
+            # Suppression Quality Audit at all. Nothing in the engine could say
+            # which of the four states that was.
+            _ce_enabled = bool(_rt.get("cohort_edge_gate_enabled"))
+            _ce_min_n = int(_rt.get("cohort_edge_gate_min_n"))
+            _ce_below = float(_rt.get("cohort_edge_suppress_below"))
+            self._suppression_counters["cohort_edge:evaluated"] += 1
+            if not _ce_enabled:
+                self._suppression_counters["cohort_edge:disabled"] += 1
+            elif _c_exp is None:
+                self._suppression_counters["cohort_edge:no_history"] += 1
+            elif _c_samples < _ce_min_n:
+                self._suppression_counters["cohort_edge:below_min_n"] += 1
+            elif _c_exp > _ce_below:
+                self._suppression_counters["cohort_edge:positive_enough"] += 1
             if (
-                _rt.get("cohort_edge_gate_enabled")
+                _ce_enabled
                 and _c_exp is not None
-                and _c_samples >= int(_rt.get("cohort_edge_gate_min_n"))
-                and _c_exp <= float(_rt.get("cohort_edge_suppress_below"))
+                and _c_samples >= _ce_min_n
+                and _c_exp <= _ce_below
             ):
                 log.info(
                     "COHORT_EDGE suppressed {}/{}: edge={:.3f}%/trade n={} "
@@ -7688,6 +7716,13 @@ class Scanner:
                 self._stamp_suppressed(sig, "cohort_edge")
                 return _reject("filtered", cross_verified)
         except Exception as _ce_exc:
+            # Hard limit: "Never swallow an exception silently in a data path —
+            # every fail-open `except` calls fail_open.record". This one only
+            # log.debug'd, so a gate raising on every candidate was
+            # indistinguishable from a gate deciding to pass every candidate,
+            # at a log level the VPS does not emit.
+            self._suppression_counters["cohort_edge:error"] += 1
+            fail_open.record("scanner.cohort_edge", _ce_exc)
             log.debug("cohort_edge gate error for {} {} (fail open): {}", symbol, chan_name, _ce_exc)
 
         # ── Pair Analysis Quality Gate ─────────────────────────────────────
