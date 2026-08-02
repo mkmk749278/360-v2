@@ -899,6 +899,21 @@ python -m src.main
   `window_coverage` and retire `INSUFFICIENT` below a floor. The separation was
   clean (the other six expiries walked 99.9–102%), which is the tell that the two
   populations were always distinguishable and simply never distinguished.
+- **A normalised unit is only honest if the thing it normalises by is what you
+  actually varied.** `R = pnl / sl_distance` equalises trades *only* when
+  position size scales inversely to the stop. `signal_dispatch` sizes at a fixed
+  notional (`raw_qty = notional / entry_price`), so the stop distance is absent
+  from the sizing and R equalises nothing: a 0.80% loss and a 6.14% loss are both
+  −1.00R while costing $4.00 and $30.70 of the same $500 (owner, 2026-08-02:
+  *"that R is purely confusing"*). It misranks paths — MEAN_REVERT reads
+  worst-in-book by R while losing a fifth of what MA_CROSS_TREND_SHIFT loses —
+  and on the same day's SAR arms it **flipped the sign**, reading +0.035R against
+  −0.041%, because the winners sat on tighter stops than the losers. Ops now
+  leads every measurement page with PnL % and keeps R as a muted bridge to the
+  edge matrix. **Ask of any normalised metric: did we hold the denominator
+  constant, or did we hold the thing it divides into constant?** Corollary: a
+  percentage needs no denominator, so it cannot silently shrink its own
+  population the way R does.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.
