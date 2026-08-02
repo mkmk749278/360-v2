@@ -523,9 +523,28 @@ def zone_distance_atr(
     such zone at all, anywhere, at any price — so it passes on structure that may
     be 20 ATR away and unrelated to the pullback being entered.
 
-    Accepts the several shapes these carry in ``smc_data`` (mappings with
-    ``top``/``bottom``, ``high``/``low``, or a single ``price``), and skips
-    anything it cannot read rather than guessing a coordinate.
+    **The only real producer today is** ``smc.FVGZone``, whose edges are
+    ``gap_high`` / ``gap_low``.  The first cut of this function did not read
+    those two names — it guessed at ``top`` / ``bottom`` / ``high`` / ``low`` /
+    ``price``, none of which that dataclass has — so **every** zone yielded no
+    edges, was skipped, and the function returned ``None`` on a full book.
+    ``smc_zone_dist_atr`` was therefore uncomputable from the day it shipped:
+    0 of 57 TPE rows on the VPS (owner-run, 2026-08-02), which reads exactly
+    like "no structure near these entries" and is instead a broken reader.
+
+    The tests went green over it because they hand-wrote the zone shape
+    (``{"top": 105.0, "bottom": 95.0}``) — keys chosen by the test author, never
+    produced by anything. ``CLAUDE.md`` already carried the rule: *a mock whose
+    keys you chose cannot verify a contract you got wrong; it asserts your
+    assumption back at you and goes green over dead code.* The regression test
+    now drives ``detect_fvg`` and passes its real output straight in.
+
+    ``orderblocks`` are mappings by declaration (``List[Dict[str, Any]]``) and
+    have **no writer at all** — ``SMCResult.orderblocks_detector_status`` is
+    ``"not_implemented"`` and the VPS truth report counts 474,467 observations,
+    100% empty. The mapping keys below are kept for whenever that detector
+    lands, and they are a guess until it does; ``gap_high``/``gap_low`` are not
+    a guess, so they are read first and named for what produces them.
     """
     e, a = _f(entry), _f(atr)
     if e is None or a is None or a <= 0 or not zones:
@@ -540,6 +559,9 @@ def zone_distance_atr(
         edges: List[float] = [
             v
             for v in (
+                # FVGZone — the real shape, the one that actually arrives.
+                _f(get("gap_high")), _f(get("gap_low")),
+                # Shapes an orderblock detector might use, if one is ever built.
                 _f(get("top")), _f(get("bottom")),
                 _f(get("high")), _f(get("low")),
                 _f(get("price")),

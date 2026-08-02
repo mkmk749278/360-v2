@@ -586,3 +586,49 @@ class TestTheGateIsWiredWhereItClaimsToBe:
         from src.suppression_telemetry import REASON_ENTRY_QUALITY
 
         assert REASON_ENTRY_QUALITY == "entry_quality"
+
+
+class TestABlindRuleIsAFaultInEitherMode:
+    """`smc_zone_dist_atr` was uncomputable from the day it shipped.
+
+    `zone_distance_atr` read key names `smc.FVGZone` does not carry, so
+    `tpe_smc_zone` abstained on **100%** of its population — 0 of 57 TPE rows on
+    the VPS — and nothing said so, because the probe's first cut judged only
+    enforcing rules. That reasoning ("abstaining costs nothing while nothing is
+    enforced") misses that a shadow rule which never reads its feature can never
+    accumulate the evidence its own promotion depends on.
+    """
+
+    def test_a_shadow_rule_blind_on_everything_is_visible_in_the_snapshot(self):
+        eq.reset_state()
+        params = _params(rules=(_rule("tpe_smc_zone", live=False, threshold=1.5),))
+        for i in range(25):
+            eq.decide({"signal_id": f"s{i}"}, "TREND_PULLBACK_EMA", params)
+        stats = eq.snapshot(params)["rules"][0]["stats"]
+        assert stats["seen"] == 25
+        assert stats["unknown_frac"] == pytest.approx(1.0)
+        eq.reset_state()
+
+    def test_a_shadow_rule_with_some_sight_is_not_a_fault(self):
+        """Paging on a rule that is working is how a real fault stops standing
+        out — only *total* blindness is judged in shadow."""
+        eq.reset_state()
+        params = _params(rules=(_rule("tpe_smc_zone", live=False, threshold=1.5),))
+        for i in range(25):
+            # A non-empty row without the feature — an EMPTY dict is "no stamp"
+            # and is not a judged row at all, which is a different state.
+            feats = {"signal_id": f"s{i}"}
+            if i % 5 == 0:
+                feats["smc_zone_dist_atr"] = 2.0
+            eq.decide(feats, "TREND_PULLBACK_EMA", params)
+        frac = eq.snapshot(params)["rules"][0]["stats"]["unknown_frac"]
+        assert 0.0 < frac < 1.0
+        eq.reset_state()
+
+    def test_the_rules_feature_name_is_on_the_snapshot_so_a_page_can_name_it(self):
+        """The probe and the panel both report which input died — "rule X is
+        blind" without naming the feature sends the reader hunting."""
+        snap = eq.snapshot(_params())
+        by_key = {r["key"]: r for r in snap["rules"]}
+        assert by_key["tpe_smc_zone"]["feature"] == "smc_zone_dist_atr"
+        assert by_key["profile_reject"]["feature"] == "profile_would_reject"

@@ -246,15 +246,67 @@ class TestPathFeatureHelpers:
         flat = [100.0] * 30
         assert ef.retrace_fraction(flat, flat, 100.0, True) is None
 
+    def test_it_reads_the_zones_the_real_detector_actually_produces(self):
+        """The regression that cost `smc_zone_dist_atr` its entire population.
+
+        This function guessed at ``top``/``bottom``/``high``/``low``/``price``.
+        ``smc.FVGZone`` — the only thing that produces zones in this engine —
+        carries ``gap_high``/``gap_low`` and none of those five, so every zone
+        yielded no edges, was skipped, and a full book returned ``None``:
+        **0 of 57 TPE rows on the VPS**, which reads as "no structure near these
+        entries" and was a broken reader.
+
+        The old tests passed because they hand-wrote the zone shape. So this one
+        drives ``detect_fvg`` and hands its output straight in — a mock whose
+        keys we chose cannot verify a contract we got wrong.
+        """
+        import numpy as np
+
+        from src.smc import detect_fvg
+
+        rng = np.random.default_rng(7)
+        px, highs, lows, closes = 100.0, [], [], []
+        for _ in range(100):
+            close = px * (1 + rng.normal(0, 0.004))
+            highs.append(max(px, close) * 1.002)
+            lows.append(min(px, close) * 0.998)
+            closes.append(close)
+            px = close
+        zones = detect_fvg(
+            np.array(highs), np.array(lows), np.array(closes), lookback=100
+        )
+        assert zones, "the fixture produced no gaps — the test proves nothing"
+
+        got = ef.zone_distance_atr(zones, float(closes[-1]), 1.0)
+        assert got is not None, (
+            "real detector output read as unmeasurable — the shape guess is back"
+        )
+        assert got >= 0.0
+
     def test_zone_distance_is_zero_inside_a_zone_not_the_gap_to_its_edge(self):
         """Inside the zone is the strongest reading there is; reporting the
         distance to the nearer edge would make it look like a near miss."""
-        zones = [{"top": 105.0, "bottom": 95.0}]
+        from src.smc import Direction, FVGZone
+
+        zones = [FVGZone(index=1, direction=Direction.LONG, gap_high=105.0, gap_low=95.0)]
         assert ef.zone_distance_atr(zones, 100.0, 2.0) == 0.0
 
     def test_zone_distance_measures_the_nearest_of_several(self):
-        zones = [{"top": 130.0, "bottom": 125.0}, {"high": 104.0, "low": 103.0}]
+        from src.smc import Direction, FVGZone
+
+        zones = [
+            FVGZone(index=1, direction=Direction.LONG, gap_high=130.0, gap_low=125.0),
+            FVGZone(index=2, direction=Direction.LONG, gap_high=104.0, gap_low=103.0),
+        ]
         assert ef.zone_distance_atr(zones, 100.0, 1.5) == pytest.approx(3.0 / 1.5)
+
+    def test_a_mapping_zone_still_reads_for_a_future_orderblock_detector(self):
+        """`orderblocks` is declared as a list of mappings and has no writer —
+        `orderblocks_detector_status` is "not_implemented" and the VPS truth
+        report counts 474,467 observations, 100% empty. These keys stay
+        supported for whenever that detector lands, and are a guess until it
+        does; the FVGZone fields above are not."""
+        assert ef.zone_distance_atr([{"top": 105.0, "bottom": 95.0}], 100.0, 2.0) == 0.0
 
     def test_an_absent_zone_book_refuses(self):
         """The gate this replaces passes on *any* zone anywhere. Absent must not

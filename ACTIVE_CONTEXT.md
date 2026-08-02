@@ -4,6 +4,56 @@
 
 ---
 
+## 🟢 SESSION 104 2026-08-02 — `smc_zone_dist_atr` never worked, and orderblocks do not exist
+
+Owner asked for a VPS command proving FVGs and orderblocks are really read from
+Binance. The commands answered a bigger question than they were built for.
+
+### What the VPS said
+
+- **`orderblocks` has no writer anywhere in the engine.** Truth report:
+  `orderblocks: presence[absent=474467] sources[not_implemented=474467]` — 474k
+  observations, 100% empty. `SMCResult.orderblocks` is declared, defaulted to
+  `[]`, serialised, never assigned. So TPE's `bool(fvgs) or bool(orderblocks)`
+  has always been `bool(fvgs)`.
+- **FVGs are genuinely computed from Binance.** Live klines through the engine's
+  own `detect_fvg`: BTC 5m 2 zones, ETH 5m 3, SOL 5m 0. But the default
+  `lookback=10` scans only the last ~12 bars — the same series at `lookback=100`
+  holds 13–19 zones. The engine sees a narrow rolling window, by design or by
+  accident; **not changed**, because it changes what a live gate sees.
+- **`smc_zone_dist_atr`: 0 of 57 TPE rows.** Not a market fact — a broken reader.
+
+### The bug
+
+`zone_distance_atr` guesses zone edges from `top`/`bottom`/`high`/`low`/`price`.
+`smc.FVGZone` carries `gap_high`/`gap_low` and none of those five, so every zone
+yielded no edges, was skipped, and the function returned `None` on a full book.
+Uncomputable since #851. Its tests passed because they hand-wrote
+`{"top": 105.0, "bottom": 95.0}` — a shape nothing produces. `CLAUDE.md` already
+carried the rule that forbids exactly this.
+
+Fixed; the regression test drives `detect_fvg` and passes its real output in, and
+fails against the old code.
+
+### Two things the bug exposed
+
+- **`tpe_smc_zone` was inert by construction** — always `unknown`, always
+  abstaining. Harmless to the money path (it is shadow), but it could never have
+  earned promotion. The probe judged only *enforcing* rules blind; total
+  blindness is now a fault in either mode (0.8 enforcing / 1.0 shadow), engine
+  and ops panel both.
+- **`entry_feature_inputs` should have been paging** — `smc_zone_dist_atr` is in
+  `missing` on 57/57 TPE rows, which is its failure condition. **Open question
+  for next session: was it firing and unnoticed, or not firing?** If the latter,
+  the watchdog has its own defect and that matters more than this one.
+
+### Still open from Session 103
+
+`profile_reject`'s live rejection volume — first read of the ops panel's
+Suppressed / Would-have-removed / Unknown columns.
+
+---
+
 ## 🟢 SESSION 103 2026-08-02 — the entry-feature lane gets a consumer
 
 Owner: *"make entry features live, not only measurement"*, against #849 and #851.
