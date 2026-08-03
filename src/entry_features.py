@@ -380,6 +380,87 @@ def extension_pct(close: Optional[float], ma_slow: Optional[float]) -> Optional[
     return (close - ma_slow) / ma_slow * 100.0
 
 
+#: Why ``level_distance_r`` produced no number. Four causes, and the response to
+#: each is different: ``no_geometry`` is a broken stamp, ``no_levels`` is the
+#: LevelBook handing us nothing (a dark upstream — go look at the refresh),
+#: ``unreadable_levels`` is a shape this reader does not understand (a defect
+#: *here*, and the one that made ``smc_zone_dist_atr`` uncomputable for its
+#: whole life), and ``none_ahead`` is a fully working read whose answer is
+#: "nothing opposing between the entry and the target" — not a fault at all.
+#:
+#: They existed before as one ``None``, which is why the liveness probe could
+#: only assert a cause and never name one.
+LEVEL_DIST_NO_GEOMETRY = "no_geometry"
+LEVEL_DIST_NO_LEVELS = "no_levels"
+LEVEL_DIST_UNREADABLE_LEVELS = "unreadable_levels"
+LEVEL_DIST_NONE_AHEAD = "none_ahead"
+
+
+def reason_key(feature: str) -> str:
+    """The row key carrying *why* ``feature`` is absent, when it records one.
+
+    One naming rule, so a reader can ask the question of any feature without
+    the module having to enumerate which ones answer. A feature that records no
+    reason simply has no such key, and the caller says "cause unrecorded"
+    rather than inventing one.
+    """
+    return f"{feature}_absence_reason"
+
+
+def level_distance_r_with_reason(
+    levels: Any,
+    entry: Optional[float],
+    tp1: Optional[float],
+    sl_dist: Optional[float],
+    is_long: bool,
+) -> Tuple[Optional[float], Optional[str]]:
+    """``(distance_in_R, reason_it_is_absent)`` — exactly one of the two is set.
+
+    The value half is ``level_distance_r``'s, unchanged. The reason half exists
+    because "blank needs a cause before it gets a caption": an empty LevelBook
+    and a book with nothing overhead are opposite findings that both used to
+    arrive as ``None``, so the feature-liveness probe watching this column had
+    to guess, and it guessed "upstream is dark" every time.
+
+    ``levels`` is produced by ``LevelBook.get_levels`` — a list of ``Level``
+    dataclasses carrying ``price`` and ``type`` (``"support"``/``"resistance"``).
+    Those are the fields read. The mapping branch is kept for the ledger's own
+    round-trip and for tests, and a level this reader cannot price is counted
+    rather than skipped in silence — an unreadable shape is indistinguishable
+    from an empty book otherwise, which is precisely how ``zone_distance_atr``
+    returned ``None`` on 57 of 57 rows without anyone being able to tell.
+    """
+    if entry is None or sl_dist is None or sl_dist <= 0:
+        return None, LEVEL_DIST_NO_GEOMETRY
+    if not levels:
+        return None, LEVEL_DIST_NO_LEVELS
+    want = "resistance" if is_long else "support"
+    best: Optional[float] = None
+    readable = 0
+    for lvl in levels:
+        if isinstance(lvl, dict):
+            price = _f(lvl.get("price"))
+            ltype = lvl.get("type", "")
+        else:
+            price = _f(getattr(lvl, "price", None))
+            ltype = getattr(lvl, "type", "")
+        if price is None:
+            continue  # a shape we cannot price — the `readable` count catches it
+        readable += 1
+        if str(ltype) != want:
+            continue
+        gap = (price - entry) if is_long else (entry - price)
+        if gap <= 0:
+            continue  # already behind us
+        if best is None or gap < best:
+            best = gap
+    if best is None:
+        return None, (
+            LEVEL_DIST_NONE_AHEAD if readable else LEVEL_DIST_UNREADABLE_LEVELS
+        )
+    return best / sl_dist, None
+
+
 def level_distance_r(
     levels: Any,
     entry: Optional[float],
@@ -395,26 +476,9 @@ def level_distance_r(
 
     ``None`` when the level book has nothing for this symbol — an empty book is
     "we do not know what is overhead", which must not read as "nothing is".
+    Use ``level_distance_r_with_reason`` when you need to tell those apart.
     """
-    if entry is None or sl_dist is None or sl_dist <= 0 or not levels:
-        return None
-    want = "resistance" if is_long else "support"
-    best: Optional[float] = None
-    for lvl in levels:
-        price = _f(getattr(lvl, "price", None) if not isinstance(lvl, dict) else lvl.get("price"))
-        ltype = (
-            getattr(lvl, "type", "") if not isinstance(lvl, dict) else lvl.get("type", "")
-        )
-        if price is None or str(ltype) != want:
-            continue
-        gap = (price - entry) if is_long else (entry - price)
-        if gap <= 0:
-            continue  # already behind us
-        if best is None or gap < best:
-            best = gap
-    if best is None:
-        return None
-    return best / sl_dist
+    return level_distance_r_with_reason(levels, entry, tp1, sl_dist, is_long)[0]
 
 
 def tp1_r_multiple(
@@ -704,6 +768,14 @@ def capture(
     last_low = lows[-1] if lows is not None and len(lows) > 0 else None
     last_close = closes[-1] if closes is not None and len(closes) > 0 else None
 
+    # Resolved here rather than inline so the *reason* it is absent survives
+    # onto the row. Computed once — a second call would be a second read of a
+    # mutable level book, and two reads of one quantity that can disagree is
+    # the shape this repo keeps paying for.
+    _level_dist, _level_dist_reason = level_distance_r_with_reason(
+        smc.get("level_book_levels"), _f(entry), _f(tp1), _f(sl_dist), direction_is_long
+    )
+
     feats: Dict[str, Any] = {
         # Geometry — chosen by the evaluator, exact at stamp time, and the
         # ceiling on what any entry filter can achieve. Read this one first.
@@ -732,9 +804,7 @@ def capture(
             closes, lows, highs, _f(atr), direction_is_long
         ),
         "extension_pct": extension_pct(_f(entry), _f(ma_slow)),
-        "level_dist_r": level_distance_r(
-            smc.get("level_book_levels"), _f(entry), _f(tp1), _f(sl_dist), direction_is_long
-        ),
+        "level_dist_r": _level_dist,
         "book_imbalance_aligned": _align(
             book_imbalance(smc.get("order_book")), direction_is_long
         ),
@@ -771,6 +841,11 @@ def capture(
             # would the pair-tier-aware spread/volume thresholds have rejected
             # this candidate? Recorded, never enforced.
             "profile_would_reject": profile_would_reject,
+            # Written AFTER the missing-accounting on purpose. It is metadata
+            # about a feature, not a feature, so it must never itself count as
+            # one — and on a row where the feature computed it is None, which
+            # would have put a non-feature into `missing` on every healthy row.
+            reason_key("level_dist_r"): _level_dist_reason,
         }
     )
     return feats
@@ -1315,22 +1390,91 @@ def join_outcomes(
 def missing_by_setup(
     ledger: Optional[EntryFeatureLedger] = None,
 ) -> Dict[str, Tuple[int, Dict[str, int]]]:
-    """``{setup_class: (n_rows, {feature: n_missing})}``.
+    """``{setup_class: (n_rows, {declared_feature: n_missing})}``.
 
     The denominator a liveness probe has to use. The paths are wildly uneven —
     MVRTP alone is ~94% of the delivered book — so a TPE-only input that has
     gone dark contributes a handful of Nones against a ledger-wide row count and
     can never reach it. Keyed per path, "absent on every row of its own path" is
     reachable and means what it says.
+
+    **Only features the path DECLARES are counted**, and that is the whole point
+    rather than a tidy-up. ``capture`` computes one flat feature block for every
+    path, so a value whose input only one path supplies lands on every row as
+    ``None``: ``extension_pct`` needs ``ma_slow``, which the two pullback paths
+    pass and MEAN_REVERT / MOVER_AVWAP_SCALP / RANGE_FADE do not. Counted raw,
+    those three read "absent on every stamp" forever — which is exactly the
+    "unused" this probe exists to distinguish dark from, arriving *as* the
+    alert. On 2026-08-03 three of its eight flagged items were that, and the
+    tell was in the alert itself: the two paths that do supply ``ma_slow`` were
+    not among them.
+
+    ``features_for`` is the authority — the same registry ``describe_features``
+    ships to ops — so the probe judges a path on the columns the page actually
+    draws, and a feature nothing declares is read by nobody and harms nobody if
+    it goes dark. The moment a path declares it, it is judged again.
     """
     led = ledger if ledger is not None else get_ledger()
     out: Dict[str, Tuple[int, Dict[str, int]]] = {}
     for row in led.rows():
         setup = str(row.get("setup_class") or "UNKNOWN")
+        declared = set(features_for(setup))
         n_rows, missing = out.get(setup, (0, {}))
         for key in row.get("missing") or []:
+            if key not in declared:
+                continue
             missing[key] = missing.get(key, 0) + 1
         out[setup] = (n_rows + 1, missing)
+    return out
+
+
+def undeclared_absences(
+    ledger: Optional[EntryFeatureLedger] = None,
+) -> Dict[str, int]:
+    """``{feature: n_rows}`` for absences ``missing_by_setup`` deliberately drops.
+
+    The filtering above is a judgement, so it is counted rather than silent — a
+    degraded or narrowed mode that leaves no trace is how the *next* reader
+    concludes the probe was watching something it was not. Nothing pages on
+    this; it is here so the probe can say how much it set aside and a growing
+    number can be noticed.
+    """
+    led = ledger if ledger is not None else get_ledger()
+    out: Dict[str, int] = {}
+    for row in led.rows():
+        declared = set(features_for(str(row.get("setup_class") or "UNKNOWN")))
+        for key in row.get("missing") or []:
+            if key not in declared:
+                out[key] = out.get(key, 0) + 1
+    return out
+
+
+def absence_reasons(
+    feature: str,
+    setup_class: str,
+    ledger: Optional[EntryFeatureLedger] = None,
+) -> Dict[str, int]:
+    """``{reason: n}`` for why *feature* was absent across one path's rows.
+
+    Empty when the feature records no reason, and the caller must then say
+    "cause unrecorded" rather than asserting one — which is the bug this is
+    here to retire. ``entry_feature_inputs`` had been reporting
+    "upstream is dark" for a column whose ``None`` covers a dark LevelBook, a
+    reader that cannot parse the level shape, and a perfectly working read
+    whose answer is "nothing overhead". Three causes, three different fixes,
+    one sentence asserting the first.
+    """
+    led = ledger if ledger is not None else get_ledger()
+    key = reason_key(feature)
+    want = str(setup_class or "")
+    out: Dict[str, int] = {}
+    for row in led.rows():
+        if str(row.get("setup_class") or "UNKNOWN") != want:
+            continue
+        reason = row.get(key)
+        if reason is None:
+            continue
+        out[str(reason)] = out.get(str(reason), 0) + 1
     return out
 
 

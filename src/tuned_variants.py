@@ -74,8 +74,39 @@ _last_stamp: Dict[Tuple[str, str, str], float] = {}
 #             degenerate input geometry)
 # seen − stamped − skipped is the unexplained residue: sustained growth means
 # the pipeline is silently failing (uncomputable ATR arms, store rejects).
+#
+# "Unexplained" was literal, and that was the defect (2026-08-03): the probe
+# paged with `66 unexplained non-stamps` and there are FOUR ways to produce one
+# — an uncomputable MTP retest arm, an uncomputable ATR arm, a store that
+# refused the candidate, and an exception — needing four different responses.
+# Each now increments its own `residue:*` counter at the point it returns, so
+# the alert names the cause instead of stating that it has none. Same fix the
+# cohort-edge gate got days earlier: a probe that cannot say which of its
+# silences it is in cannot be acted on.
+RESIDUE_MTP_ARM = "residue:mtp_arm_uncomputable"
+RESIDUE_ATR_ARM = "residue:atr_arm_uncomputable"
+#: `stamp_candidate` returning None. NOT "the store rejected it" — the store's
+#: `stamp` is fire-and-forget and its return is never read. The two real causes
+#: are that writer's own degenerate-geometry guard (sl_distance <= 0) and an
+#: exception inside it, which it has already recorded to `fail_open` under its
+#: own site name. Named for what it is, because a counter called `store_reject`
+#: sends the next reader to a module that never refused anything.
+RESIDUE_STAMP_REFUSED = "residue:stamp_refused"
+RESIDUE_EXCEPTION = "residue:exception"
+RESIDUE_KEYS: Tuple[str, ...] = (
+    RESIDUE_MTP_ARM,
+    RESIDUE_ATR_ARM,
+    RESIDUE_STAMP_REFUSED,
+    RESIDUE_EXCEPTION,
+)
+
 _counter_lock = threading.Lock()
-_counters: Dict[str, int] = {"seen": 0, "stamped": 0, "skipped": 0}
+_counters: Dict[str, int] = {
+    "seen": 0,
+    "stamped": 0,
+    "skipped": 0,
+    **{k: 0 for k in RESIDUE_KEYS},
+}
 
 
 def tuned_setups() -> Tuple[str, ...]:
@@ -134,7 +165,20 @@ def counters() -> Dict[str, int]:
 
 def _bump(key: str) -> None:
     with _counter_lock:
-        _counters[key] += 1
+        _counters[key] = _counters.get(key, 0) + 1
+
+
+def residue_breakdown() -> Dict[str, int]:
+    """``{cause: n}`` for the non-zero residue causes, cause name unprefixed.
+
+    The named causes should sum to ``seen − stamped − skipped``. Where they do
+    not, a path returns without accounting for itself and the probe says so —
+    one count is an assertion, two are a detector.
+    """
+    c = counters()
+    return {
+        k.split(":", 1)[1]: c.get(k, 0) for k in RESIDUE_KEYS if c.get(k, 0)
+    }
 
 
 def compute_tuned_arm(
@@ -217,11 +261,13 @@ def stamp_tuned_variant(
     live candidate's SL/TP1 (``live_stop_loss`` / ``live_tp1``) — the recipe
     changes the *entry*, not the exit levels.
     """
+    _bumped_seen = False
     try:
         setup = str(setup_class or "").strip().upper()
         if setup not in tuned_setups() or is_geometry_variant(setup):
             return None
         _bump("seen")
+        _bumped_seen = True
         side_u = str(side or "").upper()
         entry_f = float(entry or 0.0)
         if entry_f <= 0 or side_u not in ("LONG", "SHORT"):
@@ -243,7 +289,9 @@ def stamp_tuned_variant(
             )
             if mtp is None:
                 # Pipeline failure (degenerate live geometry / short candles)
-                # — NOT counted as skipped so the liveness residue grows.
+                # — NOT counted as skipped so the liveness residue grows, and
+                # named so the probe can say which failure it was.
+                _bump(RESIDUE_MTP_ARM)
                 return None
             limit_entry, mtp_reason = mtp
             if mtp_reason != "ok":
@@ -258,7 +306,9 @@ def stamp_tuned_variant(
             )
             if arm is None:
                 # Pipeline failure (no ATR arm / degenerate inputs) — deliberately
-                # NOT counted as skipped so the liveness residue grows.
+                # NOT counted as skipped so the liveness residue grows, and named
+                # so the probe can say which failure it was.
+                _bump(RESIDUE_ATR_ARM)
                 return None
             stop, tp1, reason = arm
             if reason == "extension_filter":
@@ -287,6 +337,11 @@ def stamp_tuned_variant(
             store=store or _gab.get_geometry_store(),
         )
         if rec is None:
+            # The ledger writer declined this candidate — degenerate geometry
+            # by its own guard, or an exception it already recorded. A
+            # different fault from an uncomputable arm, and it lives in
+            # suppression_audit rather than here.
+            _bump(RESIDUE_STAMP_REFUSED)
             return None
         _last_stamp[cd_key] = mono
         _bump("stamped")
@@ -295,4 +350,10 @@ def stamp_tuned_variant(
         from src import fail_open
 
         fail_open.record("tuned_variants.stamp", exc)
+        # Only counted as residue when `seen` was already incremented — an
+        # exception raised before that point never entered the denominator, so
+        # counting it here would make the reconciliation report a gap that is
+        # not there.
+        if _bumped_seen:
+            _bump(RESIDUE_EXCEPTION)
         return None

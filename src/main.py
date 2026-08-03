@@ -2643,6 +2643,15 @@ class CryptoSignalEngine:
             carries signal.  So the probe keys on the *content* of the stamps,
             not on whether stamping happened.
 
+            Two things it must not do, both paid for on 2026-08-03.  It must not
+            judge a path on features that path never declared — `capture` emits
+            one flat block for every setup, so an input only some paths supply
+            is structurally absent on the rest and reads as a dead upstream
+            forever.  And it must not *assert* a cause: `level_dist_r` returns
+            None for a dark LevelBook, for a level shape this reader cannot
+            parse, and for a working read whose answer is "nothing overhead",
+            and the old message called all three "upstream is dark".
+
             Keyed on the population that would be harmed — the rows we intend
             to analyse — not on the convenient one (#815).  A lane with no rows
             yet returns True: an empty ledger is a quiet market or a fresh
@@ -2668,26 +2677,59 @@ class CryptoSignalEngine:
                 # be true and the probe reports healthy forever.  That is #815's
                 # shape exactly: key on the population that would be harmed, not
                 # on the one that happens to be convenient.
+                # `missing_by_setup` counts only what each path DECLARES, which
+                # is load-bearing: `capture` computes one flat block for every
+                # path, so a feature whose input only some paths supply is
+                # structurally None on the rest.  `extension_pct` needs
+                # `ma_slow` — the two pullback paths pass it, MEAN_REVERT /
+                # MOVER_AVWAP_SCALP / RANGE_FADE do not — and unscoped it read
+                # "absent on EVERY stamp" on those three forever.  That is the
+                # 'unused' this probe exists to tell dark apart from, arriving
+                # as the alert itself (2026-08-03: 3 of 8 flagged items).
                 per_setup = _ef.missing_by_setup()
                 dead: List[str] = []
                 for setup, (n_rows, missing) in sorted(per_setup.items()):
                     if n_rows < 10:
                         continue          # too few of this path to judge yet
-                    dead.extend(
-                        f"{setup}.{k}"
-                        for k, n in missing.items()
-                        if n >= n_rows
-                    )
+                    for k, n in sorted(missing.items()):
+                        if n < n_rows:
+                            continue
+                        # Name the cause instead of asserting one.  A feature
+                        # that records why it is absent gets its histogram on
+                        # screen — an empty LevelBook and a working read whose
+                        # answer is "nothing overhead" are opposite findings
+                        # that used to arrive as the same None.
+                        why = _ef.absence_reasons(k, setup)
+                        if why:
+                            causes = "/".join(
+                                f"{r}×{c}" for r, c in sorted(
+                                    why.items(), key=lambda kv: (-kv[1], kv[0])
+                                )
+                            )
+                            dead.append(f"{setup}.{k}[{causes}]")
+                        else:
+                            dead.append(f"{setup}.{k}[cause unrecorded]")
+                # Counted, not silent: the scoping above is a judgement, and a
+                # narrowed mode that leaves no trace is how the next reader
+                # concludes the probe watched something it did not.
+                undeclared = _ef.undeclared_absences()
+                aside = (
+                    f"; set aside {len(undeclared)} undeclared "
+                    f"({','.join(sorted(undeclared))})"
+                    if undeclared else ""
+                )
                 if dead:
                     return False, (
-                        f"{len(dead)} feature(s) absent on EVERY stamp of their "
-                        f"path: {','.join(sorted(dead))} — upstream is dark, and "
-                        "the panel cannot tell that from 'unused'"
+                        f"{len(dead)} declared feature(s) absent on EVERY stamp "
+                        f"of their path: {','.join(dead)}{aside}"
                     )
                 counts = ", ".join(
                     f"{k}={v}" for k, v in sorted((s.get("rows_by_setup") or {}).items())
                 )
-                return True, f"{rows} stamps ({counts}), no feature wholly absent"
+                return True, (
+                    f"{rows} stamps ({counts}), no declared feature wholly "
+                    f"absent{aside}"
+                )
             except Exception as exc:  # noqa: BLE001
                 return True, f"probe unavailable ({type(exc).__name__})"
 
@@ -3649,9 +3691,29 @@ class CryptoSignalEngine:
             detail = (
                 f"seen={c['seen']} stamped={c['stamped']} skipped={c['skipped']}"
             )
+            # Four distinct faults produce a residue and they need four
+            # different responses, so the alert names which one rather than
+            # calling the whole thing "unexplained" (2026-08-03).
+            breakdown = _tv.residue_breakdown()
+            named = sum(breakdown.values())
+            causes = (
+                ", ".join(
+                    f"{k}={v}" for k, v in sorted(
+                        breakdown.items(), key=lambda kv: (-kv[1], kv[0])
+                    )
+                )
+                or "none recorded"
+            )
+            # Two counts of the same quantity are a detector: a gap means some
+            # path returns without accounting for itself, which is the older,
+            # quieter version of this same bug.
+            gap = residue - named
+            unaccounted = f", {gap} unaccounted" if gap else ""
             if residue >= 10:
-                return False, f"{residue} unexplained non-stamps ({detail})"
-            return True, detail
+                return False, (
+                    f"{residue} non-stamps — {causes}{unaccounted} ({detail})"
+                )
+            return True, f"{detail}, residue {residue} ({causes}){unaccounted}"
 
         fl.add_predicate(PredicateProbe(
             name="tuned_variants",

@@ -23,7 +23,16 @@ from src.suppression_audit import SuppressedCandidateStore
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch):
     monkeypatch.setattr(tv, "_last_stamp", {})
-    monkeypatch.setattr(tv, "_counters", {"seen": 0, "stamped": 0, "skipped": 0})
+    # Zeroed from the module's OWN key set, not a hand-written copy of it. The
+    # literal that used to sit here drifted the moment the residue counters
+    # were added — a fixture asserting the author's idea of a collaborator's
+    # shape back at them is the mock problem one layer down.
+    monkeypatch.setattr(tv, "_counters", {k: 0 for k in tv._counters})
+
+
+def _lifecycle(counters: dict) -> dict:
+    """The three counters the residue is computed from, without the causes."""
+    return {k: counters[k] for k in ("seen", "stamped", "skipped")}
 
 
 def _candles(n: int = 40, base: float = 100.0):
@@ -120,7 +129,7 @@ class TestVariantPlumbing:
         assert rec["setup_class"] == f"MOVER_AVWAP_SCALP{TUNED_SUFFIX}"
         assert rec["gate_name"] == "tuned_variant:MOVER_AVWAP_SCALP"
         c = tv.counters()
-        assert c == {"seen": 1, "stamped": 1, "skipped": 0}
+        assert _lifecycle(c) == {"seen": 1, "stamped": 1, "skipped": 0}
 
     def test_cooldown_skips_and_counts(self):
         highs, lows, closes = _candles()
@@ -134,7 +143,7 @@ class TestVariantPlumbing:
         assert tv.stamp_tuned_variant(now_mono=1000.0, **kw) is not None
         assert tv.stamp_tuned_variant(now_mono=1030.0, **kw) is None
         assert len(store.records()) == 1
-        assert tv.counters() == {"seen": 2, "stamped": 1, "skipped": 1}
+        assert _lifecycle(tv.counters()) == {"seen": 2, "stamped": 1, "skipped": 1}
 
     def test_vsb_extension_filter_counts_as_skipped(self):
         highs, lows, closes = _candles()
@@ -148,7 +157,7 @@ class TestVariantPlumbing:
         )
         assert out is None
         assert store.records() == []
-        assert tv.counters() == {"seen": 1, "stamped": 0, "skipped": 1}
+        assert _lifecycle(tv.counters()) == {"seen": 1, "stamped": 0, "skipped": 1}
 
     def test_non_tuned_setup_not_counted(self):
         highs, lows, closes = _candles()
@@ -157,7 +166,7 @@ class TestVariantPlumbing:
             setup_class="SR_FLIP_RETEST", side="LONG",
             entry=100.0, highs=highs, lows=lows, closes=closes,
         ) is None
-        assert tv.counters() == {"seen": 0, "stamped": 0, "skipped": 0}
+        assert _lifecycle(tv.counters()) == {"seen": 0, "stamped": 0, "skipped": 0}
 
 
 class TestScannerHook:
@@ -289,3 +298,116 @@ class TestMtpRetestArm:
         assert stop is None
         assert store.records() == []
         assert tv.counters()["skipped"] == 1
+
+
+class TestResidueNamesItsCause:
+    """``66 unexplained non-stamps`` was literal, and that was the defect.
+
+    Four paths produce a residue — an uncomputable MTP retest arm, an
+    uncomputable ATR arm, a store that refused the candidate, and an exception
+    — and they need four different responses. The probe paged for 15 straight
+    audit cycles on 2026-08-03 without being able to say which.
+    """
+
+    def test_an_uncomputable_atr_arm_is_named(self):
+        store = SuppressedCandidateStore(persist_path="", maxlen=50)
+        # Too few closes for the arm's window: `compute_tuned_arm` returns None.
+        out = tv.stamp_tuned_variant(
+            symbol="ABCUSDT", channel="360_SCALP",
+            setup_class="MOVER_AVWAP_SCALP", side="LONG",
+            entry=100.0, highs=[100.0], lows=[100.0], closes=[100.0],
+            store=store,
+        )
+        assert out is None
+        assert tv.residue_breakdown() == {"atr_arm_uncomputable": 1}
+
+    def test_an_uncomputable_mtp_arm_is_named_separately(self):
+        store = SuppressedCandidateStore(persist_path="", maxlen=50)
+        out = tv.stamp_tuned_variant(
+            symbol="ABCUSDT", channel="360_SCALP",
+            setup_class="MOVER_TREND_PULLBACK", side="LONG",
+            entry=100.0, highs=[100.0], lows=[100.0], closes=[100.0],
+            store=store, live_stop_loss=95.0, live_tp1=110.0,
+        )
+        assert out is None
+        assert tv.residue_breakdown() == {"mtp_arm_uncomputable": 1}
+
+    def test_a_refusal_by_the_ledger_writer_is_its_own_cause(self, monkeypatch):
+        """Driven through the REAL ``stamp_candidate``, not a fake store.
+
+        The first cut of this test handed in a stub whose ``add`` returned
+        None. It went green — and for the wrong reason: ``stamp_candidate``
+        never reads its store's return, it calls ``stamp``, so the stub raised
+        ``AttributeError``, was swallowed, and wrote a fabricated entry into
+        ``fail_open`` — the counter whose whole job is making a real failure
+        stand out. Here the writer's own degenerate-geometry guard fires, which
+        is a way it genuinely returns None.
+        """
+        highs, lows, closes = _candles()
+        entry = float(closes[-1])
+        # A zero-width stop: `stamp_candidate` refuses on sl_distance <= 0.
+        monkeypatch.setattr(
+            tv, "compute_tuned_arm", lambda **k: (entry, entry * 1.02, "ok")
+        )
+        store = SuppressedCandidateStore(persist_path="", maxlen=50)
+
+        out = tv.stamp_tuned_variant(
+            symbol="ABCUSDT", channel="360_SCALP",
+            setup_class="MOVER_AVWAP_SCALP", side="LONG",
+            entry=entry, highs=highs, lows=lows, closes=closes, store=store,
+        )
+
+        assert out is None
+        assert store.records() == []
+        assert tv.residue_breakdown() == {"stamp_refused": 1}
+
+    def test_an_exception_after_seen_is_counted_as_residue(self, monkeypatch):
+        highs, lows, closes = _candles()
+        monkeypatch.setattr(
+            tv, "compute_tuned_arm",
+            lambda **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        out = tv.stamp_tuned_variant(
+            symbol="ABCUSDT", channel="360_SCALP",
+            setup_class="MOVER_AVWAP_SCALP", side="LONG",
+            entry=float(closes[-1]), highs=highs, lows=lows, closes=closes,
+            store=SuppressedCandidateStore(persist_path="", maxlen=50),
+        )
+        assert out is None
+        assert tv.residue_breakdown() == {"exception": 1}
+
+    def test_the_named_causes_reconcile_with_the_arithmetic_residue(self):
+        """One count is an assertion, two are a detector: a gap between them
+        means a path returns without accounting for itself."""
+        store = SuppressedCandidateStore(persist_path="", maxlen=50)
+        for i in range(3):
+            tv.stamp_tuned_variant(
+                symbol=f"A{i}USDT", channel="360_SCALP",
+                setup_class="MOVER_AVWAP_SCALP", side="LONG",
+                entry=100.0, highs=[100.0], lows=[100.0], closes=[100.0],
+                store=store,
+            )
+        # ...and one healthy stamp, which must not land in the residue.
+        highs, lows, closes = _candles()
+        tv.stamp_tuned_variant(
+            symbol="OKUSDT", channel="360_SCALP",
+            setup_class="MOVER_AVWAP_SCALP", side="LONG",
+            entry=float(closes[-1]), highs=highs, lows=lows, closes=closes,
+            store=store,
+        )
+
+        c = tv.counters()
+        residue = c["seen"] - c["stamped"] - c["skipped"]
+
+        assert residue == 3
+        assert sum(tv.residue_breakdown().values()) == residue
+
+    def test_a_healthy_pipeline_reports_no_causes(self):
+        highs, lows, closes = _candles()
+        tv.stamp_tuned_variant(
+            symbol="ABCUSDT", channel="360_SCALP",
+            setup_class="MOVER_AVWAP_SCALP", side="LONG",
+            entry=float(closes[-1]), highs=highs, lows=lows, closes=closes,
+            store=SuppressedCandidateStore(persist_path="", maxlen=50),
+        )
+        assert tv.residue_breakdown() == {}

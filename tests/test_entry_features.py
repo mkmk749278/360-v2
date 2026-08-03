@@ -647,3 +647,216 @@ class TestTheSpecShipsWithTheData:
         known = set(spec["core"]) | {f for fs in spec["paths"].values() for f in fs}
         for setup in ef.PATH_FEATURES:
             assert set(ef.features_for(setup)) <= known
+
+
+# --------------------------------------------------------------------------- #
+# Why a feature is absent — the half `entry_feature_inputs` had to guess at
+# --------------------------------------------------------------------------- #
+
+
+class TestLevelDistanceNamesItsSilence:
+    """``None`` covered four findings needing four different responses.
+
+    The liveness probe paged for eight features on 2026-08-03 asserting
+    "upstream is dark" about all of them, which it could not know: an empty
+    LevelBook, a level shape this reader cannot parse, and a working read whose
+    answer is "nothing opposing overhead" all arrived as the same ``None``.
+    """
+
+    @staticmethod
+    def _real_levels(*specs):
+        """Levels from the module that actually produces them.
+
+        ``level_book.Level`` is the only shape ``get_levels`` ever returns.
+        Hand-writing a dict here is how ``smc_zone_dist_atr`` passed two tests
+        while being uncomputable on 57 of 57 real rows — the mock asserted the
+        author's guess back at them.
+        """
+        from src.level_book import Level
+
+        return [Level(price=p, type=t, source_tf="1h") for p, t in specs]
+
+    def test_a_wall_ahead_is_measured_in_the_trade_s_own_risk(self):
+        levels = self._real_levels((104.0, "resistance"), (90.0, "support"))
+        val, why = ef.level_distance_r_with_reason(levels, 100.0, 110.0, 10.0, True)
+        assert val == pytest.approx(0.4)
+        assert why is None
+
+    def test_an_empty_book_says_so_rather_than_saying_nothing_is_overhead(self):
+        val, why = ef.level_distance_r_with_reason([], 100.0, 110.0, 10.0, True)
+        assert val is None
+        assert why == ef.LEVEL_DIST_NO_LEVELS
+
+    def test_a_populated_book_with_nothing_ahead_is_not_a_fault(self):
+        """The reader worked perfectly. Reporting this as a dark upstream sends
+        the next session to look at the LevelBook refresh, which is fine."""
+        levels = self._real_levels((90.0, "support"), (80.0, "support"))
+        val, why = ef.level_distance_r_with_reason(levels, 100.0, 110.0, 10.0, True)
+        assert val is None
+        assert why == ef.LEVEL_DIST_NONE_AHEAD
+
+    def test_a_shape_this_reader_cannot_price_is_named_not_skipped(self):
+        """The `zone_distance_atr` failure mode: an unreadable level is
+        indistinguishable from an absent one unless it is counted."""
+        val, why = ef.level_distance_r_with_reason(
+            [{"gap_high": 104.0, "gap_low": 103.0}], 100.0, 110.0, 10.0, True
+        )
+        assert val is None
+        assert why == ef.LEVEL_DIST_UNREADABLE_LEVELS
+
+    def test_broken_geometry_is_its_own_cause(self):
+        levels = self._real_levels((104.0, "resistance"))
+        val, why = ef.level_distance_r_with_reason(levels, 100.0, 110.0, 0.0, True)
+        assert val is None
+        assert why == ef.LEVEL_DIST_NO_GEOMETRY
+
+    def test_the_thin_wrapper_still_answers_the_old_question(self):
+        levels = self._real_levels((104.0, "resistance"))
+        assert ef.level_distance_r(levels, 100.0, 110.0, 10.0, True) == pytest.approx(0.4)
+        assert ef.level_distance_r([], 100.0, 110.0, 10.0, True) is None
+
+    def test_a_short_reads_support_below_it(self):
+        levels = self._real_levels((96.0, "support"), (110.0, "resistance"))
+        val, why = ef.level_distance_r_with_reason(levels, 100.0, 90.0, 10.0, False)
+        assert val == pytest.approx(0.4)
+        assert why is None
+
+
+class TestTheReasonIsMetadataNotAFeature:
+    def test_a_healthy_row_does_not_report_the_reason_key_as_missing(self):
+        """Written after the missing-accounting on purpose: on a row where the
+        feature computed, the reason is ``None``, and stamping it earlier would
+        have put a non-feature into ``missing`` on every *healthy* row."""
+        from src.level_book import Level
+
+        feats = ef.capture(
+            symbol="BTCUSDT",
+            direction_is_long=True,
+            entry=100.0,
+            sl_dist=10.0,
+            tp1=110.0,
+            trigger="t",
+            tf={"close": [100.0] * 30, "high": [101.0] * 30,
+                "low": [99.0] * 30, "volume": [10.0] * 30},
+            tf_name="5m",
+            atr=1.0,
+            smc_data={
+                "level_book_levels": [
+                    Level(price=104.0, type="resistance", source_tf="1h")
+                ]
+            },
+        )
+        assert feats["level_dist_r"] == pytest.approx(0.4)
+        assert feats[ef.reason_key("level_dist_r")] is None
+        assert ef.reason_key("level_dist_r") not in feats["missing"]
+
+    def test_an_absent_row_carries_the_cause(self):
+        feats = ef.capture(
+            symbol="BTCUSDT",
+            direction_is_long=True,
+            entry=100.0,
+            sl_dist=10.0,
+            tp1=110.0,
+            trigger="t",
+            tf={"close": [100.0] * 30, "high": [101.0] * 30,
+                "low": [99.0] * 30, "volume": [10.0] * 30},
+            tf_name="5m",
+            atr=1.0,
+            smc_data={"level_book_levels": []},
+        )
+        assert feats["level_dist_r"] is None
+        assert "level_dist_r" in feats["missing"]
+        assert feats[ef.reason_key("level_dist_r")] == ef.LEVEL_DIST_NO_LEVELS
+
+    def test_reasons_are_histogrammed_per_path(self):
+        led = ef.EntryFeatureLedger(path="")
+        for i in range(4):
+            led.add({
+                "signal_id": f"a{i}",
+                "setup_class": "TREND_PULLBACK_EMA",
+                "missing": ["level_dist_r"],
+                ef.reason_key("level_dist_r"): ef.LEVEL_DIST_NO_LEVELS,
+            })
+        led.add({
+            "signal_id": "b",
+            "setup_class": "TREND_PULLBACK_EMA",
+            "missing": ["level_dist_r"],
+            ef.reason_key("level_dist_r"): ef.LEVEL_DIST_NONE_AHEAD,
+        })
+        # A different path's rows must not leak into this path's histogram.
+        led.add({
+            "signal_id": "c",
+            "setup_class": "MEAN_REVERT",
+            "missing": ["level_dist_r"],
+            ef.reason_key("level_dist_r"): ef.LEVEL_DIST_UNREADABLE_LEVELS,
+        })
+
+        got = ef.absence_reasons("level_dist_r", "TREND_PULLBACK_EMA", led)
+
+        assert got == {ef.LEVEL_DIST_NO_LEVELS: 4, ef.LEVEL_DIST_NONE_AHEAD: 1}
+
+    def test_a_feature_that_records_no_reason_yields_an_empty_histogram(self):
+        """So the caller says "cause unrecorded" instead of inventing one."""
+        led = ef.EntryFeatureLedger(path="")
+        led.add({"signal_id": "a", "setup_class": "MEAN_REVERT",
+                 "missing": ["sigma_at_entry"]})
+        assert ef.absence_reasons("sigma_at_entry", "MEAN_REVERT", led) == {}
+
+
+class TestOnlyDeclaredFeaturesAreJudged:
+    """The 2026-08-03 alert, reproduced.
+
+    ``capture`` emits one flat block for every path, so a feature whose input
+    only some paths supply is ``None`` on the rest by construction.
+    ``extension_pct`` needs ``ma_slow``: the two pullback paths pass it, and
+    MEAN_REVERT / MOVER_AVWAP_SCALP / RANGE_FADE do not. Three of the alert's
+    eight flagged items were that — the probe reporting "unused" as "dark",
+    which is the exact distinction it exists to make.
+    """
+
+    def test_extension_pct_is_not_a_dead_upstream_on_a_path_that_never_asked(self):
+        led = ef.EntryFeatureLedger(path="")
+        for i in range(20):
+            led.add({
+                "signal_id": f"mr-{i}",
+                "setup_class": "MEAN_REVERT",
+                # Structurally absent (no ma_slow) beside a genuinely dead one.
+                "missing": ["extension_pct", "level_dist_r"],
+            })
+
+        _, missing = ef.missing_by_setup(led)["MEAN_REVERT"]
+
+        assert "extension_pct" not in ef.features_for("MEAN_REVERT")
+        assert "extension_pct" not in missing
+        # ...and the real one is still caught, which is the whole point: this
+        # must narrow the noise without narrowing the detector.
+        assert missing["level_dist_r"] == 20
+
+    def test_the_path_that_does_declare_it_is_still_judged_on_it(self):
+        led = ef.EntryFeatureLedger(path="")
+        for i in range(20):
+            led.add({
+                "signal_id": f"mv-{i}",
+                "setup_class": "MOVER_TREND_PULLBACK",
+                "missing": ["extension_pct"],
+            })
+
+        n_rows, missing = ef.missing_by_setup(led)["MOVER_TREND_PULLBACK"]
+
+        assert "extension_pct" in ef.features_for("MOVER_TREND_PULLBACK")
+        assert missing["extension_pct"] == n_rows == 20
+
+    def test_what_was_set_aside_is_counted_rather_than_silent(self):
+        """A narrowed mode that leaves no trace is how the next reader concludes
+        the probe was watching something it was not."""
+        led = ef.EntryFeatureLedger(path="")
+        for i in range(5):
+            led.add({
+                "signal_id": f"mr-{i}",
+                "setup_class": "MEAN_REVERT",
+                "missing": ["extension_pct", "level_dist_r"],
+            })
+
+        aside = ef.undeclared_absences(led)
+
+        assert aside == {"extension_pct": 5}

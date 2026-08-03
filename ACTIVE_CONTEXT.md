@@ -4,6 +4,96 @@
 
 ---
 
+## 🟢 SESSION 107 2026-08-03 — three probes that paged without naming a cause
+
+Hourly liveness alert, five findings sustained 15 audit cycles. Two were
+diagnosable from the alert's own data and are fixed; three are real and are
+reported below rather than acted on.
+
+### `entry_feature_inputs` — 3 of its 8 items were noise, and the other 5 asserted a cause
+
+- **The probe judged paths on features they never declared.** `capture` emits
+  one flat feature block for every setup, so an input only some paths supply is
+  `None` on the rest by construction. `extension_pct` needs `ma_slow`:
+  `TREND_PULLBACK_EMA` and `MOVER_TREND_PULLBACK` pass it, MEAN_REVERT /
+  MOVER_AVWAP_SCALP / RANGE_FADE do not — and those three read *"absent on
+  EVERY stamp"* forever. That is the **'unused' the probe exists to tell dark
+  apart from**, arriving as the alert. The tell was inside the alert itself:
+  the two paths that *do* supply `ma_slow` were not among the flagged.
+  `missing_by_setup` now counts only `features_for(setup)` — the same registry
+  `describe_features` ships to ops, so the probe judges the columns the page
+  actually draws — and `undeclared_absences` counts what was set aside, because
+  a narrowed mode with no trace is how the next reader misreads the probe.
+- **`level_dist_r` is absent on all five paths, and the message asserted a
+  cause it could not know.** One `None` covered four findings needing four
+  different responses: a dark LevelBook (`no_levels`), a level shape the reader
+  cannot parse (`unreadable_levels`), broken geometry (`no_geometry`), and a
+  fully working read whose answer is *"nothing opposing overhead"*
+  (`none_ahead`) — which is not a fault at all. The old text said *"upstream is
+  dark"* for all of them. `level_distance_r_with_reason` names which; the row
+  carries it under `reason_key("level_dist_r")`, written **after** the
+  missing-accounting so metadata never counts as a feature; the alert now
+  renders the histogram. **Which cause is live is still unknown** — the ledger
+  is on the VPS. The next audit cycle answers it.
+- Paging behaviour is unchanged: a declared feature absent on every row is still
+  a column ops cannot split on. Only the *narrowing to noise* was removed.
+
+### `tuned_variants` — "66 unexplained non-stamps" was literal
+
+Four paths produce a residue and the probe could name none: an uncomputable MTP
+retest arm, an uncomputable ATR arm, a refusal by the ledger writer, and an
+exception. Each now increments its own `residue:*` counter at the point it
+returns, and the probe reconciles the named sum against `seen − stamped −
+skipped` — one count is an assertion, two are a detector.
+
+**A counter was named wrong on the first cut and the test hid it.** `store_reject`
+was wrong: `stamp_candidate` never reads its store's return, so `rec is None`
+means that writer's own degenerate-geometry guard or an exception it already
+recorded. The test that "proved" it handed in a stub whose `add` returned None —
+`stamp_candidate` calls `stamp`, so the stub raised `AttributeError`, was
+swallowed, and **wrote a fabricated entry into `fail_open`**, the counter whose
+whole job is making a real failure stand out. Renamed `stamp_refused`; the test
+now drives the real writer's real refusal path and leaves `fail_open` empty.
+`CLAUDE.md` already carried both halves of this — *never hand-write a
+collaborator's return shape* and *a non-failure must never reach `fail_open`*.
+
+The `tuned_variants` test fixture also hand-wrote the counter dict and had
+already drifted; it now zeroes from the module's own key set.
+
+### Reported, not acted on — these need data or sign-off
+
+- **`mean_revert_emission`**: 849 detections since one emission, blocked
+  candidates measuring **+0.55R over n=3361**. Real and expensive-looking, but
+  that is a *counterfactual* (~0.38R optimistic by this repo's own measurement)
+  and loosening a live gate on MEAN_REVERT is money-path, owner-sign-off.
+- **`edge_reconciliation`**: `MOVER_AVWAP_SCALP` realized − counterfactual =
+  **+0.38R** against a 0.3 bound. Note the **sign**: realized is *better* than
+  the counterfactual, the opposite of the documented optimism bias — so this is
+  more likely the cost constants or the counterfactual model than the path.
+- **`cohort_edge_gate`**: all 27 cohorts still `macro_dir=DECLINE`. The probe is
+  **working as designed** — it exists so this is never discovered from a P&L
+  chart. Unchanged since 2026-07-30; a BTC macro flip still disarms every cohort
+  at once.
+
+### Verification
+
+Full suite **7798 passed, 58 skipped**. Ruff clean; mypy unchanged (8 errors on
+`entry_features.py` before and after — line shifts only). The scoping fix was
+**verified by reverting it**: against the old code the new test fails with
+exactly the alert's shape, `{'extension_pct': 20, 'level_dist_r': 20}` on 20
+MEAN_REVERT rows.
+
+### Open
+
+- The `level_dist_r` cause histogram lands on the next audit cycle. If it reads
+  `no_levels`, the LevelBook refresh is the target; if `none_ahead`, the feature
+  works and the *paging threshold* is what wants revisiting.
+- Ops `/signals/entry-features` renders an em-dash for `level_dist_r` with no
+  cause beside it. The reason is now on the row and could be surfaced there —
+  not built this session, since the ask was the engine alert.
+
+---
+
 ## 🟢 SESSION 106 2026-08-02 — the feed's biggest gate had no counter
 
 Owner: *"take the cohort_edge feed issue"* (~16 delivered signals/day). The
