@@ -760,13 +760,44 @@ def test_the_probe_fails_on_a_row_that_stopped_advancing(monkeypatch):
 
 
 def test_the_probe_ignores_a_row_that_has_already_resolved(monkeypatch):
+    """A row done on BOTH arms is owed nothing, so its stale stamps say nothing.
+
+    Both, not one: the held-to-stop arm exits only at the stop and normally
+    outlives the row's own TP1, so a row whose status is closed can still be
+    owed a verdict. See the test below for that half.
+    """
     monkeypatch.setattr(de, "enabled", lambda: True)
     ts = 1_700_000_000.0
     ledger = _published(ts=ts)
     (row,) = ledger.rows()
-    row.update({"status": de.STATUS_SL, "resolve_misses": 9, "stalled": True})
+    row.update({
+        "status": de.STATUS_SL, "hold_status": de.HOLD_SL,
+        "resolve_misses": 9, "stalled": True,
+    })
     ok, _ = de.resolution_health(ledger, now_ts=ts + 10_000.0)
     assert ok is True
+
+
+def test_the_probe_still_watches_a_closed_row_whose_hold_arm_runs(monkeypatch):
+    """A TP1 close does not retire the held-to-stop arm, and the probe knows it.
+
+    This is #835 one lane over: an arm that rides another object's lifetime
+    stops being advanced the moment that object finishes, and nothing notices
+    because the thing it was riding looks correctly complete. The row's own
+    verdict is in; the arm the owner reads to decide whether the exit left money
+    on the table is frozen, and it is the arm that has to page.
+    """
+    monkeypatch.setattr(de, "enabled", lambda: True)
+    ts = 1_700_000_000.0
+    ledger = _published(ts=ts)
+    (row,) = ledger.rows()
+    row.update({
+        "status": de.STATUS_TP1, "hold_status": de.HOLD_OPEN,
+        "resolve_misses": de.STALL_MISS_LIMIT, "stalled": True,
+    })
+    ok, detail = de.resolution_health(ledger, now_ts=ts + 10_000.0)
+    assert ok is False
+    assert "MEANUSDT" in detail
 
 
 # --------------------------------------------------------------------------- #
@@ -945,3 +976,190 @@ def test_a_row_carries_mae_from_creation_so_blank_means_not_yet():
     (created,) = ledger.rows()
     assert created["mae_pct"] == 0.0
     assert created["mfe_pct"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# The held-to-stop arm (2026-08-03)
+#
+# Owner: *"max PnL before hitting SL"* and *"same exit strategies like Held to
+# stop in dark feed too"*. Neither was answerable from this ledger, and the
+# reason is structural rather than a missing column: `_walk` stops at the first
+# TP1-or-SL touch, so `mfe_pct` on a TP1 row is bounded by TP1 by construction
+# and everything after that touch was never looked at.
+#
+# The arm below walks the same bars with TP1 removed. These tests pin the three
+# things that make it honest: it outlives the row's own exit, its judgements all
+# lean against it, and a window it cannot walk earns it nothing.
+# --------------------------------------------------------------------------- #
+
+
+def _laddered(side="LONG", entry=100.0, sl=97.0, tp1=106.0, tp2=112.0, tp3=124.0,
+              ts=1_700_000_000.0):
+    """A published row carrying its whole TP ladder, not only TP1."""
+    sig = _Sig()
+    sig.entry, sig.stop_loss, sig.tp1 = entry, sl, tp1
+    sig.tp2, sig.tp3 = tp2, tp3
+    sig.direction = type("_D", (), {"value": side})
+    de.mark(sig, "setup_compat:regime_STRONG_TREND")
+    de.publish(sig, now_ts=ts)
+    return de.get_ledger()
+
+
+def test_the_hold_arm_keeps_walking_after_the_row_closed_at_tp1():
+    """The whole point: the row's own verdict lands at TP1 and the arm does not.
+
+    Without this the ledger can only ever say "it reached TP1", which is the one
+    thing a question about exit method cannot be answered from.
+    """
+    ledger = _published()          # LONG, entry 100, sl 97, tp1 106
+    # Runs to 107 (TP1), on to 115, then all the way back through the stop.
+    ohlc = {
+        "high": [107.0, 115.0, 108.0],
+        "low": [100.0, 106.0, 96.0],
+        "close": [106.5, 114.0, 96.5],
+    }
+    de.resolve_open(lambda *_: ohlc, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+
+    assert row["status"] == de.STATUS_TP1          # the row's own exit, unchanged
+    assert row["mfe_pct"] == pytest.approx(7.0)    # …and bounded by its own bar
+    assert row["hold_status"] == de.HOLD_SL
+    # The arm saw the 115 print that the row's walk never reached.
+    assert row["hold_mfe_pct"] == pytest.approx(15.0)
+    assert row["hold_result_pct"] == pytest.approx(-3.0)
+
+
+def test_the_stop_bar_s_favourable_wick_is_excluded_from_the_headline_mfe():
+    """Intrabar order is unknowable, so the stop is assumed to have gone first.
+
+    Both readings are stamped: their gap is the assumption, and publishing only
+    one of them is choosing the answer — the flattering one, every time.
+    """
+    ledger = _published()
+    # One bar that prints +12% and also takes out the stop.
+    ohlc = {"high": [112.0], "low": [96.0], "close": [98.0]}
+    de.resolve_open(lambda *_: ohlc, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+
+    assert row["hold_status"] == de.HOLD_SL
+    assert row["hold_mfe_pct"] == pytest.approx(0.0)        # nothing before it
+    assert row["hold_mfe_incl_pct"] == pytest.approx(12.0)  # …and the other read
+    assert row["hold_ambiguous_bar"] is True                # TP1 was in that bar
+
+
+def test_the_ladder_records_the_highest_level_reached_before_the_stop():
+    """Every scaled-exit replay is priced off this. A level touched only on the
+    stop bar does not count — it is flagged instead."""
+    ledger = _laddered()           # tp1 106, tp2 112, tp3 124
+    ohlc = {
+        "high": [107.0, 113.0, 100.0],
+        "low": [100.0, 106.0, 96.0],
+        "close": [106.0, 112.5, 96.5],
+    }
+    de.resolve_open(lambda *_: ohlc, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+
+    assert row["tp2"] == pytest.approx(112.0)
+    assert row["hold_hit_tp"] == 2                 # TP2 yes, TP3 never
+    assert row["hold_ambiguous_bar"] is False
+
+
+def test_a_short_s_hold_arm_is_measured_in_its_own_direction():
+    ledger = _published(side="SHORT", entry=100.0, sl=103.0, tp1=94.0)
+    # Falls to 90 (10% favourable for a short), then reverses through 103.
+    ohlc = {"high": [100.5, 104.0], "low": [90.0, 95.0], "close": [91.0, 103.5]}
+    de.resolve_open(lambda *_: ohlc, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+
+    assert row["hold_status"] == de.HOLD_SL
+    assert row["hold_mfe_pct"] == pytest.approx(10.0)
+    assert row["hold_result_pct"] == pytest.approx(-3.0)
+
+
+def test_the_drawdown_before_the_peak_includes_the_peak_bar_s_own_low():
+    """"Would a tighter stop have kept this winner" is exactly "did it survive
+    its own drawdown first", and that question must never be answered more
+    favourably than the bars allow."""
+    ledger = _published()
+    # Dips to 98 first, then the peak bar itself wicks to 97.5 before printing 110.
+    ohlc = {"high": [101.0, 110.0], "low": [98.0, 97.5], "close": [100.0, 109.0]}
+    de.resolve_open(lambda *_: ohlc, now_ts=1_700_000_600.0, ledger=ledger)
+    (row,) = ledger.rows()
+
+    assert row["hold_mfe_pct"] == pytest.approx(10.0)
+    assert row["hold_peak_bars"] == 2
+    assert row["hold_mae_pre_peak_pct"] == pytest.approx(2.5)   # 100 -> 97.5
+
+
+def test_the_hold_arm_is_forced_closed_at_the_horizon_not_left_open():
+    """"Hold to the stop" with no bound is not a rule anyone could run, and an
+    unbounded arm is how a lane fills with rows that render as live trades."""
+    ledger = _published()
+    de.resolve_open(
+        lambda *_: _quiet_window(420),
+        now_ts=1_700_000_000.0 + 7 * 3600.0,
+        ledger=ledger,
+    )
+    (row,) = ledger.rows()
+
+    assert row["hold_status"] == de.HOLD_EXPIRED
+    assert row["hold_result_pct"] is not None      # marked to the last close
+    assert row["hold_mark_pct"] is None            # …and no longer a mark
+
+
+def test_a_hold_arm_that_never_covered_its_window_earns_no_verdict():
+    """The row's own partial-window rule, applied to the arm. "The stop was never
+    touched" over a window nobody walked is a claim, not a measurement."""
+    ledger = _published()
+    de.resolve_open(
+        lambda *_: _quiet_window(60),              # 60 bars of a 7-hour window
+        now_ts=1_700_000_000.0 + 7 * 3600.0,
+        ledger=ledger,
+    )
+    (row,) = ledger.rows()
+
+    assert row["hold_status"] == de.HOLD_INSUFFICIENT
+    assert row["hold_insufficient_reason"] == de.INSUFFICIENT_PARTIAL_WINDOW
+    assert row["hold_result_pct"] is None          # terminal, and unscored
+
+
+def test_a_row_with_no_candles_retires_both_arms_at_the_horizon():
+    ledger = _published()
+    de.resolve_open(
+        lambda *_: None, now_ts=1_700_000_000.0 + 7 * 3600.0, ledger=ledger,
+    )
+    (row,) = ledger.rows()
+
+    assert row["status"] == de.STATUS_INSUFFICIENT
+    assert row["hold_status"] == de.HOLD_INSUFFICIENT
+    assert row["hold_insufficient_reason"] == de.INSUFFICIENT_NO_WALK
+
+
+def test_a_row_carries_the_hold_arm_from_creation_so_blank_means_not_yet():
+    ledger = _published()
+    (created,) = ledger.rows()
+    assert created["hold_status"] == de.HOLD_OPEN
+    assert created["hold_mfe_pct"] == 0.0
+    assert created["hold_hit_tp"] == 0
+    assert created["hold_result_pct"] is None
+
+
+def test_the_row_currency_stamp_follows_whichever_arm_is_still_walking():
+    """A closed row's own walk stops stamping `last_bar_ms`, so grading the row
+    on it alone would report a live held arm as stalled the moment TP1 hit."""
+    ledger = _published()
+    ts = 1_700_000_000.0
+    ohlc = {
+        "high": [107.0, 108.0],
+        "low": [100.0, 106.0],
+        "close": [106.5, 107.0],
+        "open_time": [ts * 1000.0, (ts + 60.0) * 1000.0],
+    }
+    de.resolve_open(lambda *_: ohlc, now_ts=ts + 180.0, ledger=ledger)
+    (row,) = ledger.rows()
+
+    assert row["status"] == de.STATUS_TP1
+    assert row["last_bar_ms"] == pytest.approx(ts * 1000.0)          # its own exit
+    assert row["hold_last_bar_ms"] == pytest.approx((ts + 60.0) * 1000.0)
+    # Graded on the newer of the two, so the still-running arm is not "stalled".
+    assert row["stalled"] is False

@@ -1067,6 +1067,29 @@ python -m src.main
     the gate passed them all anyway"* — self-contradictory on its face, since an
     empty list would have made that gate **reject**. Ask what would have to be
     true for the number to mean what the sentence says.
+- **A measurement that stops at its own exit cannot be read as one that did
+  not.** The dark lane's `_walk` breaks at the first TP1-or-SL touch — correct
+  for the row's verdict, and it makes `mfe_pct` on a TP1 row bounded by the TP1
+  distance **by construction**. Asked for "max PnL before hitting SL"
+  (2026-08-03), that column was sitting right there, plausibly sized, and
+  structurally incapable of meaning it: it records how far the trade ran before
+  its own exit, and everything after that touch was never walked. The same
+  truncation is why no held-to-stop or laddered exit could be priced from the
+  ledger at all. This is #848's class without the arithmetic — a figure whose
+  *shape* is fine and whose *definition* is not what the reader assumes — and it
+  is worse than a blank, because a blank prompts a question. **Before rendering
+  a stored extremum, ask what stopped the loop that produced it.** The fix was a
+  second arm over the same bars with TP1 removed (`_walk_hold`), stamped beside
+  the first and never blended with it; the two peaks are different measurements
+  and the ops page says so.
+
+  Corollary — **a second arm needs its own sweep.** It exits at the stop,
+  normally later than the row's own TP1, so a resolve loop keyed on `status ==
+  OPEN` freezes every arm the moment its row closes: #835's shape (a measurement
+  inheriting the lifetime of the thing it rides), and it would have been silent,
+  because a closed row looks correctly complete. `rows_owed_verdict` covers
+  either arm, the freshness stamps grade whichever one is still walking, and
+  `resolution_health` watches the same population its docstring already claimed.
 - **A comment asserting "this fallback only happens in tests" is a claim about
   production, and nobody had checked it.** `_build_scan_context` assembles
   `smc_data` once, then every scalp channel re-runs SMC detection with its own
