@@ -193,6 +193,52 @@ MIN_WINDOW_COVERAGE: float = float(
 INSUFFICIENT_PARTIAL_WINDOW = "partial_window"
 INSUFFICIENT_NO_WALK = "no_walk"
 
+# --------------------------------------------------------------------------- #
+# The held-to-stop arm (2026-08-03)
+#
+# The walk above stops at the FIRST touch of TP1 or the stop, which is what the
+# row's own geometry does and is the right verdict for it.  It is also why two
+# questions the owner asked of this lane could not be answered from the ledger
+# at all:
+#
+# * *"max PnL before hitting SL"* — for a row that closed at TP1 the walk ended
+#   there, so ``mfe_pct`` is bounded by TP1 by construction.  It answers "how
+#   far did it run before its own exit", never "how far was it ever going to
+#   run".  Reading the first as the second is a claim about bars nobody walked.
+# * *"the same exit strategies as the Profit tab"* — every one of them (hold to
+#   the stop, TP1 full, 50/50 TP1·TP2, thirds, a break-even stop) needs to know
+#   what happened AFTER TP1 was touched, and which ladder levels were reached
+#   before the stop.  None of that survives an early break.
+#
+# So a second arm walks the same bars with TP1 removed: it exits only at the
+# original stop, or at the horizon.  It never touches ``status`` / ``pnl_pct`` /
+# ``r_multiple`` — redefining a live measurement on a populated ledger is the
+# thing this file already warns about — and it is a genuinely different
+# mechanism, so nothing here is blended with the row's own outcome.
+#
+# Two conventions, both deliberately the pessimistic one:
+#
+# * **The stop bar's favourable wick is excluded from the headline MFE.**
+#   Intrabar order is unknowable from OHLC, so on the bar that touches the stop
+#   we assume the stop went first.  ``hold_mfe_incl_pct`` carries the other
+#   reading beside it — their gap IS the intrabar assumption, and publishing one
+#   silently is choosing the answer (the same rule as the SAR arm's two fills).
+# * **A ladder level touched on the stop bar does not count as reached.**
+#   ``hold_ambiguous_bar`` says it happened rather than hiding the judgement.
+HOLD_OPEN = "HOLD_OPEN"
+#: The stop was touched; this arm's result is the stop's return.
+HOLD_SL = "HOLD_SL"
+#: Past the horizon with the stop never touched — a forced close at the last
+#: bar's close.  A real outcome of "hold to the stop or six hours, whichever
+#: comes first", which is the only holdable version of the rule.
+HOLD_EXPIRED = "HOLD_EXPIRED"
+#: Terminal and deliberately unscored, exactly like ``STATUS_INSUFFICIENT``:
+#: past the horizon on a walk that never happened or did not cover the window.
+HOLD_INSUFFICIENT = "HOLD_INSUFFICIENT"
+
+#: States in which this arm is owed nothing further.
+HOLD_TERMINAL = frozenset({HOLD_SL, HOLD_EXPIRED, HOLD_INSUFFICIENT})
+
 
 def is_excluded(setup_class: Any) -> bool:
     """Is this path barred from the dark lane?"""
@@ -335,6 +381,20 @@ class DarkLedger:
     def open_rows(self) -> List[dict]:
         return [r for r in self.rows() if r.get("status") == STATUS_OPEN]
 
+    def rows_owed_verdict(self) -> List[dict]:
+        """Rows still owed an outcome on **either** arm.
+
+        The population the resolver sweeps. A row that closed at TP1 is done
+        with its own geometry and not with the held-to-stop arm beside it, which
+        exits only at the stop and normally runs longer — so a sweep keyed on
+        ``status == OPEN`` stops advancing exactly the arm that was built to
+        outlive that exit.
+        """
+        return [
+            r for r in self.rows()
+            if r.get("status") == STATUS_OPEN or hold_pending(r)
+        ]
+
     def mark_dirty(self) -> None:
         with self._lock:
             self._dirty = True
@@ -440,6 +500,13 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         "entry": float(getattr(sig, "entry", 0.0) or 0.0),
         "stop_loss": float(getattr(sig, "stop_loss", 0.0) or 0.0),
         "tp1": float(getattr(sig, "tp1", 0.0) or 0.0),
+        # The rest of the ladder. Only TP1 governs this row's own verdict, but a
+        # reader replaying it under a scaled exit ("50% at TP1, 50% at TP2")
+        # cannot price a leg whose level was never recorded — and a leg it
+        # cannot price must be refused rather than guessed, which means an
+        # unstamped ladder silently shrinks every strategy that uses one.
+        "tp2": float(getattr(sig, "tp2", 0.0) or 0.0),
+        "tp3": float(getattr(sig, "tp3", 0.0) or 0.0),
         # Which gate carried it here. The whole point of the lane: this row
         # exists because THIS gate said no, so the gate's name is the finding.
         "dark_gate": str(getattr(sig, DARK_ATTR, "") or ""),
@@ -481,6 +548,37 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         # the field" from "this row has not been advanced yet" (#817's class).
         "window_coverage": None,
         "insufficient_reason": None,
+        # ---- the held-to-stop arm, TP1 removed (see HOLD_* above) ----
+        # Present from creation for the same reason every other stamp is: a
+        # reader must never have to tell "this row predates the arm" from "this
+        # arm has not moved yet". A row that DOES predate it carries no
+        # `hold_status` at all, and ops renders that as its own bucket rather
+        # than as a zero — a missing stamp is not a pass.
+        "hold_status": HOLD_OPEN,
+        "hold_result_pct": None,
+        "hold_mark_pct": None,
+        "hold_exit_price": None,
+        # "Max PnL before hitting SL": the best this trade ever showed on the
+        # bars strictly BEFORE the stop bar. The headline the owner asked for,
+        # and unbounded by TP1 — which is exactly what `mfe_pct` above is not.
+        "hold_mfe_pct": 0.0,
+        # The same figure with the stop bar's favourable wick included. Their
+        # gap is the intrabar assumption, published rather than chosen.
+        "hold_mfe_incl_pct": 0.0,
+        # How far it went AGAINST us on the way to that peak. Without it the
+        # peak bounds nothing: "would a tighter stop have kept this" is exactly
+        # "did the winner survive its own drawdown first", and only this counts
+        # it instead of assuming it.
+        "hold_mae_pre_peak_pct": 0.0,
+        "hold_peak_bars": None,
+        "hold_bars": 0,
+        # Highest ladder level touched strictly before the stop bar (0..3).
+        # Every scaled-exit replay is priced off this plus the stamped levels.
+        "hold_hit_tp": 0,
+        "hold_ambiguous_bar": False,
+        "hold_window_coverage": None,
+        "hold_insufficient_reason": None,
+        "hold_last_bar_ms": None,
     }
     # Recorded where it becomes true (#802): the SL distance is knowable the
     # instant the geometry exists and never changes afterwards. Any reader
@@ -725,6 +823,143 @@ def _walk(row: dict, ohlc: Dict[str, List[float]]) -> Optional[dict]:
     return out
 
 
+def _pos(value: Any) -> Optional[float]:
+    """A strictly positive float, or None. An unstamped level is not a zero one."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _walk_hold(row: dict, ohlc: Dict[str, List[float]]) -> Optional[dict]:
+    """Walk the same bars with TP1 removed — exit only at the original stop.
+
+    The second arm described above. It answers the two questions ``_walk``
+    structurally cannot, because ``_walk`` stops at the first touch: how far the
+    trade was ever going to run before the stop caught it, and which ladder
+    levels it reached on the way.
+
+    Returns the ``hold_*`` updates, or None when the window cannot support the
+    walk at all — refuse, never clamp, and the caller records that it does not
+    know rather than booking a zero.
+
+    Every judgement in here leans against the arm:
+
+    * the stop bar's favourable wick is **not** in ``hold_mfe_pct`` (it is in
+      ``hold_mfe_incl_pct``, beside it, so the assumption is readable);
+    * a ladder level touched on the stop bar does **not** count as reached, and
+      the row is flagged ``hold_ambiguous_bar`` rather than silently rounded;
+    * the drawdown before the peak **includes** the peak bar's own low, so a
+      tight-stop question is never answered more favourably than the bars allow.
+
+    Nothing here is seeded from the previous pass while the walk runs — the
+    window always starts at the entry bar, so each cycle recomputes the whole
+    path and a seeded maximum would hide where the peak actually is. The stored
+    values are applied as floors afterwards, which only matters if a window ever
+    comes back shorter than it was.
+    """
+    highs, lows, closes = ohlc.get("high"), ohlc.get("low"), ohlc.get("close")
+    if highs is None or lows is None or closes is None:
+        return None
+    n = len(highs)
+    if n == 0 or len(lows) != n or len(closes) != n:
+        return None
+    times = ohlc.get("open_time")
+    if times is not None and len(times) != n:
+        # Ragged window: the bar at index i is not the bar timed at index i, so
+        # every stamp derived from it would be wrong. Walk anyway, stamp nothing.
+        times = None
+
+    entry = _pos(row.get("entry"))
+    sl = _pos(row.get("stop_loss"))
+    if entry is None or sl is None:
+        return None
+    is_long = str(row.get("side") or "").upper() == "LONG"
+    levels = [(lvl, px) for lvl, px in (
+        (1, _pos(row.get("tp1"))), (2, _pos(row.get("tp2"))), (3, _pos(row.get("tp3")))
+    ) if px is not None]
+
+    mfe = 0.0            # best favourable, bars strictly before the stop bar
+    mfe_incl = 0.0       # …and including it
+    mae_run = 0.0        # worst adverse so far
+    mae_pre_peak = 0.0   # …as it stood when the peak was printed
+    peak_bar: Optional[int] = None
+    hit_tp = 0
+    ambiguous = False
+    stopped = False
+    bars = 0
+
+    for i in range(n):
+        hi, lo = float(highs[i]), float(lows[i])
+        fav = ((hi - entry) if is_long else (entry - lo)) / entry * 100.0
+        adv = ((entry - lo) if is_long else (hi - entry)) / entry * 100.0
+        touched = 0
+        for lvl, px in levels:
+            if (hi >= px) if is_long else (lo <= px):
+                touched = max(touched, lvl)
+        bars = i + 1
+        if (lo <= sl) if is_long else (hi >= sl):
+            # The stop bar. Nothing else on it can be ordered against the stop,
+            # so the favourable side of it is recorded only in the inclusive
+            # figure and a ladder touch here is flagged, not counted.
+            mfe_incl = max(mfe_incl, fav)
+            ambiguous = touched > 0
+            stopped = True
+            break
+        mae_run = max(mae_run, adv)
+        if fav > mfe:
+            mfe = fav
+            peak_bar = i + 1
+            mae_pre_peak = mae_run
+        mfe_incl = max(mfe_incl, fav)
+        hit_tp = max(hit_tp, touched)
+
+    out: Dict[str, Any] = {
+        "hold_mfe_pct": max(mfe, float(row.get("hold_mfe_pct") or 0.0)),
+        "hold_mfe_incl_pct": max(
+            mfe, mfe_incl, float(row.get("hold_mfe_incl_pct") or 0.0)
+        ),
+        "hold_mae_pre_peak_pct": max(
+            mae_pre_peak, float(row.get("hold_mae_pre_peak_pct") or 0.0)
+        ),
+        "hold_peak_bars": peak_bar,
+        "hold_bars": bars,
+        "hold_hit_tp": max(hit_tp, int(row.get("hold_hit_tp") or 0)),
+        "hold_ambiguous_bar": bool(ambiguous),
+    }
+    if times is not None and bars > 0:
+        out["hold_last_bar_ms"] = float(times[bars - 1])
+    if stopped:
+        out["hold_status"] = HOLD_SL
+        out["hold_exit_price"] = sl
+        out["hold_result_pct"] = (
+            ((sl - entry) if is_long else (entry - sl)) / entry * 100.0
+        )
+        out["hold_mark_pct"] = None
+    else:
+        # Still running. A mark, in its own key: an unrealized number in a
+        # realized column is how an open trade gets read as a finished one, and
+        # this arm outlives the row's own exit by design.
+        out["hold_status"] = HOLD_OPEN
+        out["hold_result_pct"] = None
+        last_close = float(closes[n - 1])
+        out["hold_mark_pct"] = (
+            ((last_close - entry) if is_long else (entry - last_close)) / entry * 100.0
+        )
+    return out
+
+
+def hold_pending(row: dict) -> bool:
+    """Is the held-to-stop arm still owed a verdict?
+
+    A row written before the arm existed carries no ``hold_status`` at all, and
+    that reads as pending: it is re-walked while its window is still reachable
+    and retires at the horizon like any other. Absence is not a terminal state.
+    """
+    return str(row.get("hold_status") or HOLD_OPEN) not in HOLD_TERMINAL
+
+
 def _note_advance(row: dict, now: float) -> None:
     """Stamp that this row was advanced on real bars, and how current they are.
 
@@ -737,7 +972,14 @@ def _note_advance(row: dict, now: float) -> None:
     row["last_resolved_at"] = now
     row["resolve_misses"] = 0
     row["resolve_miss_reason"] = None
-    last_ms = row.get("last_bar_ms")
+    # The newer of the two arms' bars. The row's own walk stops at its first
+    # touch and then stops being advanced at all, while the held arm keeps
+    # consuming bars — so reading only `last_bar_ms` would freeze this row's
+    # currency at its own exit and report a live arm as stalled.
+    last_ms = max(
+        (v for v in (row.get("last_bar_ms"), row.get("hold_last_bar_ms")) if v is not None),
+        default=None,
+    )
     if last_ms is None:
         # Walked, but on a window that carried no usable timestamps. That is an
         # unknown, and it stays an unknown: `stalled` is None, not False. The
@@ -774,23 +1016,45 @@ def _retire_unwalkable(row: dict, ts: float, now: float, horizon_sec: float) -> 
     renders forever as a live trade. Retiring it as INSUFFICIENT is the honest
     end — no fill, no loss, and explicitly **no score**, so it can be counted
     without being averaged into anything.
+
+    Both arms retire together here, because the cause is shared: there is no
+    series to walk, so neither the row's own geometry nor the held-to-stop arm
+    can earn a verdict. They are still counted apart — a held arm that never
+    walked is not evidence about holding, exactly as an unwalked row is not
+    evidence about the setup.
     """
     if (now - ts) < horizon_sec:
         return False
-    row["status"] = STATUS_INSUFFICIENT
-    row["insufficient_reason"] = INSUFFICIENT_NO_WALK
-    row["closed_at"] = now
+    retired = False
+    if row.get("status") == STATUS_OPEN:
+        row["status"] = STATUS_INSUFFICIENT
+        row["insufficient_reason"] = INSUFFICIENT_NO_WALK
+        row["closed_at"] = now
+        retired = True
+    if hold_pending(row):
+        row["hold_status"] = HOLD_INSUFFICIENT
+        row["hold_insufficient_reason"] = INSUFFICIENT_NO_WALK
+        row["hold_mark_pct"] = None
+        retired = True
     row["stalled"] = None
-    return True
+    return retired
 
 
-def _window_coverage(row: dict, ts: float, now: float) -> Optional[float]:
+def _window_coverage(
+    row: dict, ts: float, now: float, seen_key: str = "bars_seen"
+) -> Optional[float]:
     """Fraction of this row's elapsed window the walk actually covered.
 
     Only meaningful for a row that walked to the **end** of its window without
     touching a level: a row that hit stops at the hit bar, so its ``bars_seen``
     is where the outcome was, not how much was examined. The caller stamps this
     on untouched rows only.
+
+    ``seen_key`` selects the arm: the row's own walk (``bars_seen``) or the
+    held-to-stop arm (``hold_bars``). They diverge the moment TP1 is touched, so
+    one arm's coverage says nothing about the other's — and it is an expiry's
+    coverage that decides whether "nothing happened" is a measurement or a claim
+    about bars nobody looked at.
 
     ``None`` when it cannot be computed, which is not the same as low coverage
     and must not be rendered as it — a row too young to have a meaningful
@@ -799,7 +1063,7 @@ def _window_coverage(row: dict, ts: float, now: float) -> Optional[float]:
     elapsed = now - ts
     if elapsed < BAR_SECONDS:
         return None
-    seen = row.get("bars_seen")
+    seen = row.get(seen_key)
     if seen is None:
         return None
     try:
@@ -807,6 +1071,65 @@ def _window_coverage(row: dict, ts: float, now: float) -> Optional[float]:
         return float(seen) / expected if expected > 0 else None
     except (TypeError, ValueError, ZeroDivisionError):
         return None
+
+
+def _advance_hold(
+    row: dict,
+    ohlc: Dict[str, List[float]],
+    ts: float,
+    now: float,
+    horizon_sec: float,
+    tally: Dict[str, int],
+) -> bool:
+    """Advance the held-to-stop arm on this cycle's window. True if it moved.
+
+    Separate from the row's own walk on purpose. The two arms disagree the
+    moment TP1 is touched, so pooling their refusals would report one fault
+    while the other is what is happening — the "blank needs a cause before it
+    gets a caption" rule, applied to an arm rather than to a status.
+
+    The horizon closes this arm at the last bar's close rather than leaving it
+    open forever: "hold to the stop" with no bound is not a rule anyone could
+    run, and an unbounded arm is how a lane accumulates rows that render as live
+    trades on a page an adoption decision reads.
+    """
+    if not hold_pending(row):
+        return False
+    out = _walk_hold(row, ohlc)
+    if out is None:
+        # No usable window for this arm. Left pending and unscored — it retires
+        # at the horizon via `_retire_unwalkable`, or on the coverage floor
+        # below once it can walk again. The caller counts the miss: a row whose
+        # own verdict is already in has no other arm to be advanced by, so
+        # stamping it "advanced" here would report a walk that did not happen.
+        return False
+    row.update(out)
+    if row.get("hold_status") == HOLD_SL:
+        tally["hold_resolved"] += 1
+        return True
+    coverage = _window_coverage(row, ts, now, seen_key="hold_bars")
+    row["hold_window_coverage"] = coverage
+    if (now - ts) < horizon_sec:
+        return True
+    if coverage is not None and coverage < MIN_WINDOW_COVERAGE:
+        # The arm never covered its own window, so "the stop was never touched"
+        # is a claim about bars nobody looked at. Terminal and unscored, exactly
+        # as the row's own partial-window expiry is.
+        row["hold_status"] = HOLD_INSUFFICIENT
+        row["hold_insufficient_reason"] = INSUFFICIENT_PARTIAL_WINDOW
+        row["hold_result_pct"] = None
+        row["hold_mark_pct"] = None
+        tally["hold_insufficient"] += 1
+        return True
+    # Forced close at the horizon. The mark becomes the result — it is what the
+    # arm was worth on the last bar it walked, which is the honest end of a
+    # "hold until the stop or six hours" rule.
+    row["hold_status"] = HOLD_EXPIRED
+    row["hold_result_pct"] = row.get("hold_mark_pct")
+    row["hold_exit_price"] = None
+    row["hold_mark_pct"] = None
+    tally["hold_expired"] += 1
+    return True
 
 
 def resolve_open(
@@ -834,18 +1157,28 @@ def resolve_open(
     The tally says the population is fine; only the row can say that *this* one
     stopped advancing four hours ago, and a page that prints a live price beside
     an unstamped open row is telling the reader something it does not know.
+
+    **Two arms, one sweep.** A row's own verdict lands at its first TP1-or-SL
+    touch; the held-to-stop arm beside it exits only at the stop and therefore
+    normally outlives that. Keying this loop on ``status == OPEN`` would have
+    frozen every held arm at the moment its row closed at TP1 — the exact shape
+    of #835, where an arm stopped being stepped the moment the thing it was
+    riding finished. So the population is the rows owed a verdict on **either**
+    arm, and a row is done only when both are.
     """
     now = time.time() if now_ts is None else float(now_ts)
     book = ledger if ledger is not None else get_ledger()
     tally = {
         "resolved": 0, "still_open": 0, "expired": 0, "no_candles": 0,
         "stalled": 0, "insufficient": 0, "undated": 0, "partial_window": 0,
+        "hold_resolved": 0, "hold_expired": 0, "hold_insufficient": 0,
     }
     try:
-        for row in book.open_rows():
+        for row in book.rows_owed_verdict():
             ts = float(row.get("emitted_at") or 0.0)
             if ts <= 0:
                 continue
+            arm_open = row.get("status") == STATUS_OPEN
             miss_reason = None
             try:
                 ohlc = fetch_ohlc_since(str(row.get("symbol") or ""), ts)
@@ -863,7 +1196,7 @@ def resolve_open(
                     tally["insufficient"] += 1
                 book.mark_dirty()
                 continue
-            out = _walk(row, ohlc)
+            out = _walk(row, ohlc) if arm_open else {}
             if out is None:
                 _note_miss(row, MISS_UNUSABLE_WINDOW, now)
                 tally["no_candles"] += 1
@@ -872,6 +1205,21 @@ def resolve_open(
                 book.mark_dirty()
                 continue
             row.update(out)
+            # The second arm, advanced on the same bars. Its own refusal is
+            # separate: a window this arm cannot walk is not evidence about
+            # holding, and folding it into the row's miss would report one
+            # fault where the other is what happened.
+            hold_moved = _advance_hold(row, ohlc, ts, now, horizon_sec, tally)
+            if not arm_open and not hold_moved:
+                # Only the held arm was owed anything here, and it could not be
+                # walked. Stamping the row as advanced would say a walk happened
+                # that did not — the whole point of the per-row miss counter.
+                _note_miss(row, MISS_UNUSABLE_WINDOW, now)
+                tally["no_candles"] += 1
+                if _retire_unwalkable(row, ts, now, horizon_sec):
+                    tally["insufficient"] += 1
+                book.mark_dirty()
+                continue
             # Why this row is undatable, recorded where it is known. Without it
             # "no timestamps" and "the stamp predates them" are one blank, and
             # they have different fixes — a snapshot that drops `open_time`
@@ -880,7 +1228,12 @@ def resolve_open(
             _note_advance(row, now)
             if row["window_undated_reason"]:
                 tally["undated"] += 1
-            if out.get("status"):
+            if not arm_open:
+                # This row's own verdict is already in. Only the held arm was
+                # advanced above, and it must not be able to re-open, re-expire
+                # or re-score a closed row.
+                pass
+            elif out.get("status"):
                 row["closed_at"] = now
                 tally["resolved"] += 1
             elif (now - ts) >= horizon_sec:
@@ -912,10 +1265,12 @@ def resolve_open(
                 tally["still_open"] += 1
                 if row.get("stalled"):
                     tally["stalled"] += 1
-            if row.get("status") != STATUS_OPEN:
-                # Staleness is a property of a row still owed a verdict. A closed
-                # row is owed nothing, so it carries no verdict on its own
-                # currency rather than a False that would read as "checked".
+            if row.get("status") != STATUS_OPEN and not hold_pending(row):
+                # Staleness is a property of a row still owed a verdict. A row
+                # owed nothing carries no verdict on its own currency rather
+                # than a False that would read as "checked" — but it is owed
+                # nothing only once BOTH arms are done, or a held arm still
+                # being advanced would render as unmeasured.
                 row["stalled"] = None
             book.mark_dirty()
         # Force: an idle lane still has to write. `flush()` only persists when
@@ -998,10 +1353,17 @@ def resolution_health(
 ) -> tuple:
     """Are the rows that are owed a verdict actually being advanced?
 
-    Keyed on **the population that would be harmed** (#815): the open rows. A
+    Keyed on **the population that would be harmed** (#815): every row still
+    owed an outcome on either arm, not only the ones whose own status is open. A
     tally of a healthy cycle says nothing about the one row whose symbol rotated
     out four hours ago, and that row is the one rendering as a live trade with a
     live price beside it.
+
+    A row that closed at TP1 with a held-to-stop arm still running is in exactly
+    that position: its own verdict is in, and the arm the owner reads to decide
+    whether the exit is leaving money on the table may have stopped advancing
+    hours ago with nothing watching. That is #835's shape, and this probe's own
+    docstring already claimed the population it now actually uses.
 
     Returns ``(ok, detail)`` for a ``PredicateProbe``. A disabled lane and an
     empty book both return **True with a reason** — never a raise, which would
@@ -1013,7 +1375,7 @@ def resolution_health(
             return True, "dark emission lane disabled"
         now = time.time() if now_ts is None else float(now_ts)
         book = ledger if ledger is not None else get_ledger()
-        open_rows = book.open_rows()
+        open_rows = book.rows_owed_verdict()
         if not open_rows:
             return True, "no dark rows owed a verdict"
         stalled = [

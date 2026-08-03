@@ -4,6 +4,58 @@
 
 ---
 
+## 🟢 SESSION 109 2026-08-03 — the dark lane could not answer "how much was on the table", by construction
+
+Owner, against `/signals/dark-live`: *"implement same like live features in dark
+feed — max PnL before hitting SL, and same exit strategies like Held to stop in
+dark feed too."*
+
+Neither was answerable, and the reason was not a missing column. `_walk` stops at
+the **first** TP1-or-SL touch, so on a row that closed at TP1 the recorded
+`mfe_pct` is bounded by the TP1 distance *by construction* — it says how far the
+trade ran before its own exit and is structurally silent on how far it was going
+to run. Everything after that touch was never walked, which is the same reason no
+held-to-stop or laddered exit could be priced from this ledger.
+
+Rendering that column under the words "max profit" would have produced a number
+that is always about right and never means what it says: the truncated-measurement
+class, and a close cousin of the R-denominator bug (#848) — a figure whose *shape*
+is fine and whose *definition* is not what the reader assumes.
+
+### What shipped (engine #869 + ops #127)
+
+A **second arm** per dark row: the same bars walked with TP1 removed, exiting only
+at the original stop or at the six-hour horizon (`dark_emission._walk_hold`). It
+never touches `status` / `pnl_pct` / `r_multiple`. It records the peak before the
+stop bar, the same peak including it, the drawdown on the way to that peak, and
+the highest ladder level reached before the stop — plus `tp2`/`tp3`, which the
+ledger had never stamped, so no ladder leg could be priced.
+
+Ops (`app/data_sources/dark_exit_sim.py`) prices the **Profit tab's own catalog**
+off those stamps — same keys, same labels, a test asserting they stay in sync —
+and `/signals/dark-live` grew two panels: max PnL before the stop per path, and
+every exit method against the row's own exit on one shared population, net of a
+fee charged to the baseline as well.
+
+### The thing worth remembering
+
+**A second arm needs its own sweep.** The held arm exits at the stop, normally
+*later* than the row's own TP1, so a resolve loop keyed on `status == OPEN` would
+have frozen every arm at the moment its row closed — #835's shape exactly, a
+measurement inheriting the lifetime of the thing it rides. The population is now
+"owed a verdict on either arm", the freshness stamps grade whichever arm is still
+walking, and `resolution_health` watches the same set, so a frozen arm on a closed
+row pages instead of quietly rendering as a result.
+
+### Watch
+
+Rows written before this deploy carry no `hold_status` at all. They are their own
+bucket on screen — not a zero — and rows still inside the six-hour horizon backfill
+themselves on the next resolve cycles; older ones retire unmeasured, which is
+correct and is counted rather than hidden.
+
+---
+
 ## 🟢 SESSION 108 2026-08-03 — the alert named its cause, and the cause was four live evaluators
 
 The probe fixed in #866 fired once more and answered the question it had been
