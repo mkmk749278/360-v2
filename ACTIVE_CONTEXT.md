@@ -4,6 +4,84 @@
 
 ---
 
+## 🟢 SESSION 108 2026-08-03 — the alert named its cause, and the cause was four live evaluators
+
+The probe fixed in #866 fired once more and answered the question it had been
+unable to ask: `level_dist_r` absent on **4,000 of 4,000 rows across all five
+paths, cause `no_levels`, zero `none_ahead`**. Not a market condition — a
+populated level book produces *some* `none_ahead`. Driving the real `LevelBook`
+with production-shape candles returns 60 levels, so the book was never broken.
+
+### Root cause — a rebuilt dict with a hand-maintained carry-over list
+
+`_build_scan_context` assembles `smc_data` once and sets `level_book_levels`.
+Every scalp channel then re-runs SMC detection with its own timeframe
+preference, rebuilds the dict from `SMCResult.as_dict()` (12 detector keys) and
+copies the context's additions across via an **enumerated list of 12 key
+names**. `level_book_levels` and `cvd_15m` were not on that list, and all
+**eight** scalp channels take the branch unconditionally — so this was every
+evaluator, every scan, since the keys were introduced.
+
+Same class as `is_tradfi_perp`: a list excludes exactly the keys somebody
+already typed. The carry is now **structural** (anything the context has that
+the detector does not produce), with an explicit override set for the three
+keys that exist on both sides and where the context deliberately wins.
+
+### The live blast radius was four evaluators, not the measurement column
+
+Each read a dropped key, each took a fallback, and three carried a comment
+saying that fallback "only triggers in tests / pre-warm":
+
+| Evaluator | Behaviour with the key absent |
+|---|---|
+| LSR | HTF POI anchor check **skipped entirely** — §3.4a's hard-block never applied |
+| SR_FLIP | legacy 5m pivot detector — replaced 2026-05-17 (43% of signals MFE=0) |
+| FAR | 5m struct-scan — replaced after 115 signals at 39% MFE=0, −0.72% NET/sig |
+| DIVERGENCE_CONTINUATION | legacy 5m CVD instead of the 15m read (`cvd_15m`) |
+
+FAR is the setup whose +0.846R dark-lane reading had already prompted a
+promotion request — its level sourcing was the legacy path throughout, which
+makes that already-thin argument thinner.
+
+### Owner decision
+
+Presented three options (dark-first behind a flag / restore live now /
+measurement only). **Owner chose restore live now**, against the dark-first
+default, having been told plainly that it changes emission on four live
+evaluators with no shadow window. Shipped as chosen. **Watch the delivered
+feed and those four paths over the next windows** — this is the one change in
+recent sessions with no measured before/after.
+
+### Also shipped
+
+- `cvd_source` on every entry-feature row. Restoring `cvd_15m` silently
+  redefines `cvd_slope_aligned` from a 5m slope to a 15m one — same column,
+  different series. Recorded rather than schema-bumped: the bump would discard
+  ~4,000 rows whose other twelve features are unaffected.
+- `ROW_METADATA_KEYS`. Whether a value counted as a feature depended on where
+  its line sat in `capture()`, and `stack_sep_pct` — declared by
+  `MOVER_TREND_PULLBACK` — was assigned *after* the missing-accounting, so it
+  could never be reported dark. A blind spot in the very probe fixed in #866.
+
+### Verification
+
+Contract test parses `_build_scan_context`'s own source for the keys it
+writes, so a key added tomorrow is covered without anyone updating a list.
+**Verified by reverting**: against the enumerated list the test fails naming
+`level_book_levels`. Full suite green.
+
+### Open
+
+- **Unmeasured**: how many signals actually change on the four evaluators. No
+  shadow window was run, by owner decision.
+- `mean_revert_emission` (+0.55R blocked, n=3486), `edge_reconciliation`
+  (+0.38R, sign points at the cost model), `cohort_edge_gate` (working as
+  designed) — all still open from Session 107.
+- Ops `/signals/entry-features` can now render `level_dist_r` for real, and
+  should split on `cvd_source` so the 5m and 15m populations are not pooled.
+
+---
+
 ## 🟢 SESSION 107 2026-08-03 — three probes that paged without naming a cause
 
 Hourly liveness alert, five findings sustained 15 audit cycles. Two were

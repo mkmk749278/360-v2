@@ -407,6 +407,29 @@ def reason_key(feature: str) -> str:
     return f"{feature}_absence_reason"
 
 
+#: Keys on a stamped row that are **not** features and must never enter
+#: ``missing``.
+#:
+#: The distinction used to be positional — whatever was assigned before the
+#: missing-accounting counted as a feature — and that silently reclassified
+#: ``stack_sep_pct``, which ``MOVER_TREND_PULLBACK`` declares but which was
+#: written with the metadata, so it could never be reported dark however long
+#: it stopped computing. Naming the non-features makes the question answerable
+#: instead of depending on where a line sits in a function.
+ROW_METADATA_KEYS: frozenset = frozenset({
+    # Row identity / provenance, written by `stamp`.
+    "signal_id", "setup_class", "confidence", "entry_regime", "stamped_at",
+    "schema", "missing",
+    # Descriptive context, not measurements of the setup.
+    "symbol", "side", "entry_trigger", "tf_name", "entry_ref_name",
+    "sl_dist_pct", "profile_would_reject",
+    # Metadata *about* a feature — why it is absent, or which series produced
+    # it. These are None precisely when the feature is fine, so counting them
+    # would mark every healthy row incomplete.
+    reason_key("level_dist_r"), "cvd_source",
+})
+
+
 def level_distance_r_with_reason(
     levels: Any,
     entry: Optional[float],
@@ -776,6 +799,21 @@ def capture(
         smc.get("level_book_levels"), _f(entry), _f(tp1), _f(sl_dist), direction_is_long
     )
 
+    # Which CVD series backs `cvd_slope_aligned`. The preference is 15m and the
+    # fallback is 5m, and until 2026-08-03 the fallback was taken on *every*
+    # row — the per-channel SMC re-detect dropped `cvd_15m` before any evaluator
+    # saw it. Restoring the key silently changes what this column measures, and
+    # a 5m CVD slope and a 15m one are different features under one name (the
+    # reason `tf_name` exists at all). Recorded rather than schema-bumped: the
+    # bump would discard ~4,000 rows whose other twelve features are unaffected,
+    # where naming the source keeps both populations and lets a reader split
+    # them. Never pool timeframes silently.
+    _cvd_15m = smc.get("cvd_15m")
+    _cvd_series = _cvd_15m or smc.get("cvd")
+    _cvd_source = (
+        "15m" if _cvd_15m else ("5m" if smc.get("cvd") else None)
+    )
+
     feats: Dict[str, Any] = {
         # Geometry — chosen by the evaluator, exact at stamp time, and the
         # ceiling on what any entry filter can achieve. Read this one first.
@@ -797,9 +835,7 @@ def capture(
         # (2026-08-01) — the delivered book is ~50/50 by side, so the error was
         # not visible as an obviously empty column, it just made both features
         # look like noise.
-        "cvd_slope_aligned": _align(
-            cvd_slope(smc.get("cvd_15m") or smc.get("cvd")), direction_is_long
-        ),
+        "cvd_slope_aligned": _align(cvd_slope(_cvd_series), direction_is_long),
         "pullback_depth_atr": pullback_depth_atr(
             closes, lows, highs, _f(atr), direction_is_long
         ),
@@ -818,12 +854,18 @@ def capture(
             if isinstance(smc.get("liquidation_clusters"), (list, tuple))
             else None
         ),
+        # A feature, and MOVER_TREND_PULLBACK declares it. It used to be written
+        # below with the metadata — i.e. *after* the missing-accounting — so it
+        # could never appear in `missing`, and the liveness probe could never
+        # see it go dark on the one path that reads it. Ordering was the only
+        # thing deciding whether a value counted as a feature; now
+        # ROW_METADATA_KEYS decides, and ordering cannot silently reclassify.
+        "stack_sep_pct": _f(stack_sep_pct),
     }
     # Path-specific, merged before the missing-accounting so an extra that stops
     # computing shows up in exactly the same place a core feature would.
     for key, value in (extras or {}).items():
         feats[key] = value
-    feats["missing"] = sorted(k for k, v in feats.items() if v is None)
     feats.update(
         {
             "symbol": str(symbol),
@@ -831,7 +873,6 @@ def capture(
             "entry_trigger": str(trigger or ""),
             "tf_name": str(tf_name or ""),
             "entry_ref_name": str(entry_ref_name or ""),
-            "stack_sep_pct": _f(stack_sep_pct),
             "sl_dist_pct": (
                 (_f(sl_dist) / _f(entry) * 100.0)
                 if _f(entry) and _f(sl_dist) and _f(entry) > 0
@@ -841,12 +882,20 @@ def capture(
             # would the pair-tier-aware spread/volume thresholds have rejected
             # this candidate? Recorded, never enforced.
             "profile_would_reject": profile_would_reject,
-            # Written AFTER the missing-accounting on purpose. It is metadata
-            # about a feature, not a feature, so it must never itself count as
-            # one — and on a row where the feature computed it is None, which
-            # would have put a non-feature into `missing` on every healthy row.
+            # Metadata about a feature, not a feature. On a row where the
+            # feature computed this is None, so counting it would put a
+            # non-feature into `missing` on every *healthy* row.
             reason_key("level_dist_r"): _level_dist_reason,
+            # Likewise — which series `cvd_slope_aligned` was computed from, so
+            # two definitions of one column stay separable rather than averaged.
+            "cvd_source": _cvd_source,
         }
+    )
+    # Computed last, over everything, with the non-features named explicitly.
+    # Deriving it from *position in this function* is what let `stack_sep_pct`
+    # be a declared feature that no probe could ever flag.
+    feats["missing"] = sorted(
+        k for k, v in feats.items() if v is None and k not in ROW_METADATA_KEYS
     )
     return feats
 
