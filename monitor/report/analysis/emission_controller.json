@@ -83,7 +83,11 @@
       },
       "QUIET_COMPRESSION_BREAK@SAREXIT": {
         "suppress_negative": null,
-        "min_samples": 20
+        "min_samples": 15
+      },
+      "FAILED_AUCTION_RECLAIM@SAREXIT": {
+        "suppress_negative": null,
+        "min_samples": 15
       }
     },
     "history": {
@@ -208,9 +212,9 @@
         "HOLD"
       ],
       "RANGE_FADE|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "RANGE_FADE|min_samples": [
         "HOLD",
@@ -368,6 +372,14 @@
       ],
       "SR_FLIP_RETEST@ATR|min_samples": [
         "LOWER"
+      ],
+      "FAILED_AUCTION_RECLAIM@SAREXIT|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "FAILED_AUCTION_RECLAIM@SAREXIT|min_samples": [
+        "HOLD"
       ]
     },
     "last_change_cycle": {
@@ -392,9 +404,10 @@
       "POST_DISPLACEMENT_CONTINUATION|min_samples": 273,
       "TREND_PULLBACK_EMA|suppress_negative": 362,
       "MOVER_AVWAP_SCALP|suppress_negative": 412,
-      "QUIET_COMPRESSION_BREAK@SAREXIT|min_samples": 437
+      "QUIET_COMPRESSION_BREAK@SAREXIT|min_samples": 584,
+      "FAILED_AUCTION_RECLAIM@SAREXIT|min_samples": 599
     },
-    "cycle": 555
+    "cycle": 600
   },
   "ledger": [
     {
@@ -928,6 +941,58 @@
       "ev_per_suppression_r": null,
       "n": 23,
       "routable": false
+    },
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@SAREXIT",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=16)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 16,
+      "routable": false
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM@SAREXIT",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15,
+      "routable": false
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM@SAREXIT",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15,
+      "routable": false
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM@SAREXIT",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15,
+      "routable": false
     }
   ],
   "pending": [],
@@ -993,7 +1058,10 @@
       "suppress_negative": false
     },
     "QUIET_COMPRESSION_BREAK@SAREXIT": {
-      "min_samples": 20
+      "min_samples": 15
+    },
+    "FAILED_AUCTION_RECLAIM@SAREXIT": {
+      "min_samples": 15
     }
   },
   "routability": {
@@ -1002,6 +1070,7 @@
     "unroutable_candidates": 0,
     "unroutable_strategies": [
       "FAILED_AUCTION_RECLAIM@ATR",
+      "FAILED_AUCTION_RECLAIM@SAREXIT",
       "MEAN_REVERT@ATR",
       "MEAN_REVERT@FIXED",
       "MOVER_TREND_PULLBACK@ATR",
@@ -1014,6 +1083,9 @@
     ],
     "dead_overrides": {
       "FAILED_AUCTION_RECLAIM@ATR": {
+        "min_samples": 15
+      },
+      "FAILED_AUCTION_RECLAIM@SAREXIT": {
         "min_samples": 15
       },
       "MEAN_REVERT@ATR": {
@@ -1032,7 +1104,7 @@
         "min_samples": 15
       },
       "QUIET_COMPRESSION_BREAK@SAREXIT": {
-        "min_samples": 20
+        "min_samples": 15
       },
       "SHADOW_FUNDING_FADE": {
         "min_samples": 15
