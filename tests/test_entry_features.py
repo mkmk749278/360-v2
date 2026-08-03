@@ -155,11 +155,16 @@ class TestCapture:
             tp1=103.0, trigger="fast_pullback", tf=_tf(), tf_name="15m",
             atr=1.0, ma_slow=95.0, stack_sep_pct=5.0, smc_data={},
         )
+        # Reads the producer's own non-feature set rather than restating it:
+        # the tuple that used to sit here was a two-entry mirror that had to be
+        # remembered, and metadata keys have since been added.
         none_keys = {
             k for k, v in feats.items()
-            if v is None and k not in ("missing", "profile_would_reject")
+            if v is None and k not in ef.ROW_METADATA_KEYS
         }
         assert none_keys <= set(feats["missing"])
+        # ...and every non-feature stays out, whatever its value.
+        assert not (set(feats["missing"]) & ef.ROW_METADATA_KEYS)
 
     def test_an_empty_smc_payload_still_produces_a_row(self):
         """Degrading to a row of Nones is correct; raising is not. The scan must
@@ -860,3 +865,45 @@ class TestOnlyDeclaredFeaturesAreJudged:
         aside = ef.undeclared_absences(led)
 
         assert aside == {"extension_pct": 5}
+
+
+class TestTheCvdSeriesIsNamed:
+    """Restoring ``cvd_15m`` changes what one column measures.
+
+    The per-channel SMC re-detect dropped the key, so `cvd_slope_aligned` fell
+    back to the 5m series on every row ever stamped. With the key carried, new
+    rows use 15m — the same column name over a different series, which is
+    exactly what `tf_name` exists to prevent elsewhere. The source is recorded
+    so the two populations stay separable rather than being averaged.
+    """
+
+    @staticmethod
+    def _capture(smc):
+        return ef.capture(
+            symbol="BTCUSDT", direction_is_long=True, entry=100.0, sl_dist=10.0,
+            tp1=110.0, trigger="t",
+            tf={"close": [100.0] * 30, "high": [101.0] * 30,
+                "low": [99.0] * 30, "volume": [10.0] * 30},
+            tf_name="5m", atr=1.0, smc_data=smc,
+        )
+
+    def test_a_15m_series_is_preferred_and_named(self):
+        feats = self._capture({"cvd_15m": [1.0, 2.0, 3.0], "cvd": [9.0, 1.0, 0.0]})
+        assert feats["cvd_source"] == "15m"
+
+    def test_the_5m_fallback_is_named_rather_than_looking_identical(self):
+        """The state every row was in before the handoff fix."""
+        feats = self._capture({"cvd": [1.0, 2.0, 3.0]})
+        assert feats["cvd_source"] == "5m"
+
+    def test_no_cvd_at_all_is_its_own_answer(self):
+        feats = self._capture({})
+        assert feats["cvd_source"] is None
+        assert feats["cvd_slope_aligned"] is None
+
+    def test_the_source_is_metadata_not_a_feature(self):
+        """It must not land in `missing` on a row that has no CVD, or it would
+        page the liveness probe as a dead feature nothing declares."""
+        feats = self._capture({})
+        assert "cvd_source" not in feats["missing"]
+        assert "cvd_source" not in ef.features_for("TREND_PULLBACK_EMA")

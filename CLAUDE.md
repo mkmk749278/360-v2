@@ -1067,3 +1067,54 @@ python -m src.main
     the gate passed them all anyway"* — self-contradictory on its face, since an
     empty list would have made that gate **reject**. Ask what would have to be
     true for the number to mean what the sentence says.
+- **A comment asserting "this fallback only happens in tests" is a claim about
+  production, and nobody had checked it.** `_build_scan_context` assembles
+  `smc_data` once, then every scalp channel re-runs SMC detection with its own
+  timeframe preference and rebuilds that dict from `SMCResult.as_dict()` —
+  carrying the context's additions across via a **hand-written list of twelve
+  key names**. `level_book_levels` and `cvd_15m` were not on it. All eight
+  scalp channels take that branch unconditionally, so this was every
+  evaluator, every scan, since the keys were introduced. Same "a deny-list is
+  a floor" shape as `is_tradfi_perp`: the list excludes exactly the keys
+  somebody already typed and is silent by construction on the next one. The
+  carry is now **structural** — anything the context has that the detector
+  does not produce — with an explicit override set for the keys that exist on
+  both sides, and a test that derives the contract by parsing
+  `_build_scan_context`'s own source so tomorrow's key is covered without
+  anyone updating a list.
+
+  **Four live evaluators had been running their pre-fix logic**, and each
+  carried a sentence saying otherwise. LSR skipped its HTF POI anchor check
+  entirely (§3.4a's hard-block never applied); SR_FLIP fell back to the legacy
+  5m pivot detector, replaced 2026-05-17 because 43% of its signals had MFE=0;
+  FAR fell back to the 5m struct-scan, replaced because 115 FAR signals ran
+  39% MFE=0 at −0.72% NET/sig; DIVERGENCE_CONTINUATION used the legacy 5m CVD
+  instead of the "structurally-correct" 15m read. Three of those comments said
+  the absent-key branch "only triggers in tests / pre-warm". **When a
+  fallback is documented as unreachable in production, go and check that it
+  is** — this is the `is_tradfi_perp` rule ("name the paths it covers and
+  check each one") arriving one layer down, and note FAR is the setup whose
+  +0.846R dark-lane reading had already prompted a promotion request.
+
+  Two structural notes. **`dict.get` makes absent and empty indistinguishable**,
+  which is exactly why this survived: three evaluators branch on
+  `is not None` to mean "the LevelBook was refreshed", and an absent key is a
+  silent, permanent "no". If a sentinel distinguishes two states, something
+  must be able to *observe* which one it is in. And the thing that finally
+  found it was the probe fixed hours earlier: making `level_dist_r` say
+  `no_levels` rather than assert "upstream is dark" turned an unactionable
+  page into 4,000-of-4,000 rows with one named cause. **A probe that names its
+  cause pays for itself the first time it fires.**
+
+  Corollary — **restoring a dropped input silently redefines what depends on
+  it.** `cvd_slope_aligned` had been a 5m CVD slope on every row ever stamped
+  and becomes a 15m one; same column, different series, which is the thing
+  `tf_name` exists to prevent. Recorded as `cvd_source` rather than
+  schema-bumped, because the bump discards ~4,000 rows whose other twelve
+  features are unaffected while naming the source keeps both populations
+  separable. And **whether a value counts as a feature must not depend on
+  where its line sits in a function**: `stack_sep_pct` is declared by
+  `MOVER_TREND_PULLBACK` but was assigned *after* the missing-accounting, so
+  it could never be reported dark however long it stopped computing.
+  `ROW_METADATA_KEYS` names the non-features; ordering can no longer
+  reclassify one.

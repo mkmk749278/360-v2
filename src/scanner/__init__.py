@@ -625,6 +625,51 @@ _CHANNEL_SMC_TIMEFRAMES: Dict[str, tuple[str, ...]] = {
     "360_SCALP_ORDERBLOCK":   ("5m", "15m"),
 }
 
+#: Keys the per-channel re-detect must take from the scan context even though a
+#: fresh ``SMCResult`` also produces them. The context's orderblock handoff is
+#: authoritative (it carries the detector-status and trace the evaluators read),
+#: and its ticks are the ones the order-flow wiring assembled.
+_SMC_CONTEXT_OVERRIDE_KEYS: frozenset = frozenset({
+    "orderblocks",
+    "orderblocks_detector_status",
+    "recent_ticks",
+})
+
+
+def _merge_context_smc_data(
+    fresh: Dict[str, Any], ctx_smc: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Overlay the scan context's ``smc_data`` onto a per-channel re-detect.
+
+    Every scalp channel re-runs SMC detection with its own timeframe
+    preference and rebuilds ``smc_data`` from ``SMCResult.as_dict()``. That
+    fresh dict knows only what the detector produces — everything
+    ``_build_scan_context`` *assembled* around it (the LevelBook, order flow,
+    the pair profile, the regime context) has to be carried across.
+
+    This used to be a hand-written list of twelve key names, and it is the
+    "a deny-list is a floor" shape: it excludes exactly the keys somebody
+    already typed, and is silent by construction on the next one added. Two
+    had gone missing — ``level_book_levels`` and ``cvd_15m`` — and because
+    ``smc_data.get`` returns ``None`` either way, nothing anywhere could tell
+    an absent key from a genuinely empty one. Three live evaluators (LSR,
+    SR_FLIP, FAR) read the first of those and each silently took its
+    pre-2026-05-17 fallback path, while ``entry_features.level_dist_r`` was
+    uncomputable on 4,000 of 4,000 rows (2026-08-03).
+
+    So the rule is structural rather than enumerated: **anything the context
+    has that the detector does not produce is carried**, which makes a future
+    addition to ``_build_scan_context`` safe by default. The override set
+    above stays explicit, because those keys exist on both sides and the
+    context's version is deliberately the winner.
+    """
+    merged = dict(fresh)
+    for key, value in (ctx_smc or {}).items():
+        if key not in merged or key in _SMC_CONTEXT_OVERRIDE_KEYS:
+            merged[key] = value
+    return merged
+
+
 # Which gates are active per channel family.
 # True = gate runs normally, False = gate is skipped entirely.
 # Channels not listed default to all-True (fail-safe).
@@ -8617,35 +8662,27 @@ class Scanner:
                                 smc_timeframes=_ch_tfs,
                             ),
                         )
-                        _new_smc_data = _smc_r.as_dict()
-                        _redetect_orderblocks = _new_smc_data.get("orderblocks")
+                        _fresh_smc_data = _smc_r.as_dict()
+                        _redetect_orderblocks = _fresh_smc_data.get("orderblocks")
                         _redetect_count = (
                             len(_redetect_orderblocks)
                             if isinstance(_redetect_orderblocks, list)
                             else 0
                         )
-                        # Carry over metadata fields added by _build_scan_context()
-                        # that are not part of the SMCResult dataclass.
-                        _new_smc_data["pair_profile"] = ctx.smc_data.get("pair_profile")
-                        _new_smc_data["regime_context"] = ctx.smc_data.get("regime_context")
-                        # Carry over order-flow fields wired in _build_scan_context()
-                        # so evaluators see funding_rate and cvd regardless of which
-                        # channel-specific SMC re-detect path is taken.
-                        # Only carry over when the key was set (i.e. order_flow_store present).
-                        for _of_key in (
-                            "funding_rate",
-                            "cvd",
-                            "recent_ticks",
-                            "orderblocks",
-                            "orderblocks_detector_status",
-                            "__orderblocks_trace",
-                            "order_book",
-                            "liquidation_clusters",
-                            "__dependency_source_state",
-                            "__dependency_state",
-                        ):
-                            if _of_key in ctx.smc_data:
-                                _new_smc_data[_of_key] = ctx.smc_data[_of_key]
+                        # Everything _build_scan_context assembled around the
+                        # detector — the LevelBook, order flow, pair profile,
+                        # regime context — is carried structurally rather than
+                        # by an enumerated key list. See
+                        # _merge_context_smc_data: the old list silently lost
+                        # level_book_levels and cvd_15m.
+                        _new_smc_data = _merge_context_smc_data(
+                            _fresh_smc_data, ctx.smc_data,
+                        )
+                        # These two are unconditional: present-and-None is the
+                        # shape evaluators have always seen, and absent is not
+                        # the same thing to a caller that tests membership.
+                        _new_smc_data.setdefault("pair_profile", None)
+                        _new_smc_data.setdefault("regime_context", None)
                         _handoff_orderblocks = _new_smc_data.get("orderblocks")
                         _handoff_count = (
                             len(_handoff_orderblocks)
