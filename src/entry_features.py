@@ -198,9 +198,11 @@ import os
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from src import fail_open
+from src.market_context import classify_session
 from src.utils import get_logger
 
 log = get_logger("entry_features")
@@ -423,6 +425,8 @@ ROW_METADATA_KEYS: frozenset = frozenset({
     # Descriptive context, not measurements of the setup.
     "symbol", "side", "entry_trigger", "tf_name", "entry_ref_name",
     "sl_dist_pct", "profile_would_reject",
+    # The names behind `session_quality`, which is the feature.
+    "session", "is_weekend",
     # Metadata *about* a feature — why it is absent, or which series produced
     # it. These are None precisely when the feature is fine, so counting them
     # would mark every healthy row incomplete.
@@ -752,6 +756,7 @@ def capture(
     ma_slow: Optional[float] = None,
     stack_sep_pct: Optional[float] = None,
     profile_would_reject: Optional[bool] = None,
+    now_ts: Optional[float] = None,
     extras: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The core entry-time facts, plus whatever *extras* this path supplies.
@@ -777,6 +782,11 @@ def capture(
     because that is the only place they exist. They are merged flat into the row
     and share the ``missing`` accounting, so a path-specific feature that stops
     computing is as visible as a core one.
+
+    ``now_ts`` fixes the clock for the session read (below). It defaults to the
+    wall clock because the session at stamp time *is* the session at entry;
+    passing it explicitly is what keeps the tests from depending on when they
+    run, exactly as ``stamp(now_ts=...)`` already does.
     """
     smc = smc_data or {}
     closes = _series(tf, "close")
@@ -812,6 +822,18 @@ def capture(
     _cvd_series = _cvd_15m or smc.get("cvd")
     _cvd_source = (
         "15m" if _cvd_15m else ("5m" if smc.get("cvd") else None)
+    )
+
+    # When the entry was taken. `classify_session` is a pure function of the
+    # UTC clock and the engine has been computing it — and storing it on every
+    # signal as `mc_session_quality` — since Layer A shipped, without any
+    # emission decision ever reading it. Recording it here is what makes it
+    # splittable beside every other entry-time reading, and it is the one
+    # feature on this row that can never be unknown.
+    _session, _is_weekend, _session_quality = classify_session(
+        datetime.fromtimestamp(
+            time.time() if now_ts is None else float(now_ts), tz=timezone.utc
+        )
     )
 
     feats: Dict[str, Any] = {
@@ -861,6 +883,12 @@ def capture(
         # thing deciding whether a value counted as a feature; now
         # ROW_METADATA_KEYS decides, and ordering cannot silently reclassify.
         "stack_sep_pct": _f(stack_sep_pct),
+        # The engine's own liquidity/edge proxy for the clock: OVERLAP 1.0,
+        # NY 0.85, LONDON 0.80, ASIA 0.45, OFF_HOURS 0.30, all x0.6 on a
+        # weekend. A feature, not metadata — it is a measurement of the entry,
+        # it participates in the missing-accounting like the rest, and a rule
+        # reads it.
+        "session_quality": _f(_session_quality),
     }
     # Path-specific, merged before the missing-accounting so an extra that stops
     # computing shows up in exactly the same place a core feature would.
@@ -889,6 +917,12 @@ def capture(
             # Likewise — which series `cvd_slope_aligned` was computed from, so
             # two definitions of one column stay separable rather than averaged.
             "cvd_source": _cvd_source,
+            # The two halves behind `session_quality`, kept so a reader can see
+            # WHICH low-quality window a row sits in — Asia and a Saturday NY
+            # both score 0.45-0.51 and are not the same finding. Metadata: the
+            # measurement is the quality, these name it.
+            "session": str(_session),
+            "is_weekend": bool(_is_weekend),
         }
     )
     # Computed last, over everything, with the non-features named explicitly.
@@ -1176,6 +1210,14 @@ _KEEP_ABOVE = frozenset(
         "stack_sep_pct",
         "sigma_at_entry",
         "range_width_atr",
+        # Higher session quality is the deeper book. This is the direction the
+        # engine's own scale already asserts (OVERLAP 1.0 down to OFF_HOURS
+        # 0.30) — the split measures whether the delivered book agrees.
+        "session_quality",
+        # Wider 15m separation is a run still moving on the timeframe this path
+        # trades. Same direction as `stack_sep_pct` beside it, which is the max
+        # of this and the 1H fan — deliberately, so the pair is comparable.
+        "sep_15m_pct",
     }
 )
 
@@ -1190,6 +1232,10 @@ CORE_FEATURES: Tuple[str, ...] = (
     "cvd_slope_aligned",
     "level_dist_r",
     "book_imbalance_aligned",
+    # True of every path by construction — every entry happens at a time — and
+    # the one core feature that is never unknown, because its input is a clock
+    # rather than an upstream that can go dark.
+    "session_quality",
 )
 
 #: What each path contributes on top, and why it is *that* path's question.
@@ -1245,6 +1291,14 @@ PATH_FEATURES: Dict[str, Tuple[str, ...]] = {
         # The stack's separation is the path's own trend-strength proxy and it is
         # gated at a floor; the value is what lets the floor be tested.
         "stack_sep_pct",
+        # ...and the half of it the floor never sees on its own. The mover gate
+        # gates on `max(15m MA7<->MA99, 1H EMA21/50 fan)`, deliberately, so a
+        # multi-day run whose 15m stack has compressed still qualifies. The cost
+        # is that the 1H fan stays wide long after the move has stopped moving
+        # on the timeframe this path actually trades, and nothing recorded which
+        # of the two carried a candidate through. `stack_sep_pct` is the max;
+        # this is the 15m term alone, so the difference is readable.
+        "sep_15m_pct",
         "retrace_frac_of_leg",
         "extension_pct",
     ),

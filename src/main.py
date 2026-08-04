@@ -48,7 +48,11 @@ from src.openai_evaluator import OpenAIEvaluator
 from src.order_flow import LiquidationEvent, OrderFlowStore, OIPoller
 from src.pair_manager import PairManager
 
-from src.performance_tracker import PerformanceTracker, entry_sl_distance_pct
+from src.performance_tracker import (
+    PerformanceTracker,
+    entry_sl_distance_pct,
+    shipped_sl_distance_pct,
+)
 from src.predictive_ai import PredictiveEngine
 from src.regime import RegimeService
 from src.scanner import Scanner, _cohort_edge_store as _scanner_cohort_edge_store, _stat_filter as _scanner_stat_filter
@@ -774,6 +778,10 @@ class CryptoSignalEngine:
                     # risk the trade was sized for, which ``stop_loss`` is not
                     # once BE/trail has moved it (2026-08-01).
                     sl_distance_pct_at_entry=entry_sl_distance_pct(sig),
+                    # ...and the stop that was actually in the market, which
+                    # the line above is NOT: predictive scaling and the noise
+                    # floor both move it before emit (2026-08-04).
+                    shipped_sl_distance_pct=shipped_sl_distance_pct(sig),
                     create_timestamp=_create_ts,
                     dispatch_timestamp=_dispatch_ts,
                     terminal_outcome_timestamp=_terminal_ts,

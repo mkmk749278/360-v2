@@ -1405,13 +1405,29 @@ ENTRY_QUALITY_BUDGET_WINDOW: int = _safe_int("ENTRY_QUALITY_BUDGET_WINDOW", "200
 #: it applies the pair-tier thresholds ``_pass_basic_filters`` already computes
 #: and 19 of 20 call sites discard.  ``tpe_smc_zone`` is shadow because "how many
 #: ATR counts as in the pullback zone" is a number nobody has measured.
+#: (``session_quality`` / ``mover_stack_15m`` are shadow: both reject real
+#: volume, and neither is a repair of a filter the engine already applies — see
+#: their ``rationale`` in ``entry_quality.RULES``.  Measurement runs from the
+#: moment they ship; enforcement is an owner flip on the ops panel.)
 ENTRY_QUALITY_RULE_LIVE: dict = {
     "profile_reject": _safe_bool("ENTRY_QUALITY_PROFILE_REJECT_LIVE", "true"),
     "tpe_smc_zone": _safe_bool("ENTRY_QUALITY_TPE_SMC_ZONE_LIVE", "false"),
+    "session_quality": _safe_bool("ENTRY_QUALITY_SESSION_QUALITY_LIVE", "false"),
+    "mover_stack_15m": _safe_bool("ENTRY_QUALITY_MOVER_STACK_15M_LIVE", "false"),
 }
 #: Per-rule thresholds (ignored by ``flag`` rules, which have nothing to compare).
 ENTRY_QUALITY_RULE_THRESHOLD: dict = {
     "tpe_smc_zone": _safe_float("ENTRY_QUALITY_TPE_SMC_ZONE_THRESHOLD", "1.5"),
+    #: 0.8 is a boundary on ``classify_session``'s existing scale, not a fitted
+    #: number: it is exactly "weekday London / Overlap / NY".  Everything below
+    #: — Asia (0.45), off-hours (0.30) and every weekend (x0.6, so a weekend NY
+    #: is 0.51) — falls on the reject side.
+    "session_quality": _safe_float("ENTRY_QUALITY_SESSION_QUALITY_THRESHOLD", "0.8"),
+    #: Bound to the mover path's OWN floor rather than a second opinion about
+    #: what a strong run is: the rule applies MOVER_TP_MIN_STACK_SEP_PCT to the
+    #: 15m term alone, which is the term ``max(15m, 1H fan)`` can hide.  If the
+    #: floor moves, this moves with it — one number, one place.
+    "mover_stack_15m": MOVER_TP_MIN_STACK_SEP_PCT,
 }
 
 # ── Dispatch cooldown — per-(symbol, setup, direction) re-emission guard ─────
