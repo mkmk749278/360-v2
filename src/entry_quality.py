@@ -242,6 +242,44 @@ RULES: Tuple[Rule, ...] = (
         ),
         live_default=True,
     ),
+    Rule(
+        key="session_quality",
+        feature="session_quality",
+        compare=CMP_MIN,
+        setup_class="",
+        label="Low-liquidity clock window",
+        rationale=(
+            "market_context.classify_session already scores every entry's "
+            "clock (OVERLAP 1.0, NY 0.85, LONDON 0.80, ASIA 0.45, OFF_HOURS "
+            "0.30, x0.6 on a weekend) and stores it on the signal as "
+            "mc_session_quality. No emission decision has ever read it. The "
+            "threshold is a boundary on that existing scale, not a number "
+            "fitted here: 0.8 is exactly 'weekday London/Overlap/NY'. SHADOW "
+            "— see the docstring; this is a discovery, not a repair, and it "
+            "would move roughly half the delivered book."
+        ),
+        live_default=False,
+        threshold_default=0.8,
+    ),
+    Rule(
+        key="mover_stack_15m",
+        feature="sep_15m_pct",
+        compare=CMP_MIN,
+        setup_class="MOVER_TREND_PULLBACK",
+        label="Mover run has died on the traded timeframe",
+        rationale=(
+            "The mover gate clears on max(15m MA7<->MA99, 1H EMA21/50 fan), so "
+            "a candidate can qualify entirely on the 1H fan while the 15m "
+            "stack — the timeframe this path actually enters and exits on — is "
+            "flat. The threshold is MOVER_TP_MIN_STACK_SEP_PCT, the path's own "
+            "floor, applied to the 15m term alone; it invents no number. "
+            "SHADOW: unlike profile_reject this rejects real volume, and the "
+            "widened gate was a deliberate fix for movers whose 15m stack "
+            "compresses on a pullback (BTW/ESPORTS) — so it has to prove it is "
+            "not simply undoing that."
+        ),
+        live_default=False,
+    ),
 )
 
 RULES_BY_KEY: Dict[str, Rule] = {r.key: r for r in RULES}

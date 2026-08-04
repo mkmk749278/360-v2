@@ -4,6 +4,92 @@
 
 ---
 
+## 🟢 SESSION 110 2026-08-04 — MVRTP is the book, and it is ~2.4 points of win rate short
+
+Owner: *"analyse all the mover trend pullback path signals, and why still lot
+hitting SL — entry timing, structural, sessions, exit methodology."*
+
+**91 of the last 100 delivered signals are `MOVER_TREND_PULLBACK`**, so "why is
+this path losing" and "why is the product losing" are currently the same
+question. The window (2026-07-28 -> 08-04): 29 wins at +4.72% avg, 42 full stops
+at -3.46% avg, 20 scratches, **-9.57% total / -0.105% per trade**. Payoff is
+1.36:1, so break-even needs **43.2%** including a 0.07% round trip; the path
+delivers **40.8%** of decided trades. It is marginally short, not broken — which
+reframes every lever below.
+
+### What the data says (verified, not inferred)
+
+* **Entry timing is binary and fast.** Winners' median drawdown is **0.02%** —
+  they never go negative. Losers' median peak is **0.33%**; 11 of 42 never went
+  green at all, 25 of 42 never cleared 0.5%, and the median full stop dies **30
+  minutes** (two 15m bars) after dispatch. The losses are wrong on arrival, not
+  shaken out. Corollary: because winners never approach their stop, stop *width*
+  only changes the size of the losses.
+* **The clock is the biggest single split.** Asia / off-hours / any weekend: 50
+  trades, 18.0% win, **-59.14%**. Weekday London/Overlap/NY: 41 trades, 48.8%
+  win, **+49.58%**. Permutation p=0.0013, CIs disjoint, and it replicates on the
+  15k-row edge matrix where Asia and off-hours are the only negative sessions.
+  Not a cherry-picked cell: `classify_session` already scores this (ASIA 0.45,
+  OFF_HOURS 0.30, x0.6 weekend) and **no emission decision has ever read it**.
+* **Direction is a confound, not a finding.** SHORT looks awful (-24.43%) but
+  p=0.093 and the CI spans zero; Asia *longs* alone lose -23.79% while
+  prime-window shorts are +6.19%. Act on the clock, not the side.
+* **The exit is working.** Winners capture a median **91.7% of their peak**, and
+  TP1 sits about where these moves actually top out. There is no case for moving
+  it — see #870's own lesson on TPE. The one leak: 20 trades (22%) ran a median
+  2.6% into profit and closed for 0.00% or -0.10% on the BE ratchet.
+* **Confidence does not discriminate here.** 80+ scored 29.7% win / -8.03%;
+  70-75 scored 43.5% / +7.60%. Winners average 77.71 against losers' 78.08. With
+  n=91 that is "no evidence of discrimination", not "inverted" — but the gate
+  filters 2,441 and keeps 11,180 on that score.
+
+### The defect: every MVRTP stop ships tighter than the one its TP ladder was built from
+
+**46 of 46** signals in the 2026-08-04 dispatch log — structural **4.13%** median
+against **3.09%** shipped, ratio 1.21-1.37. `predictive_ai.adjust_tp_sl` rescales
+the SL *distance*, and `_PREDICTIVE_SLTP_BYPASS_SETUPS` — the hand-maintained
+list of "structurally-protected paths" — contains eleven low-volume setups and
+**neither mover path**, i.e. not the ~94% of the delivered book. The list predates
+them and nobody added them: the deny-list-is-a-floor shape again.
+
+It was invisible because the closed record kept only the structural figure, under
+a name that reads like the shipped one, so every R on every ops surface divides
+by a stop the trade never had. Finding it took a dispatch-log diff by hand.
+
+**The obvious fix does not survive checking.** Of 19 stopped trades with a usable
+stamp, **10 would have hit the wider stop anyway**; only 5 died in the band
+between the two. Widening back makes those 10 losses bigger to rescue at most a
+handful — so this ships as *visibility*, and the bypass-list decision is the
+owner's with data in hand. Finding and fix are separate deliverables.
+
+### What shipped (engine #871) — measurement ON, enforcement OFF
+
+* `session_quality` is now a **core entry feature** on every path (plus `session`
+  / `is_weekend` as metadata), stamped in `capture()` off the same clock as
+  `stamped_at` and injectable via `now_ts` so the suite cannot drift.
+* `sep_15m_pct` is stamped for MVRTP — the 15m term of `max(15m, 1H fan)`, so the
+  ledger can finally say *which* term carried a candidate past the mover floor.
+* Two `entry_quality` rules, **both shadow**: `session_quality` (< 0.8, exactly
+  "weekday London/Overlap/NY" on the engine's existing scale) and
+  `mover_stack_15m` (< `MOVER_TP_MIN_STACK_SEP_PCT`, the path's own floor applied
+  to the 15m term alone). Neither is a repair of a filter the engine already
+  applies, so neither enforces; ops switches auto-register from the registry.
+* `shipped_sl_distance_pct` travels onto the closed record beside
+  `sl_distance_pct_at_entry`, and a new truth-report section renders designed vs
+  shipped per setup — with unstamped rows **excluded and counted apart**, because
+  0.0 means unknown and never "no override".
+
+### The thing worth remembering
+
+**A normalised figure can be honest and still describe a stop nobody placed.**
+#848 fixed the denominator against a stop that had been *moved after entry*; this
+is the same class one stage earlier — a stop moved *before* entry, between the
+evaluator and the wire, by a list that simply never learned about the path that
+became the whole book. When two stages may rewrite a value, record both ends: the
+gap is the measurement.
+
+---
+
 ## 🟢 SESSION 109 2026-08-03 — the dark lane could not answer "how much was on the table", by construction
 
 Owner, against `/signals/dark-live`: *"implement same like live features in dark

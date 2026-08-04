@@ -1156,6 +1156,50 @@ def build_quality_by_setup(records: List[Dict[str, Any]]) -> Dict[str, Dict[str,
     return result
 
 
+def build_geometry_override(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-setup: the stop the evaluator designed vs the one that shipped.
+
+    Two stages move the stop between the evaluator and the wire —
+    ``predictive_ai.adjust_tp_sl`` scales it (unless the setup sits in
+    ``_PREDICTIVE_SLTP_BYPASS_SETUPS``, which the two mover paths do not) and
+    ``_apply_noise_floor_stop`` widens it.  Nothing compared the two, so a
+    systematic override was invisible until someone diffed the dispatch log
+    against the ledger by hand (2026-08-04: 46 of 46 MVRTP signals tightened,
+    structural 4.13% median against 3.09% shipped).
+
+    ``stamped`` is published beside every figure and is the number to read
+    first.  Records written before ``shipped_sl_distance_pct`` shipped carry
+    0.0, and 0.0 means *unknown*, never *no override* — so they are excluded
+    from the ratio and counted apart.  A section that quietly averaged them
+    would report "no divergence" for a fault that is happening.
+    """
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        grouped[str(record.get("setup_class") or "UNKNOWN")].append(record)
+
+    out: Dict[str, Any] = {}
+    for setup, rows in grouped.items():
+        pairs = [
+            (float(r.get("sl_distance_pct_at_entry") or 0.0),
+             float(r.get("shipped_sl_distance_pct") or 0.0))
+            for r in rows
+        ]
+        usable = [(d, s) for d, s in pairs if d > 0.0 and s > 0.0]
+        tightened = sum(1 for d, s in usable if s < d * 0.99)
+        widened = sum(1 for d, s in usable if s > d * 1.01)
+        out[setup] = {
+            "rows": len(rows),
+            "stamped": len(usable),
+            "unstamped": len(rows) - len(usable),
+            "median_designed_pct": _median([d for d, _ in usable]),
+            "median_shipped_pct": _median([s for _, s in usable]),
+            "median_ratio": _median([d / s for d, s in usable if s > 0.0]),
+            "tightened": tightened,
+            "widened": widened,
+        }
+    return out
+
+
 def summarize_runtime_health(
     runtime_health: Dict[str, Any],
     heartbeat_text: str,
@@ -1370,6 +1414,7 @@ def build_snapshot(
 
     current_quality = build_quality_by_setup(current_records)
     previous_quality = build_quality_by_setup(previous_records)
+    geometry_override = build_geometry_override(current_records)
 
     path_funnel_truth = {}
     for setup, metrics in current_paths.items():
@@ -1528,6 +1573,7 @@ def build_snapshot(
         "dependency_readiness": dependency_readiness,
         "lifecycle_truth": lifecycle_summary,
         "quality_by_setup": current_quality,
+        "geometry_override": geometry_override,
         "regime_distribution": regime_distribution or {},
         "per_symbol_regime_distribution": per_symbol_regime_distribution or {},
         "quiet_scalp_block": quiet_scalp_block or {},
@@ -2537,6 +2583,41 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             f"- Median first breach→terminal: `{lifecycle.get('median_first_breach_to_terminal_sec')}` sec",
             f"- Fast-failure buckets: `{json.dumps(lifecycle.get('fast_failure_buckets', {}), sort_keys=True)}`",
             f"- ~3 minute terminal-close behavior: `{json.dumps(lifecycle.get('terminal_close_around_3m', {}), sort_keys=True)}`",
+            "",
+            "## Stop geometry — designed vs shipped",
+            "_The evaluator authors a structural stop (for the mover paths: beyond the mid/slow MA plus an ATR buffer — where the thesis is dead).  Two stages then move it before it reaches the wire: ``predictive_ai.adjust_tp_sl`` scales the distance by a model multiplier **unless the setup is in ``_PREDICTIVE_SLTP_BYPASS_SETUPS``**, and ``_apply_noise_floor_stop`` widens it to the pair's 1h noise band.  Nothing had ever compared the two ends, so a systematic override was invisible.  ``Ratio`` = designed ÷ shipped; **>1 means the stop that was actually in the market was TIGHTER than the one the TP ladder was built from**, so the R on every other surface divides by a stop the trade never had.  ``Stamped`` leads the row and 0.0 means unknown, not 'no override' — records written before 2026-08-04 cannot be recovered and are excluded from every figure here rather than averaged in._",
+            "| Path/Setup | Rows | Stamped | Designed % | Shipped % | Ratio | Tightened | Widened |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    _geom = snapshot.get("geometry_override", {}) or {}
+    if not _geom:
+        lines.append("| _no closed records in window_ | — | — | — | — | — | — | — |")
+    for _setup, _m in sorted(_geom.items()):
+        lines.append(
+            "| {s} | {rows} | {st} | {d} | {sh} | {r} | {t} | {w} |".format(
+                s=_setup,
+                rows=_m.get("rows", 0),
+                st=_m.get("stamped", 0),
+                d=_m.get("median_designed_pct"),
+                sh=_m.get("median_shipped_pct"),
+                r=_m.get("median_ratio"),
+                t=_m.get("tightened", 0),
+                w=_m.get("widened", 0),
+            )
+        )
+    _unstamped = sum(int(v.get("unstamped", 0) or 0) for v in _geom.values())
+    _stamped = sum(int(v.get("stamped", 0) or 0) for v in _geom.values())
+    if _unstamped:
+        lines.append("")
+        lines.append(
+            f"- **{_unstamped} of {_unstamped + _stamped} closed records carry no shipped-stop stamp** "
+            "(written before 2026-08-04, or in flight across the deploy). They are excluded above. "
+            "This shrinks on its own; it is not a fault."
+        )
+
+    lines.extend(
+        [
             "",
             "## Quality-by-path/setup summary",
             "_``Win rate`` / ``TP rate`` count only TP1/TP2/TP3 hits — they MISS the pre-TP partial-close fires that bank real subscriber value per OWNER_BRIEF §3.2a.  ``Pre-TP win%`` is the rate at which signals hit their pre-TP threshold (typically ~+0.32% raw → ~+2.5% net @ 10×) before terminal close.  The composite truth: a setup with Win=0 + Pre-TP=60% is doctrinally healthy (banking + BE residual), while Win=0 + Pre-TP=0 is the actual quality problem._",

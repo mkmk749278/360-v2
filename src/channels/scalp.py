@@ -3344,6 +3344,12 @@ class ScalpChannel(BaseChannel):
                     entry_ref_name="sma7_15m",
                     ma_slow=ma_slow,
                     stack_sep_pct=stack_sep_pct,
+                    # The 15m term of the mover gate on its own. `stack_sep_pct`
+                    # above is `max(this, the 1H fan)`, so on its own it cannot
+                    # say which of the two cleared the floor — and a candidate
+                    # carried entirely by the 1H fan is a run that has stopped
+                    # moving on the timeframe this path trades.
+                    extras={"sep_15m_pct": float(sep_15m_pct)},
                     # The argument 19 of 20 call sites omit: this path calls
                     # _pass_basic_filters WITHOUT `profile`, so the pair-tier
                     # liquidity/spread adjustment is inert for 94% of the book.

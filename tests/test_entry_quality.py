@@ -516,8 +516,27 @@ class TestOnlyRepairsShipEnforcing:
         everything the tier-adjusted one would. It stays live — proven safe, and
         it starts filtering by itself the day a tier multiplier bites — but the
         gate filters nothing today and no reader should infer otherwise.
+
+        The assertion is on the **enforcing** set, not on the registry: shadow
+        rules filter nothing by construction, so adding one must not trip a
+        test whose claim is about live output. ``session_quality`` and
+        ``mover_stack_15m`` joined the registry on 2026-08-04 and both ship
+        shadow (see ``test_a_shadow_rule_ships_shadow_until_an_owner_flips_it``
+        below, and ``tests/test_session_and_geometry_stamps.py``).
         """
-        assert [r.key for r in eq.RULES] == ["profile_reject"]
+        enforcing = [r.key for r in eq.RULES if r.live_default]
+        assert enforcing == ["profile_reject"]
+
+    def test_a_shadow_rule_ships_shadow_until_an_owner_flips_it(self):
+        """The other half of the rule above, stated positively.
+
+        A rule enforces only when its threshold comes from code that already
+        exists rather than from the window that suggested it. Everything else
+        measures first — which is what makes the shadow population an honest
+        basis for the flip.
+        """
+        for key in ("session_quality", "mover_stack_15m"):
+            assert eq.RULES_BY_KEY[key].live_default is False
 
     def test_the_rule_set_stays_small(self):
         """Twelve rules is twelve thresholds against a book this size, which

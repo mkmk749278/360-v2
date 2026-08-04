@@ -45,6 +45,40 @@ def entry_sl_distance_pct(sig: Any) -> float:
     return (dist / entry) * 100.0
 
 
+def shipped_sl_distance_pct(sig: Any) -> float:
+    """The entry→SL distance that was actually IN THE MARKET, in percent, or 0.0.
+
+    This is not a second opinion about the same number — it is a different
+    number, and until 2026-08-04 nothing recorded it.  ``entry_sl_distance_pct``
+    above reads ``original_sl_distance``, which every evaluator stamps from its
+    own structural geometry (for ``MOVER_TREND_PULLBACK``: beyond the mid/slow
+    MA plus an ATR buffer — the level at which the trend thesis is dead).  Two
+    stages in ``scanner._prepare_signal`` then move the stop before it ships,
+    in this order:
+
+    * ``predictive_ai.adjust_tp_sl`` scales the SL *distance* by the model's
+      multiplier — unless the setup is in ``_PREDICTIVE_SLTP_BYPASS_SETUPS``,
+      the hand-maintained list of "structurally-protected paths".  The two
+      mover paths are not on it, and together they are ~94% of the delivered
+      book;
+    * ``_apply_noise_floor_stop`` widens (never tightens) to the pair's 1h
+      noise band and writes the result to ``Signal.sl_distance_pct_at_entry``.
+
+    So the Signal has carried both halves all along and the closed record kept
+    only the first, under a name that reads like the second.  Measured over the
+    46 MVRTP signals in the 2026-08-04 dispatch log: structural 4.13% median,
+    shipped 3.09% median, **46 of 46 tightened**, ratio 1.21–1.37.  Every R on
+    every ops surface divides by the structural figure, i.e. by a stop that was
+    not the one the trade died on.
+
+    Recording it changes no behaviour.  It is what makes the divergence
+    decidable instead of requiring a dispatch-log diff to notice — and, like
+    ``entry_regime`` and the field above, it is knowable exactly once, so rows
+    written before this ships stay 0.0 rather than being handed a guess.
+    """
+    return max(0.0, float(getattr(sig, "sl_distance_pct_at_entry", 0.0) or 0.0))
+
+
 @dataclass
 class SignalRecord:
     """A single completed signal record."""
@@ -108,6 +142,11 @@ class SignalRecord:
     # buffer.  This field then carries the risk actually carried after the fill,
     # which is the honest denominator for the PnL that was realised.
     sl_distance_pct_at_entry: float = 0.0
+    #: The stop that was actually in the market at entry, after the predictive
+    #: multiplier and the noise floor — see ``shipped_sl_distance_pct`` above
+    #: for why this is a different number from the field above and not a
+    #: duplicate of it.  0.0 = written before 2026-08-04, not knowable now.
+    shipped_sl_distance_pct: float = 0.0
     timestamp: float = field(default_factory=time.time)
     signal_quality_pnl_pct: float = 0.0   # TP-based PnL for signal quality stats
     signal_quality_hit_tp: int = 0         # highest TP reached (for signal quality classification)
@@ -209,6 +248,7 @@ class PerformanceTracker:
         max_adverse_excursion_pct: float = 0.0,
         stop_loss: float = 0.0,
         sl_distance_pct_at_entry: float = 0.0,
+        shipped_sl_distance_pct: float = 0.0,
         signal_quality_pnl_pct: Optional[float] = None,
         signal_quality_hit_tp: Optional[int] = None,
         session_name: str = "",
@@ -258,6 +298,7 @@ class PerformanceTracker:
             max_adverse_excursion_pct=max_adverse_excursion_pct,
             stop_loss=stop_loss,
             sl_distance_pct_at_entry=float(sl_distance_pct_at_entry or 0.0),
+            shipped_sl_distance_pct=float(shipped_sl_distance_pct or 0.0),
             signal_quality_pnl_pct=normalize_pnl_pct(sq_pnl),
             signal_quality_hit_tp=sq_hit_tp,
             session_name=session_name,
@@ -1149,6 +1190,11 @@ class PerformanceTracker:
                 # stop these rows carry has already been moved (2026-08-01).
                 if "sl_distance_pct_at_entry" not in item:
                     item["sl_distance_pct_at_entry"] = 0.0
+                # Same rule, same reason: the stop that was in the market is
+                # knowable only at entry, and it has since been moved.  0.0
+                # means "written before this shipped", never "no tightening".
+                if "shipped_sl_distance_pct" not in item:
+                    item["shipped_sl_distance_pct"] = 0.0
                 for _field in (
                     "create_timestamp",
                     "dispatch_timestamp",
