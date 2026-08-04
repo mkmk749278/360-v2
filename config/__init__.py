@@ -1388,6 +1388,27 @@ DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC: float = _safe_float(
 # measurement shipped OFF produces an empty panel and a deferred decision).
 # LIVE = the master money-path switch; a rule suppresses only when this AND its
 # own per-rule flag are set, so there is one lever for the gate and one per rule.
+# ── Structural SL/TP1 snap (2026-08-04) ─────────────────────────────────────
+# `structural_levels.py` has held the level-aware geometry repair since it was
+# written, and `channels/base.build_channel_signal` called it — behind a guard
+# on `candle_highs is not None` that **no caller in the engine has ever
+# satisfied**, while the branch's own comment claimed it was "shared by EVERY
+# evaluator".  Dead twice over: every evaluator overwrites sig.stop_loss /
+# sig.tp1 immediately after that helper returns.  `src/structural_snap.py`
+# wires it at the one place the geometry is final (`Scanner._enqueue_signal`,
+# after the min-distance clamp).
+#
+# MEASURE = stamping (measurement flag, ON — a measurement shipped OFF produces
+# an empty panel and a decision that keeps being deferred).
+# APPLY = the money-path switch (OFF), and it does nothing on its own: a path
+# also has to be named in APPLY_PATHS.  One global flag would flip 19 paths at
+# once on evidence gathered from the one path that is ~59% of the book.
+STRUCTURAL_SNAP_MEASURE: bool = _safe_bool("STRUCTURAL_SNAP_MEASURE", "true")
+STRUCTURAL_SNAP_APPLY: bool = _safe_bool("STRUCTURAL_SNAP_APPLY", "false")
+#: Comma-separated setup classes the snap may actually move.  Empty = none,
+#: which is what "apply is off" means even if the master switch is flipped.
+STRUCTURAL_SNAP_APPLY_PATHS: str = os.getenv("STRUCTURAL_SNAP_APPLY_PATHS", "")
+
 ENTRY_QUALITY_ENABLED: bool = _safe_bool("ENTRY_QUALITY_ENABLED", "true")
 ENTRY_QUALITY_LIVE: bool = _safe_bool("ENTRY_QUALITY_LIVE", "true")
 #: Blast-radius cap.  Neither rule's rejection *volume* has ever been measured —

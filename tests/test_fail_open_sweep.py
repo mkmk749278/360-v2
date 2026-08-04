@@ -12,6 +12,9 @@ tests assert the fallback value AND the telemetry, never a raise.
 """
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -140,27 +143,75 @@ def test_numpy_arrays_do_not_false_positive():
 # ---------------------------------------------------------------------------
 
 
-def test_structural_sltp_snap_records_and_falls_back_to_atr_levels():
-    """channels/base.py structural snap is shared by EVERY evaluator that
-    passes candle arrays — a find_swing_levels regression would silently
-    revert all signals to raw ATR geometry.  Pin: fail open + counted."""
-    from src.channels.base import ChannelConfig, build_channel_signal
-    from src.smc import Direction
+def test_structural_snap_fail_open_is_wired_at_the_live_call_site():
+    """The snap's fail-open moved with the snap (2026-08-04).
 
-    cfg = ChannelConfig(
-        name="360_SCALP", emoji="s", timeframes=["5m"], sl_pct_range=(0.5, 3.0),
-        tp_ratios=[1.0, 2.0, 3.0], trailing_atr_mult=1.0, adx_min=0.0,
-        adx_max=100.0, spread_max=0.1, min_confidence=0.0,
+    This test used to live on ``channels/base.py`` and assert that a broken
+    ``find_swing_levels`` fell back to ATR geometry, quoting that file's own
+    comment: *"shared by EVERY evaluator that passes candle arrays"*.  It
+    passed for months over a branch that **never executed** — no caller in the
+    engine has ever passed ``candle_highs``, and the test hand-fed the argument
+    itself to reach the code.  A test that supplies the input production never
+    supplies proves the error handling works and says nothing about whether the
+    path runs; that is the shape ``CLAUDE.md`` records under "never hand-write a
+    collaborator's shape — drive the real collaborator".
+
+    The snap now runs in ``Scanner._enqueue_signal``.  So this pins the two
+    things that actually matter: the failure is counted at the live site, and
+    ``build_channel_signal`` no longer claims to do the work.
+    """
+    src = (Path(__file__).resolve().parents[1] / "src" / "scanner" / "__init__.py").read_text()
+    tree = ast.parse(src)
+    enqueue = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_enqueue_signal"
     )
-    sig = build_channel_signal(
-        cfg, "BTCUSDT", Direction.LONG,
-        close=100.0, sl=99.0, tp1=101.0, tp2=102.0, tp3=103.0,
-        sl_dist=1.0, id_prefix="t",
-        candle_highs={"bad": 1}, candle_lows={"bad": 1}, candle_closes={"bad": 1},
+    # Find the try/except that guards the snap call and confirm its handler
+    # records rather than swallowing.
+    guarded = False
+    for node in ast.walk(enqueue):
+        if not isinstance(node, ast.Try):
+            continue
+        body_calls = {
+            ast.unparse(c.func) for c in ast.walk(node) if isinstance(c, ast.Call)
+        }
+        if "_snap.stamp_and_apply" not in body_calls:
+            continue
+        for handler in node.handlers:
+            handler_calls = {
+                ast.unparse(c.func) for c in ast.walk(handler) if isinstance(c, ast.Call)
+            }
+            if "fail_open.record" in handler_calls:
+                guarded = True
+    assert guarded, (
+        "the structural-snap call in _enqueue_signal is not wrapped in a "
+        "fail_open.record handler — a measurement lane must never block "
+        "emission, and must never fail silently either"
     )
-    assert sig is not None  # fail open — ATR-based levels survive
-    assert sig.stop_loss == pytest.approx(99.0)
-    assert _count("channels.structural_sltp_snap") == 1
+
+    base_src = (
+        Path(__file__).resolve().parents[1] / "src" / "channels" / "base.py"
+    ).read_text()
+    assert "find_structural_sl(" not in base_src, (
+        "build_channel_signal has grown a second snap — there is one, and it "
+        "is in src/structural_snap.py"
+    )
+
+
+def test_structural_snap_refuses_bad_input_without_raising():
+    """Fail-open at the module level: unusable input yields a NAMED refusal,
+    not an exception and not a silently plausible number."""
+    from src import structural_snap as _ss
+
+    row = _ss.compute(
+        direction="LONG", entry=100.0, stop_loss=97.0, tp1=103.0,
+        highs=None, lows=None, closes=None, tf="5m",
+    )
+    assert row["refused"] == _ss.REFUSE_NO_CANDLES
+    assert row["sl_snapped"] is None
+    # A refusal is not a failure — it must not fill the counter whose whole
+    # purpose is making a real failure stand out.
+    assert _count("structural_snap.compute") == 0
 
 
 def test_shadow_unit_errors_are_counted_not_swallowed():

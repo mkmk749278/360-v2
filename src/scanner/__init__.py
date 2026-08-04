@@ -5304,6 +5304,47 @@ class Scanner:
             # exactly the kind of failure that must page, not vanish.
             fail_open.record("scanner.min_distance_geometry", _mind_exc)
 
+        # ── Structural SL/TP1 snap (2026-08-04, measure ON / apply OFF) ───
+        # THIS is where the geometry becomes true. Between the evaluator and
+        # here, sig.stop_loss / sig.tp1 are rewritten four times — the
+        # noise-floor widener, predictive.adjust_tp_sl, the min-distance clamp
+        # directly above, and that clamp's proportional TP rescale — so a snap
+        # measured any earlier describes a stop that is not the stop.
+        #
+        # `structural_levels.py` has held this repair since it was written and
+        # `channels/base.build_channel_signal` called it behind a guard on
+        # `candle_highs is not None` that no caller has ever satisfied, while
+        # its own comment claimed every evaluator passed the arrays. See
+        # src/structural_snap.py.
+        try:
+            from src import structural_snap as _snap
+            _snap_tf = _snap.snap_timeframe(
+                getattr(sig, "setup_class", "") or getattr(sig, "channel", "")
+            )
+            # In-memory lookup on the shared store — no network, no Firestore,
+            # and enqueues are rare (hundreds per window, not per tick).
+            _snap_candles = (
+                self.data_store.get_candles(sig.symbol, _snap_tf)
+                if _snap_tf else None
+            )
+            # Mirror of the min-distance floor enforced above, passed in rather
+            # than re-derived inside the snap: the snap band bottoms out at
+            # 0.7x the designed risk and can land inside this floor, and a
+            # tightened stop that silently widens back to it is a stop nobody
+            # chose. structural_snap refuses and names it instead.
+            _snap_entry = float(getattr(sig, "entry", 0) or 0)
+            _snap_atr = float(getattr(sig, "atr_val", 0) or 0)
+            _snap_min_dist = max(
+                _snap_entry * 0.0080, _snap_atr * 1.0 if _snap_atr > 0 else 0.0
+            )
+            _snap.stamp_and_apply(
+                sig, candles=_snap_candles, min_sl_distance=_snap_min_dist,
+            )
+        except Exception as _snap_exc:
+            # Fail-open: a measurement lane must never block emission. Counted,
+            # WARNed and paged via the feature-liveness watchdog — never silent.
+            fail_open.record("scanner.structural_snap", _snap_exc)
+
         # ── Active-duplicate guard (2026-07-09, dark-flagged) ────────────
         # The dispatch cooldown below intends "never two live copies of the
         # same setup", but it does not survive every restart path — SPCXUSDT

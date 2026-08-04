@@ -47,7 +47,7 @@ class Tunable:
     key: str
     label: str
     description: str
-    type: str                      # "bool" | "float" | "int"
+    type: str                      # "bool" | "float" | "int" | "str"
     default: Any                   # env boot default (config value)
     category: str                  # ops panel grouping
     min_value: Optional[float] = None
@@ -116,10 +116,54 @@ def _build_registry() -> Dict[str, Tunable]:
         DARK_EMISSION_ENABLED,
         PRESCORING_AUDIT_ENABLED,
         SHADOW_STRATEGIES_ENABLED,
+        STRUCTURAL_SNAP_APPLY,
+        STRUCTURAL_SNAP_APPLY_PATHS,
+        STRUCTURAL_SNAP_MEASURE,
         SUPPRESSION_AUDIT_ENABLED,
     )
 
     items = [
+        Tunable(
+            key="structural_snap_measure",
+            label="Structural snap — measure",
+            description=(
+                "Stamp, on every enqueued signal, where the nearest swing "
+                "high/low or round number sits relative to the stop and TP1 "
+                "the evaluator computed arithmetically. Measurement only: this "
+                "flag never moves a level. Read the result at "
+                "/signals/structural-snap."
+            ),
+            type="bool",
+            default=STRUCTURAL_SNAP_MEASURE,
+            category="Measurement",
+        ),
+        Tunable(
+            key="structural_snap_apply",
+            label="Structural snap — APPLY (money path)",
+            description=(
+                "Master switch: let the snap actually move the stop and TP1 "
+                "that ship. Does nothing on its own — a path must ALSO be "
+                "named in the allow-list below. The stop can move by at most "
+                "±30% of the designed risk and TP1 only ever moves NEARER, so "
+                "this cannot widen a target. Owner sign-off item."
+            ),
+            type="bool",
+            default=STRUCTURAL_SNAP_APPLY,
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="structural_snap_apply_paths",
+            label="Structural snap — paths allowed to apply",
+            description=(
+                "Comma-separated setup classes, e.g. "
+                "'SR_FLIP_RETEST,FAILED_AUCTION_RECLAIM'. Empty = none. Kept "
+                "separate from the master switch so a result measured on one "
+                "path cannot silently flip the other eighteen."
+            ),
+            type="str",
+            default=STRUCTURAL_SNAP_APPLY_PATHS,
+            category="Stops & exits",
+        ),
         Tunable(
             key="noise_floor_stops_enabled",
             label="Noise-floor stops",
@@ -1375,6 +1419,12 @@ def _coerce(tun: Tunable, raw: Any) -> Any:
             return int(float(raw))
         if tun.type == "float":
             return float(raw)
+        if tun.type == "str":
+            # Free text. The empty string is a legitimate value ("no paths
+            # selected"), so this returns "" rather than None — None is the
+            # channel `set_values` reads as a parse failure, and an allow-list
+            # you cannot clear from ops is an allow-list that only grows.
+            return str(raw).strip()
     except (TypeError, ValueError):
         return None
     return None
