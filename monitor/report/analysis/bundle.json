@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-03T04:12:11.470568+00:00",
-  "generated_at_ts": 1785730331.4705677,
+  "generated_at": "2026-08-04T03:53:49.673841+00:00",
+  "generated_at_ts": 1785815629.6738415,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "40d14ff1121f0e9a84ad662a8596ad79c2dab178",
+  "git_sha": "405e10c425a29ce7f85c83eab91c4bf6a64f69e9",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,10 +15,10 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 8103,
-    "strategy_matrix_scored_cells": 3018,
+    "strategy_matrix_cells": 8538,
+    "strategy_matrix_scored_cells": 3203,
     "performance_setups": 14,
-    "suppression_gates": 27
+    "suppression_gates": 0
   },
   "headlines": {
     "strongest_cells": [
@@ -45,16 +45,16 @@
       },
       {
         "strategy": "FAILED_AUCTION_RECLAIM",
-        "context_key": "LONDON/MARKDOWN/EXPANDED/BTC_NEUTRAL",
-        "edge_r": 1.7001787794871692,
-        "n": 45,
+        "context_key": "ASIA/MARKUP/EXPANDED/BTC_FALLING/MIDCAP",
+        "edge_r": 1.734689058681988,
+        "n": 35,
         "verdict": "STRONG"
       },
       {
         "strategy": "FAILED_AUCTION_RECLAIM",
-        "context_key": "OVERLAP/RANGE/EXPANDED/BTC_NEUTRAL/MIDCAP",
-        "edge_r": 1.6791983402803008,
-        "n": 50,
+        "context_key": "LONDON/MARKDOWN/EXPANDED/BTC_NEUTRAL",
+        "edge_r": 1.7001787794871692,
+        "n": 45,
         "verdict": "STRONG"
       }
     ],
@@ -95,14 +95,7 @@
         "verdict": "NEGATIVE"
       }
     ],
-    "gate_verdict_counts": {
-      "TUNE": 1,
-      "KEEP": 23,
-      "DROP": 1,
-      "INSUFFICIENT_SAMPLE": 2
-    },
-    "drop_gates": [
-      "context_floor:FUNDING_EXTREME_SIGNAL"
-    ]
+    "gate_verdict_counts": {},
+    "drop_gates": []
   }
 }

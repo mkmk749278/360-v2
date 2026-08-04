@@ -88,6 +88,14 @@
       "FAILED_AUCTION_RECLAIM@SAREXIT": {
         "suppress_negative": null,
         "min_samples": 15
+      },
+      "FAILED_AUCTION_RECLAIM@FIXED": {
+        "suppress_negative": null,
+        "min_samples": 15
+      },
+      "MOVER_TREND_PULLBACK@SAREXIT": {
+        "suppress_negative": null,
+        "min_samples": 25
       }
     },
     "history": {
@@ -122,7 +130,7 @@
         "HOLD"
       ],
       "FUNDING_EXTREME_SIGNAL|suppress_negative": [
-        "SKIP",
+        "DROP",
         "SKIP",
         "SKIP"
       ],
@@ -379,6 +387,28 @@
         "SKIP"
       ],
       "FAILED_AUCTION_RECLAIM@SAREXIT|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "MOVER_TREND_PULLBACK@SAREXIT|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "MOVER_TREND_PULLBACK@SAREXIT|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "FAILED_AUCTION_RECLAIM@FIXED|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "FAILED_AUCTION_RECLAIM@FIXED|min_samples": [
+        "HOLD",
+        "HOLD",
         "HOLD"
       ]
     },
@@ -405,9 +435,11 @@
       "TREND_PULLBACK_EMA|suppress_negative": 362,
       "MOVER_AVWAP_SCALP|suppress_negative": 412,
       "QUIET_COMPRESSION_BREAK@SAREXIT|min_samples": 584,
-      "FAILED_AUCTION_RECLAIM@SAREXIT|min_samples": 599
+      "FAILED_AUCTION_RECLAIM@SAREXIT|min_samples": 599,
+      "FAILED_AUCTION_RECLAIM@FIXED|min_samples": 632,
+      "MOVER_TREND_PULLBACK@SAREXIT|min_samples": 629
     },
-    "cycle": 600
+    "cycle": 643
   },
   "ledger": [
     {
@@ -993,6 +1025,58 @@
       "ev_per_suppression_r": null,
       "n": 15,
       "routable": false
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM@FIXED",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15,
+      "routable": false
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM@FIXED",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15,
+      "routable": false
+    },
+    {
+      "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=23)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 23,
+      "routable": false
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM@FIXED",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15,
+      "routable": false
     }
   ],
   "pending": [],
@@ -1062,6 +1146,12 @@
     },
     "FAILED_AUCTION_RECLAIM@SAREXIT": {
       "min_samples": 15
+    },
+    "FAILED_AUCTION_RECLAIM@FIXED": {
+      "min_samples": 15
+    },
+    "MOVER_TREND_PULLBACK@SAREXIT": {
+      "min_samples": 25
     }
   },
   "routability": {
@@ -1070,10 +1160,12 @@
     "unroutable_candidates": 0,
     "unroutable_strategies": [
       "FAILED_AUCTION_RECLAIM@ATR",
+      "FAILED_AUCTION_RECLAIM@FIXED",
       "FAILED_AUCTION_RECLAIM@SAREXIT",
       "MEAN_REVERT@ATR",
       "MEAN_REVERT@FIXED",
       "MOVER_TREND_PULLBACK@ATR",
+      "MOVER_TREND_PULLBACK@SAREXIT",
       "QUIET_COMPRESSION_BREAK@ATR",
       "QUIET_COMPRESSION_BREAK@FIXED",
       "QUIET_COMPRESSION_BREAK@SAREXIT",
@@ -1083,6 +1175,9 @@
     ],
     "dead_overrides": {
       "FAILED_AUCTION_RECLAIM@ATR": {
+        "min_samples": 15
+      },
+      "FAILED_AUCTION_RECLAIM@FIXED": {
         "min_samples": 15
       },
       "FAILED_AUCTION_RECLAIM@SAREXIT": {
@@ -1095,6 +1190,9 @@
         "min_samples": 20
       },
       "MOVER_TREND_PULLBACK@ATR": {
+        "min_samples": 25
+      },
+      "MOVER_TREND_PULLBACK@SAREXIT": {
         "min_samples": 25
       },
       "QUIET_COMPRESSION_BREAK@ATR": {
