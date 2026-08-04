@@ -86,6 +86,7 @@ from typing import Any, Deque, Dict, List, Optional
 import numpy as np
 
 from src import fail_open
+from src.setup_timeframes import TF_BY_SETUP as _TF_BY_SETUP
 from src.structural_levels import (
     find_round_numbers,
     find_structural_sl_detail,
@@ -112,38 +113,20 @@ SWING_WINDOW = 3
 
 #: The evaluator's own trigger timeframe, per setup class.
 #:
-#: This is a declared contract, not a guess: each entry was read off the
-#: evaluator's own ``candles.get(...)`` in ``channels/scalp.py``.  It matters
-#: because a "swing low" on 5m and one on 15m are different levels, and the
-#: scanner's ``_get_primary_timeframe`` — which the chart-pattern engine uses —
-#: returns the literal string ``"5m"`` for every channel, including the two
-#: mover paths that trade 15m.
+#: **Not a copy** — this is the same object as ``setup_timeframes.TF_BY_SETUP``,
+#: re-exported under the name this module already used.  The map was written
+#: here first, for the snap (a 5m swing and a 15m swing are different levels);
+#: it turned out the scanner needs exactly the same answer for scoring, because
+#: ``_get_primary_timeframe`` returned the literal ``"5m"`` for every channel.
+#: A second consumer means a second copy, and a second copy is the drift that
+#: silently inflated the Strategy Lab rollup for a week — so the declaration
+#: moved to one module and both subsystems import it.
 #:
-#: A setup absent from this map is **refused and named** (``tf_unknown``), never
+#: A setup absent from the map is **refused and named** (``tf_unknown``), never
 #: defaulted to 5m.  A hand-maintained map is a floor, silent by construction on
 #: the next evaluator; making the miss a counted refusal is what stops a new
 #: path from being quietly snapped against the wrong timeframe's structure.
-SNAP_TF_BY_SETUP: Dict[str, str] = {
-    "WHALE_MOMENTUM": "1m",
-    "LIQUIDITY_SWEEP_REVERSAL": "5m",
-    "TREND_PULLBACK_EMA": "5m",
-    "LIQUIDATION_REVERSAL": "5m",
-    "VOLUME_SURGE_BREAKOUT": "5m",
-    "BREAKDOWN_SHORT": "5m",
-    "OPENING_RANGE_BREAKOUT": "5m",
-    "SR_FLIP_RETEST": "5m",
-    "FUNDING_EXTREME_SIGNAL": "5m",
-    "QUIET_COMPRESSION_BREAK": "5m",
-    "DIVERGENCE_CONTINUATION": "5m",
-    "CONTINUATION_LIQUIDITY_SWEEP": "5m",
-    "POST_DISPLACEMENT_CONTINUATION": "5m",
-    "FAILED_AUCTION_RECLAIM": "5m",
-    "MOVER_TREND_PULLBACK": "15m",
-    "MOVER_AVWAP_SCALP": "15m",
-    "MEAN_REVERT": "15m",
-    "RANGE_FADE": "15m",
-    "MA_CROSS_TREND_SHIFT": "1h",
-}
+SNAP_TF_BY_SETUP: Dict[str, str] = _TF_BY_SETUP
 
 # ── Refusal reasons ─────────────────────────────────────────────────────────
 # Each is its own state because the reader's next move differs for each, and
@@ -453,6 +436,10 @@ class SnapLedger:
             "max_rows": self._rows.maxlen,
             "evicted": evicted,
             "counters": _counters.as_dict(),
+            # Resolver liveness only. NOT a book fraction — six consumers call
+            # resolve() per candidate, so this denominator is ~6x the signal
+            # count. The per-signal truth is `score_tf_mismatch` on each row.
+            "tf_census": _tf_census(),
             "rows": rows,
             "spec": describe_spec(),
         }
@@ -466,6 +453,21 @@ class SnapLedger:
         except Exception as exc:  # noqa: BLE001
             fail_open.record("structural_snap.flush", exc)
             return False
+
+
+
+def _tf_census() -> Dict[str, Any]:
+    """The scoring-timeframe resolver's own counters, for liveness.
+
+    Fail-soft: this rides in the ledger payload, and a census that cannot be
+    read must not stop the rows being written.
+    """
+    try:
+        from src import setup_timeframes as _stf
+        return _stf.summary()
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("structural_snap.tf_census", exc)
+        return {}
 
 
 def stamp_and_apply(
@@ -516,6 +518,35 @@ def stamp_and_apply(
         "applied_tp1": False,
         "apply_refused": "",
     }
+
+    # Per-setup scoring-timeframe census, stamped ONCE per signal.
+    #
+    # `Scanner._get_primary_timeframe` was `return "5m"` for every channel, and
+    # six money-path consumers read it — continuation-sweep evidence, the
+    # VWAP / OI / volume-divergence gates, the chart-pattern confidence bonus,
+    # and the volume inputs to the composite score. It is corrected behind
+    # `setup_tf_correction_live` (default off).
+    #
+    # It lives on this row rather than in `setup_timeframes`' own counters
+    # because those count *resolutions* — six per candidate — so a book
+    # fraction computed from them would be inflated ~6x while looking entirely
+    # plausible. One row per signal is the denominator the ops panel needs.
+    try:
+        from src import setup_timeframes as _stf
+        _declared = _stf.declared_for(setup_class)
+        _tf_live = _stf.correction_live()
+        _used = _declared if (_tf_live and _declared) else _stf.LEGACY_TF
+        base["score_tf_declared"] = _declared
+        base["score_tf_used"] = _used
+        base["score_tf_correction_live"] = bool(_tf_live)
+        # None (unmapped) is not a mismatch and not an agreement — a setup with
+        # no declared timeframe is its own state, or a new evaluator silently
+        # inherits 5m and reads as healthy.
+        base["score_tf_mismatch"] = (
+            None if _declared is None else bool(_declared != _stf.LEGACY_TF)
+        )
+    except Exception as _tf_exc:  # noqa: BLE001
+        fail_open.record("structural_snap.score_tf_census", _tf_exc)
 
     tf = snap_timeframe(setup_class)
     if tf is None:

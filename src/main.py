@@ -2845,6 +2845,66 @@ class CryptoSignalEngine:
             min_streak=6,          # 30 min sustained
         ))
 
+        def _setup_tf_resolver() -> Tuple[bool, str]:
+            """The per-setup timeframe resolver must be REACHED, and must know
+            the setups it is being asked about.
+
+            ``_get_primary_timeframe`` was ``return "5m"`` for every channel
+            since it was written — a constant wearing a lookup's docstring —
+            and six money-path consumers read it.  The failure mode that
+            replaces it is quieter than the bug it fixes: if the resolver stops
+            being called, or is called with an empty ``setup_class``, it answers
+            5m for everything again and nothing anywhere looks wrong.
+
+            Two faults, both of which read as healthy on any obvious counter:
+
+            * **unreached** — the census is empty while the scanner is plainly
+              producing signals, i.e. the call sites were refactored away;
+            * **unmapped-dominated** — the resolver is being called without a
+              setup class, or a new evaluator has no declared timeframe, so the
+              correction silently cannot apply to most of the book.
+
+            Never raises: a PredicateProbe exception becomes a fail_open record,
+            and filling that counter with non-events is how a real one stops
+            standing out.
+            """
+            try:
+                from src import setup_timeframes as _stf
+                s = _stf.summary()
+                resolved = int(s.get("resolved") or 0)
+                if resolved < 50:
+                    return True, f"only {resolved} resolutions so far — too few to judge"
+
+                unmapped = int(s.get("unmapped") or 0)
+                mismatched = int(s.get("mismatched") or 0)
+                live = bool(s.get("correction_live"))
+                if unmapped > resolved * 0.5:
+                    return False, (
+                        f"{unmapped}/{resolved} resolutions carried no declared "
+                        "timeframe — the resolver is being called without a "
+                        "setup class, or a new evaluator is unmapped; either "
+                        "way the correction cannot apply"
+                    )
+                applied = int(s.get("applied") or 0)
+                if live and mismatched > 0 and applied == 0:
+                    return False, (
+                        f"correction is LIVE and {mismatched} resolutions "
+                        "disagree with 5m, yet none was applied"
+                    )
+                mode = "LIVE" if live else "dark"
+                return True, (
+                    f"{resolved} resolutions, {mismatched} would move off 5m, "
+                    f"{unmapped} unmapped, correction {mode}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                return True, f"probe unavailable ({type(exc).__name__})"
+
+        fl.add_predicate(PredicateProbe(
+            name="setup_tf_resolver",
+            fn=_setup_tf_resolver,
+            min_streak=6,          # 30 min sustained
+        ))
+
         def _entry_quality_effective() -> Tuple[bool, str]:
             """An ENFORCING rule must be able to see the feature it enforces on.
 

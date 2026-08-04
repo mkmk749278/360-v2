@@ -1403,6 +1403,18 @@ DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC: float = _safe_float(
 # APPLY = the money-path switch (OFF), and it does nothing on its own: a path
 # also has to be named in APPLY_PATHS.  One global flag would flip 19 paths at
 # once on evidence gathered from the one path that is ~59% of the book.
+# ── Per-setup trigger timeframe correction (2026-08-04) ─────────────────────
+# `Scanner._get_primary_timeframe` was `return "5m"` for every channel since it
+# was written, and SIX money-path consumers read it: continuation-sweep
+# evidence, the VWAP / OI / volume-divergence gates, the chart-pattern
+# confidence bonus, and the volume inputs to the composite score. MVRTP is ~59%
+# of the enqueued book and trades 15m.
+#
+# Correcting it changes what scores and therefore what emits, so the counting is
+# unconditional and the CORRECTION is dark. Off = `_get_primary_timeframe`
+# returns "5m" byte-identically; the mismatch census runs either way.
+SETUP_TF_CORRECTION_LIVE: bool = _safe_bool("SETUP_TF_CORRECTION_LIVE", "false")
+
 STRUCTURAL_SNAP_MEASURE: bool = _safe_bool("STRUCTURAL_SNAP_MEASURE", "true")
 STRUCTURAL_SNAP_APPLY: bool = _safe_bool("STRUCTURAL_SNAP_APPLY", "false")
 #: Comma-separated setup classes the snap may actually move.  Empty = none,

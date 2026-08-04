@@ -63,11 +63,27 @@ moves at most ±30% of designed risk, TP1 moves **nearer only**. Ops:
 * `round_step_pct` stamped rather than fixed — the round grid is 20% wide below
   ~$0.10 and therefore inert on much of the mover book.
 
-### Not done, deliberately
+### The second defect, fixed in the same branch
 
-* `_get_primary_timeframe` returns the literal `"5m"` for **every** channel, so
-  the chart-pattern engine runs on 5m even for the two mover paths that trade
-  15m. Noted, not changed — it alters scoring.
+`_get_primary_timeframe` was `return "5m"` for **every** channel, and it is read
+by **six** money-path consumers, not one: continuation-sweep evidence (25-pt SMC
+dimension), the VWAP extension gate, the OI + funding gate, cross-timeframe
+volume divergence, the chart-pattern confidence bonus (10-pt Patterns dimension),
+and the volume inputs to the composite score. All six were reading 5m bars for
+setups that trade 15m / 1h / 1m.
+
+`src/setup_timeframes.py` is now the single declaration (the snap re-exports it,
+same object). The correction is **dark** — `setup_tf_correction_live` off,
+`_get_primary_timeframe` returns 5m byte-identically — while the per-signal
+census runs from deploy. Ops panel on `/signals/structural-snap`.
+
+**The census bounds itself and says so on screen:** five of the six consumers run
+*before* the stamp exists, so they decide whether a candidate is in the ledger at
+all. It answers *how much of the book is affected*, never *how much better it
+would be*. Pricing the correction needs a shadow gate chain — a separate change,
+not attempted here.
+
+### Not done, deliberately
 * `_evaluate_trend_pullback`'s SMC gate comment-vs-code gap is unchanged (already
   measured and closed out 2026-08-02).
 

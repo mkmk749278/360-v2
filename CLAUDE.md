@@ -302,6 +302,7 @@ Telegram are both acceptable paging paths.
 | Per-path entry-feature stamps (observe-only, joined to the closed-signal record) | `src/entry_features.py` |
 | Entry-quality gate — the consuming half of that lane (**LIVE**, per-rule ops switches) | `src/entry_quality.py` |
 | Structural SL/TP1 snap — level-aware geometry at the enqueue choke point (measure ON, apply OFF + per-path allow-list) | `src/structural_snap.py` |
+| Per-setup trigger timeframe — one declaration, read by the snap and by the scanner's six scoring consumers (correction dark) | `src/setup_timeframes.py` |
 
 ---
 
@@ -1089,6 +1090,40 @@ python -m src.main
   and a test derives the required keys by parsing the evaluators' own
   `setup_class=` arguments — so tomorrow's evaluator fails CI instead of quietly
   landing in the refusal bucket forever.
+- **A constant wearing a lookup's docstring is the same defect as a dead
+  parameter, and it had six consumers.** `Scanner._get_primary_timeframe` was
+  literally `return "5m"` under the sentence *"return the primary timeframe
+  interval string for a given channel name"* — so continuation-sweep evidence
+  (the 25-pt SMC dimension), the VWAP extension gate, the OI + funding gate,
+  cross-timeframe volume divergence, the chart-pattern confidence bonus (the
+  10-pt Patterns dimension) and the volume inputs to `score_signal_components`
+  were **all** computed on 5m bars for setups that do not trade 5m. MVRTP is
+  ~59% of the enqueued book and trades 15m; MVAVW / MEAN_REVERT / RANGE_FADE are
+  15m, MA_CROSS is 1h, WHALE is 1m. Found while wiring the structural snap,
+  which needed the same per-setup answer for a different reason — **two
+  consumers of one fact is the moment to check whether the first one is real.**
+  Three habits it produced:
+  - **Pin the shape, not just the value.** The test parses the function's AST
+    and fails if the body is a single `Return` of a `Constant`, because a future
+    "simplification" back to `return "5m"` breaks six consumers and no other
+    test anywhere would notice.
+  - **A fallback is not a default.** An empty `setup_class` resolves to 5m —
+    correct — but is counted as `unmapped`, never as agreement, so a call site
+    that forgot the argument cannot hide behind a path that genuinely trades 5m.
+    `declared_for` returns `None` rather than `"5m"` for the same reason.
+  - **Check the correction is reachable before claiming it is a fix.** A
+    timeframe the scanner never loads would make `_resolve_candles` fall
+    straight back to 5m and every column would read healthy — so a test asserts
+    every declared timeframe is in `SEED_TIMEFRAMES`.
+
+  And the measurement bounds itself: the resolver's own counters run **~6× the
+  signal count** (six consumers per candidate), so the per-signal fact is
+  stamped once on the snap row instead and the ops panel divides by that. More
+  importantly, five of the six consumers run *before* that stamp — they decide
+  whether a candidate exists at all — so the census answers *how much of the
+  book is affected* and is structurally incapable of answering *how much better
+  it would be*. Pricing the correction needs a shadow gate chain; saying so is
+  cheaper than a survivorship-biased number that looks like an answer.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

@@ -115,6 +115,7 @@ def _build_registry() -> Dict[str, Tunable]:
         NOISE_FLOOR_STOPS_ENABLED,
         DARK_EMISSION_ENABLED,
         PRESCORING_AUDIT_ENABLED,
+        SETUP_TF_CORRECTION_LIVE,
         SHADOW_STRATEGIES_ENABLED,
         STRUCTURAL_SNAP_APPLY,
         STRUCTURAL_SNAP_APPLY_PATHS,
@@ -123,6 +124,22 @@ def _build_registry() -> Dict[str, Tunable]:
     )
 
     items = [
+        Tunable(
+            key="setup_tf_correction_live",
+            label="Per-setup timeframe correction (money path)",
+            description=(
+                "Compute the sweep / VWAP / OI / volume-divergence / pattern / "
+                "composite-score inputs on the timeframe each setup actually "
+                "TRADES, instead of always 5m. MOVER_TREND_PULLBACK is ~59% of "
+                "the book and trades 15m, so flipping this changes scoring for "
+                "most of the feed at once. The mismatch census runs whether or "
+                "not this is on — read it at /signals/structural-snap before "
+                "flipping. Owner sign-off item."
+            ),
+            type="bool",
+            default=SETUP_TF_CORRECTION_LIVE,
+            category="Signal gating",
+        ),
         Tunable(
             key="structural_snap_measure",
             label="Structural snap — measure",
