@@ -4,6 +4,75 @@
 
 ---
 
+## 🟢 SESSION 112 2026-08-04 — "are we using price action?" → the snap that never ran
+
+Owner asked what price action is and whether the engine uses it. The audit, then
+the wiring.
+
+### The audit answer
+
+Three layers, three different answers:
+
+| Layer | Verdict |
+|---|---|
+| **Trigger** — does a signal fire | Mostly **no**. ~82% of the enqueued book is MA/indicator-triggered |
+| **Score** — confidence once it fires | **Yes** — SMC sweeps/MSS carry 25 of 100 pts, and MVRTP's kept rows average 19.3 of them |
+| **Geometry** — where SL and TP go | **Almost none**, and the one piece built for it was dead code |
+
+* `MOVER_TREND_PULLBACK` is **362 of 615** enqueued (59%) and is three SMAs plus
+  one ATR; TPs are fixed 1.0/1.6/2.5 R-multiples. Add MVAVW/QCB/TPE/MEAN_REVERT/
+  DIVCONT/MA_CROSS → **505 (82%)**. Structurally-triggered paths (SR_FLIP 55,
+  FAR 30, LSR 21) are **106 (17%)**.
+* The **pattern engine barely moves anything**: `_score_patterns` returns 5.0 as
+  the no-pattern neutral out of 10, and MVRTP's kept rows average **5.85** — 1,525
+  lines of `chart_patterns.py` shifting the dominant path by under one point.
+* `orderblocks` still has **no writer** (`not_implemented`, 100% empty), so every
+  `bool(fvgs) or bool(orderblocks)` has always been `bool(fvgs)` — already known,
+  re-confirmed.
+* The aux SMC channels (`ScalpFVGChannel`, `ScalpOrderblockChannel`,
+  `ScalpDivergenceChannel`) are registered in `main.py:316` and have **no rows at
+  all** in the funnel — zero generation in the window. Not investigated further.
+
+### The finding, and the fix
+
+`structural_levels.py` has held a level-aware SL/TP1 snap since it was written,
+and `build_channel_signal` **called it** — behind `if candle_highs is not None`,
+which **no caller in the engine has ever satisfied**, under the comment *"this
+snap is shared by EVERY evaluator that passes candle arrays"*. Dead twice over:
+every evaluator overwrites `sig.stop_loss` / `sig.tp1` on the next line. Its test
+passed for months by hand-feeding the argument production never supplies.
+
+Wired in `src/structural_snap.py` at `Scanner._enqueue_signal`, after the
+min-distance clamp — geometry is rewritten four times between the evaluator and
+there. **Measure ON, apply OFF**, plus a per-path allow-list so one flip cannot
+move 19 paths on evidence from the one that is most of the book. Bounds: the stop
+moves at most ±30% of designed risk, TP1 moves **nearer only**. Ops:
+`/signals/structural-snap`.
+
+### Open — needs a data window, not an opinion
+
+* **Nothing has been measured yet.** The ledger is empty until this deploys.
+  The TP1 arm is fully decidable from MFE; the SL arm has two named undecidable
+  classes that remove opposite ends of the distribution. Read the decidable
+  fraction before any delta, and do not expect the arms to be comparable.
+* **How often can the snap even fire?** The band is relative to the *designed
+  risk*: a 3% stop searches 2.1–3.9% from entry, while a quiet 20-bar window's
+  swings sit well inside 1%. Pinned as a test (`test_a_swing_nearer_than_the_band_is_not_a_candidate`)
+  because the tempting move on seeing a book full of `unchanged` is to widen the
+  band, which would be a threshold invented to fit a window.
+* `round_step_pct` stamped rather than fixed — the round grid is 20% wide below
+  ~$0.10 and therefore inert on much of the mover book.
+
+### Not done, deliberately
+
+* `_get_primary_timeframe` returns the literal `"5m"` for **every** channel, so
+  the chart-pattern engine runs on 5m even for the two mover paths that trade
+  15m. Noted, not changed — it alters scoring.
+* `_evaluate_trend_pullback`'s SMC gate comment-vs-code gap is unchanged (already
+  measured and closed out 2026-08-02).
+
+---
+
 ## 🟢 SESSION 111 2026-08-04 — two surfaces that describe suppressed candidates, and they are disjoint
 
 Owner asked for LSR / FAR / MOVER_AVWAP_SCALP next, and supplied the dark-feed

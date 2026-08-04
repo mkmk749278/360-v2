@@ -301,6 +301,7 @@ Telegram are both acceptable paging paths.
 | SAR exit mechanism (**live**, forward-stepped in the monitor loop, dark) | `src/sar_live_shadow.py` |
 | Per-path entry-feature stamps (observe-only, joined to the closed-signal record) | `src/entry_features.py` |
 | Entry-quality gate — the consuming half of that lane (**LIVE**, per-rule ops switches) | `src/entry_quality.py` |
+| Structural SL/TP1 snap — level-aware geometry at the enqueue choke point (measure ON, apply OFF + per-path allow-list) | `src/structural_snap.py` |
 
 ---
 
@@ -1029,6 +1030,65 @@ python -m src.main
   unavailable price. Same class as the R-denominator bug: **ask whether the
   quantity a measurement is anchored to is still the thing it was when the
   measurement started.**
+- **A parameter one function reads and no caller writes is #817 one layer
+  down — and a comment claiming otherwise is not evidence.**
+  `build_channel_signal` accepted `candle_highs/lows/closes` and ran a
+  structural SL/TP1 snap behind `if candle_highs is not None`, under the
+  sentence *"this snap is shared by EVERY evaluator that passes candle
+  arrays"*. `grep -rn candle_highs src/` matched **only the parameter's own
+  definition**. It was dead twice over: every evaluator overwrites
+  `sig.stop_loss` / `sig.tp1` on the line *after* that helper returns, so the
+  snapped values would have been discarded even had the arrays arrived. Nothing
+  crashed, nothing was empty — the geometry was simply never level-aware, on a
+  book that is 59% `MOVER_TREND_PULLBACK` (an MA stop with TPs at fixed
+  1.0/1.6/2.5 R-multiples). Its **test** passed for months by hand-feeding the
+  argument production never supplies, proving the fail-open worked in a branch
+  nothing reached. Two habits: **pin the call site, not the import** — the new
+  test parses `_enqueue_signal`'s AST and fails against the pre-fix tree — and
+  when a helper is described as shared, `grep` for the argument that gates it.
+- **"Where the geometry becomes true" is four rewrites later than you think.**
+  Between the evaluator and the queue, `sig.stop_loss` / `sig.tp1` are rewritten
+  by the noise-floor widener, `predictive.adjust_tp_sl`, the min-distance clamp
+  at the top of `_enqueue_signal`, and that clamp's proportional TP rescale. A
+  measurement stamped any earlier describes a stop that is not the stop — #848
+  with the arithmetic removed. `_enqueue_signal`, after the clamp, is the single
+  choke point every path passes through. Corollary: **when a bounded adjustment
+  can breach a guard the layer above it enforces, refuse — do not re-apply the
+  guard.** The snap band bottoms out at 0.7x the designed risk and can land
+  inside the `max(0.8%, 1xATR)` floor; widening back to the floor books a stop
+  nobody chose, so `would_breach_min_distance` is a named, counted refusal.
+- **Ask which half of a measurement the record can actually answer, and refuse
+  the other half by name.** The snap's TP1 arm moves *nearer only*, so
+  `max_favorable_excursion_pct` settles it outright — every recorded excursion
+  precedes the close, so there is no ordering ambiguity. The SL arm moves either
+  way and two of its cases are **not in the record at all**: a wider stop on a
+  loser (the walk ended at the stop) and a tighter stop on a winner (MFE and MAE
+  carry no ordering between them). Those remove **opposite ends** of the
+  distribution, so they are counted separately and never pooled — and the two
+  arms are never blended, because one number over both would move with the SL
+  arm's refusal rate rather than with the mechanism. Same rule as the two fills
+  and the two denominators, arriving from a third direction. Related: MFE/MAE
+  are updated on **mark-price ticks, not intrabar**, so every "the level was
+  reached" verdict is conservative — the lane can under-count rescues and can
+  never invent one, and that bias is stated rather than presented as exactness.
+- **An absolute grid against a relative consumer is inert at some magnitudes and
+  fine at others — stamp the granularity, don't silently fix it.**
+  `find_round_numbers` steps by 0.01 below $1, which is 1% at $1 and **20% at
+  $0.05**, where no round number can fall inside any plausible stop band. Much
+  of the delivered book is sub-$1 movers. Making the grid scale-relative would
+  change which levels exist on a threshold invented to fit this window, so the
+  lane records `round_step_pct` instead and the ops page reads an all-`swing`
+  source column as the grid being inert rather than as round numbers being
+  unhelpful. Measure first; the fix needs its own evidence.
+- **A hand-maintained per-setup map is a floor — make the miss a counted
+  refusal, not a default.** The snap needs each path's *trigger* timeframe (a
+  5m swing and a 15m swing are different levels), and the scanner's own
+  `_get_primary_timeframe` returns the literal `"5m"` for every channel
+  including the two mover paths that trade 15m. `SNAP_TF_BY_SETUP` declares it,
+  a setup absent from the map is refused as `tf_unknown` rather than defaulted,
+  and a test derives the required keys by parsing the evaluators' own
+  `setup_class=` arguments — so tomorrow's evaluator fails CI instead of quietly
+  landing in the refusal bucket forever.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.
