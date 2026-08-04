@@ -53,7 +53,11 @@ class TestGatedPathVerdict:
             edge={"n": 12, "avg_r": -5.0}, label="RANGE_FADE",
         )
         assert ok is False, "12 samples must not clear a path, however negative"
-        assert "12 suppressed samples" in detail
+        # The sample count must be stated. Asserted on the number and the noun
+        # separately rather than on one phrase, because 2026-08-04 inserted the
+        # population name between them ("12 POST-SCORING suppressed samples")
+        # and the claim being protected here is that the count is on screen.
+        assert "12" in detail and "suppressed samples" in detail
 
     def test_the_boundary_is_inclusive_on_the_negative_side(self):
         at_bound = gated_path_verdict(
@@ -121,3 +125,50 @@ class TestPooledSuppressedEdge:
     def test_survives_junk_cells(self):
         matrix = {"a": None, "b": "x", "c": {"strategy": "MEAN_REVERT"}}
         assert pooled_suppressed_edge(matrix, "MEAN_REVERT") is None
+
+
+# --------------------------------------------------------------------------- #
+# The verdict names its population (2026-08-04)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheVerdictNamesItsPopulation:
+    """``edge`` covers post-scoring suppressions only, and the message says so.
+
+    ``suppression_audit.feeds_edge_matrix`` returns False for every pre-scoring
+    reject, so a path whose output is actually being stopped by
+    ``setup_compat:*`` / ``execution:*`` gets a verdict computed on a population
+    that never contained the gate doing the stopping. MEAN_REVERT is the live
+    example: this edge reads +0.50R while its dark-lane rows — all pre-scoring,
+    disjoint by construction — measure −0.66%. Neither is wrong; they describe
+    different candidates, and a reader who takes one as a check on the other
+    reaches for the wrong lever.
+    """
+
+    def _edge(self, avg_r: float, n: int = 400):
+        return {"avg_r": avg_r, "n": n}
+
+    def test_a_correctly_gated_verdict_says_post_scoring(self):
+        ok, msg = gated_path_verdict(
+            backlog=4000, emitted_total=0, edge=self._edge(-0.60), label="RANGE_FADE"
+        )
+        assert ok is True
+        assert "POST-SCORING" in msg
+        assert "dark lane" in msg
+
+    def test_a_costing_verdict_says_post_scoring_and_warns_before_loosening(self):
+        ok, msg = gated_path_verdict(
+            backlog=4221, emitted_total=5, edge=self._edge(0.50), label="MEAN_REVERT"
+        )
+        assert ok is False
+        assert "POST-SCORING" in msg
+        # The actionable half: do not loosen on this number alone.
+        assert "disjoint" in msg or "pre-scoring" in msg.lower()
+
+    def test_an_unmeasured_verdict_points_at_the_other_population(self):
+        ok, msg = gated_path_verdict(
+            backlog=31169, emitted_total=0, edge=None, label="LIQUIDITY_SWEEP_REVERSAL"
+        )
+        assert ok is False
+        assert "POST-SCORING" in msg
+        assert "dark lane" in msg

@@ -976,6 +976,8 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
     per_strategy: Dict[str, Dict[str, Any]] = {}
     scored_cells: List[Dict[str, Any]] = []
     total_outcomes = 0
+    total_seen = 0
+    sampled_cells = 0
     for cell in (matrix or {}).values():
         if not isinstance(cell, dict):
             continue
@@ -986,11 +988,19 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
             continue
         n = int(cell.get("n", 0) or 0)
         total_outcomes += n
+        total_seen += int(cell.get("n_seen", n) or n)
+        if cell.get("sampled"):
+            sampled_cells += 1
         agg = per_strategy.setdefault(strategy, {
             "n": 0,
             "n_emitted": 0,
             "n_suppressed": 0,
             "n_shadow": 0,
+            # The denominator behind `n`. Cells are 50-outcome rings, so `n` is
+            # min(seen, 50) and a saturated cell is a rolling recent window
+            # rather than a population — invisible until it is printed.
+            "n_seen": 0,
+            "sampled_cells": 0,
             "cells": 0,
             "_win_weight": 0.0,
             "_r_weight": 0.0,
@@ -1002,6 +1012,11 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         agg["n_emitted"] += int(cell.get("n_emitted", 0) or 0)
         agg["n_suppressed"] += int(cell.get("n_suppressed", 0) or 0)
         agg["n_shadow"] += int(cell.get("n_shadow", 0) or 0)
+        # Pre-2026-08-04 stores have no eviction count; `n_seen` then falls
+        # back to `n`, which under-reports rather than inventing a number.
+        agg["n_seen"] += int(cell.get("n_seen", n) or n)
+        if cell.get("sampled"):
+            agg["sampled_cells"] += 1
         agg["cells"] += 1
         agg["_win_weight"] += float(cell.get("win_rate", 0.0) or 0.0) * n
         agg["_r_weight"] += float(cell.get("avg_r", 0.0) or 0.0) * n
@@ -1043,6 +1058,8 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         "top_cells": scored_cells[:5],
         "bottom_cells": scored_cells[-5:][::-1] if scored_cells else [],
         "total_outcomes": total_outcomes,
+        "total_seen": total_seen,
+        "sampled_cells": sampled_cells,
         "scored_cells": len(scored_cells),
         "geometry_ab": summarize_geometry_ab(matrix),
         "recipe_arms": summarize_recipe_arms(matrix),
@@ -2127,13 +2144,46 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         "bounded expectancy in R — thin cells cannot fake a positive edge.  "
         "This matrix is what the allocator routes on._"
     )
+    lines.append(
+        "_**`suppressed` here means POST-SCORING suppressions only.** "
+        "`suppression_audit.feeds_edge_matrix` returns False for every "
+        "pre-scoring reject — `setup_compat:*` and `execution:*` fire ahead of "
+        "the scoring engine and would swamp the matrix with a differently-"
+        "measured population (~38k/window against ~4.5k) that Layer C's "
+        "emission floor reads LIVE.  Those candidates are measured **in the "
+        "dark lane instead** (`/signals/dark-live`), and the two populations "
+        "are therefore **disjoint** — every dark row carries a `setup_compat:*` "
+        "or `execution:*` gate, and none of them can appear here.  A path can "
+        "read positive on this table and negative in the dark feed with no "
+        "contradiction, because they are not measuring the same candidates.  "
+        "Stated on the surface rather than in a docstring because reading one "
+        "as a check on the other is a mistake this repo has now made "
+        "(2026-08-04)._"
+    )
+    lines.append(
+        "_**Every cell is a 50-outcome ring** (`STRATEGY_EDGE_WINDOW`), so `n` "
+        "is `min(seen, 50)` and `seen` is the denominator: a saturated cell is "
+        "a rolling most-recent-50 window while a sparse cell beside it is "
+        "all-time.  `sampled` counts cells that have evicted at least once._"
+    )
     per_strategy = edge.get("per_strategy") or {}
     if per_strategy:
+        _held = int(edge.get("total_outcomes", 0) or 0)
+        _seen = int(edge.get("total_seen", _held) or _held)
+        _sampled = int(edge.get("sampled_cells", 0) or 0)
         lines.append(
-            f"- Outcomes recorded: {edge.get('total_outcomes', 0)} across "
+            f"- Outcomes recorded: **{_held} held of {_seen} seen** across "
             f"{len(per_strategy)} strategies; {edge.get('scored_cells', 0)} cells "
-            "past the sample floor"
+            f"past the sample floor; **{_sampled} cells have evicted** "
+            f"(saturated rings — their stats describe the most recent 50 only)"
         )
+        if _seen == _held and _sampled == 0:
+            lines.append(
+                "- _No evictions recorded. On a store written before "
+                "2026-08-04 that means the count did not exist yet, **not** "
+                "that nothing was dropped — the two are indistinguishable "
+                "here until a full window has accumulated post-deploy._"
+            )
         lines.append("")
         lines.append(
             "| Strategy | n | emit/supp/shadow | Win% | Avg R | Best context (edge) | Worst context (edge) |"

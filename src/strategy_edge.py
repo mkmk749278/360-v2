@@ -59,6 +59,11 @@ SOURCE_EMITTED = "emitted"
 SOURCE_SUPPRESSED = "suppressed"
 SOURCE_SHADOW = "shadow"
 
+#: Reserved top-level key in the persisted store holding per-cell eviction
+#: counts.  Cell keys are ``"STRATEGY|context_key"`` and ``_key`` upper-cases
+#: the strategy, so a key containing no ``"|"`` can never collide with one.
+_EVICTED_KEY = "__evicted__"
+
 
 @dataclass
 class StrategyOutcome:
@@ -109,6 +114,25 @@ class StrategyEdgeStore:
         self._records: Dict[Tuple[str, str], Deque[_Record]] = defaultdict(
             lambda: deque(maxlen=self._window)
         )
+        #: Per-cell count of outcomes pushed out of the ring by ``maxlen``.
+        #:
+        #: Every cell here is a ``deque(maxlen=50)``, so ``len(records)`` is
+        #: ``min(actual, 50)`` and a cell reading ``n=50`` may stand for fifty
+        #: outcomes or five thousand.  Until 2026-08-04 nothing counted the
+        #: difference and nothing published it, so every verdict on this matrix
+        #: was a sample of unknown size presented as a population — including
+        #: the ones Layer C's emission floor and Layer G's promotions route on.
+        #:
+        #: This is the Suppression Quality Audit's ring problem one subsystem
+        #: over: that store already computes eviction counts and renders them
+        #: beside its verdicts (``CLAUDE.md``: *"when a bounded buffer feeds a
+        #: statistic, persist the eviction count with the data and put the
+        #: denominator beside the verdict"*).  The edge matrix has the same
+        #: shape at an eighth of the window and never got the same treatment.
+        #:
+        #: Counted here rather than derived, because it cannot be derived: once
+        #: a record is evicted nothing downstream can tell it ever existed.
+        self._evicted: Dict[Tuple[str, str], int] = defaultdict(int)
         self.recorded_total: int = 0
         # Empty persist_path disables disk I/O entirely (tests).
         self._persist_path: str = (
@@ -151,7 +175,13 @@ class StrategyEdgeStore:
             ),
         )
         with self._lock:
-            self._records[key].append(rec)
+            dq = self._records[key]
+            # Count the eviction BEFORE it happens — a full ring drops its
+            # oldest record on the next append and there is no observing it
+            # afterwards.
+            if dq.maxlen is not None and dq.maxlen > 0 and len(dq) >= dq.maxlen:
+                self._evicted[key] += 1
+            dq.append(rec)
             # Monotonic since-boot counter for the feature-liveness probes
             # (per-cell deques evict, so a raw record count can go backwards).
             self.recorded_total += 1
@@ -191,6 +221,32 @@ class StrategyEdgeStore:
             records = self._records.get(key)
             return len(records) if records else 0
 
+    def sampling(self, strategy: str, context_key: str) -> Dict[str, int]:
+        """``{held, evicted, seen, sampled}`` for one cell — the denominator.
+
+        ``held`` is what every other statistic on this cell is computed from;
+        ``seen`` is how many outcomes the cell has actually observed.  They are
+        equal until the ring fills, and after that ``held`` is a **rolling
+        most-recent-N window** while a sparse cell beside it is still all-time.
+        Pooling the two without saying so averages different time windows,
+        which is why this is published rather than kept internal.
+
+        Mirrors ``suppression_audit``'s accessor of the same name, deliberately
+        — a reader moving between the two surfaces should not have to learn two
+        vocabularies for one idea.
+        """
+        key = self._key(strategy, context_key)
+        with self._lock:
+            records = self._records.get(key)
+            held = len(records) if records else 0
+            evicted = int(self._evicted.get(key, 0))
+        return {
+            "held": held,
+            "evicted": evicted,
+            "seen": held + evicted,
+            "sampled": 1 if evicted else 0,
+        }
+
     def verdict(self, strategy: str, context_key: str) -> str:
         edge = self.edge_r(strategy, context_key)
         if edge is None:
@@ -212,6 +268,7 @@ class StrategyEdgeStore:
         out: Dict[str, Dict] = {}
         with self._lock:
             snapshot = {k: list(v) for k, v in self._records.items() if v}
+            evicted_snapshot = dict(self._evicted)
         for (strategy, ctx), records in snapshot.items():
             n = len(records)
             wins = sum(1 for r in records if r.won)
@@ -232,10 +289,19 @@ class StrategyEdgeStore:
                 if mfe_records and sum(r.mfe_pct for r in mfe_records) > 0
                 else 0.0
             )
+            _evicted = int(evicted_snapshot.get((strategy, ctx), 0))
             out[f"{strategy}|{ctx}"] = {
                 "strategy": strategy,
                 "context_key": ctx,
                 "n": n,
+                # The denominator, beside the verdict rather than behind it.
+                # `n` is what the stats were computed from; `n_seen` is what
+                # the cell actually observed. A reader who cannot tell a
+                # 50-of-50 cell from a 50-of-5000 one is reading a sample as a
+                # population — see `_evicted`'s note in __init__.
+                "n_evicted": _evicted,
+                "n_seen": n + _evicted,
+                "sampled": bool(_evicted),
                 "n_emitted": sum(1 for r in records if r.source == SOURCE_EMITTED),
                 "n_suppressed": sum(1 for r in records if r.source == SOURCE_SUPPRESSED),
                 "n_shadow": sum(1 for r in records if r.source == SOURCE_SHADOW),
@@ -260,8 +326,26 @@ class StrategyEdgeStore:
                 return
             with open(self._persist_path, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
+            # Eviction counts ride in a reserved key rather than an envelope,
+            # so the file stays loadable by the previous build: a rollback
+            # skips this entry (no "|" → not a cell key) and loses the counts
+            # rather than losing the store. An envelope would have made every
+            # cell unreadable to older code — a serializer whose blast radius
+            # is every consumer (CLAUDE.md, #842).
+            evicted_raw = raw.get(_EVICTED_KEY) if isinstance(raw, dict) else None
             with self._lock:
+                if isinstance(evicted_raw, dict):
+                    for key_str, count in evicted_raw.items():
+                        parts = key_str.split("|", 1)
+                        if len(parts) != 2:
+                            continue
+                        try:
+                            self._evicted[(parts[0], parts[1])] = int(count)
+                        except (TypeError, ValueError):
+                            continue
                 for key_str, recs in raw.items():
+                    if key_str == _EVICTED_KEY:
+                        continue
                     parts = key_str.split("|", 1)
                     if len(parts) != 2:
                         continue
@@ -313,6 +397,16 @@ class StrategyEdgeStore:
                     for (strategy, ctx), records in self._records.items()
                     if records
                 }
+                # A count that resets on restart would report every cell as
+                # unsampled after each deploy — i.e. exactly the reassuring
+                # answer, on the schedule that makes it hardest to notice.
+                _ev = {
+                    f"{strategy}|{ctx}": count
+                    for (strategy, ctx), count in self._evicted.items()
+                    if count
+                }
+            if _ev:
+                payload[_EVICTED_KEY] = _ev
             dirname = os.path.dirname(self._persist_path)
             if dirname:
                 os.makedirs(dirname, exist_ok=True)
