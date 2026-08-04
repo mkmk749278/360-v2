@@ -4284,9 +4284,37 @@ class Scanner:
         return self._loss_streaks.get(cd_key, 0)
 
     @staticmethod
-    def _get_primary_timeframe(chan_name: str) -> str:
-        """Return the primary timeframe interval string for a given channel name."""
-        return "5m"
+    def _get_primary_timeframe(chan_name: str, setup_class: str = "") -> str:
+        """Return the primary timeframe interval string for this candidate.
+
+        **This used to be ``return "5m"``** — a docstring describing a lookup,
+        over a function that was a constant, for every channel, since it was
+        written.  Six money-path consumers read it and were therefore all
+        computed on 5m bars for setups that do not trade 5m:
+
+        * continuation-sweep evidence → ``has_sweep`` → the 25-pt SMC dimension
+        * VWAP extension rejection → soft penalty
+        * OI + funding gate → soft penalty and ``_funding_rate``
+        * cross-timeframe volume divergence → soft penalty
+        * chart + candlestick patterns → ``sig.confidence`` and the 10-pt
+          Patterns dimension
+        * the volume inputs to ``score_signal_components`` → composite score
+
+        ``MOVER_TREND_PULLBACK`` is ~59% of the enqueued book and trades 15m;
+        MVAVW / MEAN_REVERT / RANGE_FADE are 15m, MA_CROSS is 1h, WHALE is 1m.
+        ``ctx.candles`` carries all of them (``SEED_TIMEFRAMES``), so the
+        correction is reachable rather than silently falling back.
+
+        Correcting it changes what scores and therefore what emits, so it ships
+        **dark**: ``setup_tf_correction_live`` defaults off and this keeps
+        returning ``"5m"`` byte-identically, while ``setup_timeframes.resolve``
+        counts the mismatch from the moment it deploys.  ``chan_name`` is
+        retained for the signature; an empty ``setup_class`` resolves to the
+        legacy 5m and is counted as ``unmapped`` rather than passing silently
+        as agreement.
+        """
+        from src import setup_timeframes as _stf
+        return _stf.resolve(setup_class)
 
     @staticmethod
     def _resolve_candles(candles: Dict[str, dict], primary_tf: str) -> dict:
@@ -4477,7 +4505,9 @@ class Scanner:
         ):
             try:
                 from src.smc import detect_continuation_sweep
-                _primary_tf = self._get_primary_timeframe(chan_name)
+                _primary_tf = self._get_primary_timeframe(
+                    chan_name, getattr(sig, "setup_class", "")
+                )
                 _cont_candles = self._resolve_candles(ctx.candles, _primary_tf)
                 _cont_sweep = detect_continuation_sweep(_cont_candles, "SHORT", lookback=10)
                 if _cont_sweep is not None:
@@ -5303,6 +5333,47 @@ class Scanner:
             # exception mid-loop leaves half-rescaled geometry, which is
             # exactly the kind of failure that must page, not vanish.
             fail_open.record("scanner.min_distance_geometry", _mind_exc)
+
+        # ── Structural SL/TP1 snap (2026-08-04, measure ON / apply OFF) ───
+        # THIS is where the geometry becomes true. Between the evaluator and
+        # here, sig.stop_loss / sig.tp1 are rewritten four times — the
+        # noise-floor widener, predictive.adjust_tp_sl, the min-distance clamp
+        # directly above, and that clamp's proportional TP rescale — so a snap
+        # measured any earlier describes a stop that is not the stop.
+        #
+        # `structural_levels.py` has held this repair since it was written and
+        # `channels/base.build_channel_signal` called it behind a guard on
+        # `candle_highs is not None` that no caller has ever satisfied, while
+        # its own comment claimed every evaluator passed the arrays. See
+        # src/structural_snap.py.
+        try:
+            from src import structural_snap as _snap
+            _snap_tf = _snap.snap_timeframe(
+                getattr(sig, "setup_class", "") or getattr(sig, "channel", "")
+            )
+            # In-memory lookup on the shared store — no network, no Firestore,
+            # and enqueues are rare (hundreds per window, not per tick).
+            _snap_candles = (
+                self.data_store.get_candles(sig.symbol, _snap_tf)
+                if _snap_tf else None
+            )
+            # Mirror of the min-distance floor enforced above, passed in rather
+            # than re-derived inside the snap: the snap band bottoms out at
+            # 0.7x the designed risk and can land inside this floor, and a
+            # tightened stop that silently widens back to it is a stop nobody
+            # chose. structural_snap refuses and names it instead.
+            _snap_entry = float(getattr(sig, "entry", 0) or 0)
+            _snap_atr = float(getattr(sig, "atr_val", 0) or 0)
+            _snap_min_dist = max(
+                _snap_entry * 0.0080, _snap_atr * 1.0 if _snap_atr > 0 else 0.0
+            )
+            _snap.stamp_and_apply(
+                sig, candles=_snap_candles, min_sl_distance=_snap_min_dist,
+            )
+        except Exception as _snap_exc:
+            # Fail-open: a measurement lane must never block emission. Counted,
+            # WARNed and paged via the feature-liveness watchdog — never silent.
+            fail_open.record("scanner.structural_snap", _snap_exc)
 
         # ── Active-duplicate guard (2026-07-09, dark-flagged) ────────────
         # The dispatch cooldown below intends "never two live copies of the
@@ -6635,7 +6706,9 @@ class Scanner:
         # ── Filter 2: VWAP Extension Rejection ─────────────────────────────
         if _gate_profile.get("vwap", True):
             try:
-                _primary_tf = self._get_primary_timeframe(chan_name)
+                _primary_tf = self._get_primary_timeframe(
+                    chan_name, getattr(sig, "setup_class", "")
+                )
                 _cd = self._resolve_candles(ctx.candles, _primary_tf)
                 _vwap_result = compute_vwap(
                     _cd.get("high", []),
@@ -6693,7 +6766,9 @@ class Scanner:
         _funding_rate: Optional[float] = None
         if _gate_profile.get("oi", True) and self.order_flow_store is not None:
             try:
-                _oi_tf = self._get_primary_timeframe(chan_name)
+                _oi_tf = self._get_primary_timeframe(
+                    chan_name, getattr(sig, "setup_class", "")
+                )
                 _oi_cd = self._resolve_candles(ctx.candles, _oi_tf)
                 _prices = _oi_cd.get("close", [])
                 _oi_snaps = list(getattr(self.order_flow_store, "_oi", {}).get(symbol, []))
@@ -6822,7 +6897,9 @@ class Scanner:
         # ── Filter 7: Cross-Timeframe Volume Divergence ───────────────────
         if _gate_profile.get("volume_div", True):
             try:
-                _vol_primary_tf = self._get_primary_timeframe(chan_name)
+                _vol_primary_tf = self._get_primary_timeframe(
+                    chan_name, getattr(sig, "setup_class", "")
+                )
                 # Relaxed spike threshold for scalp signals (volume spikes ARE valid for scalps)
                 _vol_spike_thresh = 2.5 if chan_name == "360_SCALP" else 2.0
                 vol_div_allowed, vol_div_reason = check_volume_divergence_gate(
@@ -7187,7 +7264,9 @@ class Scanner:
             )
 
         # Chart pattern bonus: detect confirming patterns from primary-TF candles
-        primary_tf = self._get_primary_timeframe(chan_name)
+        primary_tf = self._get_primary_timeframe(
+            chan_name, getattr(sig, "setup_class", "")
+        )
         primary_candles = self._resolve_candles(ctx.candles, primary_tf)
         if primary_candles:
             try:
@@ -7494,7 +7573,9 @@ class Scanner:
         # existing component_scores so that downstream format checks still
         # see the "market"/"execution"/"risk" keys set earlier.
         try:
-            _primary_tf = self._get_primary_timeframe(chan_name)
+            _primary_tf = self._get_primary_timeframe(
+                chan_name, getattr(sig, "setup_class", "")
+            )
             _primary_ind = ctx.indicators.get(_primary_tf, {})
             _primary_cd = self._resolve_candles(ctx.candles, _primary_tf)
             _closes_arr = _primary_cd.get("close", [])

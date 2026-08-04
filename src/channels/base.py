@@ -17,12 +17,6 @@ from src.smc import Direction
 _DEFAULT_RSI_OB: float = 75.0
 _DEFAULT_RSI_OS: float = 25.0
 _DEFAULT_BB_TOUCH_PCT: float = 0.002
-from src.structural_levels import (  # noqa: E402
-    find_round_numbers,
-    find_structural_sl,
-    find_structural_tp,
-    find_swing_levels,
-)
 from src.utils import utcnow  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -660,38 +654,22 @@ def build_channel_signal(
         tp2 = close - sl_dist * adj_ratios[1]
         tp3 = close - sl_dist * adj_ratios[2] if len(adj_ratios) > 2 else close - sl_dist * _DEFAULT_TP3_RATIO
 
-    # ── Structural SL/TP adjustment ──
-    if candle_highs is not None and candle_lows is not None and candle_closes is not None:
-        try:
-            import numpy as np
-
-            swing_levels = find_swing_levels(
-                np.array(candle_highs),
-                np.array(candle_lows),
-                np.array(candle_closes),
-            )
-            round_nums = find_round_numbers(close)
-
-            # Adjust SL to nearest structural support/resistance
-            structural_sl = find_structural_sl(
-                direction, close, sl, swing_levels, round_nums, sl_dist
-            )
-            if structural_sl != sl:
-                sl = structural_sl
-
-            # Adjust TP1 to nearest structural level
-            structural_tp1 = find_structural_tp(
-                direction, close, tp1, swing_levels, round_nums, sl_dist
-            )
-            if structural_tp1 != tp1:
-                tp1 = structural_tp1
-        except Exception as _struct_exc:
-            # Fail open — use ATR-based levels.  This snap is shared by
-            # EVERY evaluator that passes candle arrays: a regression in
-            # find_swing_levels here would silently revert all signals
-            # to raw ATR geometry, so the failure must count and page.
-            from src import fail_open
-            fail_open.record("channels.structural_sltp_snap", _struct_exc)
+    # ── Structural SL/TP adjustment — MOVED, 2026-08-04 ──────────────────
+    # A snap used to live here, guarded on ``candle_highs is not None``, under
+    # a comment reading "this snap is shared by EVERY evaluator that passes
+    # candle arrays".  No caller in the engine has ever passed that argument
+    # (``grep -rn candle_highs src/`` matched only the parameter's own
+    # definition), so the branch never executed — and it could not have helped
+    # if it had: every evaluator overwrites ``sig.stop_loss`` / ``sig.tp1``
+    # immediately after this function returns, so the snapped values would have
+    # been discarded on the next line of the caller.
+    #
+    # It now runs in ``Scanner._enqueue_signal`` via ``src/structural_snap.py``,
+    # which is the one point where the geometry is final — after the noise
+    # floor, the predictive adjustment and the min-distance clamp.  The
+    # ``candle_*`` parameters are retained because they are part of a public
+    # signature, and are deliberately unused: there is one snap, and it is not
+    # here.  See ``src/structural_snap.py`` for why.
 
     sig = Signal(
         channel=config.name,

@@ -2148,6 +2148,21 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Entry-feature flush error (fail-open): {}", exc)
 
+            # ── Structural SL/TP1 snap ledger ─────────────────────────────
+            # force=True for the same reason: an idle lane that stops writing
+            # renders as STALE, and "quiet market" and "the lane stopped" are
+            # the two states an ops page cannot tell apart without a heartbeat.
+            # No resolver here either — outcomes join from
+            # signal_performance.json by signal_id.
+            try:
+                from src import structural_snap as _ss
+                if _ss.measure_enabled():
+                    _ss.get_ledger().flush(force=True)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Structural-snap flush error (fail-open): {}", exc)
+
             # ── Stop-geometry A/B: classify the FIXED/ATR pair ledger ──────
             # Same forward measure, dedicated store; both arms land in the
             # edge matrix as X@FIXED / X@ATR shadow rows so ops + the truth
@@ -2744,6 +2759,149 @@ class CryptoSignalEngine:
         fl.add_predicate(PredicateProbe(
             name="entry_feature_inputs",
             fn=_entry_feature_inputs,
+            min_streak=6,          # 30 min sustained
+        ))
+
+        def _structural_snap() -> Tuple[bool, str]:
+            """The snap must be able to SEE structure, not merely run.
+
+            This lane's characteristic failure is not a crash — it is a book of
+            rows all reading "no level nearby", which is indistinguishable on
+            every counter you would naturally look at from a market with no
+            structure near price.  It has already happened once in this repo:
+            ``smc_zone_dist_atr`` returned ``None`` on 57 of 57 rows for its
+            whole life because it read a zone's edges by guessing key names, and
+            nothing challenged the story written over it because nothing could.
+
+            So the failure conditions are the ones that look healthy:
+
+            * **refusal-dominated** — most rows carry no measurement at all, so
+              the panel above them describes a fraction of the book while
+              looking complete;
+            * **structurally blind** — the walk runs, but finds no swing on
+              either side, which means the series is arriving and the detector
+              is not working on it;
+            * **applying while blind** — the money-path half is on for a path
+              whose rows cannot compute, i.e. an inert gate wearing a live
+              gate's label.
+
+            Returns True on an empty or tiny ledger: a fresh deploy and a quiet
+            market are not faults, and signalling "idle" by failing is how a
+            real failure stops standing out.  Never raises — a PredicateProbe
+            exception becomes a fail_open record, and filling that counter with
+            non-events is the same mistake one layer down.
+            """
+            try:
+                from src import structural_snap as _ss
+                if not _ss.measure_enabled():
+                    return True, "structural-snap stamping disabled"
+                s = _ss.summary()
+                rows = int(s.get("rows") or 0)
+                if rows < 20:
+                    return True, f"only {rows} stamps so far — too few to judge"
+
+                refused = int(s.get("refused") or 0)
+                computed = int(s.get("computed") or 0)
+                counters = s.get("counters") or {}
+                top = sorted(
+                    (counters.get("refused") or {}).items(),
+                    key=lambda kv: -kv[1],
+                )[:3]
+                cause = ", ".join(f"{k}={v}" for k, v in top) or "none"
+                if refused > rows * 0.5:
+                    return False, (
+                        f"{refused}/{rows} rows carry no measurement "
+                        f"(top causes: {cause})"
+                    )
+
+                # Blind = the walk produced neither a swing high nor a swing
+                # low.  Counted over rows that DID compute, so a refusal spike
+                # cannot mask it and cannot double-count as it.
+                blind = 0
+                for r in _ss.get_ledger().rows():
+                    if r.get("refused"):
+                        continue
+                    if not (r.get("n_swing_highs") or 0) and not (r.get("n_swing_lows") or 0):
+                        blind += 1
+                if computed and blind > computed * 0.8:
+                    return False, (
+                        f"{blind}/{computed} computed rows found NO swing on "
+                        "either side — series arriving, detector silent"
+                    )
+
+                applied = int(counters.get("applied_sl") or 0) + int(
+                    counters.get("applied_tp1") or 0
+                )
+                return True, (
+                    f"{computed}/{rows} measured, {blind} blind, "
+                    f"{applied} levels moved (refusals: {cause})"
+                )
+            except Exception as exc:  # noqa: BLE001
+                return True, f"probe unavailable ({type(exc).__name__})"
+
+        fl.add_predicate(PredicateProbe(
+            name="structural_snap",
+            fn=_structural_snap,
+            min_streak=6,          # 30 min sustained
+        ))
+
+        def _setup_tf_resolver() -> Tuple[bool, str]:
+            """The per-setup timeframe resolver must be REACHED, and must know
+            the setups it is being asked about.
+
+            ``_get_primary_timeframe`` was ``return "5m"`` for every channel
+            since it was written — a constant wearing a lookup's docstring —
+            and six money-path consumers read it.  The failure mode that
+            replaces it is quieter than the bug it fixes: if the resolver stops
+            being called, or is called with an empty ``setup_class``, it answers
+            5m for everything again and nothing anywhere looks wrong.
+
+            Two faults, both of which read as healthy on any obvious counter:
+
+            * **unreached** — the census is empty while the scanner is plainly
+              producing signals, i.e. the call sites were refactored away;
+            * **unmapped-dominated** — the resolver is being called without a
+              setup class, or a new evaluator has no declared timeframe, so the
+              correction silently cannot apply to most of the book.
+
+            Never raises: a PredicateProbe exception becomes a fail_open record,
+            and filling that counter with non-events is how a real one stops
+            standing out.
+            """
+            try:
+                from src import setup_timeframes as _stf
+                s = _stf.summary()
+                resolved = int(s.get("resolved") or 0)
+                if resolved < 50:
+                    return True, f"only {resolved} resolutions so far — too few to judge"
+
+                unmapped = int(s.get("unmapped") or 0)
+                mismatched = int(s.get("mismatched") or 0)
+                live = bool(s.get("correction_live"))
+                if unmapped > resolved * 0.5:
+                    return False, (
+                        f"{unmapped}/{resolved} resolutions carried no declared "
+                        "timeframe — the resolver is being called without a "
+                        "setup class, or a new evaluator is unmapped; either "
+                        "way the correction cannot apply"
+                    )
+                applied = int(s.get("applied") or 0)
+                if live and mismatched > 0 and applied == 0:
+                    return False, (
+                        f"correction is LIVE and {mismatched} resolutions "
+                        "disagree with 5m, yet none was applied"
+                    )
+                mode = "LIVE" if live else "dark"
+                return True, (
+                    f"{resolved} resolutions, {mismatched} would move off 5m, "
+                    f"{unmapped} unmapped, correction {mode}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                return True, f"probe unavailable ({type(exc).__name__})"
+
+        fl.add_predicate(PredicateProbe(
+            name="setup_tf_resolver",
+            fn=_setup_tf_resolver,
             min_streak=6,          # 30 min sustained
         ))
 
