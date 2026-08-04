@@ -4,6 +4,83 @@
 
 ---
 
+## 🟢 SESSION 111 2026-08-04 — two surfaces that describe suppressed candidates, and they are disjoint
+
+Owner asked for LSR / FAR / MOVER_AVWAP_SCALP next, and supplied the dark-feed
+export (292 rows, 2026-07-31 → 08-04, resolve age 4.7s — current).
+
+### What the three paths actually say
+
+* **LSR and FAR are unreadable, and the dark feed proves it rather than
+  inferring it.** The 2026-08-03 16:16 ``_build_scan_context`` fix (#108) changed
+  both evaluators — LSR had been skipping its HTF POI anchor check, FAR falling
+  back to the 5m struct-scan. Of their decided dark rows, **14 of 15 (LSR) and 21
+  of 21 (FAR) predate it**; the edge matrix agrees at 98% pre-fix. LSR's apparent
+  +0.585% is n=15, CI **[−0.311, +1.404]**, and halves to +0.292% on removing two
+  rows. Re-read in a week; today both surfaces describe dead code.
+* **MVAVW is the one with a valid sample** — 111 dark rows, unaffected by that
+  fix: **40.6% win, −0.121%, CI [−0.72, +0.48]** over 101 scored. Its dominant
+  blocked gate ``execution:overextended`` reads −0.174% on n=100. Flat noise;
+  the gate is not costing anything. (My earlier −0.38R read off the matrix
+  overstated it — see the cap below.)
+* **The clearest result in the file**: ``setup_compat:regime_STRONG_TREND`` —
+  n=30, 16.7% win, **−1.201%, CI [−1.81, −0.53]**, the only gate whose CI
+  excludes zero. Emphatically correct.
+* Entry timing matches MVRTP on every path: losers' median peak +0.22→+0.56%,
+  winners' median heat 0.33–0.50%. Binary and fast is engine-wide, not one path.
+
+### The mistake, and it is mine
+
+I read the ``mean_revert_emission`` alert (+0.50R, *"the gating is COSTING us"*)
+against the dark lane's −0.66% and reported a contradiction with a
+recommendation to check the alert before acting on it. **There is no
+contradiction.** ``suppression_audit.feeds_edge_matrix`` returns False for every
+pre-scoring reject, and **every one of the six dark gates is pre-scoring**
+(``setup_compat:*`` / ``execution:*``). The two populations are **disjoint by
+construction** — a path can read positive on the matrix and negative in the dark
+feed while both are correct, because they are not measuring the same candidates.
+
+Nothing on either surface said so. The exclusion lives in one docstring on the
+producing side; both readers describe themselves as *"gate-blocked
+counterfactuals"*.
+
+### What shipped (engine #872)
+
+* **The edge matrix now states its denominator.** Every cell is a
+  ``deque(maxlen=50)`` and **1,569 of 8,538 were pinned at the cap**, so ``n``
+  was ``min(seen, 50)`` and a saturated cell is a rolling most-recent-50 window
+  beside sparse cells that are all-time. Evictions are now counted at the moment
+  they happen, **persisted** (a counter resetting on deploy reports every cell
+  unsampled afterwards), and published as ``n_evicted`` / ``n_seen`` /
+  ``sampled`` on the cell and ``held of seen`` in the truth report. The counts
+  ride in a reserved ``__evicted__`` key, not an envelope, so a rollback loses
+  the counts rather than the store.
+* **Both surfaces name their population.** The truth report's edge-matrix
+  section says post-scoring-only, names the dark lane as where the pre-scoring
+  rejects are measured, and says the two are disjoint. ``gated_path_verdict``
+  carries the same words into every probe that reads it, including
+  *"confirm the output is actually being stopped post-scoring before loosening
+  anything"*.
+
+Deliberately **not** shipped: emission probes for LSR / FAR / MVAVW. They would
+need per-path detection counters the evaluators do not have, and
+``gated_path_verdict`` reads the post-scoring matrix while these three die
+pre-scoring — the probe would inherit exactly the stage mismatch this session
+was about. Worth doing once the verdict can read the right population.
+
+### The thing worth remembering
+
+**Two surfaces that describe "suppressed candidates" in the same words can
+partition the candidates between them.** The rule already in this file — *"check
+the surfaces against each other on the population where their definitions
+differ"* — assumes the populations overlap. When they are disjoint, agreement is
+impossible and disagreement is not evidence of anything. Before comparing two
+measurements, **ask whether either could ever have contained the other's rows**;
+and a surface whose population is a subset must say which subset, on the surface,
+not in the docstring of the function that filters it.
+
+---
+
 ## 🟢 SESSION 110 2026-08-04 — MVRTP is the book, and it is ~2.4 points of win rate short
 
 Owner: *"analyse all the mover trend pullback path signals, and why still lot
