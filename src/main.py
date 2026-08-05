@@ -76,6 +76,7 @@ from src.execution.paper_book_registry import PaperBookFanout, PaperBookRegistry
 from src.auto_trade.risk_manager import RiskManager
 from config import PAPER_BOOKS_DIR, PAPER_PER_USER_BOOKS
 from src.auto_trade.position_reconciler import PositionReconciler
+from src.footprint import get_store as get_footprint_store
 from src.live_ticks import get_store as get_live_tick_store
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
@@ -1487,7 +1488,14 @@ class CryptoSignalEngine:
             #
             # One dict, one deque append, no logging and no async hop: this runs
             # once per message at thousands a second across the book.
-            get_live_tick_store().add(symbol, data)
+            _row = get_live_tick_store().add(symbol, data)
+            if _row is not None:
+                # Same parse, second store: per-bar, per-price volume (Phase
+                # 2b). The tick ring answers "what just traded"; the footprint
+                # answers "at which price, and which side was aggressive" —
+                # the layer the published evidence actually supports and the
+                # one a single per-bar delta is structurally silent on.
+                get_footprint_store().add_row(symbol, _row)
 
         elif event == "trade":
             tick = {
@@ -2606,6 +2614,47 @@ class CryptoSignalEngine:
         fl.add_predicate(PredicateProbe(
             name="aggtrade_feed",
             fn=_aggtrade_feed,
+            min_streak=6,          # 30 min sustained
+        ))
+
+        def _footprint_bars() -> Tuple[bool, str]:
+            """Is the footprint sealing bars, and are they usable?
+
+            Keyed on **sealed** bars, never on the open one: an open bar exists
+            the instant a single trade arrives, so a store that accepts one
+            trade and then stalls looks identical to a working one on any count
+            that includes it.
+
+            ``incomplete`` is not a failure by itself — a reconnect legitimately
+            spoils a bar and the bar says so. It becomes a failure when it is
+            most of the book, because a lane whose every bar carries a cause has
+            no usable population left however healthy its counters read.
+            """
+            from config import AGGTRADE_STREAM_ENABLED
+            if not AGGTRADE_STREAM_ENABLED:
+                return True, "disabled by tunable"
+            from src.footprint import get_store as _fp
+            h = _fp().health()
+            if h["symbols"] == 0:
+                # Nothing has sealed a bar yet. Within the first minute of a
+                # restart that is expected, and the aggtrade_feed probe above
+                # already covers "no messages at all" — so this abstains
+                # rather than paging for a second time on one cause.
+                return True, "no sealed bars yet"
+            sealed = h["sealed_bars"]
+            if sealed == 0:
+                return True, "symbols seen, no bar sealed yet"
+            bad = h["incomplete_bars_held"] / sealed
+            detail = (
+                f"{sealed} sealed bars over {h['symbols']} symbols; "
+                f"{h['incomplete_bars_held']} incomplete, "
+                f"{h['capped_bars_total']} shape-capped"
+            )
+            return bad < 0.5, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="footprint_bars",
+            fn=_footprint_bars,
             min_streak=6,          # 30 min sustained
         ))
 

@@ -56,8 +56,10 @@ class TestIngestion:
         connection. The failure is already visible as a rejection count, and a
         vendor shape change must not present as a quiet feed."""
         s = LiveTickStore()
-        assert s.add("BTCUSDT", {"p": "not-a-number", "q": "1"}) is False
-        assert s.add("BTCUSDT", {}) is False
+        # Returns None rather than False since Phase 2b — the row is handed
+        # back on success so the footprint store consumes the same parse.
+        assert s.add("BTCUSDT", {"p": "not-a-number", "q": "1"}) is None
+        assert s.add("BTCUSDT", {}) is None
         assert s.health()["total_rejected"] == 2
         assert s.recent("BTCUSDT") == []
 

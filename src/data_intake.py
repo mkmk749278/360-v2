@@ -401,6 +401,36 @@ def _live_tick_report(store: Any) -> Dict[str, Any]:
     return out
 
 
+def _footprint_report() -> Dict[str, Any]:
+    """Per-bar, per-price volume — health, bounds, and one real sample.
+
+    The sample matters: a row count proves the store is filling and says
+    nothing about whether the shape is usable. A rendered bar shows the bin
+    granularity, the point of control, the most one-sided level and the size
+    distribution — so a reader can see the measurement rather than a promise
+    of one.
+    """
+    out: Dict[str, Any] = {"present": False}
+    try:
+        from src.footprint import get_store as _fp
+
+        store = _fp()
+        out = dict(store.health())
+        out["present"] = True
+        # Newest sealed bar from whichever symbol has one. Not "the busiest" —
+        # picking by volume would show the healthiest example every time and
+        # hide a store that is filling for one symbol and nothing else.
+        sample = None
+        for sym in sorted(getattr(store, "_by_symbol", {})):
+            sample = store.sample(sym)
+            if sample is not None:
+                break
+        out["sample"] = sample
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+    return out
+
+
 def _derived_report(engine: Any) -> Dict[str, Any]:
     """Where each derived input actually comes from.
 
@@ -462,6 +492,11 @@ def _derived_report(engine: Any) -> Dict[str, Any]:
         # `serving_consumers` is what says which one the money path actually
         # sees, and it is a flag, not a consequence of health.
         "live_ticks": _live_tick_report(store),
+        # Phase 2b. Reported beside the tick ring, not inside it: the ring
+        # answers "what just traded", the footprint answers "at which price,
+        # and which side was aggressive" — and only the second can say whether
+        # a level was defended.
+        "footprint": _footprint_report(),
         "order_book": {
             "source": "book_ticker",
             "quality": "top_of_book_only",
