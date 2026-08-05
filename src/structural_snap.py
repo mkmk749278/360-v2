@@ -138,6 +138,7 @@ REFUSE_BAD_PRICES = "bad_prices"            # non-finite / non-positive input
 REFUSE_NO_GEOMETRY = "no_geometry"          # signal carries no usable SL or TP1
 REFUSE_MIN_DISTANCE = "would_breach_min_distance"   # apply-only
 REFUSE_WRONG_SIDE = "would_cross_entry"             # apply-only
+REFUSE_REDETECT = "redetect_cooldown"               # same move, already stamped
 
 
 @dataclass
@@ -170,6 +171,37 @@ class SnapCounters:
 
 _counters = SnapCounters()
 
+#: (symbol, direction, setup_class) -> last stamp time.
+#:
+#: A THROTTLE ON EVIDENCE, not on rate. A setup persists across many scans, so
+#: without this one move contributes a row per scan and the ledger's verdict
+#: becomes an artefact of re-detection rather than of the mechanism. Owner
+#: export 2026-08-05: **51 rows from 6 distinct setups**, EPICUSDT SHORT alone
+#: 30 of them (59%) — every one carrying the *identical* `shift_pct`, i.e. the
+#: same level and the same geometry counted thirty times. The same shape had
+#: already filled this ledger with 211 re-detections of one RIFUSDT setup, and
+#: SLXUSDT's 10 rows in 2h10m inside a 0.37% spread inverted a whole
+#: population's sign (32% win per row against 55% per move).
+#:
+#: The key is deliberately MINIMAL — symbol, direction, setup. Nothing in it can
+#: oscillate within a move, because a key that splits a budget multiplies it:
+#: the SAR cooldown carried provenance and a candidate flipping across a gate
+#: boundary therefore held two budgets.
+_last_stamp: Dict[str, float] = {}
+
+#: Matched to `price_action_lane.EMIT_COOLDOWN_S`. One number for "how long is
+#: one move" across every lane that needs the answer.
+REDETECT_COOLDOWN_S = 1800.0
+
+
+def _redetect_key(symbol: str, direction: str, setup_class: str) -> str:
+    return f"{symbol}|{direction}|{setup_class}"
+
+
+def reset_redetect_state() -> None:
+    """Test hook. Never called in production."""
+    _last_stamp.clear()
+
 
 def get_counters() -> SnapCounters:
     return _counters
@@ -178,6 +210,7 @@ def get_counters() -> SnapCounters:
 def reset_counters() -> None:
     global _counters
     _counters = SnapCounters()
+
 
 
 # ── Flags ───────────────────────────────────────────────────────────────────
@@ -420,6 +453,22 @@ class SnapLedger:
             return True
         return False
 
+    def note_duplicate(self) -> None:
+        """Count a duplicate the caller rejected before it reached the ring."""
+        self._ring.note_duplicate()
+
+    def has(self, signal_id: str) -> bool:
+        """Is this signal already stamped?
+
+        Exposed so the re-detect throttle can run AFTER the duplicate check: a
+        second stamp of ONE signal_id is a fault (the choke point ran twice),
+        while two signals on one move is expected. Letting the throttle
+        pre-empt the fault detector would file a real bug in the bucket that
+        exists for an expected condition — which is how a fault stops standing
+        out.
+        """
+        return signal_id in self._ring
+
     def rows(self) -> List[dict]:
         return self._ring.rows()
 
@@ -523,6 +572,27 @@ def stamp_and_apply(
     direction: Any = getattr(sig, "direction", None)
     dir_str = str(getattr(direction, "value", direction) or "")
     entry = float(getattr(sig, "entry", 0) or 0)
+    symbol = str(getattr(sig, "symbol", "") or "")
+
+    # The duplicate check runs FIRST. A second stamp of one signal_id means the
+    # choke point ran twice — a fault — while two signal_ids on one move is
+    # expected. If the throttle pre-empted this, a real bug would be filed under
+    # the bucket that exists for an expected condition.
+    _sid = str(getattr(sig, "signal_id", "") or "")
+    if _sid and get_ledger().has(_sid):
+        get_ledger().note_duplicate()
+        return None
+
+    # One move, one row. Counted and named, never silent — a suppressed
+    # re-detection and a setup that never fired are different facts, and the
+    # panel divides by this to show how concentrated the ledger really is.
+    _now = time.time()
+    _key = _redetect_key(symbol, dir_str, setup_class)
+    _prev = _last_stamp.get(_key, 0.0)
+    if _prev and (_now - _prev) < REDETECT_COOLDOWN_S:
+        _counters.refuse(REFUSE_REDETECT)
+        return None
+    _last_stamp[_key] = _now
 
     base: Dict[str, Any] = {
         "signal_id": str(getattr(sig, "signal_id", "") or ""),
@@ -660,9 +730,18 @@ def get_ledger() -> SnapLedger:
 
 
 def reset_ledger(ledger: Optional[SnapLedger] = None) -> None:
+    """Replace the ledger, and clear the re-detect state with it.
+
+    The throttle belongs to the ledger's lifetime, not to the process's. A
+    fresh ledger carrying stale `_last_stamp` entries would refuse to stamp
+    setups the (empty) ledger has never seen — a silent, self-inflicted blind
+    spot, and exactly the kind of leak that makes one test's state decide
+    another's result.
+    """
     global _ledger
     with _ledger_lock:
         _ledger = ledger
+    reset_redetect_state()
 
 
 def summary() -> Dict[str, Any]:

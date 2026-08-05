@@ -505,3 +505,78 @@ def test_apply_paths_allowlist_is_per_path(monkeypatch):
     calls["structural_snap_apply"] = True
     calls["structural_snap_apply_paths"] = ""
     assert ss.apply_enabled("SR_FLIP_RETEST") is False
+
+
+class TestRedetectThrottle:
+    """One move, one row.
+
+    A setup persists across many scans, so without this the ledger's verdict is
+    an artefact of re-detection rather than of the mechanism. Owner export
+    2026-08-05: 51 rows from 6 distinct setups, EPICUSDT SHORT alone 30 of them
+    (59%), every one carrying the IDENTICAL shift_pct — one level and one
+    geometry counted thirty times.
+
+    The same shape had already filled this ledger with 211 re-detections of one
+    RIFUSDT setup, and SLXUSDT's 10 rows in 2h10m inside a 0.37% spread inverted
+    a whole population's sign: 32% win per row against 55% per move.
+    """
+
+    def _sig(self, symbol="EPICUSDT", direction="SHORT", sid="a"):
+        from src.smc import Direction
+
+        class _S:
+            pass
+
+        s = _S()
+        s.signal_id = sid
+        s.symbol = symbol
+        s.setup_class = "MOVER_TREND_PULLBACK"
+        s.direction = Direction.SHORT if direction == "SHORT" else Direction.LONG
+        s.entry = 100.0
+        s.stop_loss = 102.0
+        s.tp1 = 97.0
+        s.atr_val = 1.0
+        return s
+
+    def test_a_persisting_setup_stamps_once_not_once_per_scan(self):
+        import src.structural_snap as snap
+
+        snap.reset_redetect_state()
+        first = snap.stamp_and_apply(self._sig(sid="a"), candles=None)
+        second = snap.stamp_and_apply(self._sig(sid="b"), candles=None)
+        assert first is not None, "the first detection must stamp"
+        assert second is None, "a re-detection of the same setup stamped again"
+        snap.reset_redetect_state()
+
+    def test_the_throttle_is_counted_never_silent(self):
+        """A suppressed re-detection and a setup that never fired are different
+        facts, and the panel divides by this to show real concentration."""
+        import src.structural_snap as snap
+
+        snap.reset_redetect_state()
+        before = dict(snap.get_counters().refused)
+        snap.stamp_and_apply(self._sig(sid="a"), candles=None)
+        snap.stamp_and_apply(self._sig(sid="b"), candles=None)
+        after = snap.get_counters().refused
+        assert after.get(snap.REFUSE_REDETECT, 0) > before.get(snap.REFUSE_REDETECT, 0)
+        snap.reset_redetect_state()
+
+    def test_a_different_setup_on_the_same_symbol_is_not_throttled(self):
+        """A LONG and a SHORT on one symbol are genuinely different evidence."""
+        import src.structural_snap as snap
+
+        snap.reset_redetect_state()
+        assert snap.stamp_and_apply(self._sig(direction="SHORT", sid="a"), candles=None) is not None
+        assert snap.stamp_and_apply(self._sig(direction="LONG", sid="b"), candles=None) is not None
+        snap.reset_redetect_state()
+
+    def test_the_key_carries_nothing_that_can_oscillate(self):
+        """A key that splits a budget multiplies it — the SAR cooldown carried
+        provenance, so a candidate flipping across a gate boundary held two
+        budgets and 21 of 21 sub-cooldown repeats were flips, not misses."""
+        import src.structural_snap as snap
+
+        key = snap._redetect_key("EPICUSDT", "SHORT", "MOVER_TREND_PULLBACK")
+        assert key == "EPICUSDT|SHORT|MOVER_TREND_PULLBACK"
+        for volatile in ("provenance", "apply_mode", "level_source", "shift"):
+            assert volatile not in key
