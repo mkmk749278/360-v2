@@ -1541,6 +1541,22 @@ FVG_LOOKBACK_WIDE: int = _safe_int("FVG_LOOKBACK_WIDE", "60")
 # FVG_WIDE_LIVE (OFF) makes the wide list the one the gates read.
 FVG_WIDE_LIVE: bool = _safe_bool("FVG_WIDE_LIVE", "false")
 
+# ── Standalone price-action lane (price-action program, Phase 5) ───────────
+# The first thing in this engine where STRUCTURE GENERATES the signal rather
+# than scoring or filtering it: a LevelBook level swept and reclaimed, with
+# delta confirmation from the footprint, sized and targeted from structure.
+#
+# ON by default and that is not a money-path risk: the lane publishes to
+# `dark_emission` and nowhere else. It reaches no channel, no push, no app feed
+# and no order. Promotion to a delivered channel is a NEW EVALUATOR PATH and
+# therefore an owner-sign-off item — it is a separate change, not a flag.
+#
+# The standing warning it is measured against: 54 mechanical SMC rule variants
+# over 2.5M bars produced a best win rate of 56.3% and ZERO profitable after
+# costs, and our book loses ~10x its edge to fees. This lane is instrumented to
+# return "no edge" and that is a successful outcome.
+PRICE_ACTION_LANE_MEASURE: bool = _safe_bool("PRICE_ACTION_LANE_MEASURE", "true")
+
 ENTRY_QUALITY_ENABLED: bool = _safe_bool("ENTRY_QUALITY_ENABLED", "true")
 ENTRY_QUALITY_LIVE: bool = _safe_bool("ENTRY_QUALITY_LIVE", "true")
 #: Blast-radius cap.  Neither rule's rejection *volume* has ever been measured —
