@@ -41,6 +41,7 @@ from config import (
 )
 from src.binance import BinanceClient
 from src.execution.symbol_filters import is_tradfi_perp
+from src.binance_weights import weight_for
 from src.utils import get_logger
 
 log = get_logger("pair_manager")
@@ -360,7 +361,7 @@ class PairManager:
         pairs: List[PairInfo] = []
         await self._ensure_symbol_metadata()
         try:
-            data = await self._spot_client._get("/api/v3/ticker/24hr", weight=40)
+            data = await self._spot_client._get("/api/v3/ticker/24hr", weight=weight_for("/api/v3/ticker/24hr"))
             if data is None:
                 log.warning("Spot ticker fetch returned no data")
                 return pairs
@@ -392,7 +393,7 @@ class PairManager:
         pairs: List[PairInfo] = []
         await self._ensure_symbol_metadata()
         try:
-            data = await self._futures_client._get("/fapi/v1/ticker/24hr", weight=40)
+            data = await self._futures_client._get("/fapi/v1/ticker/24hr", weight=weight_for("/fapi/v1/ticker/24hr"))
             if data is None:
                 log.warning("Futures ticker fetch returned no data")
                 return pairs
@@ -430,7 +431,7 @@ class PairManager:
         pairs: List[PairInfo] = []
         await self._ensure_symbol_metadata()
         try:
-            data = await self._spot_client._get("/api/v3/ticker/24hr", weight=40)
+            data = await self._spot_client._get("/api/v3/ticker/24hr", weight=weight_for("/api/v3/ticker/24hr"))
             if data is None:
                 log.warning("Spot ticker fetch returned no data")
                 return pairs
@@ -466,7 +467,7 @@ class PairManager:
         pairs: List[PairInfo] = []
         await self._ensure_symbol_metadata()
         try:
-            data = await self._futures_client._get("/fapi/v1/ticker/24hr", weight=40)
+            data = await self._futures_client._get("/fapi/v1/ticker/24hr", weight=weight_for("/fapi/v1/ticker/24hr"))
             if data is None:
                 log.warning("Futures ticker fetch returned no data")
                 return pairs

@@ -461,13 +461,58 @@ value it does not consume, registers a flag nothing reads, or lands a "Phase N+1
 will wire it" comment. Where a phase cannot be completed end to end in one change,
 it is split so that each half is itself complete.
 
-### Phase 0 — the stale quota constant
+### Phase 0 — weight accounting *(shipped)*
 
-`api_limits.py:21` says 1,200; the futures limit is 2,400 and `binance.py` knows
-it. One writer, one reader: `api_limits` imports the limit from the module that
-syncs it from the exchange header, and a test pins that the two cannot disagree.
+Written up as "fix a stale constant". Building it found three defects, and the
+third was mine.
 
-Small, and it goes first because §4 is load-bearing for everything after it.
+**1. `api_limits.py` was an entire dead module, not a wrong constant.**
+`APIWeightTracker` and `BatchScheduler` are instantiated at
+`scanner/__init__.py:1482–1483` and have **zero method calls** anywhere;
+`check_rate_limit` has no consumers. Its `BINANCE_WEIGHT_LIMIT_PER_MINUTE = 1200`
+fed only the dead tracker. Changing 1,200 to 2,400 would have made a dead tracker
+agree with reality while staying dead — cosmetic. The module, its test file and
+the two instantiations are **deleted**; `rate_limiter.py` is the single budget
+authority.
+
+Note what is *not* drift: `rate_limiter`'s `_DEFAULT_FUTURES_BUDGET = 2_200` sits
+deliberately under the 2,400 limit, with the ~200 reserved for reconnects and
+ad-hoc calls, documented in a comment at the constant. A test now pins that the
+margin exists so a future "fix" cannot raise it to 2,400 and delete the headroom.
+
+**2. The tick seeder under-declared its weight by 5× and 25×** — the real bug,
+and it sits on the price-action path. `fetch_recent_trades` declared `weight=1`
+for both `/fapi/v1/trades` (**actual 5**, verified) and `/api/v3/trades`
+(**actual 25**, verified) while fetching `limit=1000`. An under-declared weight
+makes the limiter *optimistic*: it keeps issuing requests believing it has budget
+it has already spent, and the first symptom is a 429 or an IP ban, not a warning.
+
+`ACTIVE_CONTEXT.md` had already recorded both this and the dead module as open
+follow-ups. Neither was enforced by anything, so both shipped.
+
+**What ships:** `src/binance_weights.py` — one declared table, every entry
+carrying **where its number came from** (`VERIFIED` = read from the vendor page
+on a stated date; `CARRIED` = preserved from the call site it was moved out of,
+explicitly *not* thereby confirmed). `weight_for()` **raises on an unknown
+endpoint** rather than defaulting to 1, because a silent default is the exact
+under-declaration this exists to prevent. Every call site now reads the table
+instead of a literal, and a test AST-parses `src/` to fail CI on any call that
+hand-types a weight or names an endpoint the table cannot price.
+
+**3. The audit had a hole, found by reverting the fix.** The first cut of
+`_call_sites()` only saw calls whose endpoint was a **string literal** — and the
+fix that merged `fetch_recent_trades`'s two branches into one call with a `path`
+variable therefore made *the very call site the module exists for* invisible to
+its own audit. Restoring `weight=1` left the suite green.
+
+That is the failure mode this whole document is written against, produced inside
+the change meant to prevent it: a check that looks like coverage, stops seeing
+its subject the moment the subject is refactored, and reports success. The audit
+now covers dynamic-path calls, and a test asserts at least one is visible — so
+the audit narrowing again is itself a failure.
+
+**Verify a fix by reverting it.** The first revert passed and that was the
+finding.
 
 ### Phase 1 — `/diagnostics/data-intake`: see the pipe before changing it
 

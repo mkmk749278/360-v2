@@ -17,6 +17,7 @@ from config import (
     BINANCE_FUTURES_REST_BASE,
     BINANCE_REST_BASE,
 )
+from src.binance_weights import weight_for
 from src.rate_limiter import futures_rate_limiter, spot_rate_limiter
 from src.utils import get_logger
 
@@ -209,7 +210,10 @@ class BinanceClient:
             path = "/fapi/v1/ticker/24hr"
         else:
             path = "/api/v3/ticker/24hr"
-        return await self._get(path, params={"symbol": symbol}, weight=1)
+        return await self._get(
+            path, params={"symbol": symbol},
+            weight=weight_for(path, single_symbol=True),
+        )
 
     async def fetch_klines(
         self,
@@ -229,18 +233,10 @@ class BinanceClient:
             path = "/fapi/v1/klines"
         else:
             path = "/api/v3/klines"
-        if limit < 100:
-            weight = 1
-        elif limit < 500:
-            weight = 2
-        elif limit <= 1000:
-            weight = 5
-        else:
-            weight = 10
         return await self._get(
             path,
             params={"symbol": symbol, "interval": interval, "limit": limit},
-            weight=weight,
+            weight=weight_for(path, limit=limit),
         )
 
     async def fetch_all_book_tickers(self) -> Optional[Dict[str, Dict[str, str]]]:
@@ -265,7 +261,7 @@ class BinanceClient:
             path = "/fapi/v1/ticker/bookTicker"
         else:
             path = "/api/v3/ticker/bookTicker"
-        data = await self._get(path, weight=2)
+        data = await self._get(path, weight=weight_for(path))
         if not isinstance(data, list):
             return None
         return {item["symbol"]: item for item in data if "symbol" in item}
@@ -279,4 +275,4 @@ class BinanceClient:
             path = "/fapi/v1/exchangeInfo"
         else:
             path = "/api/v3/exchangeInfo"
-        return await self._get(path, weight=10)
+        return await self._get(path, weight=weight_for(path))

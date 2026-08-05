@@ -2410,10 +2410,13 @@ than anything about universe size.
 - **No Binance weight gauge anywhere** — `rate_limiter.update_from_header` parses the
   authoritative `X-MBX-USED-WEIGHT-1M` and discards it; no ops panel in any of the 24
   route modules. Off money path, ships normally.
-- `src/api_limits.py` is **dead code with the wrong constant** (1200 = old *spot* limit;
-  futures is 2400). Instantiated at `scanner/__init__.py:1425-1426`, never read.
-- `/fapi/v1/trades` declared `weight=1` at `historical_data.py:144,150` while fetched
-  with `limit=1000` — under-declaring makes our limiter *optimistic*.
+- ~~`src/api_limits.py` is **dead code with the wrong constant**~~ — **DONE 2026-08-05**
+  (price-action program Phase 0). Module, its tests and both dead instantiations
+  deleted; `rate_limiter.py` is now the single budget authority.
+- ~~`/fapi/v1/trades` declared `weight=1` while fetched with `limit=1000`~~ —
+  **DONE 2026-08-05**. Actual weights verified: `/fapi/v1/trades` **5**,
+  `/api/v3/trades` **25**. All call sites now read `src/binance_weights.py`, and a
+  CI test AST-parses `src/` to fail on any hand-typed weight or undeclared endpoint.
 - **Three uncapped containers remain in `360ce-ops`** (`360ce-ops`, `-agent`, `-redis`).
 
 ---
