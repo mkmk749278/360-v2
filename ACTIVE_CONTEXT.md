@@ -4,7 +4,130 @@
 
 ---
 
-## 🟢 SESSION 113 2026-08-05 — the price-action program, Phases 0 → 2c
+## 🟢 SESSION 113 2026-08-05 — the price-action program, Phases 0 → 6
+
+*(Sections below record 0→2c as first written; 2c's repair, and Phases 6, 4 and 3,
+are recorded here.)*
+
+### The depth feed shipped silent, and the ops page caught it in minutes
+
+`FUTURES_DEPTH`: **40 streams, 40 silent, 0 messages, 0/40 books fresh** — while
+the pool read **HEALTHY** and the aggTrade pool beside it on identical config had
+0 silent.
+
+**Binance serves book streams and trade streams on MUTUALLY EXCLUSIVE routed
+paths.** Measured against the live vendor, one stream per connection, 5s each:
+
+| stream | `/market/stream` | `/stream` |
+|---|---|---|
+| `@aggTrade` · `@kline_1m` · `@markPrice` | **OK** | silent |
+| `@bookTicker` · `@depth` · `@depth<N>` | silent | **OK** |
+
+`@depth20@500ms` was not the wrong name and 500ms was not the wrong speed — every
+depth variant including the bare `@depth` is silent on `/market/stream`.
+`WebSocketManager` hardcoded that path for every pool **and** stripped any suffix
+from `.env`, so it was not fixable by config. Fixed in #880: per-pool routed path,
+plus a guard that logs loudly when a pool's declared path cannot serve its streams
+(a *mixed* pool gets a different message — that needs splitting, not repathing).
+
+This is the **2026-05-14 blackout class**, and the docstring written to fix that
+outage is what gave it away: it enumerates the `/market` streams — kline,
+aggTrade, markPrice, forceOrder, ticker — and **depth was never in the list**.
+Wrong path = handshake succeeds, PING/PONG keeps it alive, `is_healthy` stays
+true, zero frames arrive.
+
+**It shipped because the stream-name format was taken from knowledge and never
+exercised.** The Real-Data-First rule says read the wire first; it was applied
+only after the owner surfaced the symptom. Dark-first limited the damage —
+`DEPTH_LIVE_FOR_CONSUMERS` was off, so nothing reached a signal.
+
+### Depth, once alive, says something loud
+
+First window: **14 of 40 sign flips**, mean |Δ| 0.483. The `top-1` column is
+saturated near ±1 (+0.994, +0.991, −0.961) while `top-20` sits near zero (−0.045,
+−0.043, +0.044). That is the signature of a one-level "imbalance" being a coin
+flip — whichever side happens to hold the larger order at the touch — against a
+book that is close to balanced. **Not yet a verdict**: one instantaneous snapshot
+of 40 symbols, and COTIUSDT flips the other way, so it is not a one-directional
+bias. Needs hours before `DEPTH_LIVE_FOR_CONSUMERS`.
+
+### Phase 6 — retention by delivery (#881)
+
+The rings hold 4,000 rows, evict oldest-first, and are filled by enqueues of which
+**~0.5% deliver**. So a ring fills ~32h after deploy and then every re-detection
+of a high-volume path evicts a row that might have carried a verdict —
+preferentially destroying the rare population to make room for the common one,
+invisibly, because the ledger stays exactly full.
+
+Two rings now: pending evicts oldest-first (correct — cheap evidence), delivered
+cannot be evicted by a pending row. Delivered is still bounded, but an eviction
+*there* is counted under its own name and logged at ERROR, because it means the
+retention policy itself is losing verdicts. `delivered` is a field **on the row**,
+so it survives the JSON round trip — held only in the ring it would be correct
+until the first restart and then silently back to evict-by-recency with a
+full-looking ledger (#842's class).
+
+One policy, not one per lane: `structural_snap` and `entry_features` had identical
+rings, and the program says the rule applies to Phase 5 "from the start".
+
+### Phase 4 — the structural veto (#882)
+
+Every enqueued signal now carries the distance to the nearest **opposing** level
+(ATR and %), whether it falls **between entry and TP1**, that level's score and
+age, and the value-area position. Signed toward the trade throughout.
+
+The gate is real and suppression-stamped, and enforces **exactly one** rule:
+`target_behind_level`. Chosen because **its threshold comes from no window** — not
+"closer than N ATR" but "the target cannot be reached without breaking a level",
+which is arithmetic on values the signal already carries. Distance rules need an
+N, and an N taken from the window it is judged on is what `tpe_smc_zone` was
+retired for. Those ship as stamps.
+
+Why this before the standalone lane: structurally-*triggered* paths are **0.62%**
+of the book, none delivered. The veto is measurable against ~97% of the book from
+day one.
+
+### Phase 3 — layer 3 repaired, dark (this change)
+
+`orderblocks` had **no writer** (474,467 observations, 100% empty), so eight
+`bool(fvgs) or bool(orderblocks)` gates have always been `bool(fvgs)` alone. And
+`detect_fvg` sees twelve bars — which is what makes a deliberately loose gate
+behave like a strict one (median zone distance 0.13 ATR, max 0.52, no tail).
+
+Both **widen a rejecting gate**, so both are dark — and dark means the detector
+**runs for real** while the gates behave **byte-identically**:
+
+* the order-block detector's output lands on `orderblocks_measured`, never
+  `orderblocks`. Assigning it to the live key would ship the *effect* — eight
+  gates passing candidates they reject today with nothing measured behind it;
+* FVG detection runs **once at the wide window** and the live list is that result
+  filtered by index — **proved byte-identical** to `detect_fvg(lookback=10)`
+  across 300 random series, because "equivalent" is not enough when the
+  alternative is silently changing emission on deploy;
+* the gate comment was corrected to say what it checks, rather than the gate.
+
+**The census bounds itself on screen**: these gates reject *pre-scoring*, so the
+candidates a wider window would admit have no row and no outcome. It answers *how
+much of the book would change* and is structurally incapable of answering *how
+much better it would be*.
+
+### Open — every flag is waiting on data, none on engineering
+
+| Flag | Default | What it hands over |
+|---|---|---|
+| `TICKS_LIVE_FOR_CONSUMERS` | OFF | five consumers, seed snapshot → live ticks. Drift grows with uptime, so an early read **understates** it |
+| `DEPTH_LIVE_FOR_CONSUMERS` | OFF | four consumers, one quote → twenty levels. Read the **sign-flip** count first |
+| `STRUCTURAL_VETO_ENFORCE` (+ paths) | OFF | `target_behind_level` |
+| `ORDERBLOCKS_LIVE` | OFF | eight gates gain a second real condition |
+| `FVG_WIDE_LIVE` | OFF | eight gates see 60 bars instead of 12 |
+
+Remaining: **Phase 5** (standalone lane — gated on Phase 4's answer) and
+**Phase 7** (verdict surface — worth waiting until 4 has data, since an empty
+verdict page is the thing this program keeps warning about).
+
+---
+
+## 🟢 SESSION 113 (as first written) — Phases 0 → 2c
 
 `docs/PRICE_ACTION_PROGRAM.md` is the design of record: what price action is,
 what we actually read from Binance, and a seven-phase build. Written before any

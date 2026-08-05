@@ -583,16 +583,46 @@ def _primitive_report() -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
 
     try:
-        from src.detector import SMCResult
-        status = SMCResult().orderblocks_detector_status
+        # Read the LIVE status from the module that decides it, never the
+        # dataclass default — the default still says `not_implemented`, which
+        # is the honest value for a result nobody ran.
+        from src import layer3_repair as _l3
+        status = _l3.detector_status()
+        _c = _l3.census()
+        _det = max(1, _c.get("detections", 0))
         rows.append({
             "primitive": "orderblocks",
             "status": status,
-            "healthy": status not in ("not_implemented", ""),
+            "healthy": status not in ("not_implemented", "", "measure_disabled"),
             "detail": (
                 "declared on SMCResult and never assigned — every "
                 "`bool(fvgs) or bool(orderblocks)` gate is `bool(fvgs)` alone"
-                if status == "not_implemented" else ""
+                if status in ("not_implemented", "measure_disabled") else
+                # Dark: the detector runs and the gates do not see it. The
+                # number that matters is how often the gate WOULD flip, which
+                # is a per-detection rate, not a count of zones.
+                f"detector live (Phase 3, DARK — gates still read an empty "
+                f"list). Found on {_c.get('ob_found', 0)} of {_c.get('detections', 0)} "
+                f"detections; would flip `bool(fvgs) or bool(orderblocks)` "
+                f"False→True on {_c.get('ob_found_when_fvg_empty', 0)} "
+                f"({_c.get('ob_found_when_fvg_empty', 0) / _det * 100:.1f}%)"
+            ),
+        })
+        _lb_live, _lb_wide = _l3.lookbacks()
+        rows.append({
+            "primitive": "fvg_lookback_wide",
+            "status": f"live={_lb_live} measured={_lb_wide}",
+            "healthy": True,
+            "detail": (
+                f"the wide window would admit {_c.get('fvg_narrow_empty_wide_found', 0)} "
+                f"of {_c.get('detections', 0)} detections the narrow one rejects "
+                f"({_c.get('fvg_narrow_empty_wide_found', 0) / _det * 100:.1f}%). "
+                "DARK — the gates still read the narrow list. This says how much "
+                "of the book would CHANGE and is structurally incapable of saying "
+                "how much better it would be: these gates reject pre-scoring, so "
+                "the candidates a wider window would admit have no row, no "
+                "outcome and no ledger entry. Pricing that needs a shadow gate "
+                "chain."
             ),
         })
     except Exception as exc:  # noqa: BLE001

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+
+import numpy as np
 from typing import Any, Dict, List, Optional
 
 from src.ai_engine import WhaleAlert, detect_volume_delta_spike, detect_whale_trade
@@ -78,6 +80,18 @@ class SMCResult:
     fvg: List[FVGZone] = field(default_factory=list)
     orderblocks: List[Dict[str, Any]] = field(default_factory=list)
     orderblocks_detector_status: str = "not_implemented"
+    # ── Phase 3, dark ───────────────────────────────────────────────────
+    # The detector's REAL output. It lands here rather than in `orderblocks`
+    # so that the eight `bool(fvgs) or bool(orderblocks)` gates behave
+    # byte-identically: assigning it above would ship the effect, not the
+    # measurement. `ORDERBLOCKS_LIVE` is what moves it across.
+    orderblocks_measured: List[Dict[str, Any]] = field(default_factory=list)
+    # FVG at the wide window. `fvg` above stays the narrow list the gates
+    # already read — derived from this one by an index filter, so it is the
+    # same list `detect_fvg(lookback=10)` returns rather than an equivalent.
+    fvg_wide: List[FVGZone] = field(default_factory=list)
+    fvg_lookback_live: int = 0
+    fvg_lookback_wide: int = 0
     whale_alert: Optional[WhaleAlert] = None
     volume_delta_spike: bool = False
     recent_ticks: List[Dict[str, Any]] = field(default_factory=list)
@@ -94,6 +108,10 @@ class SMCResult:
             "fvg": self.fvg,
             "orderblocks": self.orderblocks,
             "orderblocks_detector_status": self.orderblocks_detector_status,
+            "orderblocks_measured": self.orderblocks_measured,
+            "fvg_wide": self.fvg_wide,
+            "fvg_lookback_live": self.fvg_lookback_live,
+            "fvg_lookback_wide": self.fvg_lookback_wide,
             "whale_alert": self.whale_alert,
             "volume_delta_spike": self.volume_delta_spike,
             "recent_ticks": self.recent_ticks,
@@ -196,7 +214,44 @@ class SMCDetector:
             )
         if _fvg_tf_key is not None:
             _fvg_cd = candles[_fvg_tf_key]
-            result.fvg = detect_fvg(_fvg_cd["high"], _fvg_cd["low"], _fvg_cd["close"])
+            # Phase 3. Detect ONCE at the wide window; the live list is that
+            # result filtered by index, which is exactly what
+            # `detect_fvg(lookback=narrow)` returns. A wide lookback subsumes a
+            # narrow one, so this is one pass rather than two on a path that
+            # runs per scan, per symbol, per channel.
+            from src import layer3_repair as _l3
+
+            _lb_live, _lb_wide = _l3.lookbacks()
+            result.fvg_lookback_live = _lb_live
+            result.fvg_lookback_wide = _lb_wide
+            _n_bars = len(np.asarray(_fvg_cd["close"]).ravel())
+            result.fvg_wide = detect_fvg(
+                _fvg_cd["high"], _fvg_cd["low"], _fvg_cd["close"],
+                lookback=max(_lb_live, _lb_wide),
+            )
+            _fvg_narrow = _l3.narrow_from_wide(
+                result.fvg_wide, _n_bars, _lb_live,
+            )
+            # Effect flag OFF by default: the gates keep reading the narrow
+            # list. This is the line that makes the change dark rather than
+            # live, and it is the only line that has to move to activate it.
+            result.fvg = result.fvg_wide if _l3.fvg_wide_live() else _fvg_narrow
+
+            # The detector that has never existed. Its output lands under its
+            # own key; `result.orderblocks` stays empty until the flag flips.
+            if _l3.orderblocks_enabled():
+                result.orderblocks_measured = _l3.detect_orderblocks(
+                    _fvg_cd["high"], _fvg_cd["low"], _fvg_cd["close"],
+                    _fvg_cd.get("open"),
+                )
+                if _l3.orderblocks_live():
+                    result.orderblocks = result.orderblocks_measured
+            result.orderblocks_detector_status = _l3.detector_status()
+            _l3.observe(
+                fvg_narrow=_fvg_narrow,
+                fvg_wide=result.fvg_wide,
+                orderblocks=result.orderblocks_measured,
+            )
 
         # ------------------------------------------------------------------
         # Order flow validation (OI trend check requires sweeps)
@@ -225,7 +280,9 @@ class SMCDetector:
                 None,
             )
             if tf_key_for_cvd is not None:
-                import numpy as np
+                # numpy is imported at module level; a function-local `import
+                # numpy as np` here made `np` local to this whole method and
+                # shadowed it for every earlier line.
                 close_arr = np.asarray(
                     candles[tf_key_for_cvd]["close"], dtype=np.float64
                 ).ravel()

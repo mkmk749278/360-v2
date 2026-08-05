@@ -1510,6 +1510,37 @@ STRUCTURAL_VETO_MEASURE: bool = _safe_bool("STRUCTURAL_VETO_MEASURE", "true")
 STRUCTURAL_VETO_ENFORCE: bool = _safe_bool("STRUCTURAL_VETO_ENFORCE", "false")
 STRUCTURAL_VETO_ENFORCE_PATHS: str = os.getenv("STRUCTURAL_VETO_ENFORCE_PATHS", "")
 
+# ── Layer 3 repair (price-action program, Phase 3) ─────────────────────────
+# Two hollow primitives, both behind gates that read as though they check two
+# things. Both WIDEN a rejecting gate when activated, so both are money-path and
+# ship dark: the detector runs for real from deploy, and the gates keep reading
+# exactly what they read today until the owner flips the effect flag.
+#
+# ORDERBLOCKS_MEASURE (ON) runs the detector that has never existed —
+# `orderblocks` has had NO writer, so every `bool(fvgs) or bool(orderblocks)`
+# gate has always been `bool(fvgs)` alone, at eight call sites.
+ORDERBLOCKS_MEASURE: bool = _safe_bool("ORDERBLOCKS_MEASURE", "true")
+
+# ORDERBLOCKS_LIVE (OFF) puts that output into SMCResult.orderblocks, where
+# those eight gates read it. Assigning it without this flag would ship the
+# EFFECT rather than the measurement — the gates would immediately start
+# passing candidates they reject today with nothing measured behind it.
+ORDERBLOCKS_LIVE: bool = _safe_bool("ORDERBLOCKS_LIVE", "false")
+
+# FVG_LOOKBACK is what `detect_fvg` uses today: 10, plus the 2-bar pattern, so
+# twelve bars — three hours on 15m. That narrow window is what makes a
+# deliberately loose gate behave like a strict one (median zone distance 0.13
+# ATR, max 0.52, no tail, on the first 89 TPE signals).
+FVG_LOOKBACK: int = _safe_int("FVG_LOOKBACK", "10")
+
+# FVG_LOOKBACK_WIDE is the measured window. Detection runs ONCE at this width —
+# a wide lookback subsumes a narrow one — and the live list is filtered out of
+# it, so there is no doubled cost on a per-scan, per-symbol, per-channel path.
+FVG_LOOKBACK_WIDE: int = _safe_int("FVG_LOOKBACK_WIDE", "60")
+
+# FVG_WIDE_LIVE (OFF) makes the wide list the one the gates read.
+FVG_WIDE_LIVE: bool = _safe_bool("FVG_WIDE_LIVE", "false")
+
 ENTRY_QUALITY_ENABLED: bool = _safe_bool("ENTRY_QUALITY_ENABLED", "true")
 ENTRY_QUALITY_LIVE: bool = _safe_bool("ENTRY_QUALITY_LIVE", "true")
 #: Blast-radius cap.  Neither rule's rejection *volume* has ever been measured —

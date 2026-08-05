@@ -200,14 +200,39 @@ class TestDerivedProvenance:
 # ---------------------------------------------------------------------------
 
 class TestPrimitiveCensus:
-    def test_the_orderblock_detector_is_reported_as_having_no_writer(self):
-        """Read from `SMCResult` itself, not mirrored — the fix for a drifting
-        mirror is one writer and one reader."""
+    def test_the_orderblock_detector_reports_that_it_runs_but_is_dark(self):
+        """Phase 3 killed this test's original premise, deliberately.
+
+        It used to assert ``not_implemented`` — true for years, and the reason
+        the hollow gate survived. The detector now exists and runs, so the row
+        must say the NEW true thing: measured, and **not** reaching the gates.
+        A test kept green by asserting a dead premise is worse than no test.
+
+        Read from the module that decides the status, never from the
+        ``SMCResult`` dataclass default — the default still says
+        ``not_implemented``, which is the honest value for a result nobody ran
+        and the wrong answer for the live engine.
+        """
         rep = build_data_intake(_engine_with_current_streams())
         rows = {r["primitive"]: r for r in rep["primitives"]["rows"]}
-        assert rows["orderblocks"]["status"] == "not_implemented"
-        assert rows["orderblocks"]["healthy"] is False
-        assert "bool(fvgs)" in rows["orderblocks"]["detail"]
+        assert rows["orderblocks"]["status"] == "measured_dark"
+        assert rows["orderblocks"]["healthy"] is True
+        # The row must say the gates still cannot see it, or a reader takes a
+        # running detector for a live one.
+        assert "DARK" in rows["orderblocks"]["detail"]
+        assert "empty list" in rows["orderblocks"]["detail"]
+
+    def test_the_wide_fvg_census_states_what_it_cannot_answer(self):
+        """These gates reject pre-scoring, so the candidates a wider window
+        would admit have no row and no outcome. The census can say how much of
+        the book would CHANGE and not how much better it would be — and that
+        limitation belongs on screen, not in a footnote."""
+        rep = build_data_intake(_engine_with_current_streams())
+        rows = {r["primitive"]: r for r in rep["primitives"]["rows"]}
+        row = rows["fvg_lookback_wide"]
+        assert "DARK" in row["detail"]
+        assert "how much better" in row["detail"]
+        assert "shadow gate chain" in row["detail"]
 
     def test_the_fvg_lookback_is_on_screen(self):
         """Not a fault — a design choice that makes a loose gate behave like a

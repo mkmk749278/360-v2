@@ -664,7 +664,7 @@ against zero and one testing against a threshold are harmed by different things 
 the OBI gate compares a fraction to 0.65. That distribution is what the handover
 decision gets read from; it is deliberately not a threshold invented now.
 
-### Phase 3 — repair layer 3
+### Phase 3 — repair layer 3 *(shipped)*
 
 - **Order blocks**: implement the detector, or delete the branch. Both are
   acceptable; what is not acceptable is a third year of `bool(fvgs) or
@@ -679,6 +679,34 @@ decision gets read from; it is deliberately not a threshold invented now.
 
 **Money-path, so dark-first with owner sign-off to activate**, per § Project
 Phase. Both changes alter what emits.
+
+**What "dark" meant here, stated because it is the whole design** (`src/layer3_repair.py`):
+
+- the order-block detector **actually runs** from the moment this deployed,
+  producing real output that ops renders the same day — that is the measurement
+  flag, and it is ON;
+- its output lands on `SMCResult.orderblocks_measured`, **not** `orderblocks`, so
+  the **eight** `bool(fvgs) or bool(orderblocks)` gates behave byte-identically.
+  Assigning it to the live key would have shipped the *effect*: eight gates would
+  immediately start passing candidates they reject today, with nothing measured
+  behind it;
+- FVG detection runs **once at the wide window** and the live list is that result
+  filtered by index — proved byte-identical to `detect_fvg(lookback=10)` across
+  300 random series, because "equivalent" is not good enough when the alternative
+  is silently changing what emits on deploy;
+- `ORDERBLOCKS_LIVE` / `FVG_WIDE_LIVE` default OFF and are the owner's to flip.
+
+**The census bounds itself, on screen.** These gates reject **pre-scoring**, so a
+candidate the FVG gate kills today has no row, no outcome and no ledger entry —
+widening the window would *admit* candidates that are currently invisible. The
+census therefore answers *how much of the book would change* and is
+**structurally incapable** of answering *how much better it would be*. Same
+survivorship bound as the `_get_primary_timeframe` census; pricing the correction
+needs a shadow gate chain.
+
+**The gate comment was corrected rather than the gate.** `_evaluate_trend_pullback`
+said *"require at least one FVG or orderblock in the pullback zone"* and performed
+a global existence test on a list with one live half. It now says what it checks.
 
 ### Phase 4 — the structural veto (application 6)
 
