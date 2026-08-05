@@ -233,6 +233,17 @@ class DeliveryRetainedRing:
                 self.name, self._delivered.maxlen,
             )
 
+    def note_duplicate(self) -> None:
+        """Record a duplicate the CALLER rejected before reaching `add`.
+
+        A lane that must run its own fault check before another guard (so the
+        fault is not filed under the guard's expected-condition bucket) still
+        needs the count to land in one place. Without this the caller reaches
+        into the counter directly and the two drift.
+        """
+        with self._lock:
+            self.duplicate_skips += 1
+
     def drain_evicted_ids(self) -> List[str]:
         """Ids evicted since the last call, so a caller keeping its own index
         can stay in step.
