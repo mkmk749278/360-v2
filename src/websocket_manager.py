@@ -53,6 +53,42 @@ from config import (
 from src.utils import get_logger, get_ws_trace_logger
 
 log = get_logger("ws_manager")
+
+# ── Binance routed paths, and they are MUTUALLY EXCLUSIVE ──────────────────
+#
+# Measured against the live vendor on 2026-08-05, one stream per connection,
+# 5s each (`OK` = a frame arrived, `silent` = handshake succeeded and nothing
+# ever came):
+#
+#     stream                  /market/stream   /stream
+#     @aggTrade               OK               silent
+#     @kline_1m               OK               silent
+#     @markPrice              OK               silent
+#     @bookTicker             silent           OK
+#     @depth / @depth<N>      silent           OK
+#
+# So the split is **book data against trade data**, not a legacy-vs-current
+# distinction. A stream on the wrong path does not error and does not close:
+# the TCP+WS handshake succeeds, PING/PONG keeps the connection alive and
+# `is_healthy` stays true, and **zero application-layer frames ever arrive**.
+# That is the 2026-05-14 multi-hour blackout signature, and it is exactly what
+# the Phase 2c depth pool shipped with — 40 streams, 40 silent, pool HEALTHY,
+# store empty (owner-caught from `/diagnostics/data-intake`, 2026-08-05).
+#
+# `@forceOrder` is deliberately NOT in the table: liquidations are genuinely
+# rare, so a 5s probe cannot distinguish "wrong path" from "quiet market". It
+# is left on `/market/stream`, where production observes it delivering.
+#
+# The previous URL builder hardcoded `/market/stream` AND stripped any suffix
+# an operator supplied, so this was not reachable from `.env` — the path has
+# to be a per-pool property.
+ROUTED_PATH_MARKET = "/market/stream"
+ROUTED_PATH_BOOK = "/stream"
+
+#: Stream suffixes served on ROUTED_PATH_BOOK. Used by the guard below rather
+#: than by the URL builder: the builder takes the pool's declared path, and the
+#: guard's job is to catch a pool whose declaration disagrees with its streams.
+_BOOK_PATH_MARKERS = ("@depth", "@bookTicker")
 # Dedicated logger for ``<WS:LABEL>`` events that the operator pulls via
 # ``/ws_log``.  Routes only to ``logs/ws_trace.log`` (configured in
 # ``src/utils.py``) so stderr and the engine rolling log stay quiet of
@@ -134,11 +170,17 @@ class WSConnection:
 class WebSocketManager:
     """Manages multiple Binance WebSocket connections with resilience."""
 
-    def __init__(self, on_message: MessageHandler, market: str = "spot", admin_alert_callback=None, data_store=None, label: str | None = None, staleness_multiplier: float | None = None) -> None:
+    def __init__(self, on_message: MessageHandler, market: str = "spot", admin_alert_callback=None, data_store=None, label: str | None = None, staleness_multiplier: float | None = None, routed_path: str | None = None) -> None:
         self._on_message = on_message
         self._market = market
         self._label = label or market
         self._base_url = BINANCE_WS_BASE if market == "spot" else BINANCE_FUTURES_WS_BASE
+        # Which routed path this pool's streams are served on. Binance splits
+        # them and the two are MUTUALLY EXCLUSIVE — see
+        # `_build_combined_stream_url` for the measured map. Defaults to
+        # `/market/stream`, which is right for every pool that existed before
+        # the depth feed.
+        self._routed_path = routed_path or ROUTED_PATH_MARKET
         self._rest_base_url = BINANCE_REST_BASE if market == "spot" else BINANCE_FUTURES_REST_BASE
         self._heartbeat_interval = WS_HEARTBEAT_INTERVAL_FUTURES if market == "futures" else WS_HEARTBEAT_INTERVAL
         default_multiplier = WS_STALENESS_MULTIPLIER_FUTURES if market == "futures" else WS_STALENESS_MULTIPLIER
@@ -747,8 +789,37 @@ class WebSocketManager:
             )
             # Stamp the flag so subsequent reconnects don't spam.
             self._warned_legacy_ws_base = True
+        # Guard the declaration against the streams it is about to carry.
+        # A wrong path is silent, not broken — the connection stays up and
+        # `is_healthy` stays true — so nothing downstream can raise it. This
+        # is the only point where both facts are in scope together.
+        book = [s for s in streams if any(m in s for m in _BOOK_PATH_MARKERS)]
+        other = [s for s in streams if s not in book]
+        wrong = (
+            book if self._routed_path != ROUTED_PATH_BOOK
+            else other
+        )
+        if wrong and book and other:
+            # Mixed pool: no single path can serve it, and whichever we pick
+            # silently drops the rest. Loud, because the symptom is silence.
+            log.error(
+                "WS pool {} mixes book streams ({}) with non-book streams ({}) "
+                "— Binance serves these on mutually exclusive routed paths and "
+                "the losing half will connect, stay healthy and deliver "
+                "NOTHING. Split them into separate pools.",
+                self._label, len(book), len(other),
+            )
+        elif wrong:
+            want = ROUTED_PATH_BOOK if book else ROUTED_PATH_MARKET
+            log.error(
+                "WS pool {} declares routed path {} but carries {} stream(s) "
+                "served on {} (e.g. {}). They will connect, report healthy and "
+                "deliver nothing. Pass routed_path={!r}.",
+                self._label, self._routed_path, len(wrong), want,
+                wrong[0], want,
+            )
         stream_path = "/".join(streams)
-        return f"{base}/market/stream?streams={stream_path}"
+        return f"{base}{self._routed_path}?streams={stream_path}"
 
     async def _connect(self, conn: WSConnection) -> None:
         assert self._session is not None
