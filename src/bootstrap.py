@@ -34,7 +34,7 @@ from src.binance_weights import weight_for
 from src.depth_book import get_store as get_depth_store
 from src.live_ticks import get_store as get_live_tick_store
 from src.utils import get_logger
-from src.websocket_manager import WebSocketManager
+from src.websocket_manager import ROUTED_PATH_BOOK, WebSocketManager
 
 log = get_logger("bootstrap")
 
@@ -1034,6 +1034,12 @@ class Bootstrap:
                 admin_alert_callback=None,
                 data_store=engine.data_store,
                 label="futures_depth",
+                # Depth is served on `/stream`, NOT on the `/market/stream`
+                # path every other pool uses — Binance splits book data from
+                # trade data and the two are mutually exclusive. The first cut
+                # of this pool inherited `/market/stream` and shipped 40
+                # streams, 40 silent, pool HEALTHY, store empty.
+                routed_path=ROUTED_PATH_BOOK,
             )
 
         if futures_kline_streams:
