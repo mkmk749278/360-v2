@@ -907,9 +907,11 @@ _STRUCTURE_MISALIGN_PATHS: frozenset = frozenset({
 # tunes it off the audit with no redeploy; still guards against 15s
 # bit-identical re-emission spam.  Env default kept env-overridable per B8.
 from config import (  # noqa: E402
+    DEPTH_LIVE_FOR_CONSUMERS,
     DISPATCH_COOLDOWN_ENABLED,
     DISPATCH_COOLDOWN_SEC,
 )
+from src.depth_book import get_store as get_depth_store  # noqa: E402
 DISPATCH_COOLDOWN_PATH: str = "data/signal_dispatch_cooldown.json"
 
 
@@ -3200,6 +3202,22 @@ class Scanner:
         )
 
         _order_book = smc_data.get("order_book")
+        # Phase 2c handover, and the ONE place it happens. Every consumer of a
+        # book reads `smc_data["order_book"]` (or the signal attribute copied
+        # from it), so preferring the real book here hands over all four at
+        # once rather than leaving some reading one quote and some reading
+        # twenty levels — a split that would make any comparison between them
+        # a measurement of which call site was edited.
+        #
+        # Effect flag OFF by default: until it is flipped this branch does not
+        # run and the bookTicker snapshot below is still what everything sees,
+        # while `depth_book` fills and ops renders the disagreement.
+        if _order_book is None and DEPTH_LIVE_FOR_CONSUMERS:
+            try:
+                _order_book = get_depth_store().order_book(symbol)
+            except Exception as exc:  # noqa: BLE001
+                fail_open.record("scanner:depth_book_read", exc)
+                _order_book = None
         if _order_book is None:
             _book_snapshot = self._order_book_snapshot_cache.get(symbol)
             if _book_snapshot and time.monotonic() < float(_book_snapshot[1]):

@@ -303,6 +303,10 @@ Telegram are both acceptable paging paths.
 | Entry-quality gate — the consuming half of that lane (**LIVE**, per-rule ops switches) | `src/entry_quality.py` |
 | Structural SL/TP1 snap — level-aware geometry at the enqueue choke point (measure ON, apply OFF + per-path allow-list) | `src/structural_snap.py` |
 | Per-setup trigger timeframe — one declaration, read by the snap and by the scanner's six scoring consumers (correction dark) | `src/setup_timeframes.py` |
+| Live aggressive-trade ring, fed from `@aggTrade` (Phase 2a, handover dark) | `src/live_ticks.py` |
+| Footprint — buy/sell volume at each price, per bar (Phase 2b) | `src/footprint.py` |
+| Live order-book depth, fed from `@depth20@500ms` (Phase 2c, handover dark) | `src/depth_book.py` |
+| Data-intake X-ray — what we actually read from Binance (Phase 1) | `src/data_intake.py` |
 
 ---
 

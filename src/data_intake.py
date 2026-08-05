@@ -431,6 +431,40 @@ def _footprint_report() -> Dict[str, Any]:
     return out
 
 
+def _depth_report() -> Dict[str, Any]:
+    """The real book: health, and what it disagrees with.
+
+    Two things, and the second is the one the phase turns on. Health says the
+    feed is arriving. The **comparison** says whether it matters — top-of-book
+    imbalance against full-depth imbalance, computed from the same snapshot so
+    the two differ only in depth and not in timing.
+
+    A sign flip is counted apart from the magnitude of the disagreement,
+    because a consumer testing against zero and one testing against a threshold
+    are harmed by different things: the OBI gate compares a fraction to 0.65,
+    while `book_imbalance` is signed toward the trade and its sign is the whole
+    reading.
+    """
+    out: Dict[str, Any] = {"present": False}
+    try:
+        from config import DEPTH_LIVE_FOR_CONSUMERS, DEPTH_STREAM_ENABLED
+        from src.depth_book import get_store as _db
+
+        store = _db()
+        out = dict(store.health())
+        out["present"] = True
+        out["measurement_enabled"] = DEPTH_STREAM_ENABLED
+        # The handover state, named on the panel rather than inferred. While
+        # this is False the four consumers are still reading one quote, and a
+        # panel showing a healthy depth feed without saying so would read as
+        # though the book were in use.
+        out["live_for_consumers"] = DEPTH_LIVE_FOR_CONSUMERS
+        out["comparison"] = store.comparison_census()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+    return out
+
+
 def _derived_report(engine: Any) -> Dict[str, Any]:
     """Where each derived input actually comes from.
 
@@ -497,17 +531,27 @@ def _derived_report(engine: Any) -> Dict[str, Any]:
         # and which side was aggressive" — and only the second can say whether
         # a level was defended.
         "footprint": _footprint_report(),
+        # What the CONSUMERS read. Kept as its own entry beside `depth` below,
+        # because until the handover flag flips these are two different books
+        # and the panel must not let the healthier one stand for both.
         "order_book": {
             "source": "book_ticker",
             "quality": "top_of_book_only",
             "detail": (
                 "one bid and one ask from /fapi/v1/ticker/bookTicker — cannot "
-                "see walls, refills or absorption"
+                "see walls, refills or absorption. Four consumers read this: "
+                "the OBI execution gate (OBI_DEFAULT_LEVELS=20), "
+                "entry_features.book_imbalance (bids[:10]), the WHALE OBI "
+                "check, and the AI predictor's 0.25-weighted order_book score"
             ),
             "symbols_cached": len(
                 getattr(scanner, "_order_book_snapshot_cache", {}) or {}
             ) if scanner is not None else 0,
         },
+        # Phase 2c. The real book, and the disagreement it has with the quote
+        # above. Reported separately for the same reason the footprint is
+        # reported beside the tick ring rather than inside it.
+        "depth": _depth_report(),
         "open_interest": {
             "source": "rest_poll",
             "symbols": len(getattr(flow, "_oi", {}) or {}) if flow is not None else 0,

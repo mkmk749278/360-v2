@@ -389,8 +389,14 @@ Current subscriptions, at a nominal 75 scanned pairs:
 | `!ticker@arr` | 1 |
 | **Today** | **451** |
 | `+ @aggTrade × 75` (Phase 2a) | 75 |
-| `+ @depth20@100ms × 75` (Phase 2c) | 75 |
+| `+ @depth20@500ms × 75` (Phase 2c) | 75 |
 | **Program total** | **601** |
+
+*As built, both are bounded to 40 symbols (`AGGTRADE_MAX_SYMBOLS` /
+`DEPTH_MAX_SYMBOLS`), so the shipped total is 531. The bound is about our own
+read loop, never the vendor's quota — streams cost no REQUEST_WEIGHT at any
+rate — and the whole-universe decision comes from the measured message rate on
+`/diagnostics/data-intake` rather than from this table.*
 
 601 is inside the 1,024-per-connection ceiling, and we already run separate
 connection pools (klines / liquidations / mover), so headroom is comfortable.
@@ -604,11 +610,10 @@ memory numbers.
 **Ops:** the footprint lands on the data-intake page (health, coverage, memory)
 and the per-bar values become columns on the measurement surfaces that follow.
 
-### Phase 2c — depth
+### Phase 2c — depth *(shipped)*
 
-`{sym}@depth20@100ms`, maintaining a real 20-level book per symbol, replacing
-`top_of_book_only` for the evaluator paths that consume `order_book`. Weight-free,
-75 more streams.
+`{sym}@depth20@500ms` (`src/depth_book.py`), maintaining a real 20-level book per
+symbol. Weight-free, 40 more streams on their own pool.
 
 Split from Phase 2 deliberately: aggTrade answers *who is aggressive*, depth
 answers *who is resting*. The first is required by every trigger in this program;
@@ -619,6 +624,45 @@ impossible without the other.
 rule that restoring a dropped input silently redefines what depends on it, the
 change is **stamped as a source change** (`book_source`) rather than schema-bumped,
 so pre-change and post-change rows stay separable instead of being pooled.
+
+**Four decisions the build made against what this section originally said:**
+
+**1. Partial depth, not the diff stream.** `@depth` gives a *full* book and costs
+a REST snapshot plus `U`/`u`/`pu` sequence reconciliation, with a resync when the
+chain breaks. A consumer that misses that resync **does not fail — it drifts**,
+and keeps answering with confident, well-shaped, wrong numbers. That is the exact
+failure class this document was written against, and it would have been
+self-inflicted. `@depth<N>` sends a complete top-N snapshot every interval: a
+dropped message costs one interval of staleness and cannot corrupt state, because
+the next message replaces it wholesale rather than amending it. Every consumer
+reads 10 or 20 levels, so the full book was never the requirement.
+
+**2. 500ms, not 100ms.** Every consumer reads this at scan cadence (15s) or at
+dispatch, so a 100ms book is ~150× fresher than the fastest thing that will ever
+look at it and costs 5× the messages to be so. `DEPTH_STREAM_SPEED_MS` is one env
+var if a later phase grows a consumer that reads between scans.
+
+**3. Silence is a fault here, and it is not one on aggTrade.**
+`live_ticks.QUIET_AFTER_S` is 90s because an illiquid perp genuinely can go a
+minute without an aggressive trade — *subscribed and quiet* is a market fact
+there. Depth publishes on a **fixed clock** whether or not anything trades, so a
+symbol with no message is a stopped feed, never a quiet market. The bound is
+derived from the configured speed (20 intervals) rather than guessed, and the
+`depth_feed` probe is keyed on the symbols **subscribed** — not on what the store
+holds, because a feed that dies leaves its snapshots behind and any count of what
+is held reads healthy while nothing arrives (#815's shape).
+
+**4. It is money-path, and this document had it in the wrong column** — see the
+correction in §8. Dark-first, with the handover flag default-OFF.
+
+**The measurement the phase turns on** is on `/diagnostics/data-intake`:
+top-of-book imbalance against full-depth imbalance, computed from the **same
+snapshot** so the two differ only in depth and not in timing. A **sign flip** is
+counted apart from the magnitude of the disagreement, because a consumer testing
+against zero and one testing against a threshold are harmed by different things —
+`book_imbalance` is signed toward the trade and its sign *is* the reading, while
+the OBI gate compares a fraction to 0.65. That distribution is what the handover
+decision gets read from; it is deliberately not a threshold invented now.
 
 ### Phase 3 — repair layer 3
 
@@ -741,8 +785,26 @@ sequenced late for narrative clarity only, and in practice ships alongside Phase
 
 **Owner sign-off gates:** Phase 3 (changes what emits), Phase 4's veto activation,
 Phase 5's promotion to a delivered channel. Phase 2a is money-path (it changes what five live
-consumers see) and ships dark-first. Phases 0, 1, 2b, 2c, 6 and 7 are
+consumers see) and ships dark-first. Phases 0, 1, 2b, 6 and 7 are
 off-money-path and ship normally.
+
+**Correction, 2026-08-05 (made while building 2c): this section had 2c in the
+wrong column.** §6's own Phase 2c text says it replaces `top_of_book_only`
+*"for the evaluator paths that consume `order_book`"* — which is a money-path
+change by the same sentence that puts 2a there, and the audit found **four**
+consumers rather than the one the line implied: the OBI execution gate in
+`risk.calculate_risk` (the *final* filter before dispatch, and its own
+`OBI_DEFAULT_LEVELS` is 20 against a one-element list),
+`entry_features.book_imbalance`, the WHALE path's OBI check, and the AI
+predictor's 0.25-weighted `order_book` score. Two sentences of one document
+disagreed, and the one in the summary table was the wrong one.
+
+So **2c ships dark-first like 2a**: `DEPTH_STREAM_ENABLED` (measurement) ON,
+`DEPTH_LIVE_FOR_CONSUMERS` (effect) OFF, the disagreement between the one-level
+quote and the real book rendered on `/diagnostics/data-intake`, and the handover
+taken on owner sign-off. Building the book is off-money-path; *handing it to the
+consumers* is not, and those are separable in exactly the way § Project Phase
+describes.
 
 ---
 
