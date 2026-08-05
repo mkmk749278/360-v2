@@ -4,6 +4,103 @@
 
 ---
 
+## 🟢 SESSION 113 2026-08-05 — the price-action program, Phases 0 → 2c
+
+`docs/PRICE_ACTION_PROGRAM.md` is the design of record: what price action is,
+what we actually read from Binance, and a seven-phase build. Written before any
+code, with every fact labelled **[verified]** / **[documented]** / **[inferred]**.
+
+**The framing that governs the whole thing:** a controlled test of 54 mechanical
+SMC rule variants over 2.5M bars produced a best win rate of 56.3% and **zero
+profitable variants after costs**, and our own book already loses ~10× its edge
+to fees. So the program builds the **measurement** before the signal, and the
+missing **data layer** before the measurement — and it is instrumented to be able
+to return "no edge", which is a supported outcome rather than a failure.
+
+### Shipped this session
+
+| Phase | What | PR |
+|---|---|---|
+| 0 | weight accounting made enforceable | #874 |
+| 1 | `/diagnostics/data-intake` — the X-ray | #875 · ops #133 |
+| 2a | subscribe the trade feed that already had a handler | #876/#877 · ops #134 |
+| 2b | the footprint — volume at price, per bar | #878 · ops #135 |
+| 2c | the resting side of the book — depth | #879 · ops #136 |
+
+### The audit's four findings, none of which failed
+
+* **`data_store.ticks` was a seed-time REST snapshot** and five call sites read
+  it as live, including a `$500k cumulative tick volume` gate. A complete
+  `trade` handler, the store, its cap and the gate telemetry all existed — and
+  **nothing subscribed the stream**. Fixed in 2a.
+* **`orderblocks` has never had a writer**, so every
+  `bool(fvgs) or bool(orderblocks)` is `bool(fvgs)` alone. Phase 3.
+* **`detect_fvg` sees twelve bars**, which is what makes a deliberately loose
+  gate behave like a strict one. Phase 3.
+* **The order book was one bid and one ask**, and *four* consumers were written
+  for a book: the OBI execution gate (its own `OBI_DEFAULT_LEVELS` is **20**,
+  against a one-element list), `entry_features.book_imbalance`, the WHALE OBI
+  check, and the AI predictor's 0.25-weighted score. Fixed in 2c.
+
+Every one is a **provenance** fault — the right shape, from somewhere other than
+where the consumer assumes. None raises, which is why they survived, and why
+Phase 1 built the page before anything else changed.
+
+### Phase 0's third defect was the interesting one
+
+The first cut of the weight audit only saw calls whose endpoint was a **string
+literal** — and the fix that merged `fetch_recent_trades`'s two branches into one
+call with a `path` variable therefore made *the very call site the module exists
+for* invisible to its own audit. **Restoring `weight=1` left the suite green.**
+A check that looks like coverage, stops seeing its subject the moment the subject
+is refactored, and reports success — produced inside the change meant to prevent
+exactly that. *Verify a fix by reverting it*; the first revert passing was the
+finding.
+
+### Phase 2c — four decisions against the program document
+
+* **Partial depth, never the diff stream.** A diff consumer that misses a resync
+  **does not fail — it drifts**, and keeps answering with confident wrong
+  numbers. Every partial message is a complete top-N snapshot, so a drop costs
+  one interval and cannot corrupt state.
+* **500ms, not the document's 100ms.** Every consumer reads at scan cadence or
+  at dispatch; 100ms is ~150× fresher than the fastest reader at 5× the messages.
+* **Silence is a fault here and is not one on aggTrade.** Depth publishes on a
+  fixed clock, so a silent symbol is a stopped feed, never a quiet market. The
+  bound is derived from the configured speed, and the probe is keyed on symbols
+  **subscribed** — a dead feed leaves its snapshots behind, so counting what the
+  store *holds* reads healthy while nothing arrives (#815's shape).
+* **It is money-path, and §8 had it in the wrong column** — §6's own text says it
+  replaces `top_of_book_only` for the evaluator paths, which is the sentence that
+  puts 2a in the money-path column. Two sentences of one document disagreed.
+  Corrected; 2c ships dark-first.
+
+### Open — the flags waiting on a data window, not an opinion
+
+Both are **measurement ON / effect OFF**, and both need the owner to read the
+disagreement on `/diagnostics/data-intake` before flipping:
+
+* **`TICKS_LIVE_FOR_CONSUMERS`** (2a) — hands five consumers from the seed-time
+  snapshot to the live series. The drift panel sizes the error, and it is a
+  function of uptime, so a page read minutes after a deploy **understates** it.
+* **`DEPTH_LIVE_FOR_CONSUMERS`** (2c) — hands four consumers from one quote to
+  twenty levels, one of them the *final* gate before dispatch. Read the **sign
+  flip** count first: `book_imbalance` is signed toward the trade so its sign
+  *is* the reading, while the OBI gate compares a fraction to 0.65 — the two are
+  harmed by different things, which is why they are counted separately.
+
+### Next, in the program's order
+
+Phase 3 (repair layer 3 — order blocks, FVG lookback; both change what emits, so
+dark + sign-off), then **Phase 4, the structural veto** — the one with leverage,
+because it needs no new signal and is testable on the whole delivered book from
+the day it ships. **Phase 6 (retention by delivery, not recency) has no
+dependencies and should land before Phase 4's ledger fills** — the structural-snap
+ledger reaches its 4,000-row cap ~32h after deploy, after which every
+re-detection evicts a row that might have carried a verdict.
+
+---
+
 ## 🟢 SESSION 112 2026-08-04 — "are we using price action?" → the snap that never ran
 
 Owner asked what price action is and whether the engine uses it. The audit, then
