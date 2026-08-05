@@ -130,7 +130,7 @@
         "HOLD"
       ],
       "FUNDING_EXTREME_SIGNAL|suppress_negative": [
-        "DROP",
+        "SKIP",
         "SKIP",
         "SKIP"
       ],
@@ -439,7 +439,7 @@
       "FAILED_AUCTION_RECLAIM@FIXED|min_samples": 632,
       "MOVER_TREND_PULLBACK@SAREXIT|min_samples": 629
     },
-    "cycle": 643
+    "cycle": 686
   },
   "ledger": [
     {
