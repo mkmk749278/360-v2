@@ -37,8 +37,16 @@ class _Conn:
 
 
 class _Mgr:
-    def __init__(self, conns):
+    """A WebSocketManager's shape: connections, a label, a staleness multiplier.
+
+    The label is the manager's OWN — the page reads it rather than mapping
+    attribute names, so a pool added tomorrow needs no list updated anywhere.
+    """
+
+    def __init__(self, conns, label="futures_klines", staleness_multiplier=None):
         self._connections = list(conns)
+        self._label = label
+        self._staleness_multiplier = staleness_multiplier
 
 
 class _Store:
@@ -85,7 +93,9 @@ class _Engine:
         self._ws_futures = kw.get("ws_futures")
         self._ws_futures_liq = kw.get("ws_liq")
         self._ws_futures_mover = kw.get("ws_mover")
+        self._ws_futures_aggtrade = kw.get("ws_aggtrade")
         self._ws = None
+        self.pair_mgr = kw.get("pair_mgr")
         self.data_store = kw.get("store", _Store())
         self._order_flow_store = kw.get("flow", _Flow())
         self.scanner = kw.get("scanner", _Scanner())
@@ -95,9 +105,11 @@ def _engine_with_current_streams():
     """The subscription set the engine actually starts today: klines,
     forceOrder and !ticker@arr — and deliberately no trade stream."""
     return _Engine(
-        ws_futures=_Mgr([_Conn(["btcusdt@kline_1m", "btcusdt@kline_5m"])]),
-        ws_liq=_Mgr([_Conn(["btcusdt@forceOrder"])]),
-        ws_mover=_Mgr([_Conn(["!ticker@arr"])]),
+        ws_futures=_Mgr([_Conn(["btcusdt@kline_1m", "btcusdt@kline_5m"])],
+                        label="futures_klines"),
+        ws_liq=_Mgr([_Conn(["btcusdt@forceOrder"])], label="futures_liq",
+                    staleness_multiplier=100),
+        ws_mover=_Mgr([_Conn(["!ticker@arr"])], label="futures_mover"),
     )
 
 
@@ -124,10 +136,28 @@ class TestStreamKinds:
         assert kinds["depth"] is False
 
     def test_an_added_aggtrade_subscription_is_detected(self):
-        """Phase 2a flips this. Pinned now so the panel is proven to be
-        reading the subscription rather than hardcoding the answer."""
+        """Phase 2a flips this. Pinned so the panel is proven to be reading the
+        subscription rather than hardcoding the answer."""
         eng = _Engine(ws_futures=_Mgr([_Conn(["btcusdt@aggTrade"])]))
         assert build_data_intake(eng)["stream_kinds"]["kinds"]["aggregate_trades"] is True
+
+    def test_a_pool_on_a_new_attribute_is_seen_without_updating_a_list(self):
+        """THE regression this page shipped with.
+
+        The first cut hard-coded four pool attribute names, and Phase 2a added
+        `_ws_futures_aggtrade` the very next change. The live page then read
+        "Aggregate trades: NOT SUBSCRIBED" on a feed nobody could confirm either
+        way, because the reporter could not see the pool at all — a hand-written
+        list excluding exactly the thing somebody already typed, committed by
+        the surface built to catch that class of defect.
+
+        Pools are now discovered by shape. This fails against the old tree.
+        """
+        eng = _Engine(ws_aggtrade=_Mgr([_Conn(["btcusdt@aggTrade"])],
+                                       label="futures_aggtrade"))
+        rep = build_data_intake(eng)
+        assert rep["stream_kinds"]["kinds"]["aggregate_trades"] is True
+        assert "futures_aggtrade" in {p["label"] for p in rep["pools"]}
 
 
 # ---------------------------------------------------------------------------
@@ -230,18 +260,20 @@ class TestSeries:
 # ---------------------------------------------------------------------------
 
 class TestPools:
-    def test_a_missing_pool_is_named_not_shown_as_zero_streams(self):
-        """'Never started' and 'all connections died' both show zero streams."""
-        pools = {p["label"]: p for p in build_data_intake(_Engine())["pools"]}
-        assert pools["futures_klines"]["state"] == "not_started"
-        assert pools["futures_klines"]["present"] is False
+    def test_a_declared_but_unstarted_pool_is_named_not_omitted(self):
+        """'Never started' and 'all connections died' both show zero streams,
+        and a pool that is simply absent from the page is a third silence."""
+        pools = build_data_intake(_Engine())["pools"]
+        assert pools, "declared-but-None pools must still be reported"
+        assert all(p["state"] == "not_started" for p in pools)
+        assert all(p["present"] is False for p in pools)
 
     def test_a_partially_degraded_pool_is_not_reported_as_healthy(self):
         """Binance drops subsets of subscriptions silently — one degraded
         connection inside a healthy pool is exactly what an aggregate hides."""
         eng = _Engine(ws_futures=_Mgr([
             _Conn(["a@kline_1m"]), _Conn(["b@kline_1m"], degraded=True),
-        ]))
+        ], label="futures_klines"))
         pools = {p["label"]: p for p in build_data_intake(eng)["pools"]}
         assert pools["futures_klines"]["state"] == "partially_degraded"
         assert pools["futures_klines"]["degraded_count"] == 1
@@ -249,16 +281,36 @@ class TestPools:
     def test_silent_streams_are_counted_and_sampled(self):
         eng = _Engine(ws_futures=_Mgr([
             _Conn(["a@kline_1m", "b@kline_1m"], silent={"b@kline_1m"}),
-        ]))
-        conn = build_data_intake(eng)["pools"][0]["connections"][0]
+        ], label="futures_klines"))
+        pools = {p["label"]: p for p in build_data_intake(eng)["pools"]}
+        conn = pools["futures_klines"]["connections"][0]
         assert conn["silent_streams"] == 1
         assert conn["silent_sample"] == ["b@kline_1m"]
+
+    def test_a_pool_whose_silence_is_expected_is_not_flagged(self):
+        """@forceOrder fires only during liquidations and is legitimately
+        silent for hours — the engine sets staleness_multiplier=100 on that
+        pool for exactly that reason. A flat budget flagged 64 of 75 of them
+        on the first live read: this page reporting a fault that is not
+        happening, against its own rule. The engine's own number is reused
+        rather than a second threshold invented here."""
+        eng = _Engine(ws_liq=_Mgr(
+            [_Conn(["a@forceOrder"], silent={"a@forceOrder"})],
+            label="futures_liq", staleness_multiplier=100,
+        ))
+        pools = {p["label"]: p for p in build_data_intake(eng)["pools"]}
+        liq = pools["futures_liq"]
+        assert liq["silence_is_expected"] is True
+        assert liq["silence_budget_s"] == 12_000.0
+        assert liq["connections"][0]["silent_streams"] == 0
 
     def test_the_24h_forced_cycle_is_reported_as_time_remaining(self):
         """Binance force-closes every connection at 24h. Showing the countdown
         turns a scheduled event into an expected one."""
-        eng = _Engine(ws_futures=_Mgr([_Conn(["a@kline_1m"])]))
-        conn = build_data_intake(eng)["pools"][0]["connections"][0]
+        eng = _Engine(ws_futures=_Mgr([_Conn(["a@kline_1m"])],
+                                      label="futures_klines"))
+        pools = {p["label"]: p for p in build_data_intake(eng)["pools"]}
+        conn = pools["futures_klines"]["connections"][0]
         assert conn["seconds_to_forced_cycle"] is not None
         assert 86_000 < conn["seconds_to_forced_cycle"] <= 86_400
 
@@ -292,15 +344,19 @@ class TestFailSoft:
     def test_a_broken_section_reports_its_cause_and_does_not_empty_the_page(self):
         """'The WS pool is down' and 'the WS section raised' are different
         states; pooling them reports a fault that is not happening."""
-        class _Exploding:
+        class _ExplodingVars:
+            """Pool discovery itself raises. Distinct from "no pools": one is a
+            quiet engine, the other is a broken reporter, and rendering them
+            alike is the failure this page exists to prevent."""
+
+            def __init__(self):
+                self.data_store = _Store()
+
             @property
-            def _ws_futures(self):
+            def __dict__(self):
                 raise RuntimeError("boom")
 
-            def __getattr__(self, name):
-                return None
-
-        rep = build_data_intake(_Exploding())
+        rep = build_data_intake(_ExplodingVars())
         assert rep["schema"] == SCHEMA
         assert isinstance(rep["pools"], dict) and "error" in rep["pools"]
         # Other sections still rendered.

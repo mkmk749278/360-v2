@@ -107,14 +107,30 @@ def _pool_report(label: str, mgr: Any) -> Dict[str, Any]:
 
     conns = list(getattr(mgr, "_connections", []) or [])
     now = time.monotonic()
+    # Default 120s; scaled by the pool's own multiplier where the engine has
+    # declared one. Surfaced on the row so a reader can see WHY a pool with
+    # hours of silence is not being flagged.
+    mult = float(getattr(mgr, "_staleness_multiplier", 1.0) or 1.0)
+    silence_budget_s = 120.0 * max(1.0, mult)
+    out["silence_budget_s"] = round(silence_budget_s, 1)
+    out["silence_is_expected"] = mult > 1.0
     for idx, conn in enumerate(conns):
         streams = list(getattr(conn, "streams", []) or [])
         stream_ts = dict(getattr(conn, "stream_data_ts", {}) or {})
-        # Streams that have delivered nothing recently. This is the
-        # "Binance silently dropped a subset" detector.
+        # Streams that have delivered nothing recently — the "Binance silently
+        # dropped a subset" detector.
+        #
+        # The budget is per POOL, read from the manager's own staleness
+        # multiplier. A @forceOrder stream fires only during liquidations and is
+        # legitimately silent for hours; the engine already sets
+        # ``staleness_multiplier=100`` on that pool for exactly this reason, and
+        # a flat 120s budget flagged 64 of 75 of them as silent on the first
+        # live read. That is this page reporting a fault that is not happening —
+        # against its own rule. The engine's number is reused rather than a
+        # second threshold being invented here.
         silent = [
             s for s in streams
-            if (now - stream_ts.get(s, 0.0)) > 120.0 or s not in stream_ts
+            if (now - stream_ts.get(s, 0.0)) > silence_budget_s or s not in stream_ts
         ]
         connected_ts = float(getattr(conn, "connected_ts", 0.0) or 0.0)
         out["connections"].append({
@@ -155,6 +171,39 @@ def _pool_report(label: str, mgr: Any) -> Dict[str, Any]:
     return out
 
 
+def _discover_pools(engine: Any) -> List[tuple]:
+    """Every WebSocket pool on the engine, found by SHAPE not by name.
+
+    The first cut hard-coded ``("_ws_futures", "_ws_futures_liq",
+    "_ws_futures_mover", "_ws")`` — and Phase 2a added ``_ws_futures_aggtrade``
+    the very next change. The page then reported "Aggregate trades: NOT
+    SUBSCRIBED" on a running feed, because the reporter could not see the pool
+    at all. That is this repo's "a deny-list is a floor" rule, committed by the
+    surface built to catch exactly this class of defect: a hand-written list
+    excludes precisely the things somebody already typed and is silent by
+    construction on the next one.
+
+    So: any attribute carrying ``_connections`` is a pool, and its label comes
+    from the manager's own ``_label`` — one writer, one reader. A pool added
+    tomorrow appears here without anyone updating a list.
+    """
+    found: List[tuple] = []
+    for attr, value in list(vars(engine).items()):
+        if not attr.startswith("_ws"):
+            continue
+        if value is None:
+            # A declared-but-unstarted pool is still a pool, and "never
+            # started" is a state worth naming — see _pool_report.
+            found.append((attr.lstrip("_").replace("ws_", "") or attr, attr, None))
+            continue
+        if not hasattr(value, "_connections"):
+            continue
+        label = str(getattr(value, "_label", "") or attr.lstrip("_"))
+        found.append((label, attr, value))
+    found.sort(key=lambda t: t[0])
+    return found
+
+
 def _stream_kinds(pools: List[Dict[str, Any]], engine: Any) -> Dict[str, Any]:
     """Which *kinds* of stream we subscribe to at all.
 
@@ -170,8 +219,7 @@ def _stream_kinds(pools: List[Dict[str, Any]], engine: Any) -> Dict[str, Any]:
     # running. Caught by the test that asserts each kind by name, which is
     # exactly what that test is for.
     subscribed: set[str] = set()
-    for mgr_attr in ("_ws_futures", "_ws_futures_liq", "_ws_futures_mover", "_ws"):
-        mgr = getattr(engine, mgr_attr, None)
+    for _label, _attr, mgr in _discover_pools(engine):
         if mgr is None:
             continue
         for conn in getattr(mgr, "_connections", []) or []:
@@ -220,20 +268,40 @@ def _series_report(engine: Any, *, sample_limit: int = 400) -> Dict[str, Any]:
     if store is None:
         return out
 
+    # The live scan universe. A rotated-out mover's bucket freezes by design —
+    # it has no WS kline subscription and nothing re-seeds it once its 6h
+    # promotion lapses — so counting it as "stale" beside a core pair pools a
+    # known, harmless state with a real fault and reports the fault at ~4x its
+    # true size. On the first live read this page showed 95 of 286 1m series
+    # stale; the scan universe is 75, so most of that was symbols nobody scans.
+    #
+    # Split, never subtracted: the rotated-out count is retained because an
+    # unbounded pile of frozen buckets is its own finding (286 symbols held for
+    # a 75-symbol universe), just not a *staleness* finding.
+    pair_mgr = getattr(engine, "pair_mgr", None)
+    try:
+        live_universe = {str(x).upper() for x in (getattr(pair_mgr, "pairs", {}) or {})}
+    except Exception:  # noqa: BLE001
+        live_universe = set()
+
     candles = getattr(store, "candles", {}) or {}
     now = time.time()
     per_tf: Dict[str, Dict[str, Any]] = {}
 
     for symbol, by_tf in list(candles.items())[:sample_limit]:
+        in_universe = (not live_universe) or (str(symbol).upper() in live_universe)
         if not isinstance(by_tf, dict):
             continue
         for tf, data in by_tf.items():
             slot = per_tf.setdefault(tf, {
                 "series": 0, "stale": 0, "undated": 0,
+                "series_scanned": 0, "stale_scanned": 0, "undated_scanned": 0,
                 "bars_min": None, "bars_max": None,
                 "oldest_newest_bar_age_s": None, "stalest_symbols": [],
             })
             slot["series"] += 1
+            if in_universe:
+                slot["series_scanned"] += 1
             closes = data.get("close") if isinstance(data, dict) else None
             n = int(len(closes)) if closes is not None else 0
             slot["bars_min"] = n if slot["bars_min"] is None else min(slot["bars_min"], n)
@@ -246,20 +314,28 @@ def _series_report(engine: Any, *, sample_limit: int = 400) -> Dict[str, Any]:
                 # calling that "fresh" is how a restart-dropped `open_time`
                 # field stayed invisible (#842).
                 slot["undated"] += 1
+                slot["undated_scanned"] += int(in_universe)
                 continue
             try:
                 newest_ms = float(open_time[-1])
             except (TypeError, ValueError, IndexError):
                 slot["undated"] += 1
+                slot["undated_scanned"] += int(in_universe)
                 continue
             if newest_ms != newest_ms:  # NaN
                 slot["undated"] += 1
+                slot["undated_scanned"] += int(in_universe)
                 continue
             age = max(0.0, now - newest_ms / 1000.0)
             budget = _INTERVAL_SECONDS.get(tf, 300) * _STALE_MULTIPLIER
             if age > budget:
                 slot["stale"] += 1
-                slot["stalest_symbols"].append((symbol, round(age, 1)))
+                if in_universe:
+                    slot["stale_scanned"] += 1
+                    # Only a scanned symbol's staleness is actionable, so only
+                    # those are named — a list headed by four-day-old rotated-out
+                    # movers buries the core pair that actually broke.
+                    slot["stalest_symbols"].append((symbol, round(age, 1)))
             if (slot["oldest_newest_bar_age_s"] is None
                     or age > slot["oldest_newest_bar_age_s"]):
                 slot["oldest_newest_bar_age_s"] = round(age, 1)
@@ -273,6 +349,12 @@ def _series_report(engine: Any, *, sample_limit: int = 400) -> Dict[str, Any]:
     out["by_timeframe"] = per_tf
     out["symbols_sampled"] = min(len(candles), sample_limit)
     out["symbols_total"] = len(candles)
+    out["symbols_in_scan_universe"] = len(live_universe)
+    # Buckets held for symbols nobody scans. Not a staleness fault — an
+    # unbounded-growth one, and it has never had a number anywhere.
+    out["symbols_retained_outside_universe"] = max(
+        0, len(candles) - len(live_universe)
+    ) if live_universe else None
     return out
 
 
@@ -462,6 +544,36 @@ def _primitive_report() -> Dict[str, Any]:
     return {"rows": rows}
 
 
+def _vp_report(scanner: Any) -> Dict[str, Any]:
+    """Volume-profile coverage, read from the store's REAL attribute.
+
+    The first cut guessed ``_cache``; ``VolumeProfileStore`` holds ``_results``.
+    So the live page read ``micro 0 · macro 0`` on two stores that were running,
+    which says "volume profile is dead" — and layers 1-2 of the price-action
+    program rest on it. An all-zero column is a claim about the reader before it
+    is a claim about the system, and a guessed attribute name cannot fail
+    loudly: ``getattr(x, "_cache", {})`` returns ``{}`` just as convincingly for
+    "empty" as for "wrong name".
+
+    So the attribute is read by name and its absence is reported as
+    ``unreadable`` rather than as zero.
+    """
+    def _count(store: Any) -> Any:
+        if store is None:
+            return {"symbols": 0, "state": "absent"}
+        results = getattr(store, "_results", None)
+        if results is None:
+            return {"symbols": None, "state": "unreadable: no _results attribute"}
+        return {"symbols": len(results), "state": "ok"}
+
+    return {
+        "micro": _count(getattr(scanner, "volume_profile_store", None)
+                        if scanner is not None else None),
+        "macro": _count(getattr(scanner, "volume_profile_store_macro", None)
+                        if scanner is not None else None),
+    }
+
+
 def _levels_report(engine: Any) -> Dict[str, Any]:
     """LevelBook and volume-profile coverage — layers 1 and 2."""
     scanner = getattr(engine, "scanner", None) or getattr(engine, "_scanner", None)
@@ -479,14 +591,7 @@ def _levels_report(engine: Any) -> Dict[str, Any]:
             "levels_total": sum(len(v or []) for v in (levels or {}).values()),
             "oldest_refresh_age_s": round(max(ages), 1) if ages else None,
         },
-        "volume_profile": {
-            "micro_symbols": len(
-                getattr(getattr(scanner, "volume_profile_store", None), "_cache", {}) or {}
-            ) if scanner is not None else 0,
-            "macro_symbols": len(
-                getattr(getattr(scanner, "volume_profile_store_macro", None), "_cache", {}) or {}
-            ) if scanner is not None else 0,
-        },
+        "volume_profile": _vp_report(scanner),
     }
 
 
@@ -546,13 +651,8 @@ def build_data_intake(engine: Any) -> Dict[str, Any]:
 
     sections = (
         ("pools", lambda: [
-            _pool_report(label, getattr(engine, attr, None))
-            for label, attr in (
-                ("futures_klines", "_ws_futures"),
-                ("futures_liquidations", "_ws_futures_liq"),
-                ("futures_mover", "_ws_futures_mover"),
-                ("spot", "_ws"),
-            )
+            _pool_report(label, mgr)
+            for label, _attr, mgr in _discover_pools(engine)
         ]),
         ("stream_kinds", lambda: _stream_kinds([], engine)),
         ("series", lambda: _series_report(engine)),
