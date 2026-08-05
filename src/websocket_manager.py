@@ -527,6 +527,13 @@ class WebSocketManager:
                 duration_ms = (now - conn.degraded_since) * 1000.0
                 conn.last_reconnect_ms = duration_ms
                 self._ws_reconnection_count += 1
+                # A footprint bar that was open across this gap holds a
+                # fraction of its true volume while looking exactly like a
+                # quiet bar. Marked with its cause here — on the reconnect
+                # itself — rather than inferred later from silence, because an
+                # illiquid symbol is legitimately quiet and inferring a gap
+                # from that reports one that never happened.
+                self._mark_footprint_gap(conn)
                 # Snapshot the index for log readability — connections
                 # don't carry an explicit ID, so we use the position in
                 # ``_connections``.
@@ -1112,6 +1119,29 @@ class WebSocketManager:
 
     def build_kline_stream(self, symbol: str, interval: str) -> str:
         return f"{symbol.lower()}@kline_{interval}"
+
+    def _mark_footprint_gap(self, conn: "WSConnection") -> None:
+        """Stamp every aggTrade symbol on this connection as feed-interrupted.
+
+        Fail-soft and deliberately narrow: only ``@aggTrade`` streams feed the
+        footprint, so marking a kline-only connection would flag bars that were
+        never at risk — a fault that is not happening.
+        """
+        try:
+            symbols = {
+                s.split("@", 1)[0].upper()
+                for s in (getattr(conn, "streams", []) or [])
+                if "@aggTrade" in s
+            }
+            if not symbols:
+                return
+            from src.footprint import get_store as _fp
+            store = _fp()
+            for sym in symbols:
+                store.mark_gap(sym, "ws_reconnect")
+        except Exception as exc:  # noqa: BLE001
+            from src import fail_open
+            fail_open.record("websocket_manager.mark_footprint_gap", exc)
 
     def build_trade_stream(self, symbol: str) -> str:
         return f"{symbol.lower()}@trade"

@@ -102,8 +102,14 @@ class LiveTickStore:
         for s in symbols:
             self._subscribed.add(str(s).upper())
 
-    def add(self, symbol: str, payload: Dict[str, Any]) -> bool:
-        """Fold one ``@aggTrade`` message in. Returns True when accepted.
+    def add(self, symbol: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Fold one ``@aggTrade`` message in.
+
+        Returns the **normalised row** on success and ``None`` on a rejected
+        payload. The row is returned rather than a bool so the footprint store
+        can consume the same parse — the read loop handles thousands of these
+        a second and parsing each message twice to feed two stores is waste
+        that grows with the universe.
 
         Called once per message on the WebSocket read loop, so it does the
         minimum: one dict, one deque append. A malformed payload is counted and
@@ -128,9 +134,9 @@ class LiveTickStore:
             ts = float(payload.get("T", 0) or 0)
         except (KeyError, TypeError, ValueError):
             slot.rejected += 1
-            return False
+            return None
 
-        slot.ticks.append({
+        row = {
             "price": price,
             "qty": qty,
             "quote": price * qty,
@@ -139,10 +145,11 @@ class LiveTickStore:
             # reading either series does not need two field names.
             "isBuyerMaker": is_buyer_maker,
             "time": ts,
-        })
+        }
+        slot.ticks.append(row)
         slot.total += 1
         slot.last_msg_at = time.time()
-        return True
+        return row
 
     # ── reads ─────────────────────────────────────────────────────────────
     def recent(self, symbol: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
