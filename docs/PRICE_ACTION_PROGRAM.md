@@ -725,7 +725,7 @@ figure's colours inverted because a negative there is the rule looking right.
 This is testable against the whole delivered book immediately, and it is the
 cheapest possible answer to "does structure carry information here".
 
-### Phase 5 — the standalone price-action lane (application 2)
+### Phase 5 — the standalone price-action lane (application 2) *(shipped)*
 
 Only now, and built on the supported column from §2:
 
@@ -745,6 +745,41 @@ snap ledger filled with 211 re-detections of one RIFUSDT setup.
 **Its own page**, reporting volume per day, win rate, PnL % gross **and net**,
 MFE and MAE, per structural trigger — never pooled with the MA book, because
 pooling is how 15 rows disappear into 2,418.
+
+**As built** (`src/price_action_lane.py`, ops `/signals/price-action`):
+
+- **Trigger** — a LevelBook level whose window low went below it by more than a
+  tolerance and whose newest closed bar closed back above (mirrored for shorts).
+  A sweep is a *failed break*, which is the event stop-clustering predicts.
+- **Confirmation** — the footprint's sealed-bar delta must be aligned with the
+  trade. **Required, not a bonus**: a sweep with no aggression behind the reclaim
+  is a wick. The footprint covers a bounded symbol set, so most symbols refuse on
+  `no_footprint` — named rather than waived, because a lane that silently drops
+  its own confirmation where the data is absent is measuring a *different*
+  mechanism there.
+- **Geometry** — stop beyond the **sweep extreme** (the wick that took the
+  liquidity; if price returns there the read was wrong), TP1 at the **next
+  opposing level**. No opposing level ⇒ **refused**, never given a fixed
+  R-multiple: that is what §5 found the rest of the book doing, and inventing one
+  here would make this a moving-average path wearing a structural name. A target
+  nearer than `MIN_RR` is refused rather than *retargeted*, for the same reason.
+- **One move, one row** — a 30-minute per-symbol cooldown. A sweep persists for
+  several bars, so without it one setup emits per scan and the verdict becomes an
+  artefact of re-detection (SLXUSDT: 10 rows in 2h10m inside a 0.37% spread,
+  which inverted a whole population's sign).
+- **`confidence` is `0.0`** and that is honest, not missing. The lane passes
+  through no scoring engine, no MTF policy and no confidence floor; a number
+  there would be fabricated performance data on a surface an adoption decision
+  reads.
+
+**It rides `dark_emission`'s ledger for its resolver** — correct, and paid for
+over six sessions of defects — but the two populations are **split at one place**
+(`reduce_rows` / `reduce_lane_rows`). A dark-feed row cleared the full scoring
+chain minus one gate; a lane row cleared none of it, so pooling them would make
+the dark-feed page's own first sentence false.
+
+**Promotion to a delivered channel is a new evaluator path** and therefore an
+owner-sign-off item in its own right — a separate change, not a flag.
 
 ### Phase 6 — retention, so the measurement survives
 

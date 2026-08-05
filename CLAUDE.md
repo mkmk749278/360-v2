@@ -308,6 +308,7 @@ Telegram are both acceptable paging paths.
 | Live order-book depth, fed from `@depth20@500ms` (Phase 2c, handover dark) | `src/depth_book.py` |
 | Layer-3 repair — order-block detector + wide FVG window (Phase 3, both dark) | `src/layer3_repair.py` |
 | Structural veto — level ahead of the trade (Phase 4, measure ON / enforce OFF) | `src/structural_veto.py` |
+| Standalone price-action lane — level swept + reclaimed, delta-confirmed (Phase 5, dark) | `src/price_action_lane.py` |
 | Retention by delivery, shared by every measurement ledger (Phase 6) | `src/delivery_retention.py` |
 | Data-intake X-ray — what we actually read from Binance (Phase 1) | `src/data_intake.py` |
 

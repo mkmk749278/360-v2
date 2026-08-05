@@ -2753,6 +2753,43 @@ class CryptoSignalEngine:
             min_streak=6,          # 30 min sustained
         ))
 
+        def _price_action_lane() -> Tuple[bool, str]:
+            """Is the lane evaluating, and is it refusing for a readable reason?
+
+            Emission is NOT the health signal. This trigger is deliberately rare
+            — a level swept and reclaimed with delta behind it — so zero rows in
+            an hour is a quiet market, not a fault, and paging on it would train
+            the reader to ignore the probe.
+
+            What IS a fault is the lane never getting far enough to refuse for a
+            market reason: if every evaluation dies on `no_levels` or
+            `short_series`, the lane is blind rather than selective, and those
+            are upstream faults with upstream fixes.
+            """
+            from config import PRICE_ACTION_LANE_MEASURE
+            if not PRICE_ACTION_LANE_MEASURE:
+                return True, "disabled by tunable"
+            from src.price_action_lane import census as _pc
+            c = _pc()
+            n = c.get("evaluated", 0)
+            if n < 50:
+                return True, f"only {n} evaluations yet"
+            refusals = c.get("refusals", {})
+            blind = refusals.get("no_levels", 0) + refusals.get("short_series", 0)
+            detail = (
+                f"{n} evaluated, {c.get('emitted', 0)} emitted; "
+                + ", ".join(f"{k}={v}" for k, v in sorted(refusals.items()))
+            )
+            # Blind on nearly everything means the LevelBook or the candle store
+            # is not delivering — not that the market is quiet.
+            return (blind / max(1, n)) < 0.9, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="price_action_lane",
+            fn=_price_action_lane,
+            min_streak=6,          # 30 min sustained
+        ))
+
         def _sar_ledger_candles() -> Tuple[bool, str]:
             """Can the resolver still fetch candles for the trades it owes?
 
