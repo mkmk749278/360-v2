@@ -83,6 +83,7 @@ class SnapshotWriter:
         await self._write_tickers()
         await self._write_engine_state()
         await self._write_positions_diag()
+        await self._write_data_intake()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             await self._write_activity()
             await self._write_alerts()
@@ -132,6 +133,25 @@ class SnapshotWriter:
     def _build_positions_diag(self) -> dict:
         from src.api.snapshot import build_positions_diag
         return build_positions_diag(self._engine).model_dump(mode="json")
+
+    async def _write_data_intake(self) -> None:
+        """Publish the data-intake X-ray computed engine-side.
+
+        Same reason as the positions diag: it reads WS connection state, the
+        candle store, the order-flow store and the rate limiter — none of which
+        the API container's RedisEngineFacade can see in isolated mode. Built
+        here on the real engine, rendered there.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(self._executor, self._build_data_intake)
+            await self._set(_store.KEY_DATA_INTAKE, data, _store.TTL_DATA_INTAKE)
+        except Exception:
+            log.exception("snapshot_writer: failed to write data_intake")
+
+    def _build_data_intake(self) -> dict:
+        from src.data_intake import build_data_intake
+        return build_data_intake(self._engine)
 
     async def _write_activity(self) -> None:
         try:

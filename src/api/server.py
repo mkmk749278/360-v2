@@ -1832,6 +1832,36 @@ def build_app(
             )
 
     @app.get(
+        "/internal/diag/data-intake",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def data_intake_diag() -> dict:
+        """What we are actually reading from Binance.
+
+        Isolated mode: the engine container computes this (it needs live WS
+        connection state, the candle store, the order-flow store and the rate
+        limiter — none of which the facade can see) and publishes it. Consult
+        the published snapshot first, fall back to a live build otherwise —
+        the same shape as ``/internal/diag/positions``.
+
+        A failure here returns a payload carrying its own cause rather than an
+        empty one: "nothing is subscribed" and "the report could not be built"
+        are different states and must not render identically.
+        """
+        try:
+            published = getattr(engine, "published_data_intake", None)
+            if callable(published):
+                raw = published()
+                if raw is not None:
+                    return raw
+            from src.data_intake import build_data_intake
+            return build_data_intake(engine)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("/internal/diag/data-intake failed")
+            return {"schema": 0, "error": f"{type(exc).__name__}: {exc}"}
+
+    @app.get(
         "/internal/diag/position_counters",
         tags=["internal-diag"],
         dependencies=[Depends(owner_required)],
