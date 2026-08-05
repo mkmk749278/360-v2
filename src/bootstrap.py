@@ -22,8 +22,16 @@ from config import (
 from src.ai_engine import close_shared_session
 from src.binance import BinanceClient
 from src.rate_limiter import futures_rate_limiter, spot_rate_limiter
-from config import AGGTRADE_MAX_SYMBOLS, AGGTRADE_STREAM_ENABLED
+from config import (
+    AGGTRADE_MAX_SYMBOLS,
+    AGGTRADE_STREAM_ENABLED,
+    DEPTH_MAX_SYMBOLS,
+    DEPTH_STREAM_ENABLED,
+    DEPTH_STREAM_LEVELS,
+    DEPTH_STREAM_SPEED_MS,
+)
 from src.binance_weights import weight_for
+from src.depth_book import get_store as get_depth_store
 from src.live_ticks import get_store as get_live_tick_store
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
@@ -897,6 +905,7 @@ class Bootstrap:
         futures_kline_streams: List[str] = []
         futures_liq_streams: List[str] = []
         futures_aggtrade_streams: List[str] = []
+        futures_depth_streams: List[str] = []
 
         # 2026-05-14: spot WS removed.  Engine is futures-only per CLAUDE.md
         # (75 USDT-M futures pairs scalped via SMC + order-flow logic).  The
@@ -957,6 +966,23 @@ class Bootstrap:
             )
             get_live_tick_store().note_subscribed(agg_symbols)
 
+        # ── Live order-book depth (price-action program, Phase 2c) ─────────
+        # The other half of layer 4. aggTrade above is executed aggression;
+        # this is resting size. Four consumers were written for a book and
+        # have been reading the one-level bookTicker snapshot — including the
+        # OBI execution gate, whose own OBI_DEFAULT_LEVELS is 20.
+        #
+        # Partial-depth (a full top-N snapshot every interval), never the diff
+        # stream: a diff consumer that misses a resync does not fail, it drifts
+        # and keeps answering with confident wrong numbers.
+        if DEPTH_STREAM_ENABLED:
+            depth_symbols = list(tier1_futures)[:max(0, DEPTH_MAX_SYMBOLS)]
+            futures_depth_streams.extend(
+                f"{sym.lower()}@depth{DEPTH_STREAM_LEVELS}@{DEPTH_STREAM_SPEED_MS}ms"
+                for sym in depth_symbols
+            )
+            get_depth_store().note_subscribed(depth_symbols)
+
         engine._ws_futures = WebSocketManager(
             engine._on_ws_message,
             market="futures",
@@ -994,12 +1020,30 @@ class Bootstrap:
                 label="futures_aggtrade",
             )
 
+        # Depth gets its own pool rather than sharing the aggTrade one. Not for
+        # rate — at 500ms x 40 symbols it is ~80 msg/s against aggTrade's
+        # thousands — but because the two are graded on different clocks: an
+        # aggTrade symbol may legitimately be silent for a minute, while depth
+        # publishes unconditionally and silence on it is always a fault. Shared
+        # pools would mean one staleness rule over two different meanings of
+        # quiet, and independent rollback is the point of a separate phase.
+        if futures_depth_streams:
+            engine._ws_futures_depth = WebSocketManager(
+                engine._on_ws_message,
+                market="futures",
+                admin_alert_callback=None,
+                data_store=engine.data_store,
+                label="futures_depth",
+            )
+
         if futures_kline_streams:
             await engine._ws_futures.start(futures_kline_streams)
         if futures_liq_streams:
             await engine._ws_futures_liq.start(futures_liq_streams)
         if futures_aggtrade_streams and getattr(engine, "_ws_futures_aggtrade", None):
             await engine._ws_futures_aggtrade.start(futures_aggtrade_streams)
+        if futures_depth_streams and getattr(engine, "_ws_futures_depth", None):
+            await engine._ws_futures_depth.start(futures_depth_streams)
 
         # Real-time mover-ignition feed: the single all-market ticker array
         # stream `!ticker@arr` (every changed symbol, 1/sec) on its own

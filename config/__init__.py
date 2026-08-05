@@ -1441,6 +1441,46 @@ TICKS_LIVE_FOR_CONSUMERS: bool = _safe_bool("TICKS_LIVE_FOR_CONSUMERS", "false")
 # /diagnostics/data-intake rather than assumed here.
 AGGTRADE_MAX_SYMBOLS: int = _safe_int("AGGTRADE_MAX_SYMBOLS", "40")
 
+# ── Live order-book depth (price-action program, Phase 2c) ─────────────────
+# Same two-flag split, for the same reason. 2a/2b answer "who is aggressive";
+# this answers "who is resting", and they are separate rollbacks because one
+# does not substitute for the other.
+#
+# DEPTH_STREAM_ENABLED is the MEASUREMENT flag and defaults ON: it opens the
+# @depth subscription and fills `src/depth_book.py`. Nothing reads it for a
+# decision while the effect flag below is off, so it runs from the moment it
+# ships.
+DEPTH_STREAM_ENABLED: bool = _safe_bool("DEPTH_STREAM_ENABLED", "true")
+
+# DEPTH_LIVE_FOR_CONSUMERS is the EFFECT flag and defaults OFF. It hands the
+# four existing consumers of the order-book snapshot — the OBI execution gate
+# in `risk.calculate_risk` (whose own OBI_DEFAULT_LEVELS is 20 and which has
+# been summing a one-element list), `entry_features.book_imbalance`, the WHALE
+# path's OBI check, and the AI predictor's 0.25-weighted order_book score —
+# from the one-level bookTicker snapshot to the real book.
+#
+# That is a twenty-fold wider input to a gate sitting immediately before
+# dispatch, so it waits for owner sign-off on the measured disagreement rather
+# than riding in on the deploy that first produces the data.
+DEPTH_LIVE_FOR_CONSUMERS: bool = _safe_bool("DEPTH_LIVE_FOR_CONSUMERS", "false")
+
+# Levels and update speed. Both are choices from a fixed vendor menu (5/10/20
+# and 100/250/500ms), not free tunables — `depth_book` rejects anything else at
+# construction, because an invalid value subscribes a stream that silently
+# never delivers and reads exactly like a dead feed.
+#
+# 500ms against the program document's own 100ms: every consumer reads this at
+# scan cadence (15s) or at dispatch, so 100ms is ~150x fresher than the fastest
+# reader and costs 5x the messages to be so.
+DEPTH_STREAM_LEVELS: int = _safe_int("DEPTH_STREAM_LEVELS", "20")
+DEPTH_STREAM_SPEED_MS: int = _safe_int("DEPTH_STREAM_SPEED_MS", "500")
+
+# Bounded rollout, same reasoning as AGGTRADE_MAX_SYMBOLS: WebSocket market
+# streams cost no REQUEST_WEIGHT at any rate, so the bound is our own read loop
+# and the whole-universe decision comes from the measured message rate on
+# /diagnostics/data-intake.
+DEPTH_MAX_SYMBOLS: int = _safe_int("DEPTH_MAX_SYMBOLS", "40")
+
 STRUCTURAL_SNAP_MEASURE: bool = _safe_bool("STRUCTURAL_SNAP_MEASURE", "true")
 STRUCTURAL_SNAP_APPLY: bool = _safe_bool("STRUCTURAL_SNAP_APPLY", "false")
 #: Comma-separated setup classes the snap may actually move.  Empty = none,

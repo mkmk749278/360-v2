@@ -77,6 +77,7 @@ from src.auto_trade.risk_manager import RiskManager
 from config import PAPER_BOOKS_DIR, PAPER_PER_USER_BOOKS
 from src.auto_trade.position_reconciler import PositionReconciler
 from src.footprint import get_store as get_footprint_store
+from src.depth_book import get_store as get_depth_store
 from src.live_ticks import get_store as get_live_tick_store
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
@@ -398,6 +399,10 @@ class CryptoSignalEngine:
         # Live aggressive-trade pool (price-action program, Phase 2a). Its own
         # connection pool because @aggTrade is the highest-rate stream we take.
         self._ws_futures_aggtrade: Optional[WebSocketManager] = None
+        # Live order-book depth pool (price-action program, Phase 2c). Its own
+        # pool because depth publishes on a fixed clock — silence on it is a
+        # fault, where silence on aggTrade is often just a quiet symbol.
+        self._ws_futures_depth: Optional[WebSocketManager] = None
         # Real-time mover-ignition detector — folds `!ticker@arr` frames and
         # surfaces pairs igniting *now*; drained by the scanner each cycle to
         # promote them (replaces the lagging 24h-%change trigger). Pure in-memory.
@@ -1496,6 +1501,13 @@ class CryptoSignalEngine:
                 # the layer the published evidence actually supports and the
                 # one a single per-bar delta is structurally silent on.
                 get_footprint_store().add_row(symbol, _row)
+
+        elif event == "depthUpdate":
+            # Partial book depth (Phase 2c). Every message is a complete top-N
+            # snapshot, so this REPLACES state rather than amending it — there
+            # is no sequence to chain and therefore nothing that can desync.
+            # Two lists allocated and stored; no logging and no async hop.
+            get_depth_store().update(symbol, data)
 
         elif event == "trade":
             tick = {
@@ -2655,6 +2667,50 @@ class CryptoSignalEngine:
         fl.add_predicate(PredicateProbe(
             name="footprint_bars",
             fn=_footprint_bars,
+            min_streak=6,          # 30 min sustained
+        ))
+
+        def _depth_feed() -> Tuple[bool, str]:
+            """Are the subscribed books actually being refreshed?
+
+            Keyed on the population **owed** a book — the symbols we subscribed
+            — and not on the symbols currently delivering, which is the shape
+            that let a watchdog read 100% while every rotated-out symbol was
+            unresolvable (#815). Here the difference bites immediately: a feed
+            that dies leaves the store full of snapshots, so any probe counting
+            what it holds sees a healthy book of stale prices.
+
+            Silence is a fault on this stream and is not one on aggTrade. Depth
+            publishes on a fixed clock whether or not anything trades, so a
+            symbol with no message is a stopped feed, never a quiet market —
+            which is why `depth_book` derives its staleness bound from the
+            configured speed rather than guessing one.
+            """
+            from config import DEPTH_STREAM_ENABLED
+            if not DEPTH_STREAM_ENABLED:
+                # Not a failure. Raising here would convert to a fail_open
+                # record and fill the counter whose whole purpose is making a
+                # real failure stand out.
+                return True, "disabled by tunable"
+            h = get_depth_store().health()
+            subscribed = h["symbols_subscribed"]
+            if subscribed == 0:
+                return True, "no symbols subscribed yet"
+            live = h["delivering"]
+            detail = (
+                f"{live}/{subscribed} books fresh "
+                f"(stale {h['stale']}, never {h['never_delivered']}, "
+                f"thin {h['thin_books']}); {h['messages_total']} msgs, "
+                f"{h['messages_rejected']} rejected"
+            )
+            # Two thirds rather than all: a genuinely thin or newly-subscribed
+            # symbol can lag, and paging on the first one would make the probe
+            # noise. A majority going dark is the fault worth waking someone.
+            return live >= (subscribed * 2 // 3), detail
+
+        fl.add_predicate(PredicateProbe(
+            name="depth_feed",
+            fn=_depth_feed,
             min_streak=6,          # 30 min sustained
         ))
 

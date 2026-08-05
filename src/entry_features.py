@@ -430,7 +430,7 @@ ROW_METADATA_KEYS: frozenset = frozenset({
     # Metadata *about* a feature — why it is absent, or which series produced
     # it. These are None precisely when the feature is fine, so counting them
     # would mark every healthy row incomplete.
-    reason_key("level_dist_r"), "cvd_source",
+    reason_key("level_dist_r"), "cvd_source", "book_source",
 })
 
 
@@ -824,6 +824,26 @@ def capture(
         "15m" if _cvd_15m else ("5m" if smc.get("cvd") else None)
     )
 
+    # Same treatment for the book, and for the same reason (Phase 2c).
+    # `book_imbalance` sums `bids[:10]` / `asks[:10]`, and until the depth
+    # handover it has been summing a list of length ONE — the bookTicker
+    # snapshot carries a single quote per side. When `DEPTH_LIVE_FOR_CONSUMERS`
+    # flips, the same column starts describing twenty levels: same name,
+    # different measurement, which is precisely what `cvd_source` exists to
+    # prevent going unnoticed.
+    #
+    # Stamped rather than schema-bumped: a bump discards every row already
+    # collected over a feature the change does not touch, where naming the
+    # source keeps both populations and lets a reader split them. The value is
+    # read off the book itself, never from the config flag — the flag says what
+    # was intended, the snapshot says what arrived.
+    _book = smc.get("order_book")
+    _book_source = None
+    if isinstance(_book, dict):
+        _book_source = str(
+            _book.get("depth_quality") or _book.get("source") or "unknown"
+        )
+
     # When the entry was taken. `classify_session` is a pure function of the
     # UTC clock and the engine has been computing it — and storing it on every
     # signal as `mc_session_quality` — since Layer A shipped, without any
@@ -864,7 +884,7 @@ def capture(
         "extension_pct": extension_pct(_f(entry), _f(ma_slow)),
         "level_dist_r": _level_dist,
         "book_imbalance_aligned": _align(
-            book_imbalance(smc.get("order_book")), direction_is_long
+            book_imbalance(_book), direction_is_long
         ),
         # Raw and deliberately unsigned: funding is a market state, not a
         # directional read. "Crowded long" is not automatically good for a short
@@ -917,6 +937,9 @@ def capture(
             # Likewise — which series `cvd_slope_aligned` was computed from, so
             # two definitions of one column stay separable rather than averaged.
             "cvd_source": _cvd_source,
+            # Likewise for `book_imbalance_aligned`: one quote or twenty
+            # levels, under one column name.
+            "book_source": _book_source,
             # The two halves behind `session_quality`, kept so a reader can see
             # WHICH low-quality window a row sits in — Asia and a Saturday NY
             # both score 0.45-0.51 and are not the same finding. Metadata: the
