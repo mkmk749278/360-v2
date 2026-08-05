@@ -5396,6 +5396,50 @@ class Scanner:
             # WARNed and paged via the feature-liveness watchdog — never silent.
             fail_open.record("scanner.structural_snap", _snap_exc)
 
+        # ── Structural veto (price-action program, Phase 4) ──────────────
+        # Same seam and the same reason: `opposing_inside_tp1` asks whether TP1
+        # sits beyond a level, and `sig.tp1` is rewritten four times between the
+        # evaluator and here — so measured any earlier it describes a target
+        # that is not the target.
+        #
+        # Both reads are in-memory on shared stores. No network, no Firestore,
+        # and enqueues are hundreds per window rather than per tick.
+        _veto_row = None
+        try:
+            from src import structural_veto as _veto
+            _veto_row = _veto.stamp(
+                sig,
+                levels=self.level_book.get_levels(sig.symbol),
+                value_area=self.volume_profile_store.get(sig.symbol),
+            )
+        except Exception as _veto_exc:
+            fail_open.record("scanner.structural_veto", _veto_exc)
+
+        # The consuming half, in the same change — a setting the engine stores
+        # but does not consume is a scaffold. Default OFF and per-path gated;
+        # `should_suppress` reads the row the ledger holds rather than
+        # recomputing the verdict, so the gate and the panel cannot describe
+        # different books.
+        try:
+            from src import structural_veto as _veto
+            if _veto_row is not None and _veto.should_suppress(_veto_row):
+                # Every live gate stamps `_stamp_suppressed`, no exceptions —
+                # an enforcing gate starves its own evidence, and the
+                # suppression audit's forward measurement is the only thing
+                # that keeps this rule earning its place.
+                self._stamp_suppressed(sig, "structural_veto:target_behind_level")
+                self._increment_path_funnel(
+                    "suppressed", str(getattr(sig, "channel", "") or "UNKNOWN"), sig,
+                )
+                log.info(
+                    "structural_veto: {} {} rejected — TP1 {} sits beyond {} at {}",
+                    sig.symbol, sig.direction.value, sig.tp1,
+                    _veto_row.get("opposing_type"), _veto_row.get("opposing_price"),
+                )
+                return False
+        except Exception as _veto_exc2:
+            fail_open.record("scanner.structural_veto_gate", _veto_exc2)
+
         # ── Active-duplicate guard (2026-07-09, dark-flagged) ────────────
         # The dispatch cooldown below intends "never two live copies of the
         # same setup", but it does not survive every restart path — SPCXUSDT
