@@ -845,6 +845,50 @@ python -m src.main
   a crash; it just made both features look like noise, which is indistinguishable
   from a feature that genuinely does not discriminate. Ask of every signed
   feature whether positive means "good for price" or "good for *this trade*".
+- **A vendor can split one protocol across routed paths, and the wrong one is
+  silent, not broken.** Binance serves book streams and trade streams on
+  **mutually exclusive** paths — measured 2026-08-05, one stream per connection:
+  `@aggTrade` / `@kline_1m` / `@markPrice` deliver on `/market/stream` and are
+  silent on `/stream`; `@depth*` / `@bookTicker` are the exact inverse. Phase
+  2c's depth pool inherited `/market/stream` and shipped **40 streams, 40
+  silent, 0 messages, pool HEALTHY** — the handshake succeeds, PING/PONG keeps
+  the socket alive, `is_healthy` stays true, and zero application-layer frames
+  ever arrive. That is the 2026-05-14 multi-hour blackout signature, and the
+  docstring written to fix *that* outage is what identified it: it enumerates
+  the streams belonging to `/market` (kline, aggTrade, markPrice, forceOrder,
+  ticker) and **depth was never in the list**. A hand-written list of what
+  belongs somewhere is silent by construction on the next member — the
+  `is_tradfi_perp` rule, one layer down.
+
+  Three habits. **Exercise a vendor seam once before shipping it**: the stream
+  name was taken from documentation and never connected to, and the probe that
+  found this took thirty seconds. **`is_healthy` is a fact about the socket, not
+  about the data** — a pool needs a per-stream delivery count before it can
+  claim to be working, which is why the `depth_feed` probe keys on symbols
+  *subscribed* rather than on what the store holds. And **a guard belongs where
+  both facts are in scope**: the declared path and the actual streams meet only
+  in the URL builder, so that is where a mismatch is named — with a *different*
+  message for a mixed pool, because no single path can serve it and the fix is
+  to split the pool rather than change its path.
+
+  Corollary, and it is why this shipped at all: **dark-first is what made this
+  cheap.** `DEPTH_LIVE_FOR_CONSUMERS` was off, so a completely dead feed reached
+  no signal, and the ops surface that shipped in the same change surfaced it
+  within minutes. A dark change without its panel would have been silently dead
+  for as long as nobody looked.
+- **"Sign-off to activate" is not "sign-off to implement", and reading it the
+  second way defers work for nothing.** Phase 3 was described in its own program
+  doc as *"dark-first with owner sign-off to activate"*, and it was queued as
+  needing approval *before starting* on the reasoning that it "changes what
+  emits". It does not: a dark change alters nothing, because the effect flag is
+  off — that is the entire point of there being two flags. The owner corrected
+  it (*"phase 3 also dark measurement right"*) and the phase shipped the same
+  day. **Building the mechanism and choosing its threshold are separable, and
+  only the second needs evidence** — the rule this file already carries from the
+  other direction ("make it live" is a question about which rules). Before
+  deferring a money-path change for sign-off, ask whether what is being deferred
+  is the *measurement* or the *effect*; deferring the measurement is how an ops
+  panel stays empty and a decision keeps getting postponed.
 - **A gate whose comment and code disagree is worth CHECKING — it is not
   thereby a gate that does nothing.** `_evaluate_trend_pullback`'s SMC check
   reads *"require at least one FVG or orderblock in the pullback zone"* and is

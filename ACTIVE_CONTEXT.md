@@ -125,6 +125,41 @@ Remaining: **Phase 5** (standalone lane — gated on Phase 4's answer) and
 **Phase 7** (verdict surface — worth waiting until 4 has data, since an empty
 verdict page is the thing this program keeps warning about).
 
+### Verify after the next deploy (priority order)
+
+Every one of these distinguishes *running* from *shipped*, which is the whole
+lesson of the depth pool reading HEALTHY with 40/40 streams silent. **A lane that
+cannot be confirmed alive is not dark — it is off, and nobody knows.**
+
+1. **`/diagnostics/data-intake` → depth card.** Expect ~40/40 books fresh and
+   messages climbing. `0 accepted` with a HEALTHY pool means a routed-path
+   regression — check `_routed_path` before anything else.
+2. **Same page → primitive census.** `orderblocks` should read `measured_dark`
+   with a non-zero would-flip count, and `fvg_lookback_wide` should show
+   `live=10 measured=60`. `not_implemented` there means Phase 3 did not deploy;
+   `measure_disabled` means the tunable is off.
+3. **`/signals/structural-veto`.** Rows accumulate immediately; the *joined*
+   count only grows as signals deliver and close, so an empty splits table on
+   day one is expected and is **not** a fault.
+4. **Feature-liveness probes** — `depth_feed`, `structural_veto_lane`,
+   `footprint_bars`, `aggtrade_feed`. Each abstains cleanly when its tunable is
+   off rather than paging, so a silent watchdog here means healthy *or*
+   disabled, and the census rows above are what separate the two.
+5. **Retention counters** on `/signals/structural-veto`. `evicted_delivered`
+   must stay **0**. Non-zero means the retention policy is losing exactly the
+   population it exists to keep, and the delivered cap needs raising.
+
+### Do not do these without new evidence
+
+* **Do not flip any of the five flags on the first window.** Depth's 14/40
+  sign-flip read is one instantaneous snapshot of 40 symbols; the veto's splits
+  need delivered rows, which arrive at ~16/day.
+* **Do not read the Phase 3 census as "how much better".** It is structurally a
+  *how much would change* number — those gates reject pre-scoring, so the
+  candidates a wider window would admit have no outcome anywhere.
+* **Do not "fix" an empty veto splits table.** No joined rows yet is the quiet
+  case, and the row count beside it is what tells them apart.
+
 ---
 
 ## 🟢 SESSION 113 (as first written) — Phases 0 → 2c
