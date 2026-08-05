@@ -1171,6 +1171,23 @@ class SignalRouter:
             from src import fail_open
             fail_open.record("router.promote_sar_provenance", _prom_exc)
 
+        # Retention by delivery (Phase 6). Same point, same reason: enqueue is
+        # not delivery, and only this line knows the difference. Every
+        # measurement ring is filled by enqueues of which ~0.5% get here, so
+        # evict-by-recency spends the cap destroying the confirmed rows to make
+        # room for the unconfirmed ones — silently, since the ledger stays
+        # exactly full. This marks the row so it can never be evicted by one.
+        #
+        # Keyed on `signal_id`, which is exact. The SAR promotion above matches
+        # on (symbol, side, setup, entry) within a time window because its store
+        # is not keyed by id; that fuzziness is not inherited here.
+        try:
+            from src import delivery_retention as _dr
+            _dr.mark_delivered(signal.signal_id)
+        except Exception as _ret_exc:
+            from src import fail_open
+            fail_open.record("router.mark_delivered", _ret_exc)
+
         # FCM push to the app's `signals` topic — fire-and-forget, off the
         # dispatch path (push_notifications never blocks and never raises).
         push_signal_published(signal)
