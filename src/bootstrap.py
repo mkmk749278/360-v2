@@ -22,6 +22,7 @@ from config import (
 from src.ai_engine import close_shared_session
 from src.binance import BinanceClient
 from src.rate_limiter import futures_rate_limiter, spot_rate_limiter
+from src.binance_weights import weight_for
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
 
@@ -130,7 +131,7 @@ class Bootstrap:
         try:
             _ping_client = BinanceClient("spot")
             ping_resp = await asyncio.wait_for(
-                _ping_client._get("/api/v3/ping", weight=1), timeout=5
+                _ping_client._get("/api/v3/ping", weight=weight_for("/api/v3/ping")), timeout=5
             )
             await _ping_client.close()
             if ping_resp is None:

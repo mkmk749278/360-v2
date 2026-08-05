@@ -25,6 +25,7 @@ from config import (
     TimeframeSeed,
 )
 from src.binance import BinanceClient
+from src.binance_weights import weight_for
 from src.pair_manager import PairManager
 from src.utils import get_logger
 
@@ -151,19 +152,18 @@ class HistoricalDataStore:
     ) -> List[Dict[str, Any]]:
         client = self._futures_client if market == "futures" else self._client
         capped_limit = min(limit, 1000)
+        # Declared 1 here until 2026-08-05, against an actual 5 (futures) and
+        # 25 (spot). A 5x/25x under-declaration makes the rate limiter believe
+        # it has budget it has already spent, and the first symptom of that is
+        # a 429 rather than a warning. Weights now come from one declared
+        # table so the next new endpoint fails CI instead of the exchange.
+        path = "/fapi/v1/trades" if market == "futures" else "/api/v3/trades"
         try:
-            if market == "futures":
-                raw = await client._get(
-                    "/fapi/v1/trades",
-                    params={"symbol": symbol, "limit": capped_limit},
-                    weight=1,
-                )
-            else:
-                raw = await client._get(
-                    "/api/v3/trades",
-                    params={"symbol": symbol, "limit": capped_limit},
-                    weight=1,
-                )
+            raw = await client._get(
+                path,
+                params={"symbol": symbol, "limit": capped_limit},
+                weight=weight_for(path),
+            )
         except Exception as exc:
             log.error("Trade fetch error %s: %s", symbol, exc)
             return []
