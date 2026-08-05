@@ -2714,6 +2714,45 @@ class CryptoSignalEngine:
             min_streak=6,          # 30 min sustained
         ))
 
+        def _structural_veto_lane() -> Tuple[bool, str]:
+            """Is the veto lane computing its features, or only its rows?
+
+            Total blindness is a fault in EITHER mode, not just when enforcing.
+            The tempting reasoning — abstaining costs nothing while nothing is
+            enforced — is wrong: a rule that never reads its feature can never
+            accumulate the evidence its own promotion depends on, which is a
+            measurement flat-lining without paging. That is exactly how
+            `smc_zone_dist_atr` returned None on 57 of 57 rows for its whole
+            life while looking like agreement.
+
+            Keyed on the fraction of stamped rows where the level book had
+            NOTHING readable. `no_opposing` is deliberately not a fault — a
+            populated book with clear air ahead is the finding, not a fault, and
+            counting it here would page on the market being quiet.
+            """
+            from config import STRUCTURAL_VETO_MEASURE
+            if not STRUCTURAL_VETO_MEASURE:
+                return True, "disabled by tunable"
+            from src.structural_veto import counters as _vc
+            c = _vc()
+            stamped = c.get("stamped", 0)
+            if stamped < 20:
+                return True, f"only {stamped} rows stamped yet"
+            blind = c.get("refused_no_levels", 0) / max(1, stamped)
+            detail = (
+                f"{stamped} stamped; {c.get('refused_no_levels', 0)} with no "
+                f"readable level book, {c.get('refused_no_opposing', 0)} with "
+                f"clear air ahead, {c.get('would_reject', 0)} would-reject, "
+                f"{c.get('enforced_reject', 0)} enforced"
+            )
+            return blind < 0.8, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="structural_veto_lane",
+            fn=_structural_veto_lane,
+            min_streak=6,          # 30 min sustained
+        ))
+
         def _sar_ledger_candles() -> Tuple[bool, str]:
             """Can the resolver still fetch candles for the trades it owes?
 

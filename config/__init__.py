@@ -1487,6 +1487,29 @@ STRUCTURAL_SNAP_APPLY: bool = _safe_bool("STRUCTURAL_SNAP_APPLY", "false")
 #: which is what "apply is off" means even if the master switch is flipped.
 STRUCTURAL_SNAP_APPLY_PATHS: str = os.getenv("STRUCTURAL_SNAP_APPLY_PATHS", "")
 
+# ── Structural veto (price-action program, Phase 4) ────────────────────────
+# The application with leverage: it needs no new signal and no new delivery
+# surface, and it is measurable against ~97% of the book from day one.
+#
+# MEASURE defaults ON — it cannot reach a subscriber while ENFORCE is off, and
+# an observe-only path that stamps nothing until someone remembers to flip it
+# produces an empty panel and a decision that keeps being deferred.
+STRUCTURAL_VETO_MEASURE: bool = _safe_bool("STRUCTURAL_VETO_MEASURE", "true")
+
+# ENFORCE defaults OFF and is gated per setup class, the same shape as the
+# snap: one flip must not move nineteen paths on evidence from the one that is
+# 59% of the book. An empty allow-list means enforcing nowhere, which is what
+# "off" means even if the master switch is flipped.
+#
+# The single enforcing rule is `target_behind_level` — TP1 sits beyond an
+# opposing level. It is the only rule here whose threshold comes from NO
+# window: not "closer than N ATR", but "the target cannot be reached without
+# breaking a level", which is arithmetic on values the signal already carries.
+# Distance rules need an N, and an N chosen from the window it is judged on is
+# what `tpe_smc_zone` was retired for.
+STRUCTURAL_VETO_ENFORCE: bool = _safe_bool("STRUCTURAL_VETO_ENFORCE", "false")
+STRUCTURAL_VETO_ENFORCE_PATHS: str = os.getenv("STRUCTURAL_VETO_ENFORCE_PATHS", "")
+
 ENTRY_QUALITY_ENABLED: bool = _safe_bool("ENTRY_QUALITY_ENABLED", "true")
 ENTRY_QUALITY_LIVE: bool = _safe_bool("ENTRY_QUALITY_LIVE", "true")
 #: Blast-radius cap.  Neither rule's rejection *volume* has ever been measured —
