@@ -76,6 +76,7 @@ from src.execution.paper_book_registry import PaperBookFanout, PaperBookRegistry
 from src.auto_trade.risk_manager import RiskManager
 from config import PAPER_BOOKS_DIR, PAPER_PER_USER_BOOKS
 from src.auto_trade.position_reconciler import PositionReconciler
+from src.live_ticks import get_store as get_live_tick_store
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
 from src.redis_client import RedisClient
@@ -393,6 +394,9 @@ class CryptoSignalEngine:
         # connection pool so its frame size cannot stall the kline connections,
         # mirroring the liquidation-pool separation above.
         self._ws_futures_mover: Optional[WebSocketManager] = None
+        # Live aggressive-trade pool (price-action program, Phase 2a). Its own
+        # connection pool because @aggTrade is the highest-rate stream we take.
+        self._ws_futures_aggtrade: Optional[WebSocketManager] = None
         # Real-time mover-ignition detector — folds `!ticker@arr` frames and
         # surfaces pairs igniting *now*; drained by the scanner each cycle to
         # promote them (replaces the lagging 24h-%change trigger). Pure in-memory.
@@ -1473,6 +1477,18 @@ class CryptoSignalEngine:
                 # Snapshot CVD at candle close to align with OHLCV for divergence detection
                 self._order_flow_store.snapshot_cvd_at_candle_close(symbol)
 
+        elif event == "aggTrade":
+            # The subscription the engine never had. Folded into its OWN store
+            # rather than into `data_store.ticks`, because five live consumers
+            # read that one — including a $500k cumulative-tick-volume gate —
+            # and a gate that has been reading seed-time trades for months must
+            # not silently start reading current ones in the deploy that makes
+            # them current. `TICKS_LIVE_FOR_CONSUMERS` is the handover.
+            #
+            # One dict, one deque append, no logging and no async hop: this runs
+            # once per message at thousands a second across the book.
+            get_live_tick_store().add(symbol, data)
+
         elif event == "trade":
             tick = {
                 "price": float(data.get("p", 0)),
@@ -2547,6 +2563,49 @@ class CryptoSignalEngine:
         fl.add_predicate(PredicateProbe(
             name="sar_alignment_crosscheck",
             fn=_sar_alignment_crosscheck,
+            min_streak=6,          # 30 min sustained
+        ))
+
+        def _aggtrade_feed() -> Tuple[bool, str]:
+            """Is the live aggressive-trade feed actually delivering?
+
+            The whole reason Phase 2a exists is that a complete trade handler
+            sat in this file for months with nothing subscribed to feed it, and
+            nothing anywhere reported the absence — an unfed store returns
+            plausible rows of the right shape.
+
+            Keyed on **subscribed-but-silent**, not on total rows: a subscription
+            that did not take has no key in any arrival-keyed count, and a ring
+            left full by a stream that stopped an hour ago looks identical to a
+            healthy one. `quiet` is deliberately NOT a failure — an illiquid
+            perp can genuinely go a minute without an aggressive trade, and
+            paging on that reports a fault that is not happening.
+
+            Returns True when disabled rather than raising: ``PredicateProbe``
+            converts an exception into a ``fail_open.record``, and filling that
+            counter with non-failures is how a real one stops standing out.
+            """
+            from config import AGGTRADE_STREAM_ENABLED
+            if not AGGTRADE_STREAM_ENABLED:
+                return True, "disabled by tunable"
+            from src.live_ticks import get_store as _live
+            h = _live().health()
+            if h["subscribed"] == 0:
+                return True, "no symbols subscribed yet"
+            silent = h["subscribed_silent"]
+            frac = silent / h["subscribed"]
+            detail = (
+                f"{h['fed']} fed / {h['quiet']} quiet / {silent} never delivered "
+                f"of {h['subscribed']} subscribed; {h['total_accepted']} accepted, "
+                f"{h['total_rejected']} rejected"
+            )
+            # A third of the subscription never delivering is a subscription
+            # that did not take, not a quiet market.
+            return frac < 0.34, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="aggtrade_feed",
+            fn=_aggtrade_feed,
             min_streak=6,          # 30 min sustained
         ))
 

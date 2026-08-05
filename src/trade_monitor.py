@@ -62,6 +62,7 @@ from src.execution import runner_policy as _runner_policy
 from src import sar_live_shadow
 from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
+from src.live_ticks import resolve_recent_ticks
 from src.indicators import atr as _compute_atr
 from src.indicators import ema as _compute_ema
 from src.indicators import momentum as _compute_momentum
@@ -1080,7 +1081,7 @@ class TradeMonitor:
                 return mark
         if candle_close is not None:
             return candle_close
-        ticks = self._store.ticks.get(symbol)
+        ticks, _tick_source = resolve_recent_ticks(self._store, symbol)
         if ticks:
             tick_price = ticks[-1].get("price")
             if tick_price is not None:

@@ -22,7 +22,9 @@ from config import (
 from src.ai_engine import close_shared_session
 from src.binance import BinanceClient
 from src.rate_limiter import futures_rate_limiter, spot_rate_limiter
+from config import AGGTRADE_MAX_SYMBOLS, AGGTRADE_STREAM_ENABLED
 from src.binance_weights import weight_for
+from src.live_ticks import get_store as get_live_tick_store
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
 
@@ -894,6 +896,7 @@ class Bootstrap:
         engine = self._engine
         futures_kline_streams: List[str] = []
         futures_liq_streams: List[str] = []
+        futures_aggtrade_streams: List[str] = []
 
         # 2026-05-14: spot WS removed.  Engine is futures-only per CLAUDE.md
         # (75 USDT-M futures pairs scalped via SMC + order-flow logic).  The
@@ -933,6 +936,27 @@ class Bootstrap:
             # updates on kline connections, causing false staleness detections.
             futures_liq_streams.append(f"{s}@forceOrder")
 
+        # ── Live aggressive trades (price-action program, Phase 2a) ────────
+        # The engine has had a complete `trade` handler, a tick store, a cap,
+        # five consumers and gate telemetry all along, and NO subscription —
+        # so `data_store.ticks` served a seed-time REST snapshot and five call
+        # sites read it as live. This is the subscription.
+        #
+        # Its own pool, for the same reason forceOrder has one: aggTrade is the
+        # highest-rate stream we take, and a burst on it must not starve the
+        # kline connections whose staleness detection the whole scan depends on.
+        #
+        # Bounded by AGGTRADE_MAX_SYMBOLS. WebSocket market streams cost no
+        # REQUEST_WEIGHT at any rate, so the bound is about our own read loop
+        # and not the vendor's quota — and the whole-universe decision comes
+        # from the measured message rate on /diagnostics/data-intake.
+        if AGGTRADE_STREAM_ENABLED:
+            agg_symbols = list(tier1_futures)[:max(0, AGGTRADE_MAX_SYMBOLS)]
+            futures_aggtrade_streams.extend(
+                f"{sym.lower()}@aggTrade" for sym in agg_symbols
+            )
+            get_live_tick_store().note_subscribed(agg_symbols)
+
         engine._ws_futures = WebSocketManager(
             engine._on_ws_message,
             market="futures",
@@ -956,10 +980,26 @@ class Bootstrap:
             staleness_multiplier=100,
         )
 
+        # aggTrade is the highest-rate stream we take. Its own pool for the
+        # same reason forceOrder has one — a burst must not stall the kline
+        # connections whose staleness detection the whole scan depends on.
+        # admin_alert_callback is None: this feed is a measurement lane, and a
+        # drop on it degrades a panel rather than the money path.
+        if futures_aggtrade_streams:
+            engine._ws_futures_aggtrade = WebSocketManager(
+                engine._on_ws_message,
+                market="futures",
+                admin_alert_callback=None,
+                data_store=engine.data_store,
+                label="futures_aggtrade",
+            )
+
         if futures_kline_streams:
             await engine._ws_futures.start(futures_kline_streams)
         if futures_liq_streams:
             await engine._ws_futures_liq.start(futures_liq_streams)
+        if futures_aggtrade_streams and getattr(engine, "_ws_futures_aggtrade", None):
+            await engine._ws_futures_aggtrade.start(futures_aggtrade_streams)
 
         # Real-time mover-ignition feed: the single all-market ticker array
         # stream `!ticker@arr` (every changed symbol, 1/sec) on its own
