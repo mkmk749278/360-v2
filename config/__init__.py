@@ -1415,6 +1415,32 @@ DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC: float = _safe_float(
 # returns "5m" byte-identically; the mismatch census runs either way.
 SETUP_TF_CORRECTION_LIVE: bool = _safe_bool("SETUP_TF_CORRECTION_LIVE", "false")
 
+# ── Live aggressive-trade feed (price-action program, Phase 2a) ────────────
+# Two flags, and they are not the same flag (§ Project Phase).
+#
+# AGGTRADE_STREAM_ENABLED is the MEASUREMENT flag and defaults ON: it opens the
+# @aggTrade subscription and fills `src/live_ticks.py`. It cannot reach a
+# subscriber or the money path — the live series lands under its own key and
+# nothing reads it for a decision — so it runs from the moment it ships. An
+# observe-only path that stamps nothing until someone remembers to flip it
+# produces an empty ops panel and a decision that keeps getting deferred.
+AGGTRADE_STREAM_ENABLED: bool = _safe_bool("AGGTRADE_STREAM_ENABLED", "true")
+
+# TICKS_LIVE_FOR_CONSUMERS is the EFFECT flag and defaults OFF. It hands the
+# five existing consumers of `data_store.ticks` — including the $500k
+# cumulative-tick-volume gate — from the seed-time REST snapshot to the live
+# series. That changes what a live gate sees, so it waits for owner sign-off on
+# the measured disagreement rather than riding in on the deploy that makes the
+# data fresh.
+TICKS_LIVE_FOR_CONSUMERS: bool = _safe_bool("TICKS_LIVE_FOR_CONSUMERS", "false")
+
+# How many symbols to subscribe, highest-volume first. aggTrade costs no
+# REQUEST_WEIGHT (WebSocket market streams never do) but it is continuous
+# traffic and CPU on the read loop, so the rollout is bounded and the
+# whole-universe decision is taken from the measured message rate on
+# /diagnostics/data-intake rather than assumed here.
+AGGTRADE_MAX_SYMBOLS: int = _safe_int("AGGTRADE_MAX_SYMBOLS", "40")
+
 STRUCTURAL_SNAP_MEASURE: bool = _safe_bool("STRUCTURAL_SNAP_MEASURE", "true")
 STRUCTURAL_SNAP_APPLY: bool = _safe_bool("STRUCTURAL_SNAP_APPLY", "false")
 #: Comma-separated setup classes the snap may actually move.  Empty = none,

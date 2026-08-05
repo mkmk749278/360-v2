@@ -191,6 +191,7 @@ from src.structure_state import LEG_DOMINANCE_THRESHOLD, StructureTracker
 from src.volume_profile import VolumeProfileStore
 from src.spoof_detect import check_spoof_gate
 from src.tier_manager import TierManager
+from src.live_ticks import resolve_recent_ticks
 from src.utils import get_logger, price_decimal_fmt, utcnow
 from src.btc_direction import (
     check_btc_direction_gate,
@@ -1310,6 +1311,11 @@ class Scanner:
         # Order book spread cache: symbol → (spread_pct, expiry_monotonic_time)
         # expiry_monotonic_time is an absolute time.monotonic() value; the entry
         # is valid while time.monotonic() < expiry_monotonic_time.
+        # Which tick series last answered a read — "live" (aggTrade),
+        # "seed_snapshot" (the REST snapshot taken at seed time) or "none".
+        # Stamped rather than assumed: five call sites read the seeded store as
+        # live for months precisely because nothing recorded which one they got.
+        self._tick_source: str = "none"
         self._order_book_cache: Dict[str, Tuple[float, float]] = {}
         # Lightweight order-book snapshot cache sourced from global bookTicker:
         # symbol → ({"bids": [[price, qty]], "asks": [[price, qty]]}, expiry).
@@ -1697,7 +1703,7 @@ class Scanner:
             regime = getattr(_regime_enum, "value", "RANGING") if _regime_enum else "RANGING"
 
             # SMC via the detector, mirroring _build_scan_context.
-            ticks = self.data_store.ticks.get(symbol, [])
+            ticks, self._tick_source = resolve_recent_ticks(self.data_store, symbol)
             smc_result = self.smc_detector.detect(
                 symbol, candles, ticks, self.order_flow_store,
                 lookback=SMC_SCALP_LOOKBACK,
@@ -3075,7 +3081,7 @@ class Scanner:
         # bar); the higher timeframes hit ~95% of cycles.
         # ------------------------------------------------------------------
         loop = asyncio.get_running_loop()
-        ticks = self.data_store.ticks.get(symbol, [])
+        ticks, self._tick_source = resolve_recent_ticks(self.data_store, symbol)
 
         _sym_ind_cache = self._indicator_cache.setdefault(symbol, {})
         _tfs_to_compute: Dict[str, dict] = {}
@@ -3151,7 +3157,8 @@ class Scanner:
         dependency_source_state: Dict[str, str] = {}
         _recent_ticks = smc_data.get("recent_ticks")
         if _recent_ticks is None:
-            _recent_ticks = self.data_store.ticks.get(symbol, [])[-100:]
+            _recent_ticks, self._tick_source = resolve_recent_ticks(self.data_store, symbol)
+            _recent_ticks = _recent_ticks[-100:]
             dependency_source_state["recent_ticks"] = "unavailable" if not _recent_ticks else "populated"
         else:
             dependency_source_state["recent_ticks"] = "populated" if _recent_ticks else "empty"
@@ -8674,7 +8681,7 @@ class Scanner:
         except Exception as exc:
             log.debug("level excursion sweep failed for {}: {}", symbol, exc)
 
-        ticks = self.data_store.ticks.get(symbol, [])
+        ticks, self._tick_source = resolve_recent_ticks(self.data_store, symbol)
         loop = asyncio.get_running_loop()
 
         # Compute rolling BTC correlation for this symbol (once per scan cycle)

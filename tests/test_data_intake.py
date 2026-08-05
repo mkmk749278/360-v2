@@ -146,7 +146,7 @@ class TestDerivedProvenance:
         rep = build_data_intake(_engine_with_current_streams())
         ticks = rep["derived"]["ticks"]
         assert ticks["source"] == "rest_seed_snapshot"
-        assert "@aggTrade" in ticks["detail"]
+        assert "@trade" in ticks["detail"]
         assert ticks["consumers"], "consumers must be named — the risk is theirs"
 
     def test_a_stale_tick_store_shows_its_age(self):

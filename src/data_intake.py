@@ -280,6 +280,45 @@ def _series_report(engine: Any, *, sample_limit: int = 400) -> Dict[str, Any]:
 # Derived inputs — provenance, not just freshness
 # ───────────────────────────────────────────────────────────────────────────
 
+def _live_tick_report(store: Any) -> Dict[str, Any]:
+    """The live aggTrade series, and whether anything is reading it.
+
+    Two facts that must not collapse into one:
+
+    * **is the feed working** — `fed` / `quiet` / `subscribed_silent`, where
+      the third is a subscription that did not take and is invisible in any
+      count keyed on arrival;
+    * **is the money path reading it** — `serving_consumers`, which is the
+      `TICKS_LIVE_FOR_CONSUMERS` flag and *not* a consequence of the feed being
+      healthy. A working feed is not a reason to change what a live gate sees.
+
+    The drift panel is the measurement the handover is waiting on: the seeded
+    store's age against the live one's, per symbol, which is exactly the error
+    every current consumer carries.
+    """
+    out: Dict[str, Any] = {"present": False}
+    try:
+        from config import (
+            AGGTRADE_MAX_SYMBOLS,
+            AGGTRADE_STREAM_ENABLED,
+            TICKS_LIVE_FOR_CONSUMERS,
+        )
+        from src.live_ticks import get_store as _live
+
+        live = _live()
+        out = dict(live.health())
+        out["present"] = True
+        out["stream_enabled"] = bool(AGGTRADE_STREAM_ENABLED)
+        out["max_symbols"] = int(AGGTRADE_MAX_SYMBOLS)
+        # The flag, read as the flag. Never inferred from feed health.
+        out["serving_consumers"] = bool(TICKS_LIVE_FOR_CONSUMERS)
+        seeded = getattr(store, "ticks", {}) if store is not None else {}
+        out["drift_vs_seeded"] = live.compare_with_seeded(seeded or {})
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+    return out
+
+
 def _derived_report(engine: Any) -> Dict[str, Any]:
     """Where each derived input actually comes from.
 
@@ -316,13 +355,13 @@ def _derived_report(engine: Any) -> Dict[str, Any]:
             if flow is not None else 0,
         },
         "ticks": {
-            # The finding. `append_tick` exists, the `trade` handler exists,
-            # and nothing subscribes a trade stream — so this store is whatever
-            # `/fapi/v1/trades` returned when each symbol was seeded.
+            # The seeded store. `append_tick` and the `trade` handler both
+            # exist and nothing has ever subscribed a trade stream, so this is
+            # whatever `/fapi/v1/trades` returned when each symbol was seeded.
             "source": "rest_seed_snapshot",
             "detail": (
-                "/fapi/v1/trades limit=1000 at seed time; no @trade or "
-                "@aggTrade subscription feeds it"
+                "/fapi/v1/trades limit=1000 at seed time; no @trade "
+                "subscription feeds it"
             ),
             "symbols": tick_symbols,
             "rows": tick_rows,
@@ -336,6 +375,11 @@ def _derived_report(engine: Any) -> Dict[str, Any]:
                 "trade_monitor",
             ],
         },
+        # Phase 2a. Reported beside the seeded store rather than replacing it,
+        # because the handover is a separate decision from the feed working —
+        # `serving_consumers` is what says which one the money path actually
+        # sees, and it is a flag, not a consequence of health.
+        "live_ticks": _live_tick_report(store),
         "order_book": {
             "source": "book_ticker",
             "quality": "top_of_book_only",
