@@ -1816,7 +1816,18 @@ class ScalpChannel(BaseChannel):
             if momentum_last >= 0:
                 return self._reject("momentum_flat")
 
-        # SMC: require at least one FVG or orderblock in the pullback zone
+        # SMC support. NOTE what this actually checks (Phase 3): `orderblocks`
+        # has had no writer for the life of this gate, so `bool(fvgs) or
+        # bool(orderblocks)` has always been `bool(fvgs)` alone. The detector
+        # now exists but is DARK — its output is on `orderblocks_measured` and
+        # this line is unchanged until ORDERBLOCKS_LIVE flips.
+        #
+        # Nor is this the "in the pullback zone" test the old comment claimed:
+        # it is a global existence test. What makes it behave like a zone test
+        # is `detect_fvg`'s 12-bar window — any gap it can find is near price by
+        # construction (median 0.13 ATR, max 0.52 over the first 89 TPE
+        # signals). Widening that window is the other half of Phase 3, also
+        # dark: `fvg` stays the narrow list until FVG_WIDE_LIVE flips.
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
         has_smc_support = bool(fvgs) or bool(orderblocks)
