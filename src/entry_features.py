@@ -197,12 +197,12 @@ import json
 import os
 import threading
 import time
-from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src import fail_open
 from src.market_context import classify_session
+from src.delivery_retention import DeliveryRetainedRing
 from src.utils import get_logger
 
 log = get_logger("entry_features")
@@ -967,7 +967,9 @@ class EntryFeatureLedger:
 
     def __init__(self, path: Optional[str] = None, max_rows: Optional[int] = None) -> None:
         self._path = _DEFAULT_PATH if path is None else path
-        self._rows: Deque[dict] = deque(maxlen=max_rows or _MAX_ROWS)
+        self._ring = DeliveryRetainedRing(
+            name="entry_features", max_pending=max_rows or _MAX_ROWS,
+        )
         self._seen: set = set()
         # signal_id -> the row object itself. The deque already holds it; this
         # is the same object, not a copy, so an annotation written through here
@@ -991,15 +993,20 @@ class EntryFeatureLedger:
                 # a fault worth counting rather than silently overwriting.
                 self.duplicate_skips += 1
                 return False
-            evicted = self._rows[0] if len(self._rows) == self._rows.maxlen else None
+            # Retention by DELIVERY, not by recency (Phase 6). Identical ring
+            # to structural_snap's and identical arithmetic behind it: ~0.5% of
+            # stamped rows ever deliver, and only a delivered row can join
+            # `signal_performance.json` for an outcome. Evicting oldest-first
+            # therefore spends the cap destroying exactly the rows this lane
+            # exists to produce.
             self._seen.add(sid)
-            self._rows.append(row)
+            if not self._ring.add(row):
+                self._seen.discard(sid)
+                return False
             self._by_id[sid] = row
-            if evicted is not None:
-                old = str(evicted.get("signal_id") or "")
-                if old:
-                    self._by_id.pop(old, None)
-                    self._seen.discard(old)
+            for _lost in self._ring.drain_evicted_ids():
+                self._by_id.pop(_lost, None)
+                self._seen.discard(_lost)
             self._dirty = True
             return True
 
@@ -1044,8 +1051,18 @@ class EntryFeatureLedger:
             return True
 
     def rows(self) -> List[dict]:
-        with self._lock:
-            return list(self._rows)
+        return self._ring.rows()
+
+    def mark_delivered(self, signal_id: str) -> bool:
+        """Promote after the router confirmed delivery (Phase 6)."""
+        if self._ring.mark_delivered(signal_id):
+            with self._lock:
+                self._dirty = True
+            return True
+        return False
+
+    def retention(self) -> Dict[str, Any]:
+        return self._ring.stats()
 
     def flush(self, force: bool = False) -> bool:
         """Persist. ``force`` writes even when unchanged, so an idle lane still
@@ -1062,8 +1079,9 @@ class EntryFeatureLedger:
             if not self._path:
                 self._dirty = False
                 return False
-            rows = list(self._rows)
             self._dirty = False
+        rows = self._ring.rows()
+
         payload = {
             "schema": SCHEMA,
             "written_at": time.time(),
@@ -1103,18 +1121,19 @@ class EntryFeatureLedger:
                     sid = str(row.get("signal_id") or "")
                     if sid and sid not in self._seen:
                         self._seen.add(sid)
-                        self._rows.append(row)
-                        # Same object the deque holds — a reloaded row must be
-                        # annotatable, or a restart would silently split the
-                        # ledger into rows the gate can write to and rows it
-                        # cannot, with nothing on screen saying which.
-                        self._by_id[sid] = row
-                # A payload longer than the ring evicts from the left as it is
-                # appended, so the maps are rebuilt from what actually survived
-                # rather than from what was read.
+                        # `restore` routes by the row's OWN delivered flag, so
+                        # a confirmed row comes back protected. Retention state
+                        # kept in the ring instead of on the row would be
+                        # correct until the first restart and then silently
+                        # back to evict-by-recency (#842's class).
+                        self._ring.restore(row)
+                # A payload longer than the ring evicts as it is appended, so
+                # the maps are rebuilt from what actually survived rather than
+                # from what was read. The row objects are the ring's own, so a
+                # reloaded row stays annotatable by the entry-quality gate.
                 self._by_id = {
                     str(r.get("signal_id") or ""): r
-                    for r in self._rows
+                    for r in self._ring.rows()
                     if r.get("signal_id")
                 }
                 self._seen = set(self._by_id)

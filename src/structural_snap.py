@@ -79,9 +79,8 @@ import json
 import os
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -94,6 +93,7 @@ from src.structural_levels import (
     find_swing_levels,
     round_step_for,
 )
+from src.delivery_retention import DeliveryRetainedRing
 from src.utils import get_logger
 
 log = get_logger("structural_snap")
@@ -376,37 +376,55 @@ class SnapLedger:
 
     def __init__(self, path: Optional[str] = None, max_rows: Optional[int] = None) -> None:
         self._path = _DEFAULT_PATH if path is None else path
-        self._rows: Deque[dict] = deque(maxlen=max_rows or _MAX_ROWS)
-        self._by_id: Dict[str, dict] = {}
+        # Retention by DELIVERY, not by recency (Phase 6). This ring is filled
+        # by enqueues of which ~0.5% deliver, so oldest-first eviction spends
+        # the cap destroying the rare population to make room for the common
+        # one — and does it silently, because the ledger stays exactly full.
+        self._ring = DeliveryRetainedRing(
+            name="structural_snap",
+            max_pending=max_rows or _MAX_ROWS,
+        )
         self._lock = threading.RLock()
         self._dirty = False
-        self.duplicate_skips = 0
-        self.evicted = 0
+
+    # `duplicate_skips` / `evicted` stay readable at their old names: the
+    # truth report and the ops payload both read them, and a rename would be a
+    # cross-process contract break for no gain.
+    @property
+    def duplicate_skips(self) -> int:
+        return self._ring.duplicate_skips
+
+    @property
+    def evicted(self) -> int:
+        """Pending-row evictions only.
+
+        Deliberately NOT the sum with `evicted_delivered`: one is cheap
+        evidence rotating out as designed, the other is the retention policy
+        losing a confirmed row, and a single figure covering both would move
+        with enqueue volume rather than with the thing worth knowing.
+        """
+        return self._ring.evicted_pending
 
     def add(self, row: dict) -> bool:
-        sid = str(row.get("signal_id") or "")
-        if not sid:
-            return False
-        with self._lock:
-            if sid in self._by_id:
-                # One signal enqueues once. A second stamp means the choke
-                # point ran twice on one id — a fault worth counting rather
-                # than silently overwriting.
-                self.duplicate_skips += 1
-                return False
-            full = len(self._rows) == self._rows.maxlen
-            old_row = self._rows[0] if full else None
-            self._rows.append(row)
-            self._by_id[sid] = row
-            if old_row is not None:
-                self.evicted += 1
-                self._by_id.pop(str(old_row.get("signal_id") or ""), None)
-            self._dirty = True
+        if self._ring.add(row):
+            with self._lock:
+                self._dirty = True
             return True
+        return False
+
+    def mark_delivered(self, signal_id: str) -> bool:
+        """Promote after the router confirmed delivery."""
+        if self._ring.mark_delivered(signal_id):
+            with self._lock:
+                self._dirty = True
+            return True
+        return False
 
     def rows(self) -> List[dict]:
-        with self._lock:
-            return list(self._rows)
+        return self._ring.rows()
+
+    def retention(self) -> Dict[str, Any]:
+        return self._ring.stats()
 
     def flush(self, force: bool = False) -> bool:
         """Persist.  ``force`` writes even when unchanged, so an idle lane still
@@ -423,9 +441,10 @@ class SnapLedger:
             if not self._path:
                 self._dirty = False
                 return False
-            rows = list(self._rows)
-            evicted = self.evicted
             self._dirty = False
+        rows = self._ring.rows()
+        _ret = self._ring.stats()
+        evicted = _ret["evicted_pending"]
         payload = {
             "schema": SCHEMA,
             "written_at": time.time(),
@@ -433,8 +452,11 @@ class SnapLedger:
             # Persist the eviction count WITH the data: a reader in another
             # process cannot see the cap, and a verdict without its denominator
             # reads as if it covered everything.
-            "max_rows": self._rows.maxlen,
+            "max_rows": _ret["max_pending"],
             "evicted": evicted,
+            # Phase 6. Named apart from `evicted` because they are different
+            # events: one is designed rotation, the other is a lost verdict.
+            "retention": _ret,
             "counters": _counters.as_dict(),
             # Resolver liveness only. NOT a book fraction — six consumers call
             # resolve() per candidate, so this denominator is ~6x the signal
