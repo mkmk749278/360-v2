@@ -303,3 +303,80 @@ def test_the_census_is_surfaced_so_silence_has_a_named_cause():
     assert "refusals" in rep
     assert "refusal_share" in rep
     assert "evaluated" in rep
+
+
+def test_the_payload_key_is_the_one_ops_reads():
+    """A cross-repo field name is a contract, pinned on the PRODUCING side.
+
+    The test above asserts the report function's own return shape, which is a
+    mock asserting your assumption back at you one repo short of the reader —
+    and it went green on 2026-08-06 while `/diagnostics/data-intake` rendered
+    nothing for the lane at all, because ops had no section for the key. That is
+    #817 inverted: a field one repo WRITES and no repo READS, invisible at both
+    ends.
+
+    So this pins the key by name, in the assembled payload. Renaming it now
+    fails here rather than quietly emptying a panel in the other repo.
+    """
+    from src import data_intake
+
+    src = (REPO / "src" / "data_intake.py").read_text()
+    assert '"price_action_lane": _price_action_lane_report()' in src
+
+    # And it is nested under `derived`, which is the half a reader gets wrong:
+    # ops must walk `report["derived"]["price_action_lane"]`, and a fixture that
+    # puts the block at the top level goes green over a page that renders
+    # nothing. Pinned by driving the real assembler over a bare engine.
+    class _Engine:
+        pass
+
+    report = data_intake.build_data_intake(_Engine())
+    assert "price_action_lane" not in report, (
+        "moved to the top level — ops reads report['derived']['price_action_lane']"
+    )
+    assert "price_action_lane" in report["derived"], (
+        "ops reads report['derived']['price_action_lane'] on "
+        "/diagnostics/data-intake"
+    )
+
+
+def test_every_refusal_reason_is_a_declared_constant():
+    """The reason strings travel to ops as dictionary KEYS, and ops looks each
+    one up to decide whether it is a fault, a coverage gap, a market fact or our
+    own throttle. A reason invented inline at a call site would arrive unnamed.
+
+    Ops renders an unrecognised reason under its raw name rather than dropping
+    it — the fix for a drifting mirror is not a second mirror — but the reason
+    must at least be declared here, once, so there is something to rename.
+    """
+    import ast
+
+    src = (REPO / "src" / "price_action_lane.py").read_text()
+    tree = ast.parse(src)
+
+    declared = {
+        node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        and any(
+            isinstance(t, ast.Name) and t.id.startswith("REFUSE_")
+            for t in node.targets
+        )
+    }
+    assert declared, "no REFUSE_* constants found"
+
+    # Every `_census.refuse(...)` argument must be one of them — never a literal.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "refuse"
+            and node.args
+        ):
+            arg = node.args[0]
+            assert isinstance(arg, ast.Name) and arg.id.startswith("REFUSE_"), (
+                f"refuse() called with a literal on line {node.lineno} — "
+                "the reason string is a cross-repo contract, declare it"
+            )
