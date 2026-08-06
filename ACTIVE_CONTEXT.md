@@ -4,6 +4,100 @@
 
 ---
 
+## 🟢 SESSION 114 2026-08-06 — Phase 5 shipped, and then had to be fixed twice
+
+The standalone price-action lane (#886), the snap ledger's re-detection throttle
+(#887 + ops #139), and the lane's call-site defect (#889). Two of the three are
+repairs of work shipped hours earlier in the same session.
+
+### Phase 5 — the standalone lane (#886)
+
+`src/price_action_lane.py` — `PA_SWEEP_RECLAIM`: a level swept and reclaimed on
+the newest closed bar, confirmed by footprint delta, stopped beyond the sweep
+extreme, targeted at the next opposing level. It is the first path in this engine
+whose **trigger** is structure rather than an indicator — the audit that opened
+this program found ~82% of the enqueued book is MA/indicator-triggered and the
+targets are fixed R-multiples off the stop.
+
+It is dark in the strongest sense available: it publishes only to
+`dark_emission`, so it reaches no channel, no push, no app feed and no order. A
+test asserts that by **AST**, not by grepping text — the first cut of that test
+matched the word "router" inside a docstring and passed for the wrong reason.
+
+### The snap ledger was counting re-detections, not evidence (#887, ops #139)
+
+51 rows across 6 setups, EPICUSDT alone 59%, and **one distinct `shift_pct` per
+symbol** — so it was 6 pieces of evidence wearing 51 rows. This is #816's rule
+arriving on a second lane: *a throttle on rate is not a throttle on evidence*,
+and the unit of evidence is the **move**, not the scan that re-detected it.
+
+`REDETECT_COOLDOWN_S = 1800` keyed on `symbol|direction|setup_class`, and ops
+discloses the concentration rather than averaging over it. Two details worth
+keeping:
+
+* the throttle runs **after** the `signal_id` dedup, not before. Reversed, a
+  genuine double-stamp — a real fault — would be filed under `redetect_cooldown`,
+  which is an expected state. A fault must never be absorbed by a bucket that
+  means "working as designed";
+* the throttle state is process-global while the ledger is not, so
+  `reset_ledger()` clears both. Three unrelated tests failed on ordering before
+  that was tied together.
+
+The latest window shows it holding: ~165 signals across ~11 setup classes.
+
+### The lane was evaluated once per hour, and nothing said so (#889)
+
+Owner, after the first deploy: *"still price action itself not generating any
+signals, and those 4 signals also belong to MVRTP."* Correct, and not because the
+trigger is rare.
+
+`scan_symbol` sat inside `_refresh_level_book_if_stale`, which returns early on
+`LEVEL_BOOK_REFRESH_SEC = 3600`. The lane therefore ran **~once per symbol per
+hour**, and a sweep-and-reclaim is a transient on the newest closed bar — an
+hourly poll essentially never lands on one. Moved into `_build_scan_context`,
+beside the line that reads the levels: ~240× more evaluations per symbol per
+hour.
+
+*"Where it becomes true is a point in the call graph."* The lane needs to run
+**often**; the levels needing to be **fresh** is a different requirement, and the
+call went where the second was satisfied because that is where the levels are.
+The test pins the **enclosing function** by AST, because "it is wired" was true
+the whole time and still wrong.
+
+**The second half is why the owner had to ask at all.** The lane shipped with a
+page for its *rows* and nothing anywhere showing *why* there were none — so "why
+is it silent" was answerable only by reading source. That is *dark work must be
+observable* broken by the change meant to honour it; the census existed and only
+the liveness probe read it. `/api/data-intake` now carries the refusal mix, with
+**evaluations** as the denominator, separating `no_footprint` (coverage),
+`no_sweep` (market) and `no_levels` / `short_series` (a data fault) — three
+states with three different next moves. Emission stays out of the health signal
+on purpose: the trigger is rare by design, so zero rows is a quiet market and
+paging on it teaches the reader to ignore the probe.
+
+### Verify after this deploy
+
+1. **`/diagnostics/data-intake` → price-action lane card.** `evaluations` should
+   now climb with the scan loop, not with the hour. If it is still ~1/symbol/hour
+   the call-site fix did not deploy.
+2. **The refusal mix.** `no_levels` / `short_series` at any material share is a
+   data fault and is the only one of the three worth acting on. A book dominated
+   by `no_sweep` is the setup simply not being on offer.
+3. **`/signals/price-action`.** Rows are expected to be *rare*. Zero rows with a
+   healthy refusal mix is the quiet case — do not "fix" it.
+4. **`/signals/structural-snap` concentration columns.** Distinct-symbol and
+   distinct-`shift_pct` counts should now track the row count far more closely
+   than 6:51.
+
+### Still open, unchanged from Session 113
+
+All five dark flags remain OFF and every one is waiting on a data window, not on
+engineering. **Phase 7** (the verdict surface) is the only phase left, and it is
+deliberately queued until Phases 3–5 have rows — an empty verdict page is the
+exact failure this program keeps warning about.
+
+---
+
 ## 🟢 SESSION 113 2026-08-05 — the price-action program, Phases 0 → 6
 
 *(Sections below record 0→2c as first written; 2c's repair, and Phases 6, 4 and 3,
