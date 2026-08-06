@@ -439,7 +439,7 @@
       "FAILED_AUCTION_RECLAIM@FIXED|min_samples": 632,
       "MOVER_TREND_PULLBACK@SAREXIT|min_samples": 629
     },
-    "cycle": 686
+    "cycle": 735
   },
   "ledger": [
     {
