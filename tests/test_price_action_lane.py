@@ -380,3 +380,128 @@ def test_every_refusal_reason_is_a_declared_constant():
                 f"refuse() called with a literal on line {node.lineno} — "
                 "the reason string is a cross-repo contract, declare it"
             )
+
+
+def test_lane_provenance_survives_the_serializer():
+    """`LaneSignal` declares eight provenance fields under the sentence
+    "carried so the page can split by what actually differs between rows".
+    `_row_from_signal` wrote a fixed key list containing none of them, so
+    `/signals/price-action` bucketed every row into `unstamped` and its
+    by-level table described nothing (owner data, 2026-08-06).
+
+    #842's shape: a field one writer populates and one SERIALIZER drops,
+    invisible at both ends because nothing is missing while the process lives.
+    Driven through the real serializer rather than asserted on the dataclass.
+    """
+    from src import dark_emission
+    from src.smc import Direction
+
+    sig = pa.LaneSignal(
+        signal_id="pa-test", symbol="BTCUSDT", channel=pa.SETUP_CLASS,
+        setup_class=pa.SETUP_CLASS, direction=Direction.LONG,
+        entry=100.0, stop_loss=98.0, tp1=104.0,
+        level_price=99.0, level_type="support", level_source_tf="1h",
+        level_score=7.5, sweep_extreme=97.5, sweep_depth_pct=1.5,
+        delta_quote=12345.0, rr=2.0,
+    )
+    row = dark_emission._row_from_signal(sig, 1_700_000_000.0)
+
+    # Every declared field arrives, by name and by value.
+    assert row["level_source_tf"] == "1h"
+    assert row["level_type"] == "support"
+    assert row["level_price"] == 99.0
+    assert row["level_score"] == 7.5
+    assert row["sweep_extreme"] == 97.5
+    assert row["sweep_depth_pct"] == 1.5
+    assert row["delta_quote"] == 12345.0
+    assert row["rr"] == 2.0
+    for key in dark_emission.LANE_PROVENANCE_FIELDS:
+        assert key in row, key
+
+
+def test_a_row_with_no_lane_gets_none_not_zero():
+    """An unstamped level is not a zero one. Every other dark row is a real
+    `Signal` with none of these attributes, and ops renders the difference —
+    `None` becomes `unstamped`, `0.0` would become a level at price zero."""
+    from src import dark_emission
+    from src.smc import Direction
+
+    class _PlainSignal:
+        signal_id = "s-1"
+        symbol = "ETHUSDT"
+        channel = "x"
+        setup_class = "MOVER_TREND_PULLBACK"
+        direction = Direction.SHORT
+        entry = 100.0
+        stop_loss = 102.0
+        tp1 = 96.0
+
+    row = dark_emission._row_from_signal(_PlainSignal(), 1_700_000_000.0)
+    for key in dark_emission.LANE_PROVENANCE_FIELDS:
+        assert row[key] is None, f"{key} must be None, not {row[key]!r}"
+
+
+def test_the_emit_cooldown_survives_a_restart():
+    """The throttle lived in memory while the ledger it protects lives on disk,
+    so every deploy re-armed every symbol and a setup still live across the
+    restart bought a second row at the same price.
+
+    #816 arriving through the process lifetime rather than through the key: a
+    restart is not a new move.
+    """
+    from src import dark_emission
+
+    class _Ledger:
+        def rows(self):
+            return [
+                {"symbol": "BTCUSDT", "dark_gate": pa.DARK_GATE,
+                 "emitted_at": 1_000.0},
+                {"symbol": "BTCUSDT", "dark_gate": pa.DARK_GATE,
+                 "emitted_at": 1_500.0},          # newest wins
+                {"symbol": "ETHUSDT", "dark_gate": "some_other_gate",
+                 "emitted_at": 1_500.0},          # not this lane — ignored
+            ]
+
+    pa.reset_census()
+    original = dark_emission.get_ledger
+    dark_emission.get_ledger = lambda: _Ledger()          # type: ignore[assignment]
+    try:
+        pa._rehydrate_cooldown()
+        assert pa._last_emit["BTCUSDT"] == 1_500.0
+        assert "ETHUSDT" not in pa._last_emit, (
+            "another lane's rows must not arm this lane's throttle"
+        )
+        # Once per process, not once per evaluation — this sits inside the
+        # scanner's per-symbol loop.
+        pa._last_emit.clear()
+        pa._rehydrate_cooldown()
+        assert pa._last_emit == {}
+    finally:
+        dark_emission.get_ledger = original               # type: ignore[assignment]
+        pa.reset_census()
+
+
+def test_a_rehydrated_cooldown_actually_refuses():
+    """The seed is only worth having if `evaluate` reads it — pinning the wire,
+    not the helper. Driven through the same triggering fixture every other test
+    in this file uses, so a pass here means a real setup was refused."""
+    from src import dark_emission
+
+    class _Ledger:
+        def rows(self):
+            return [{"symbol": "BTCUSDT", "dark_gate": pa.DARK_GATE,
+                     "emitted_at": 10_000.0}]
+
+    # Same inputs, no ledger: this triggers. That is the control.
+    sig, reason = _eval(now=10_100.0)
+    assert sig is not None, "fixture must trigger, or the test below proves nothing"
+
+    original = dark_emission.get_ledger
+    dark_emission.get_ledger = lambda: _Ledger()          # type: ignore[assignment]
+    try:
+        sig, reason = _eval(now=10_100.0)                 # 100s after the row
+        assert sig is None
+        assert reason == pa.REFUSE_COOLDOWN
+    finally:
+        dark_emission.get_ledger = original               # type: ignore[assignment]
+        pa.reset_census()
