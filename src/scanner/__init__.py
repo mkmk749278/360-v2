@@ -3413,11 +3413,30 @@ class Scanner:
                             _pa_atr = float(_a[-1])
                     except Exception:  # noqa: BLE001
                         _pa_atr = None
+                    # Layer 1, passed in rather than recomputed: `regime_context`
+                    # is built ~80 lines above and `regime_tf` ~145 above, both
+                    # in this same function, so stamping costs nothing.
+                    #
+                    # The lane declared `entry_regime` from the day it shipped
+                    # and NOTHING EVER ASSIGNED IT — every row carried "". §1 of
+                    # the program doc defines this lane's own trigger relative to
+                    # the prevailing trend (a break WITH it is continuation,
+                    # AGAINST it is reversal), so a lane blind to trend cannot
+                    # tell those apart; and an empty column cannot be split on,
+                    # which made the quality question unaskable rather than
+                    # merely unanswered (owner-directed audit, 2026-08-06).
+                    #
+                    # `regime_tf` rides along because this label is the 5m one
+                    # and the lane triggers on 15m. The trigger-timeframe regime
+                    # is computed inside `scan_symbol`, on the emit path only.
                     _pa.scan_symbol(
                         symbol=symbol,
                         levels=smc_data["level_book_levels"],
                         candles=_pa_cd,
                         atr=_pa_atr,
+                        regime_label=str(getattr(regime_context, "label", "") or ""),
+                        regime_tf=regime_tf,
+                        pair_tier=_pair_tier,
                     )
             except Exception as _pa_exc:
                 fail_open.record("scanner.price_action_lane", _pa_exc)

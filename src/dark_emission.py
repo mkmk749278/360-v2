@@ -501,6 +501,11 @@ LANE_PROVENANCE_FIELDS: Dict[str, type] = {
     "sweep_depth_pct": float,
     "delta_quote": float,
     "rr": float,
+    # Layer 1 — which timeframe `regime` describes. The scanner classifies on
+    # 5m and this lane triggers on 15m, so a regime label with no timeframe
+    # beside it is the same class of omission as a percentage with no
+    # denominator ("never pool timeframes silently").
+    "regime_tf": str,
 }
 
 
@@ -551,6 +556,12 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         # one, which is exactly what makes it different from a suppression stamp.
         "confidence": float(getattr(sig, "confidence", 0.0) or 0.0),
         "regime": str(getattr(sig, "entry_regime", "") or ""),
+        # The higher-timeframe regime, which every real `Signal` has carried
+        # since the scanner started stamping `entry_regime_15m` and no dark row
+        # ever recorded. Layer 1 of the price-action model is the question
+        # "is the prevailing trend with this trade or against it", and it is
+        # the trigger timeframe's answer that settles it for a 15m lane.
+        "regime_15m": str(getattr(sig, "entry_regime_15m", "") or "") or None,
         "context_key": str(getattr(sig, "mc_context_key", "") or ""),
         "valid_for_minutes": float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
         "pair_admission": str(getattr(sig, "pair_admission", "") or ""),

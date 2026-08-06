@@ -201,7 +201,6 @@ def _rehydrate_cooldown() -> None:
             if sym and ts > _last_emit.get(sym, 0.0):
                 _last_emit[sym] = ts
     except Exception as exc:  # noqa: BLE001
-        from src import fail_open
         fail_open.record("price_action_lane.rehydrate_cooldown", exc)
 
 
@@ -240,7 +239,25 @@ class LaneSignal:
     #: no MTF policy and no confidence floor. An invented number here would be
     #: fabricated performance data on a surface an adoption decision reads.
     confidence: float = 0.0
+    #: Layer 1 — "where are we in the auction?". Declared since the lane
+    #: shipped and NEVER ASSIGNED, so every row ever written carried "".
+    #:
+    #: That is not a cosmetic gap. §1 of the program doc defines the lane's own
+    #: trigger relative to the prevailing trend — a break WITH it is a BOS
+    #: (continuation), a break AGAINST it is a CHoCH (reversal) — so a lane with
+    #: no notion of trend cannot tell the two apart and takes every sweep
+    #: identically. It also made the question unaskable: you cannot split a book
+    #: by an empty column (owner-directed audit, 2026-08-06).
     entry_regime: str = ""
+    #: Which timeframe `entry_regime` describes. Stamped because the scanner's
+    #: regime runs on 5m and this lane triggers on 15m — "never pool timeframes
+    #: silently", and a regime label with no timeframe beside it is the same
+    #: class of omission as a percentage with no denominator.
+    regime_tf: str = ""
+    #: The regime on the lane's OWN trigger timeframe. This is the one layer 1
+    #: actually asks for here; the 5m label above is kept beside it because a
+    #: disagreement between them is information, not noise.
+    entry_regime_15m: str = ""
     mc_context_key: str = ""
     valid_for_minutes: float = 0.0
     pair_admission: str = ""
@@ -363,10 +380,19 @@ def evaluate(
     atr: Optional[float],
     footprint_bar: Optional[Dict[str, Any]],
     now_ts: Optional[float] = None,
+    regime_label: str = "",
+    regime_tf: str = "",
 ) -> Tuple[Optional[LaneSignal], str]:
     """``(signal, refusal_reason)`` — exactly one is set.
 
     Pure: no I/O, mutates nothing but the census.
+
+    *regime_label* / *regime_tf* are layer 1, passed in rather than computed
+    here because the caller already has them — the scanner classifies the regime
+    ~130 lines above this lane's call site in the same function, so stamping it
+    costs one attribute and no work. A default of ``""`` keeps this callable
+    from a test without a scanner, and an unstamped row is then honestly blank
+    rather than confidently wrong.
     """
     now = float(now_ts if now_ts is not None else time.time())
     _census.evaluated += 1
@@ -451,6 +477,8 @@ def evaluate(
         level_type=str(_lvl_attr(lvl, "type", "") or ""),
         level_source_tf=str(_lvl_attr(lvl, "source_tf", "") or ""),
         level_score=_f(_lvl_attr(lvl, "score")) or 0.0,
+        entry_regime=str(regime_label or ""),
+        regime_tf=str(regime_tf or ""),
         sweep_extreme=float(extreme),
         sweep_depth_pct=abs(level_price - extreme) / level_price * 100.0,
         delta_quote=delta,
@@ -466,6 +494,9 @@ def scan_symbol(
     candles: Any,
     atr: Optional[float],
     now_ts: Optional[float] = None,
+    regime_label: str = "",
+    regime_tf: str = "",
+    pair_tier: str = "MIDCAP",
 ) -> bool:
     """Evaluate one symbol and publish a dark row if it triggers.
 
@@ -490,9 +521,34 @@ def scan_symbol(
         sig, reason = evaluate(
             symbol=symbol, levels=levels, high=high, low=low, close=close,
             atr=atr, footprint_bar=fp_bar, now_ts=now_ts,
+            regime_label=regime_label, regime_tf=regime_tf,
         )
         if sig is None:
             return False
+
+        # The regime on the lane's OWN trigger timeframe, computed HERE and not
+        # in `evaluate` — this runs a few times a day on the emit path, where
+        # `evaluate` runs ~19,000 times an hour on every scanned symbol. Same
+        # arrays, already in memory, so the cost is CPU on the rare path rather
+        # than CPU on the hot one (Cost Discipline).
+        #
+        # Refuses rather than guessing: a blank label is honestly unknown, and
+        # #817's lesson is that a confidently wrong regime is worse than an
+        # empty one because the table still looks full.
+        try:
+            from src.regime import detect_regime_from_arrays
+            _c = np.asarray(close, dtype=np.float64).ravel()
+            _h = np.asarray(high, dtype=np.float64).ravel()
+            _l = np.asarray(low, dtype=np.float64).ravel()
+            if len(_c) >= 30:
+                sig.entry_regime_15m = str(
+                    detect_regime_from_arrays(
+                        _c, _h, _l, np.zeros(len(_c), dtype=np.float64),
+                        idx=len(_c) - 1, pair_tier=pair_tier,
+                    ) or ""
+                )
+        except Exception as exc:  # noqa: BLE001
+            fail_open.record("price_action_lane.regime_15m", exc)
 
         from src import dark_emission
         if dark_emission.publish(sig):
