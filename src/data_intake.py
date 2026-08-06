@@ -465,6 +465,43 @@ def _depth_report() -> Dict[str, Any]:
     return out
 
 
+def _price_action_lane_report() -> Dict[str, Any]:
+    """Why the price-action lane produced what it produced.
+
+    Shipped **after** the lane itself, which was the mistake: the lane went out
+    with a page for its ROWS and nothing showing why there were none. So the
+    only way to answer "why is it silent" was to read the source — which is the
+    "dark work must be observable" rule broken by the change that was supposed
+    to honour it, and it cost the owner a question that a page should have
+    answered (2026-08-06).
+
+    Emission is not the health signal here. The trigger is deliberately rare, so
+    zero rows is a quiet market. What this panel exists to separate is WHICH
+    refusal is doing the work: `no_footprint` means the confirmation layer does
+    not cover the symbol (a coverage fact), `no_sweep` means the market is not
+    offering the setup (a market fact), and `no_levels` / `short_series` mean the
+    lane is blind (a data fault). Three different next moves.
+    """
+    out: Dict[str, Any] = {"present": False}
+    try:
+        from config import PRICE_ACTION_LANE_MEASURE
+        from src.price_action_lane import census as _pc
+
+        c = _pc()
+        out = dict(c)
+        out["present"] = True
+        out["measure_enabled"] = PRICE_ACTION_LANE_MEASURE
+        n = max(1, int(c.get("evaluated") or 0))
+        # Shares, so a reader sees which refusal dominates without dividing by
+        # hand — and the denominator is evaluations, never rows.
+        out["refusal_share"] = {
+            k: v / n for k, v in (c.get("refusals") or {}).items()
+        }
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+    return out
+
+
 def _derived_report(engine: Any) -> Dict[str, Any]:
     """Where each derived input actually comes from.
 
@@ -552,6 +589,11 @@ def _derived_report(engine: Any) -> Dict[str, Any]:
         # above. Reported separately for the same reason the footprint is
         # reported beside the tick ring rather than inside it.
         "depth": _depth_report(),
+        # Phase 5. Not a derived INPUT — a lane that consumes several of the
+        # ones above. It sits here because this is the page a reader opens when
+        # something is producing nothing, and its refusal mix names which input
+        # is the reason.
+        "price_action_lane": _price_action_lane_report(),
         "open_interest": {
             "source": "rest_poll",
             "symbols": len(getattr(flow, "_oi", {}) or {}) if flow is not None else 0,

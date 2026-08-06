@@ -3384,6 +3384,43 @@ class Scanner:
         try:
             self._refresh_level_book_if_stale(symbol, candles)
             smc_data["level_book_levels"] = self.level_book.get_levels(symbol)
+
+            # ── Standalone price-action lane (Phase 5) ──────────────────
+            # HERE, and not inside `_refresh_level_book_if_stale`, which is
+            # where the first cut put it. That method returns early on a
+            # per-symbol TTL of ONE HOUR, so the lane was evaluated ~1/hour
+            # per symbol — and a sweep-and-reclaim is a transient event on the
+            # newest closed bar, so an hourly poll almost never lands on one.
+            # It produced zero signals for that reason alone, not because the
+            # trigger is rare (owner-caught 2026-08-06).
+            #
+            # "Where it becomes true is a point in the call graph": the lane
+            # needs to be evaluated OFTEN, which is a different requirement
+            # from the levels being FRESH, and I put it where the second was
+            # satisfied. This block runs every scan, per symbol.
+            #
+            # All reads are in-memory (LevelBook, the candle store, the
+            # footprint) — no network, no Firestore.
+            try:
+                from src import price_action_lane as _pa
+                _pa_cd = candles.get("15m") or candles.get("5m")
+                if isinstance(_pa_cd, dict) and _pa_cd.get("close") is not None:
+                    from src.indicators import atr as _atr_fn
+                    _pa_atr = None
+                    try:
+                        _a = _atr_fn(_pa_cd["high"], _pa_cd["low"], _pa_cd["close"])
+                        if _a is not None and len(_a):
+                            _pa_atr = float(_a[-1])
+                    except Exception:  # noqa: BLE001
+                        _pa_atr = None
+                    _pa.scan_symbol(
+                        symbol=symbol,
+                        levels=smc_data["level_book_levels"],
+                        candles=_pa_cd,
+                        atr=_pa_atr,
+                    )
+            except Exception as _pa_exc:
+                fail_open.record("scanner.price_action_lane", _pa_exc)
         except Exception as _lb_exc:
             log.debug(
                 "LevelBook refresh/lookup failed at smc_data assembly for {}: {}",
@@ -4777,46 +4814,6 @@ class Scanner:
         except Exception as exc:
             log.debug("LevelBook refresh failed for {}: {}", symbol, exc)
 
-        # ── Standalone price-action lane (Phase 5) ────────────────────────
-        # Runs right after the LevelBook refresh, because that is where the
-        # levels it triggers on become current. The first lane in this engine
-        # where structure GENERATES the signal rather than scoring or filtering
-        # it.
-        #
-        # It publishes to `dark_emission` and nowhere else — no channel, no
-        # push, no app feed, no order — so this is not a money-path call site
-        # even though it creates signals. Promotion to a delivered channel is a
-        # new evaluator path and therefore a separate, owner-signed change.
-        #
-        # All reads are in-memory (LevelBook, the candle store, the footprint)
-        # and this runs at scan cadence, not per tick.
-        try:
-            from src import price_action_lane as _pa
-            _pa_cd = candles_by_tf.get("15m") or candles_by_tf.get("5m")
-            if isinstance(_pa_cd, dict) and _pa_cd.get("close") is not None:
-                # ATR from the real indicator, on the same bars the sweep is
-                # detected on. It buffers the stop past the sweep wick and does
-                # not size the trade, so a short series degrading to None is
-                # survivable — `evaluate` treats it as a zero buffer rather
-                # than refusing, and the stop still sits at the wick.
-                from src.indicators import atr as _atr_fn
-                _pa_atr = None
-                try:
-                    _atr_arr = _atr_fn(
-                        _pa_cd["high"], _pa_cd["low"], _pa_cd["close"],
-                    )
-                    if _atr_arr is not None and len(_atr_arr):
-                        _pa_atr = float(_atr_arr[-1])
-                except Exception:  # noqa: BLE001
-                    _pa_atr = None
-                _pa.scan_symbol(
-                    symbol=symbol,
-                    levels=self.level_book.get_levels(symbol),
-                    candles=_pa_cd,
-                    atr=_pa_atr,
-                )
-        except Exception as _pa_exc:
-            fail_open.record("scanner.price_action_lane", _pa_exc)
 
         # Structure tracker on 4h.  Same TTL semantics; cheap.
         try:
