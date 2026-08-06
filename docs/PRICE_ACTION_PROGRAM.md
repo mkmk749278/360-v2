@@ -21,6 +21,43 @@ document exists before the code:
 
 ---
 
+## Status — 2026-08-06
+
+**Phases 0–6 shipped. Phase 7 (the verdict surface) is the only one left.** Three
+of §5's six applications are built and all three are dark.
+
+| | state |
+|---|---|
+| Application 1 — universe / regime | not built |
+| Application 2 — trigger (`price_action_lane`) | **built**, dark, 60 closed rows |
+| Application 3 — entry timing | not built |
+| Application 4 — geometry (`structural_snap`) | **built**, measure ON / apply OFF |
+| Application 5 — exit management | not built |
+| Application 6 — veto (`structural_veto`) | **built**, measure ON / enforce OFF |
+
+Every effect flag is OFF and **every one waits on a data window, not on
+engineering**: `TICKS_LIVE_FOR_CONSUMERS`, `DEPTH_LIVE_FOR_CONSUMERS`,
+`STRUCTURAL_VETO_ENFORCE`, `STRUCTURAL_SNAP_APPLY`, `ORDERBLOCKS_LIVE`,
+`FVG_WIDE_LIVE`. `SETUP_TF_CORRECTION_LIVE` is the odd one out — a **bug fix**
+rather than a mechanism, and pricing it needs a shadow gate chain rather than a
+window.
+
+**No phase before 2026-08-07 has a trustworthy window.** Session 114 found that
+`structural_veto` was never flushed and that **neither** structural ledger had a
+`load()`, so each deploy started from an empty ring and the first flush
+overwrote the file. Four deploys, four erased windows. Everything read before
+that fix describes a partial day at best — including this document's own earlier
+note that the snap had produced little evidence, which was a ledger being wiped
+rather than a rare mechanism.
+
+**Read the veto before tightening the lane.** §5 says application 6 answers
+*"does structure carry information on this book"* against ~97% of it in days,
+while the standalone lane needs weeks — and calls that answer the precondition
+for the lane being worth building. Session 114 reached for the lane's own thin
+window twice before taking that advice.
+
+---
+
 ## 0. Executive summary
 
 1. **Price action is four layers, not one thing**: context (where are we in the
@@ -726,6 +763,15 @@ This is testable against the whole delivered book immediately, and it is the
 cheapest possible answer to "does structure carry information here".
 
 ### Phase 5 — the standalone price-action lane (application 2) *(shipped)*
+
+> **Six seams were found under this phase on the day it shipped, and none was
+> caught by CI** — the lane was evaluated hourly rather than per scan; its census
+> was written and read by nothing; eight provenance fields were dropped by the
+> serializer; the emit throttle lived in memory while its ledger lived on disk,
+> so every deploy re-armed it; layer 1 was declared on the dataclass and never
+> assigned; and the page itself was not in the nav. Each half looked complete.
+> `ACTIVE_CONTEXT.md` § Session 114 has the full list and the derived guards that
+> now cover them.
 
 Only now, and built on the supported column from §2:
 

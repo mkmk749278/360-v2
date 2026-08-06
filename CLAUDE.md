@@ -1324,3 +1324,73 @@ python -m src.main
   stamped — positive evidence the lane fires. Bucketed with `no_sweep` it reads
   as the market being quiet when it was us throttling, which is the exact
   mistake #816 cost a session over, arriving from the display side.
+- **Flush without load is worse than neither, and a ledger nobody flushes is
+  worse still.** Two defects one day apart in the same two modules, both found
+  by the owner reading a row count. `structural_veto.stamp` filled an in-memory
+  ring and **nothing ever wrote it** — `/engine-data/structural_veto_v1.json`
+  never existed, so the page measuring ~97% of the book read `UNREADABLE, 0
+  stamped rows` from the day it shipped, while that same session pointed at it
+  three times as the highest-value read available. Its own `flush()` carries the
+  `force=True` docstring about idle lanes rendering STALE; **it had no caller**.
+  That is #839 verbatim — *a docstring describing a heartbeat is not a
+  heartbeat, find the caller* — and the tell was that it had no
+  `measure_enabled()`, which is what the maintenance loop gates every flush on.
+
+  Then neither structural ledger had a `load()` **at all**, so each restart began
+  with an empty ring and the first flush after boot **overwrote** the file. The
+  snap page read 12 rows and then 8, with a 4,000 cap and "nothing evicted"
+  beside it — nothing *was* evicted; the window was destroyed. Four deploys, four
+  erased windows, and a file sitting on disk made both lanes look persistent.
+  Without flush the data is merely in memory and the page says so; **with flush
+  and no load it is actively deleted on every deploy while the page reports a
+  healthy ledger.** It also invalidated a reading published hours earlier — the
+  snap's "thin evidence" was not a rare mechanism, it was a ledger being wiped,
+  and the difference was invisible from inside the code.
+
+  Restore through the ring's `restore`, never `add`: a **DELIVERED** row must
+  come back protected, or Phase 6's retention silently reverts to
+  evict-by-recency after the first restart — correct until then, wrong forever
+  after. And the guards are derived, not listed: a module with `get_ledger()` and
+  a `flush()` must have a caller in `main.py`, must define `load()`, and
+  `get_ledger()` must **call** it. *Defining a method is not calling it* — pin
+  the call site, not the method.
+- **"Dark work must be observable" has a last hop, and it is the nav.**
+  `/signals/price-action` and `/signals/structural-veto` shipped with panels,
+  tests and PR bodies, and **neither was in the navigation** — reachable only by
+  typing the URL, which is what the owner was reduced to after being told three
+  times to open one of them. Both also set `active: "signals"`, the *Feed* tab's
+  key, so the Feed pill lit up on a page that was not the feed; that is what
+  looked wrong on screen before anyone read a label. Worse, the label "Price
+  action" was already taken by `/signals/structural-snap` — a different
+  mechanism — so the one page a reader *could* navigate to under that name was
+  the wrong one. **A panel that renders perfectly on a page nobody can reach is
+  exactly as useful as no panel**, and the session that produced those pages
+  spent itself quoting that rule. The guard derives the requirement from the
+  route decorators and parses the nav literal, because a hand-maintained nav is
+  the `is_tradfi_perp` deny-list wearing a fifth hat.
+- **A missing label is not a missing outcome — filter, do not purge.** Asked
+  whether clearing the rows written before a stamp existed would make the data
+  clearer, the answer is no: it would have taken a closed book from **74 rows to
+  12**. Those rows lacked `entry_regime` and `level_source_tf` and carried a
+  perfectly valid `pnl_pct`; they cannot appear in a *split* and are most of the
+  *evidence*. Precision comes from n, so a purge makes an estimate smaller, not
+  clearer — and the splits were already clean, because an unstamped bucket that
+  is never folded into a real one cannot contaminate anything. Two corollaries:
+  **a capped ring rotates the old population out on its own**, so the problem
+  solves itself without anyone deciding to delete evidence; and **a purge is only
+  right when a field was REDEFINED rather than added**, because then old and new
+  rows disagree about what a column means. Related: when two stamps ship hours
+  apart, the rows between them carry one and not the other — that middle
+  population is real, and folding it into either end misdescribes exactly the
+  rows a reader wonders about.
+- **The one defect shape worth naming, because it happened six times in a
+  day: a seam.** Two halves that each look complete — wired but called on the
+  wrong clock, written but read by nothing, set but dropped by the serializer,
+  declared but never assigned, stamped but never flushed, flushed but never
+  loaded, built but never linked. **None crashed, none left an empty screen**,
+  and each produced a full-looking artifact describing nothing. That is why
+  8,113 tests saw none of them and the owner saw all of them from a phone.
+  A unit test asserts one half against itself; the seam is where nobody looks.
+  **The fix is always the same shape — derive the requirement from the tree
+  rather than write it in a list** — and the tell is always the same question:
+  *who reads this, and does the thing that writes it run first?*
