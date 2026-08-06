@@ -4,97 +4,142 @@
 
 ---
 
-## 🟢 SESSION 114 2026-08-06 — Phase 5 shipped, and then had to be fixed twice
+## 🟢 SESSION 114 2026-08-06 — Phase 5 shipped, and then six seams were found under it
 
-The standalone price-action lane (#886), the snap ledger's re-detection throttle
-(#887 + ops #139), and the lane's call-site defect (#889). Two of the three are
-repairs of work shipped hours earlier in the same session.
+Eleven engine PRs (#886–#894) and six ops PRs (#139–#144). **One of them added a
+feature. The rest repaired seams in work shipped earlier the same day**, and
+every one was found by the owner reading a screen, not by 8,113 tests.
 
-### Phase 5 — the standalone lane (#886)
+### What shipped
 
-`src/price_action_lane.py` — `PA_SWEEP_RECLAIM`: a level swept and reclaimed on
-the newest closed bar, confirmed by footprint delta, stopped beyond the sweep
-extreme, targeted at the next opposing level. It is the first path in this engine
-whose **trigger** is structure rather than an indicator — the audit that opened
-this program found ~82% of the enqueued book is MA/indicator-triggered and the
-targets are fixed R-multiples off the stop.
+| # | Change |
+|---|---|
+| #886 | Phase 5 — the standalone price-action lane |
+| #887 / ops #139 | the snap ledger counted re-detections, not evidence |
+| #889 / #890 | the lane was evaluated hourly; its census was surfaced nowhere |
+| ops #140 | the data-intake refusal card the engine had been writing into a void |
+| #891 | eight provenance fields dropped by the serializer; a throttle that died on restart |
+| #892 / ops #142 | layer 1 stamped — the lane had no notion of trend |
+| ops #143 | two of this session's own pages were not in the nav |
+| #893 | nothing ever flushed the structural-veto ledger |
+| #894 | both structural ledgers flushed and never loaded |
+| ops #144 | filter the book by stamp, and export it |
 
-It is dark in the strongest sense available: it publishes only to
-`dark_emission`, so it reaches no channel, no push, no app feed and no order. A
-test asserts that by **AST**, not by grepping text — the first cut of that test
-matched the word "router" inside a docstring and passed for the wrong reason.
+### The one shape, six times
 
-### The snap ledger was counting re-detections, not evidence (#887, ops #139)
+Every defect this session was a **seam**: two halves that each looked complete.
 
-51 rows across 6 setups, EPICUSDT alone 59%, and **one distinct `shift_pct` per
-symbol** — so it was 6 pieces of evidence wearing 51 rows. This is #816's rule
-arriving on a second lane: *a throttle on rate is not a throttle on evidence*,
-and the unit of evidence is the **move**, not the scan that re-detected it.
+| defect | one half | the other |
+|---|---|---|
+| lane call site | wired | called hourly, not per scan |
+| lane census | written | read by nothing |
+| provenance | set on the signal | dropped by the serializer |
+| emit throttle | in memory | ledger on disk — every deploy re-armed it |
+| layer 1 | declared on the dataclass | never assigned |
+| veto ledger | stamped | never flushed |
+| both structural ledgers | flushed | never loaded — each deploy erased them |
+| two ops pages | built and tested | not in the nav |
 
-`REDETECT_COOLDOWN_S = 1800` keyed on `symbol|direction|setup_class`, and ops
-discloses the concentration rather than averaging over it. Two details worth
-keeping:
+None crashed. None left an empty screen. Each produced a **full-looking artifact
+describing nothing** — which is why the suite could not see any of them and the
+owner could see all of them.
 
-* the throttle runs **after** the `signal_id` dedup, not before. Reversed, a
-  genuine double-stamp — a real fault — would be filed under `redetect_cooldown`,
-  which is an expected state. A fault must never be absorbed by a bucket that
-  means "working as designed";
-* the throttle state is process-global while the ledger is not, so
-  `reset_ledger()` clears both. Three unrelated tests failed on ordering before
-  that was tied together.
+**Every one now has a derived guard** — the requirement is computed from the tree
+rather than written in a list, so the next instance fails CI:
 
-The latest window shows it holding: ~165 signals across ~11 setup classes.
+* `tests/test_nav.py` — every registered `/signals/` page must be linked, no two
+  labels or active keys may collide, and every destination is driven as a real
+  request.
+* `tests/test_ledger_flush_wiring.py` — a module with `get_ledger()` and a
+  `flush()` must have a caller in `main.py`, must define `load()`, and
+  `get_ledger()` must **call** it. Defining a method is not calling it.
+* `test_the_payload_key_is_the_one_ops_reads` — drives the real assembler and
+  asserts where the key lands, *including that it is not where I first guessed*.
+* `test_the_scanner_passes_the_regime_it_already_computed` — pins the call site
+  by AST, not the parameter.
 
-### The lane was evaluated once per hour, and nothing said so (#889)
+### The two that cost the most
 
-Owner, after the first deploy: *"still price action itself not generating any
-signals, and those 4 signals also belong to MVRTP."* Correct, and not because the
-trigger is rare.
+**The veto measured nothing for a day.** `structural_veto.stamp` was wired
+correctly at the enqueue choke point and filled an in-memory ring;
+`/engine-data/structural_veto_v1.json` never existed. Its own `flush()` carries
+the `force=True` docstring about idle lanes rendering STALE — **and had no
+caller**. #839's rule verbatim: a docstring describing a heartbeat is not a
+heartbeat. It is the surface measuring ~97% of the book, and this session
+pointed at it three times as the highest-value read available.
 
-`scan_symbol` sat inside `_refresh_level_book_if_stale`, which returns early on
-`LEVEL_BOOK_REFRESH_SEC = 3600`. The lane therefore ran **~once per symbol per
-hour**, and a sweep-and-reclaim is a transient on the newest closed bar — an
-hourly poll essentially never lands on one. Moved into `_build_scan_context`,
-beside the line that reads the levels: ~240× more evaluations per symbol per
-hour.
+**Flush without load is worse than neither.** Neither structural ledger had a
+`load()` at all, so each restart began with an empty ring and the first flush
+after boot **overwrote** the file. The snap page read 12 rows and then 8 with a
+4,000 cap and "nothing evicted" beside it — nothing *was* evicted; the window was
+destroyed. Four deploys, four erased windows, while a file on disk made both
+lanes look persistent. It also invalidated a reading published earlier the same
+day: the snap's "thin evidence" was not a rare mechanism, it was a ledger being
+wiped.
 
-*"Where it becomes true is a point in the call graph."* The lane needs to run
-**often**; the levels needing to be **fresh** is a different requirement, and the
-call went where the second was satisfied because that is where the levels are.
-The test pins the **enclosing function** by AST, because "it is wired" was true
-the whole time and still wrong.
+### What the data now says
 
-**The second half is why the owner had to ask at all.** The lane shipped with a
-page for its *rows* and nothing anywhere showing *why* there were none — so "why
-is it silent" was answerable only by reading source. That is *dark work must be
-observable* broken by the change meant to honour it; the census existed and only
-the liveness probe read it. `/api/data-intake` now carries the refusal mix, with
-**evaluations** as the denominator, separating `no_footprint` (coverage),
-`no_sweep` (market) and `no_levels` / `short_series` (a data fault) — three
-states with three different next moves. Emission stays out of the health signal
-on purpose: the trigger is rare by design, so zero rows is a quiet market and
-paging on it teaches the reader to ignore the probe.
+* **Depth is alive and reproduces.** Two independent windows: 14/40 and 15/40
+  sign flips, mean |Δ| 0.483 and 0.444, top-1 saturated near ±1 while top-20 sits
+  near zero. Membership changes between windows — a stable rate with unstable
+  membership is what a coin flip looks like. Still instantaneous snapshots.
+* **Phase 3's primitives bound themselves small.** Order blocks would flip
+  `bool(fvgs) or bool(orderblocks)` on **43 of 777** detections (5.5%); the wide
+  FVG window would admit **40 of 777** (5.1%). Both are ~5% levers.
+* **92% of the book is scored on the wrong chart** — 11 of 12 censused signals
+  would move off 5m. Deterministic, not statistical: it is a census of which
+  paths trade which timeframe. It still cannot say *how much better*.
+* **The lane has no edge on the rows so far.** 60 closed at 15.0% win, Wilson
+  [8.1%, 26.1%], **−1.097% per signal net**. Its own `MIN_RR = 1.2` floor needs
+  45.5% to break even; the interval has never approached it across four windows.
+  Rows per move **1.09**, so this is not a re-detection artefact.
+
+### The one cell worth watching, and why it is not a finding
+
+`round` levels read 55% win / +1.047% over 11 closed rows while every swing
+timeframe sits at 0%. Interesting because it cuts *against* the program doc,
+which treats round numbers as the weaker generator. **CI [28%, 79%], best of 16
+cells drawn.** It cannot be acted on. If it survives to ~40 closed rows still
+clearing 45.5%, that is the first real finding this lane has produced.
+
+### Decisions taken
+
+* **Do not purge the unstamped rows.** Clearing would have taken the closed book
+  from 74 to 12 — those rows are missing *labels*, not *outcomes*, and precision
+  comes from n. A filter (ops #144) gives the clean read without deleting
+  evidence, and the capped ring rotates them out on its own.
+* **Do not choose `MIN_RR` from this window.** It is a well-shaped lever — it
+  filters and moves no target, so the TPE trap does not apply — but 45 closed
+  rows cannot supply the number.
+* **Do not tighten the lane before reading the veto.** §5 of the program says
+  application 6 answers "does structure carry information on this book" on 97% of
+  it in days, and calls that a precondition for the standalone lane being worth
+  building. It has been the right answer all session and I reached for the lane's
+  own thin window twice before taking it.
 
 ### Verify after this deploy
 
-1. **`/diagnostics/data-intake` → price-action lane card.** `evaluations` should
-   now climb with the scan loop, not with the hour. If it is still ~1/symbol/hour
-   the call-site fix did not deploy.
-2. **The refusal mix.** `no_levels` / `short_series` at any material share is a
-   data fault and is the only one of the three worth acting on. A book dominated
-   by `no_sweep` is the setup simply not being on offer.
-3. **`/signals/price-action`.** Rows are expected to be *rare*. Zero rows with a
-   healthy refusal mix is the quiet case — do not "fix" it.
-4. **`/signals/structural-snap` concentration columns.** Distinct-symbol and
-   distinct-`shift_pct` counts should now track the row count far more closely
-   than 6:51.
+1. **`unstamped` counts must stop growing** — 81 on layer 1, 70 on the level
+   split. They are frozen by definition; if either climbs, a stamp is not wiring.
+2. **`/signals/structural-veto` joined count.** Stamped rows climb with the
+   enqueued book (~300/day); joined rows only arrive as delivered signals close
+   (~16/day). **Still 0 in 24h means the join itself is broken** — that would be
+   the seventh instance of this session's shape.
+3. **Snap and veto row counts must survive a restart.** They never have. A count
+   that drops across a deploy means #894 did not take.
+4. **Rows per move stays near 1.00** on `/signals/price-action`. Above 1.5 and
+   badged `concentrated` means the cooldown rehydrate regressed.
 
-### Still open, unchanged from Session 113
+### Still open
 
-All five dark flags remain OFF and every one is waiting on a data window, not on
-engineering. **Phase 7** (the verdict surface) is the only phase left, and it is
-deliberately queued until Phases 3–5 have rows — an empty verdict page is the
-exact failure this program keeps warning about.
+**Phase 7** (the verdict surface) is the only phase left, and applications 1, 3
+and 5 of §5 are unbuilt. All seven effect flags remain OFF and every one waits on
+a data window rather than on engineering — and **tomorrow is the first window any
+of them has ever had**, because until #894 no window survived a deploy.
+
+`SETUP_TF_CORRECTION_LIVE` is the odd one out: a **bug fix**, not a mechanism.
+Pricing it needs a shadow gate chain, not a data window, and that is its own
+change.
 
 ---
 
