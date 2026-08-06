@@ -252,3 +252,54 @@ def test_the_measurement_flag_is_on():
     a decision that keeps being deferred."""
     import config
     assert config.PRICE_ACTION_LANE_MEASURE is True
+
+
+def test_the_lane_runs_per_scan_not_on_the_level_book_ttl():
+    """THE defect this lane shipped with, and it is a call-site defect.
+
+    The first cut put `scan_symbol` inside `_refresh_level_book_if_stale`,
+    which returns early on a per-symbol TTL of **one hour**
+    (`LEVEL_BOOK_REFRESH_SEC = 3600`). So the lane was evaluated ~1/hour per
+    symbol — and a sweep-and-reclaim is a transient event on the newest closed
+    bar, so an hourly poll almost never lands on one. It produced zero signals
+    for that reason alone, not because the trigger is rare.
+
+    "Where it becomes true is a point in the call graph": the lane needs to be
+    evaluated OFTEN, which is a different requirement from the levels being
+    FRESH, and the first cut satisfied the second. Pinned by the enclosing
+    function, because "it is wired" was true the whole time and still wrong.
+    """
+    src = (REPO / "src" / "scanner" / "__init__.py").read_text()
+    tree = ast.parse(src)
+
+    enclosing = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        seg = ast.get_source_segment(src, node) or ""
+        if "_pa.scan_symbol(" not in seg:
+            continue
+        if enclosing is None or node.lineno > enclosing.lineno:
+            enclosing = node          # innermost wins
+
+    assert enclosing is not None, "the lane is not called from the scanner"
+    assert enclosing.name == "_build_scan_context", (
+        f"the lane is called from {enclosing.name!r}. It must run per scan; "
+        "_refresh_level_book_if_stale is TTL-gated at one hour per symbol and "
+        "starved the lane to ~1 evaluation/hour"
+    )
+    assert "_refresh_level_book_if_stale" != enclosing.name
+
+
+def test_the_census_is_surfaced_so_silence_has_a_named_cause():
+    """The lane shipped with a page for its ROWS and nothing showing why there
+    were none — so "why is it silent" could only be answered by reading source.
+    That is "dark work must be observable" broken by the change meant to honour
+    it."""
+    from src.data_intake import _price_action_lane_report
+
+    rep = _price_action_lane_report()
+    assert rep.get("present") is True
+    assert "refusals" in rep
+    assert "refusal_share" in rep
+    assert "evaluated" in rep
