@@ -456,6 +456,17 @@ _ledger: Optional[VetoLedger] = None
 _ledger_lock = threading.Lock()
 
 
+def measure_enabled() -> bool:
+    """Whether the lane is stamping. Mirrors `structural_snap.measure_enabled`
+    because the maintenance loop gates every ledger flush on one — and this
+    module not having one is how it got left out of that loop entirely."""
+    try:
+        from config import STRUCTURAL_VETO_MEASURE
+        return bool(STRUCTURAL_VETO_MEASURE)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def get_ledger() -> VetoLedger:
     global _ledger
     if _ledger is None:

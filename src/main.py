@@ -2199,6 +2199,28 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Structural-snap flush error (fail-open): {}", exc)
 
+            # ── Structural veto ledger (price-action program, Phase 4) ─────
+            # This was MISSING. `structural_veto.stamp` added rows to an
+            # in-memory ring and nothing ever wrote them, so
+            # `/engine-data/structural_veto_v1.json` never existed and the ops
+            # page read UNREADABLE with 0 stamped rows from the day it shipped
+            # — while I told the owner three times that it was the highest-value
+            # surface available, because it measures ~97% of the book
+            # (owner-caught 2026-08-06).
+            #
+            # #839's rule exactly: a docstring describing a heartbeat is not a
+            # heartbeat, FIND THE CALLER. That ledger's own flush() carries the
+            # force=True comment about idle lanes rendering STALE, and no
+            # caller passed force because no caller existed.
+            try:
+                from src import structural_veto as _sv
+                if _sv.measure_enabled():
+                    _sv.get_ledger().flush(force=True)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Structural-veto flush error (fail-open): {}", exc)
+
             # ── Stop-geometry A/B: classify the FIXED/ATR pair ledger ──────
             # Same forward measure, dedicated store; both arms land in the
             # edge matrix as X@FIXED / X@ATR shadow rows so ops + the truth
