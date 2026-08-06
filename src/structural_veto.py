@@ -399,6 +399,43 @@ class VetoLedger:
             return True
         return False
 
+
+    def load(self) -> None:
+        """Read the ledger back at boot.
+
+        **This was missing, and flush without load is worse than neither.** The
+        lane persisted every cycle and started from an empty ring on every
+        restart, so the first flush after boot OVERWROTE the file with what had
+        accumulated since — the snap ledger went 12 rows to 8 across one
+        afternoon's deploys while its own panel read "nothing evicted", because
+        nothing was: the previous window had been destroyed, not rotated
+        (owner data, 2026-08-06).
+
+        #842's class, the other half. That entry says a round trip is a
+        contract and to follow a field all the way to disk AND BACK; here the
+        return leg did not exist at all. Restores through `ring.restore` rather
+        than `add` so a row that was DELIVERED comes back protected — retention
+        rebuilt as evict-by-recency would be correct until the first restart
+        and silently wrong after it.
+        """
+        if not self._path or not os.path.exists(self._path):
+            return
+        try:
+            with open(self._path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            if int(payload.get("schema") or 0) != SCHEMA:
+                log.info(
+                    "{}: ledger schema {} != {}, starting fresh",
+                    "structural_veto", payload.get("schema"), SCHEMA,
+                )
+                return
+            with self._lock:
+                for row in payload.get("rows") or []:
+                    if str(row.get("signal_id") or ""):
+                        self._ring.restore(row)
+        except Exception as exc:  # noqa: BLE001
+            fail_open.record("structural_veto.load", exc)
+
     def mark_delivered(self, signal_id: str) -> bool:
         if self._ring.mark_delivered(signal_id):
             with self._lock:
@@ -473,6 +510,7 @@ def get_ledger() -> VetoLedger:
         with _ledger_lock:
             if _ledger is None:
                 _ledger = VetoLedger()
+                _ledger.load()
     return _ledger
 
 
