@@ -1288,3 +1288,39 @@ python -m src.main
   it could never be reported dark however long it stopped computing.
   `ROW_METADATA_KEYS` names the non-features; ordering can no longer
   reclassify one.
+- **A field one repo writes and no repo reads is #817 with the arrow
+  reversed — and it is harder to see, because the producing side's test
+  passes.** `_price_action_lane_report` shipped in #889 with a test asserting
+  its own return shape (`present`, `refusals`, `refusal_share`, `evaluated`),
+  which is a mock asserting your assumption back at you **one repo short of the
+  reader**. Ops rendered nothing for the key, so the owner opened
+  `/diagnostics/data-intake` looking for the refusal mix the PR body had
+  promised him and found a page with no such card — after a session whose whole
+  subject was *"dark work must be observable"*. The PR body's sentence was even
+  true: `/api/data-intake` *did* carry it. **The owner reads the page, not the
+  JSON**, and a claim scoped to the endpoint reads as a claim about the surface.
+
+  Two things fell out of fixing it, and the second is the sharper one:
+
+  - **A fixture chooses a location, and then agrees with you about it.** The
+    ops fixture put the block at the payload's top level because that is where
+    the reader assumed it; the engine nests it under `derived`. Every ops test
+    passed against a card that would have rendered `NOT REPORTED` against the
+    real engine — the `zone_distance_atr` failure with the shape right and the
+    *path* wrong. A cross-repo contract test must **drive the real assembler**
+    (`build_data_intake(_Engine())`) and assert the key is where it actually
+    lands, including asserting it is *not* at the level you first guessed.
+  - **Classification copy is not a mirror, and must not iterate its own keys.**
+    Ops attaches a sentence to each refusal reason, so the temptation is to
+    render `for reason in OPS_KNOWN_REASONS` — silent by construction on the
+    next reason the engine adds, which is `MEASUREMENT_SUFFIXES` and the
+    `is_tradfi_perp` deny-list wearing a third hat. The page iterates **the
+    engine's payload** and looks the sentence up; a reason ops has never heard
+    of renders under its raw name, badged `unclassified`. One writer, one
+    reader, and the drift is visible instead of absent.
+
+  Corollary: **the throttle is not a refusal, and pooling it with one inverts
+  the reading.** `cooldown` means a setup *was* found and deliberately not
+  stamped — positive evidence the lane fires. Bucketed with `no_sweep` it reads
+  as the market being quiet when it was us throttling, which is the exact
+  mistake #816 cost a session over, arriving from the display side.
