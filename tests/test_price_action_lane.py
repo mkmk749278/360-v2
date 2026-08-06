@@ -38,7 +38,8 @@ def _levels(support=100.0, resistance=103.0):
     return out
 
 
-def _eval(symbol="BTCUSDT", levels=None, delta=50_000.0, atr=0.4, now=1_000.0, **kw):
+def _eval(symbol="BTCUSDT", levels=None, delta=50_000.0, atr=0.4, now=1_000.0,
+          regime_label="", regime_tf="", **kw):
     pa.reset_census()
     high, low, close = _swept_support(**kw)
     return pa.evaluate(
@@ -47,6 +48,7 @@ def _eval(symbol="BTCUSDT", levels=None, delta=50_000.0, atr=0.4, now=1_000.0, *
         high=high, low=low, close=close, atr=atr,
         footprint_bar=None if delta is None else {"delta_quote": delta},
         now_ts=now,
+        regime_label=regime_label, regime_tf=regime_tf,
     )
 
 
@@ -505,3 +507,86 @@ def test_a_rehydrated_cooldown_actually_refuses():
     finally:
         dark_emission.get_ledger = original               # type: ignore[assignment]
         pa.reset_census()
+
+
+def test_layer_one_is_stamped_on_every_row():
+    """§1 of the program doc defines this lane's own trigger relative to the
+    PREVAILING TREND — a break with it is a BOS (continuation), against it a
+    CHoCH (reversal). `LaneSignal` declared `entry_regime` from the day the lane
+    shipped and nothing ever assigned it, so every row carried "" and the book
+    could not be split by the one layer that decides whether a sweep is worth
+    taking (owner-directed audit, 2026-08-06)."""
+    sig, reason = _eval(regime_label="TRENDING_UP", regime_tf="5m")
+    assert sig is not None, reason
+    assert sig.entry_regime == "TRENDING_UP"
+    assert sig.regime_tf == "5m"
+
+
+def test_the_regime_carries_its_timeframe():
+    """The scanner classifies on 5m and this lane triggers on 15m. A regime
+    label with no timeframe beside it is the same class of omission as a
+    percentage with no denominator."""
+    from src import dark_emission
+
+    sig, _ = _eval(regime_label="RANGING", regime_tf="5m")
+    row = dark_emission._row_from_signal(sig, 1_700_000_000.0)
+    assert row["regime"] == "RANGING"
+    assert row["regime_tf"] == "5m"
+    assert "regime_15m" in row
+
+
+def test_an_unstamped_regime_is_blank_not_guessed():
+    """#817: a confidently wrong regime is worse than an empty one, because the
+    table still looks full. The default keeps this callable from a test without
+    a scanner and never invents a label."""
+    sig, _ = _eval()
+    assert sig is not None
+    assert sig.entry_regime == ""
+    assert sig.regime_tf == ""
+
+
+def test_the_scanner_passes_the_regime_it_already_computed():
+    """Pin the CALL SITE, not the parameter — a parameter one function reads and
+    no caller writes is exactly how this field stayed empty. Fails against the
+    pre-fix tree, where `scan_symbol` was called with four arguments."""
+    import ast
+
+    src = (REPO / "src" / "scanner" / "__init__.py").read_text()
+    tree = ast.parse(src)
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "scan_symbol"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "_pa"
+    ]
+    assert calls, "the scanner no longer calls the lane at all"
+    for call in calls:
+        kw = {k.arg for k in call.keywords}
+        assert "regime_label" in kw, "layer 1 is not being passed"
+        assert "regime_tf" in kw, "the regime's timeframe is not being passed"
+
+
+def test_the_trigger_timeframe_regime_is_computed_off_the_hot_path():
+    """`evaluate` runs ~19,000 times an hour on every scanned symbol; the emit
+    path runs a few times a day. The 15m regime is computed on the second, not
+    the first — same arrays, already in memory, so the cost lands on the rare
+    path (Cost Discipline)."""
+    import ast
+    import inspect
+
+    ev = ast.parse(inspect.getsource(pa.evaluate))
+    names = {
+        n.func.id for n in ast.walk(ev)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "detect_regime_from_arrays" not in names, (
+        "the 15m regime must not be computed per evaluation"
+    )
+    sc = ast.parse(inspect.getsource(pa.scan_symbol))
+    sc_names = {
+        n.func.id for n in ast.walk(sc)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "detect_regime_from_arrays" in sc_names
