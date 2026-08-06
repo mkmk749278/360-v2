@@ -488,6 +488,42 @@ def reset_ledger(ledger: Optional[DarkLedger] = None) -> None:
 # --------------------------------------------------------------------------- #
 
 
+#: Fields a `price_action_lane.LaneSignal` carries that an ordinary `Signal`
+#: does not, with the type each one is read back as. Derived from the dataclass
+#: rather than typed twice — a hand-kept second list is the drift this repo has
+#: paid for under three different names.
+LANE_PROVENANCE_FIELDS: Dict[str, type] = {
+    "level_price": float,
+    "level_type": str,
+    "level_source_tf": str,
+    "level_score": float,
+    "sweep_extreme": float,
+    "sweep_depth_pct": float,
+    "delta_quote": float,
+    "rr": float,
+}
+
+
+def _lane_provenance(sig: Any) -> Dict[str, Any]:
+    """The lane's own columns, or `None` for every row that has no lane.
+
+    Absent and zero are different: a row with no `level_source_tf` has no level
+    provenance, which is not the same claim as a level whose timeframe is the
+    empty string. Ops reads the `None` as `unstamped` and renders a dash.
+    """
+    out: Dict[str, Any] = {}
+    for key, kind in LANE_PROVENANCE_FIELDS.items():
+        raw = getattr(sig, key, None)
+        if raw is None or raw == "":
+            out[key] = None
+            continue
+        try:
+            out[key] = kind(raw)
+        except (TypeError, ValueError):
+            out[key] = None
+    return out
+
+
 def _row_from_signal(sig: Any, now: float) -> dict:
     _direction = getattr(sig, "direction", None)
     row: Dict[str, Any] = {
@@ -518,6 +554,19 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         "context_key": str(getattr(sig, "mc_context_key", "") or ""),
         "valid_for_minutes": float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
         "pair_admission": str(getattr(sig, "pair_admission", "") or ""),
+        # Lane-specific provenance (Phase 5). `LaneSignal` declares eight fields
+        # under the sentence "carried so the page can split by what actually
+        # differs between rows", and this serializer wrote a fixed key list that
+        # did not include any of them — so `/signals/price-action` bucketed all
+        # 64 rows into `unstamped` and its by-level table, whose entire premise
+        # is that "a 1d level and a 1h level are different obstacles", described
+        # nothing (owner data, 2026-08-06). #842's shape exactly: a field one
+        # writer populates and one serializer drops, invisible at both ends.
+        #
+        # `None` rather than 0.0 on a row that has no lane provenance — every
+        # other dark row is a real `Signal` and has none of these. An unstamped
+        # level is not a zero one, and ops renders the difference.
+        **_lane_provenance(sig),
         "emitted_at": now,
         "status": STATUS_OPEN,
         "closed_at": None,

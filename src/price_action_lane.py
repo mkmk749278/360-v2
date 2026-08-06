@@ -160,14 +160,60 @@ _last_emit: Dict[str, float] = {}
 EMIT_COOLDOWN_S = 1800.0
 
 
+#: Whether `_last_emit` has been seeded from the ledger this process.
+_cooldown_rehydrated = False
+
+
+def _rehydrate_cooldown() -> None:
+    """Seed the throttle from the ledger, once per process.
+
+    **The throttle's state lived in memory while the evidence it protects lives
+    on disk**, so every deploy re-armed every symbol: a setup still live across
+    a restart bought a second row at the same price, and the ledger kept both.
+    Owner data 2026-08-06 — the engine restarted three times that day and 7 of
+    40 visible rows were exact `(symbol, side, entry)` duplicates carrying
+    identical geometry, on a 0.6-day ledger whose headline verdict is read per
+    row. That is #816's rule ("a throttle on rate is not a throttle on
+    evidence") arriving through the process lifetime rather than through the
+    key: the unit of evidence is the MOVE, and a restart is not a new move.
+
+    Seeding from the ledger rather than persisting a second file, because the
+    ledger already holds `emitted_at` per row and **the fix for a drifting
+    mirror is not a second mirror**. Once per process, not per evaluation — this
+    runs inside the scanner's per-symbol loop and a ledger read there would be
+    the hot-path shape the cost rules forbid.
+
+    Fail-open and **counted**: a lane must never break a scan, but a rehydrate
+    that silently failed would restore the exact bug, so the failure records.
+    """
+    global _cooldown_rehydrated
+    if _cooldown_rehydrated:
+        return
+    _cooldown_rehydrated = True          # set first: one attempt, not one per scan
+    try:
+        from src import dark_emission
+
+        for row in dark_emission.get_ledger().rows():
+            if str(row.get("dark_gate") or "") != DARK_GATE:
+                continue
+            sym = str(row.get("symbol") or "")
+            ts = float(row.get("emitted_at") or 0.0)
+            if sym and ts > _last_emit.get(sym, 0.0):
+                _last_emit[sym] = ts
+    except Exception as exc:  # noqa: BLE001
+        from src import fail_open
+        fail_open.record("price_action_lane.rehydrate_cooldown", exc)
+
+
 def census() -> Dict[str, Any]:
     return _census.as_dict()
 
 
 def reset_census() -> None:
-    global _census, _last_emit
+    global _census, _last_emit, _cooldown_rehydrated
     _census = LaneCensus()
     _last_emit = {}
+    _cooldown_rehydrated = False
 
 
 @dataclass
@@ -337,6 +383,7 @@ def evaluate(
     # One move, one row. A sweep persists for several bars, so without this the
     # lane emits once per scan for the same event and the population's verdict
     # becomes an artefact of re-detection rather than of the setup.
+    _rehydrate_cooldown()
     last = _last_emit.get(symbol, 0.0)
     if last and (now - last) < EMIT_COOLDOWN_S:
         _census.refuse(REFUSE_COOLDOWN)
