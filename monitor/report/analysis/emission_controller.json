@@ -130,9 +130,9 @@
         "HOLD"
       ],
       "FUNDING_EXTREME_SIGNAL|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "FUNDING_EXTREME_SIGNAL|min_samples": [
         "HOLD",
@@ -222,7 +222,7 @@
       "RANGE_FADE|suppress_negative": [
         "KEEP",
         "KEEP",
-        "KEEP"
+        "SKIP"
       ],
       "RANGE_FADE|min_samples": [
         "HOLD",
@@ -439,7 +439,7 @@
       "FAILED_AUCTION_RECLAIM@FIXED|min_samples": 632,
       "MOVER_TREND_PULLBACK@SAREXIT|min_samples": 629
     },
-    "cycle": 735
+    "cycle": 779
   },
   "ledger": [
     {
