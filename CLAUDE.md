@@ -116,6 +116,14 @@ money-path changes follow dark-first from here.
 - Paid-channel routing changes
 - Regime-per-exit design decisions (§3.2b — data research in progress)
 
+**Wait ~6 minutes before checking CI here.** That is what this repo's `test` job
+takes; ops is ~4 min and `lumin-app` ~10 min. Polling a check run that cannot
+have finished yet burns API calls and turns one wait into six — sleep the known
+duration first, *then* read the conclusion. Treat these as expected durations,
+not deadlines: a job still running at the mark gets another wait, and a job that
+finishes early is fine. If a repo's CI time drifts materially, update the number
+here rather than re-learning it every session.
+
 Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Production phase: the app is LIVE on the Play Store** — a `main` deploy reaches real users, so money-path changes ship **dark + shadow-measured + owner sign-off to activate** per § Project Phase — measurement flag ON and visible in ops, user-visible flag OFF. Off-money-path work ships normally.
 
 ---
@@ -1383,6 +1391,54 @@ python -m src.main
   apart, the rows between them carry one and not the other — that middle
   population is real, and folding it into either end misdescribes exactly the
   rows a reader wonders about.
+- **A docstring claiming a property IS the absence of that property, often
+  enough to check every time.** `LANE_PROVENANCE_FIELDS` read *"Derived from the
+  dataclass rather than typed twice — a hand-kept second list is the drift this
+  repo has paid for under three different names"* — directly above a hand-kept
+  second list. It had already dropped eight provenance fields once, and it would
+  have silently dropped all seven layer-1 fields the next change added. The
+  sentence was not a lie anyone told; it is what the author *intended* to build,
+  left in place after building something else, and it then actively suppressed
+  the audit because a reader who greps for hand-kept lists skips the one that
+  says it is not.
+
+  This file already carries the same shape three times — `_get_primary_timeframe`
+  as a constant wearing a lookup's docstring, `build_channel_signal`'s *"shared
+  by EVERY evaluator"* over a dead parameter, `flush()`'s heartbeat docstring
+  with no caller. **The tell is that the property is checkable in one command**,
+  and nobody ran it. Derive in the direction of the half that does not grow: the
+  `Signal` contract is stable, the lane's own columns gain one per program phase,
+  so the derivation subtracts the stable set rather than enumerating the growing
+  one. The payoff was immediate — two existing tests that loop over the mapping
+  covered seven new fields without being touched.
+
+- **A four-layer model with three layers built is not "mostly done" — the missing
+  layer can be the only one that separates the outcomes.** The price-action lane
+  shipped Location, Trigger and Confirmation and no **Context**, while
+  `volume_profile.py` had computed POC and the value area all along and the lane
+  never imported it. A sweep + reclaim is a *failed break*, i.e. mean reversion:
+  it pays in balance and traps in imbalance, and **those two states produce an
+  identical layer-2/3/4 signature** — same level, same sweep, same aligned delta.
+  So every stamped column looked like noise, and it genuinely was noise *for
+  telling those two apart*, because the discriminating variable was not being
+  recorded at all.
+
+  The habit: when a page of measurements all read like noise, ask whether the
+  thing that would discriminate is **in the data at all** before ranking what is.
+  Two dead ends checked here, both worth not re-running — `rr` shows a clean
+  monotonic win-rate gradient (46% → 5%) that is *mechanical*, since `rr` is
+  target ÷ stop distance and a farther target must be hit less often; and
+  `level_score` looks dramatic (45% → 8%) but is 0.49 rank-correlated with `rr`
+  and shrinks to 35% vs 26% once `rr` is held. **Both measure the trigger, and
+  the trigger was not what was failing.**
+
+  Corollary, and it inverted the obvious fix: the program doc's diagnosis is that
+  this lane has no context layer, which is true — but **eight of the ten BEATUSDT
+  longs were stamped `TRENDING_UP`**, so a context layer keyed on the existing
+  regime label would have *confirmed* the losing entries rather than filtered
+  them. "Check the direction of every recommendation, not only its premise",
+  arriving at a fix that was one field away from being shipped backwards.
+
 - **The one defect shape worth naming, because it happened six times in a
   day: a seam.** Two halves that each look complete — wired but called on the
   wrong clock, written but read by nothing, set but dropped by the serializer,
