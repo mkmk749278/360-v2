@@ -21,15 +21,48 @@ document exists before the code:
 
 ---
 
-## Status — 2026-08-06
+## Status — 2026-08-07
 
 **Phases 0–6 shipped. Phase 7 (the verdict surface) is the only one left.** Three
 of §5's six applications are built and all three are dark.
 
+> **2026-08-07 — the lane was missing a layer of §1, not a filter.** The owner
+> asked how we separate good price-action signals from raw ones. The answer was
+> that this program's own §1 defines price action as a **four-layer** read and
+> `price_action_lane` had implemented three: Location (LevelBook), Trigger
+> (sweep + reclaim), Confirmation (footprint delta) — and **no layer 1
+> (Context)**, while `src/volume_profile.py` had computed POC and the value area
+> since long before the lane existed and the lane never imported it.
+>
+> This matters more for this trigger than for any other the program could have
+> built. A sweep + reclaim is a **failed break**, so it is a mean-reversion
+> trade: it pays in **balance** (rotation inside a value area, rejected at the
+> edge, returning toward POC) and traps in **imbalance** (value being accepted
+> away from the area, so each failed break is a pause before continuation).
+> **Those two states produce an identical layer-2/3/4 signature** — same level,
+> same sweep, same aligned delta — so no column the lane already stamped could
+> separate them, and every one of them read like noise.
+>
+> Engine #897 stamps `vp_entry_zone` / `vp_level_zone` / `vp_poc_room_pct`
+> (signed toward the trade) / `vp_value_width_pct` and raw POC/VAH/VAL, on the
+> emit path, **applied to nothing**. Ops #151 renders the split and a
+> `balance_only` shadow rule whose cutoff is **half fitted to the window that
+> produced it** — the value-area definition predates the lane, but which layer-1
+> conditions to combine was chosen while looking at this book, and the page says
+> so.
+>
+> **The empirical case, and the trap inside it.** BEATUSDT whipsawed 24% and the
+> lane bought reclaimed support ten times through it for ten losses; the worst
+> nine were one 4.5h run worth −85.71% against a whole-book net of −78.25%, so
+> removing one run flipped the book to +7.46%. But **eight of those ten were
+> stamped `TRENDING_UP`** — a context layer keyed on the *existing regime label*
+> would have confirmed those entries, not filtered them. Read that before
+> reaching for §5 application 1.
+
 | | state |
 |---|---|
-| Application 1 — universe / regime | not built |
-| Application 2 — trigger (`price_action_lane`) | **built**, dark, 60 closed rows |
+| Application 1 — universe / regime | not built — and see the layer-1 note above before keying it on `regime` |
+| Application 2 — trigger (`price_action_lane`) | **built**, dark, all four layers stamped from 2026-08-07 |
 | Application 3 — entry timing | not built |
 | Application 4 — geometry (`structural_snap`) | **built**, measure ON / apply OFF |
 | Application 5 — exit management | not built |
@@ -817,6 +850,15 @@ pooling is how 15 rows disappear into 2,418.
   through no scoring engine, no MTF policy and no confidence floor; a number
   there would be fabricated performance data on a surface an adoption decision
   reads.
+- **Layer 1 — Context** *(added 2026-08-07, engine #897)*. Value-area position of
+  the entry, whether the swept level is a value boundary, and room to POC signed
+  toward the trade. Stamped on the emit path, **applied to nothing**. Until this
+  landed the lane implemented three of this document's own four layers, and the
+  one it lacked is the only one that separates a failed break that reverts from a
+  failed break that continues. `layer1_stamped` / `layer1_blind` are counted so a
+  profile that stops computing pages the watchdog rather than quietly emptying
+  the split — an empty column reads as *"not enough rows yet"*, which is exactly
+  what a dead stamp would hide behind.
 
 **It rides `dark_emission`'s ledger for its resolver** — correct, and paid for
 over six sessions of defects — but the two populations are **split at one place**

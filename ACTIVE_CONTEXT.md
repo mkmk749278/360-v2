@@ -4,6 +4,109 @@
 
 ---
 
+## 🟢 SESSION 115 2026-08-07 — the price-action lane had three of its four layers
+
+Engine #897, ops #150 / #151. The owner read the lane's page and asked two
+questions that turned out to be the same question: *"this is huge raw data … we
+don't get clarity"* and *"how can we sort out good signals"*.
+
+### The answer was structural, not statistical
+
+**§1 of the program doc defines price action as a FOUR-layer read, and the lane
+had three.** Location (LevelBook), Trigger (sweep + reclaim) and Confirmation
+(footprint delta) shipped in #886. **Layer 1 — Context — never did**, while
+`src/volume_profile.py` had computed POC and the value area since long before the
+lane existed and the lane never imported it.
+
+Why layer 1 and not a better filter: a sweep + reclaim is a **failed break**, so
+it is a mean-reversion trade. It pays in **balance** (price rotating inside a
+value area, rejected at the edge, returning toward POC) and traps in
+**imbalance** (value accepted away from the area, so each failed break is a pause
+before continuation). Those two states produce an **identical layer-2/3/4
+signature** — same level, same sweep, same aligned delta. Nothing already stamped
+could separate them, which is why every column on that page read like noise.
+
+`vp_entry_zone` / `vp_level_zone` / `vp_poc_room_pct` (signed toward the trade) /
+`vp_value_width_pct` + raw POC/VAH/VAL, on the emit path, applied to nothing.
+Verified live within minutes: PUMPUSDT LONG below POC reads `+0.631%` where a raw
+distance would read negative — the `cvd_slope` error avoided rather than paid for.
+
+### The empirical case, and what it cost to state it correctly
+
+BEATUSDT whipsawed 24% and the lane bought reclaimed support **ten times** through
+it for ten losses. The worst nine form **one 4.5h run worth −85.71%** against a
+whole-book net of −78.25% — remove it and the book reads **+7.46%**. *The sign of
+`NO EDGE DETECTED` was one episode.*
+
+**Eight of those ten were stamped `TRENDING_UP`.** So the scanner's regime label
+is *not* a usable layer 1 for this, and "add a context layer" keyed on it would
+have **confirmed** the losing entries rather than filtered them. That correction
+was made mid-session, before it reached a PR body — the first read had been "the
+lane bought into a downtrend it could see", which the stamps disprove.
+
+### Two column-ranking dead ends, checked so nobody re-runs them
+
+* **`rr`** — win rate 46% → 32% → 24% → 5% across quartiles, monotonic, survives
+  removing BEATUSDT, and **mechanical**: `rr` *is* target ÷ stop distance, so a
+  farther target must be hit less often. Expectancy does not follow it, and
+  "filter to low rr" is the `TREND_PULLBACK_EMA` TP1 mistake this file already
+  carries.
+* **`level_score`** — 45% → 8% headline, but 0.49 rank-correlated with `rr`; hold
+  `rr` in [1.5, 3.0] and it shrinks to 35% vs 26%. Mostly the same geometry.
+
+Both measure the *trigger*. The trigger was not what was failing.
+
+### Three ops defects the same read turned up (#150)
+
+* **80 flat expiries reported as losses.** The engine scores `EXPIRED` at 0.00%;
+  `losses = n_closed - wins` swept every zero in, so the page read `115W / 347L`
+  where the book was `115W / 267L / 80 flat` — 25% against 30% on the rows that
+  resolved to a level. Both denominators published now.
+* **The concentration panel could not see the concentration that decided the
+  verdict.** Its `symbol · side · entry` key is right for one sweep re-stamped at
+  one price and **structurally blind to a moving symbol** — a trend hands out a
+  new entry every time, so it read `1.12 rows/move` and *"largest single move =
+  1.0% of all rows"* over the BEATUSDT run. An episode panel now sits beside it.
+  #816 arriving at the display side.
+* **Two sentences had outlived their data** — *"whole closed book is under 50
+  rows"* above 462, *"expected to be almost all unstamped today"* above 16%.
+
+### Seams closed on the way
+
+* **`LANE_PROVENANCE_FIELDS` carried the sentence *"derived from the dataclass
+  rather than typed twice — a hand-kept second list is the drift this repo has
+  paid for under three different names"* directly above a hand-kept second
+  list.** It had already dropped eight fields once (Session 114) and would have
+  dropped all seven layer-1 fields. Now genuinely derived from
+  `dataclasses.fields(LaneSignal)` minus the Signal contract — the half that does
+  not grow — with a test asserting every field lands in one set or the other.
+  The two existing tests that loop over it covered the new fields for free.
+* **The lane probe watched refusals only**, so a volume profile returning `None`
+  on every row would have flat-lined the whole split invisibly — an empty column
+  reads as *"not enough rows yet"*, which is exactly what a dead stamp hides
+  behind. `layer1_stamped` / `layer1_blind` are counted on the emit path and the
+  probe fails when the lane has emitted and stamped none of it.
+
+### Open, and deliberately not acted on
+
+* **`EMIT_COOLDOWN_S`'s comment still claims "one move, one row".** BEATUSDT
+  disproves it — ten rows, one whipsaw — because a per-symbol 30-minute timer
+  bounds how *often* a symbol stamps and says nothing about how many rows one
+  continuous move contributes. Changing the key or the duration alters what the
+  lane stamps, and picking a new one off this window is the move this file
+  forbids. Needs a session with fresh evidence.
+* **The shadow rule `balance_only` is half fitted.** "Inside the value area" is
+  the value area's own 70%-of-volume definition and predates the lane; *which*
+  layer-1 conditions to combine was chosen while looking at this book. The owner
+  asked for it knowing that; the page says so. **Its first number is a hypothesis
+  this window generated, not one it tested** — re-earn it on rows stamped after
+  2026-08-07.
+* **Watch `level_zone`.** The first three stamped rows all read `interior`. If
+  that persists, the swept levels are not value boundaries at all — a finding
+  about the LevelBook against the value area, not about the rule.
+
+---
+
 ## 🟢 SESSION 114 2026-08-06 — Phase 5 shipped, and then six seams were found under it
 
 Eleven engine PRs (#886–#894) and six ops PRs (#139–#144). **One of them added a
