@@ -84,6 +84,7 @@ class SnapshotWriter:
         await self._write_engine_state()
         await self._write_positions_diag()
         await self._write_data_intake()
+        await self._write_router_delivery()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             await self._write_activity()
             await self._write_alerts()
@@ -152,6 +153,40 @@ class SnapshotWriter:
     def _build_data_intake(self) -> dict:
         from src.data_intake import build_data_intake
         return build_data_intake(self._engine)
+
+    async def _write_router_delivery(self) -> None:
+        """Publish the router's drop census — the last hop before a subscriber.
+
+        `SignalRouter` lives in the ENGINE container and its counters are plain
+        in-process ints, so the API container's facade cannot see them at all in
+        isolated mode. Same reason as the positions diag: built here on the real
+        object, rendered there.
+
+        This exists because `delivery_stats()` had exactly one caller —
+        `_log_delivery_stats`, which logs `drops_by_reason` and **not**
+        `drops_by_reason_setup`. That second key is the one that says whether a
+        high-volume path is consuming the concurrency caps and starving the
+        others, and it was computed on every cycle and rendered nowhere: a field
+        one repo writes and no repo reads, standing in front of the question it
+        was built to answer (owner, 2026-08-07).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(self._executor, self._build_router_delivery)
+            await self._set(_store.KEY_ROUTER_DELIVERY, data, _store.TTL_ROUTER_DELIVERY)
+        except Exception:
+            log.exception("snapshot_writer: failed to write router_delivery")
+
+    def _build_router_delivery(self) -> dict:
+        router = getattr(self._engine, "router", None)
+        stats = getattr(router, "delivery_stats", None)
+        if not callable(stats):
+            # Named, not blank: "no router on this object" and "the router has
+            # dropped nothing" are different states with different fixes.
+            return {"schema": 0, "error": "engine has no router.delivery_stats"}
+        out = dict(stats())
+        out["schema"] = 1
+        return out
 
     async def _write_activity(self) -> None:
         try:

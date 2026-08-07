@@ -135,6 +135,7 @@ class RedisEngineFacade:
         self._signals_all_cache: Optional[list] = None
         self._alerts: Optional[list] = None
         self._data_intake: Optional[dict] = None
+        self._router_delivery: Optional[dict] = None
         self._refreshed_at: float = 0.0
 
     # ------------------------------------------------------------------
@@ -163,8 +164,19 @@ class RedisEngineFacade:
             self._alerts = _store.decode(alerts_raw)
             intake_raw = await self._redis.client.get(_store.KEY_DATA_INTAKE)
             self._data_intake = _store.decode(intake_raw)
+            rd_raw = await self._redis.client.get(_store.KEY_ROUTER_DELIVERY)
+            self._router_delivery = _store.decode(rd_raw)
         except Exception:
             log.exception("redis_engine: failed to refresh state from Redis")
+
+    def published_router_delivery(self) -> Optional[dict]:
+        """The engine-computed router drop census published to Redis, or `None`
+        when the engine has not written one (key absent / expired).
+
+        `SignalRouter` and its counters live in the engine container, so in
+        isolated mode this facade has no other way to see them.
+        """
+        return self._router_delivery
 
     def published_positions_diag(self) -> Optional[dict]:
         """Return the engine-computed positions-diag X-ray published to Redis,

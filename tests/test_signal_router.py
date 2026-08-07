@@ -1527,3 +1527,87 @@ class TestRouterDropTelemetry:
         out."""
         router._log_delivery_stats()
         assert "ROUTER_DELIVERY" not in caplog.text
+
+
+# ── the drop census must reach a reader ───────────────────────────────────
+
+class TestRouterDeliveryCensusIsPublished:
+    """`delivery_stats()` had exactly one caller — `_log_delivery_stats`, which
+    logs `drops_by_reason` and **not** `drops_by_reason_setup`.
+
+    That second key is the one that says whether a high-volume path is consuming
+    the concurrency caps and starving the others, and it was computed on every
+    cycle and rendered nowhere: a field one repo writes and no repo reads,
+    standing directly in front of the question it was built to answer
+    (owner, 2026-08-07).
+    """
+
+    def test_the_stats_carry_the_per_setup_breakdown(self):
+        from src.signal_router import SignalRouter
+        r = SignalRouter.__new__(SignalRouter)
+        from collections import defaultdict
+        r._drop_counters = defaultdict(int)
+        r._processed_total = 0
+        r._delivered_total = 0
+        r._drop_counters["same_direction_throttle"] = 7
+        r._drop_counters["same_direction_throttle:MOVER_TREND_PULLBACK"] = 5
+        r._drop_counters["same_direction_throttle:TREND_PULLBACK_EMA"] = 2
+        s = r.delivery_stats()
+        assert s["drops_by_reason"] == {"same_direction_throttle": 7}
+        assert s["drops_by_reason_setup"]["same_direction_throttle:MOVER_TREND_PULLBACK"] == 5
+        # The two must not pool: the un-keyed total is not a setup row.
+        assert "same_direction_throttle" not in s["drops_by_reason_setup"]
+
+    def test_the_snapshot_writer_publishes_it(self):
+        """Pin the CALL SITE, not the method. Defining `_write_router_delivery`
+        is not calling it — the exact distinction that left two structural
+        ledgers flushed-but-never-loaded."""
+        import ast
+        import inspect
+        import textwrap
+
+        from src.api.snapshot_writer import SnapshotWriter
+
+        src = textwrap.dedent(inspect.getsource(SnapshotWriter._write_cycle))
+        calls = {
+            n.func.attr for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+        assert "_write_router_delivery" in calls, (
+            "the census is built and never published — the seam this fixes"
+        )
+
+    def test_a_missing_router_names_its_cause_rather_than_returning_empty(self):
+        """"The router dropped nothing" and "there is no router here" are
+        different states; an empty payload renders them identically."""
+        from src.api.snapshot_writer import SnapshotWriter
+
+        w = SnapshotWriter.__new__(SnapshotWriter)
+        w._engine = object()
+        out = w._build_router_delivery()
+        assert out["schema"] == 0
+        assert "error" in out and out["error"]
+
+    def test_a_real_router_builds_a_schema_1_payload(self):
+        """Drive the real object rather than a stub whose keys I chose."""
+        from collections import defaultdict
+
+        from src.api.snapshot_writer import SnapshotWriter
+        from src.signal_router import SignalRouter
+
+        r = SignalRouter.__new__(SignalRouter)
+        r._drop_counters = defaultdict(int)
+        r._processed_total = 3
+        r._delivered_total = 1
+        r._drop_counters["per_channel_cap"] = 2
+        r._drop_counters["per_channel_cap:MOVER_TREND_PULLBACK"] = 2
+
+        class _E:
+            router = r
+
+        w = SnapshotWriter.__new__(SnapshotWriter)
+        w._engine = _E()
+        out = w._build_router_delivery()
+        assert out["schema"] == 1
+        assert out["processed"] == 3 and out["delivered"] == 1 and out["dropped"] == 2
+        assert out["drops_by_reason_setup"]["per_channel_cap:MOVER_TREND_PULLBACK"] == 2

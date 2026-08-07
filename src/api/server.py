@@ -1862,6 +1862,46 @@ def build_app(
             return {"schema": 0, "error": f"{type(exc).__name__}: {exc}"}
 
     @app.get(
+        "/internal/diag/router-delivery",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def router_delivery_diag() -> dict:
+        """What the router did with what it dequeued — the last hop to a user.
+
+        Enqueue is not delivery. `SignalRouter._process` rejects on twelve
+        conditions, and `_drop` counts each one keyed by reason **and** by
+        `reason:setup_class`. That second key answers a question nothing else
+        can: whether a high-volume path is consuming the concurrency caps
+        (`same_direction_throttle`, `per_channel_cap`) and starving the others.
+        It was computed on every cycle and rendered nowhere.
+
+        Isolated mode: the router lives in the engine container and its counters
+        are plain in-process ints, so the facade cannot see them — consult the
+        published snapshot first, fall back to a live read. Same shape as
+        `/internal/diag/data-intake`.
+
+        A failure returns a payload carrying its own cause: "the router dropped
+        nothing" and "the census could not be built" must not render alike.
+        """
+        try:
+            published = getattr(engine, "published_router_delivery", None)
+            if callable(published):
+                raw = published()
+                if raw is not None:
+                    return raw
+            router = getattr(engine, "router", None)
+            stats = getattr(router, "delivery_stats", None)
+            if not callable(stats):
+                return {"schema": 0, "error": "engine has no router.delivery_stats"}
+            out = dict(stats())
+            out["schema"] = 1
+            return out
+        except Exception as exc:  # noqa: BLE001
+            log.exception("/internal/diag/router-delivery failed")
+            return {"schema": 0, "error": f"{type(exc).__name__}: {exc}"}
+
+    @app.get(
         "/internal/diag/position_counters",
         tags=["internal-diag"],
         dependencies=[Depends(owner_required)],
