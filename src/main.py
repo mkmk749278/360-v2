@@ -2798,13 +2798,27 @@ class CryptoSignalEngine:
                 return True, f"only {n} evaluations yet"
             refusals = c.get("refusals", {})
             blind = refusals.get("no_levels", 0) + refusals.get("short_series", 0)
+            l1_ok = c.get("layer1_stamped", 0)
+            l1_blind = c.get("layer1_blind", 0)
             detail = (
                 f"{n} evaluated, {c.get('emitted', 0)} emitted; "
+                f"layer1 {l1_ok} stamped / {l1_blind} blind; "
                 + ", ".join(f"{k}={v}" for k, v in sorted(refusals.items()))
             )
             # Blind on nearly everything means the LevelBook or the candle store
             # is not delivering — not that the market is quiet.
-            return (blind / max(1, n)) < 0.9, detail
+            if (blind / max(1, n)) >= 0.9:
+                return False, detail
+            # Layer 1 stamped on NOTHING once the lane has actually emitted is a
+            # dead measurement, and it is invisible in the split panel — an
+            # empty column reads as "not enough rows yet", which is the reading
+            # a volume profile returning `None` on every row would hide behind.
+            # Graded only once there are rows to stamp, because zero emissions
+            # is a quiet market and paging on it teaches the reader to ignore
+            # this probe.
+            if (l1_ok + l1_blind) >= 10 and l1_ok == 0:
+                return False, "layer 1 stamped on 0 emitted rows — " + detail
+            return True, detail
 
         fl.add_predicate(PredicateProbe(
             name="price_action_lane",

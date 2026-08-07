@@ -139,6 +139,15 @@ class LaneCensus:
     evaluated: int = 0
     emitted: int = 0
     refusals: Dict[str, int] = field(default_factory=dict)
+    #: Layer 1 stamped / not, counted on the EMIT path. Without these a volume
+    #: profile that returns `None` on every row is indistinguishable from a lane
+    #: that has not emitted yet: the split panel reads empty either way, and
+    #: "no data yet" is the reading a reader will reach for. That is the
+    #: "a shadow rule can be dead and nobody is watching" failure — a
+    #: measurement flat-lining without paging — so the blindness is counted
+    #: where it happens and the probe grades it.
+    layer1_stamped: int = 0
+    layer1_blind: int = 0
 
     def refuse(self, reason: str) -> None:
         self.refusals[reason] = self.refusals.get(reason, 0) + 1
@@ -148,6 +157,8 @@ class LaneCensus:
             "evaluated": self.evaluated,
             "emitted": self.emitted,
             "refusals": dict(self.refusals),
+            "layer1_stamped": self.layer1_stamped,
+            "layer1_blind": self.layer1_blind,
         }
 
 
@@ -271,6 +282,53 @@ class LaneSignal:
     sweep_depth_pct: float = 0.0
     delta_quote: float = 0.0
     rr: float = 0.0
+
+    # ── Layer 1 — Context (AMT). ────────────────────────────────────────────
+    # §1 of the program doc defines price action as a FOUR-layer read and names
+    # value area / POC / HTF bias as layer 1's primitives. This lane shipped
+    # with layers 2 (LevelBook), 3 (sweep+reclaim) and 4 (footprint delta) and
+    # **no layer 1 at all** — `src/volume_profile.py` has computed POC/VAH/VAL
+    # since long before the lane existed and the lane never imported it.
+    #
+    # Why layer 1 specifically, for THIS trigger: a sweep + reclaim is a *failed
+    # break*, i.e. a mean-reversion trade. It pays when the market is in
+    # BALANCE (price rotating inside a value area, rejected at the edge,
+    # returning toward POC) and it is a trap when the market is in IMBALANCE
+    # (value being accepted away from the old area, so each failed break is a
+    # pause before continuation). Those two states produce an identical
+    # layer-2/3/4 signature — same level, same sweep, same aligned delta — so
+    # nothing already stamped can separate them.
+    #
+    # Owner window 2026-08-07: BEATUSDT whipsawed 24% and the lane bought
+    # reclaimed support ten times through it for ten losses; the worst nine were
+    # one run worth −85.71% against a whole-book net of −78.25%, and removing it
+    # flipped the book positive. Eight of those ten were stamped TRENDING_UP, so
+    # the scanner's regime label is NOT a usable stand-in for this read.
+    #
+    # Numeric fields are `Optional[float] = None`, never `0.0`: `_lane_provenance`
+    # maps only `None`/`""` to a dash, so a 0.0 default would render on every
+    # pre-stamp row as "POC exactly at entry" — a missing stamp reading as a
+    # measured value, in the flattering direction. Strings are `""` for the
+    # same reason (a `bool` would serialize unstamped rows as `False`).
+    vp_poc: Optional[float] = None
+    vp_vah: Optional[float] = None
+    vp_val: Optional[float] = None
+    #: "in" / "out" — is the ENTRY inside the value area? Balance vs imbalance,
+    #: on the value area's own 70%-of-volume definition rather than a threshold
+    #: invented here.
+    vp_entry_zone: str = ""
+    #: "edge" / "interior" — is the SWEPT LEVEL at a value-area boundary? The
+    #: textbook failed-break location, as against a level sitting mid-expansion.
+    vp_level_zone: str = ""
+    #: Room to POC, **signed toward the trade**: positive means POC is ahead of
+    #: the trade and the rotation this setup is built on has somewhere to go.
+    #: Raw distance would rank every LONG below POC against every SHORT above
+    #: it — the `cvd_slope` error, which made two features look like noise
+    #: because half the book was scored backwards.
+    vp_poc_room_pct: Optional[float] = None
+    #: Value-area width as a % of POC. A very wide area is weak evidence of
+    #: balance, so this bounds how much the two labels above are worth.
+    vp_value_width_pct: Optional[float] = None
 
 
 def _f(v: Any) -> Optional[float]:
@@ -549,6 +607,50 @@ def scan_symbol(
                 )
         except Exception as exc:  # noqa: BLE001
             fail_open.record("price_action_lane.regime_15m", exc)
+
+        # Layer 1 — Context. Computed HERE, on the emit path, for the same
+        # reason the trigger-timeframe regime above is: `evaluate` runs ~19,000
+        # times an hour on every scanned symbol and this runs a few times a day
+        # on a row that actually triggered (Cost Discipline). Same `candles`
+        # dict already in memory — no fetch, no I/O.
+        #
+        # Fail-open and REFUSE rather than guess: a row whose profile could not
+        # be built keeps `""`/`None` and lands in ops' `unstamped` bucket, which
+        # is never folded into a real one. #817's lesson is that a confidently
+        # wrong label is worse than an absent one, because the table still looks
+        # full.
+        try:
+            from src.volume_profile import compute_volume_profile
+            _vp = compute_volume_profile(symbol, candles)
+            if _vp is not None:
+                poc, vah, val = _f(_vp.poc), _f(_vp.vah), _f(_vp.val)
+                entry = _f(sig.entry)
+                if poc and poc > 0 and entry and entry > 0:
+                    sig.vp_poc, sig.vp_vah, sig.vp_val = poc, vah, val
+                    sig.vp_entry_zone = "in" if _vp.is_in_value_area(entry) else "out"
+                    lvl_price = _f(sig.level_price)
+                    if lvl_price and lvl_price > 0:
+                        sig.vp_level_zone = (
+                            "edge" if _vp.is_at_value_edge(lvl_price) else "interior"
+                        )
+                    # Signed toward the trade: positive = POC ahead of us, so the
+                    # rotation this setup is built on has room to run.
+                    is_long = str(getattr(sig.direction, "value", sig.direction)) == "LONG"
+                    room = (poc - entry) if is_long else (entry - poc)
+                    sig.vp_poc_room_pct = room / entry * 100.0
+                    if vah and val and vah > val:
+                        sig.vp_value_width_pct = (vah - val) / poc * 100.0
+            # Counted on the outcome, not on the attempt: an exception and a
+            # profile that could not be built leave the row equally unstamped,
+            # and the reader's question is "does this column have data", not
+            # "which way did it fail".
+            if sig.vp_entry_zone:
+                _census.layer1_stamped += 1
+            else:
+                _census.layer1_blind += 1
+        except Exception as exc:  # noqa: BLE001
+            _census.layer1_blind += 1
+            fail_open.record("price_action_lane.volume_profile", exc)
 
         from src import dark_emission
         if dark_emission.publish(sig):

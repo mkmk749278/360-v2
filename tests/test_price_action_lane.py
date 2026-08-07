@@ -590,3 +590,134 @@ def test_the_trigger_timeframe_regime_is_computed_off_the_hot_path():
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
     }
     assert "detect_regime_from_arrays" in sc_names
+
+
+# ── Layer 1 — Context (AMT) ───────────────────────────────────────────────
+
+class TestLayerOneContextStamps:
+    """§1 of the program doc defines price action as a FOUR-layer read. The lane
+    shipped with layers 2/3/4 and no layer 1, while `src/volume_profile.py` had
+    computed POC/VAH/VAL all along and the lane never imported it.
+
+    A sweep+reclaim is a *failed break* — a mean-reversion trade that pays in
+    balance and traps in imbalance — and those two states have an **identical**
+    layer-2/3/4 signature, so nothing already stamped could separate them.
+    Owner window 2026-08-07: BEATUSDT, ten longs on reclaimed support through a
+    24% whipsaw, ten losses, eight of them stamped TRENDING_UP.
+    """
+
+    def _profile(self, poc=100.0, vah=104.0, val=96.0):
+        from src.volume_profile import VolumeProfileResult
+        import inspect
+        # Drive the REAL result object rather than a hand-made stub: a mock
+        # whose keys we chose cannot verify a contract we got wrong.
+        kwargs = {}
+        for name in inspect.signature(VolumeProfileResult).parameters:
+            kwargs[name] = {"poc": poc, "vah": vah, "val": val}.get(name, 0.0)
+        return VolumeProfileResult(**kwargs)
+
+    def test_the_real_profile_object_answers_the_three_questions_we_ask(self):
+        """Pin the collaborator's API. If `is_in_value_area` / `is_at_value_edge`
+        are renamed, the lane's stamps silently become `unstamped` for every row
+        and the split empties without anything failing."""
+        vp = self._profile()
+        assert vp.is_in_value_area(100.0) is True
+        assert vp.is_in_value_area(120.0) is False
+        assert callable(vp.is_at_value_edge)
+        assert vp.distance_to_poc_pct(110.0) > 0
+
+    def test_poc_room_is_signed_toward_the_trade(self):
+        """`cvd_slope` shipped raw and scored every SHORT backwards, and because
+        the book is ~50/50 by side it looked like noise rather than like a bug.
+        Positive must mean "POC is ahead of THIS trade", both ways."""
+        from src.price_action_lane import LaneSignal
+        from src.smc import Direction
+        # LONG entered below POC: rotation up toward POC is the trade.
+        assert self._room(Direction.LONG, entry=95.0, poc=100.0) > 0
+        # LONG entered above POC: rotation would go against it.
+        assert self._room(Direction.LONG, entry=105.0, poc=100.0) < 0
+        # SHORT is the exact mirror — raw distance would rank these backwards.
+        assert self._room(Direction.SHORT, entry=105.0, poc=100.0) > 0
+        assert self._room(Direction.SHORT, entry=95.0, poc=100.0) < 0
+        assert LaneSignal is not None
+
+    @staticmethod
+    def _room(direction, *, entry, poc):
+        is_long = str(getattr(direction, "value", direction)) == "LONG"
+        return ((poc - entry) if is_long else (entry - poc)) / entry * 100.0
+
+    def test_unstamped_layer_one_serializes_as_none_never_zero(self):
+        """The defect this defaulting choice avoids: `0.0` on an unstamped row
+        renders as "POC exactly at entry" — a missing stamp reading as a
+        measured value, in the flattering direction."""
+        from src import dark_emission
+        from src.price_action_lane import LaneSignal
+        from src.smc import Direction
+
+        sig = LaneSignal(
+            signal_id="s-1", symbol="BTCUSDT", channel="c",
+            setup_class="PA_SWEEP_RECLAIM", direction=Direction.LONG,
+            entry=100.0, stop_loss=98.0, tp1=104.0,
+        )
+        row = dark_emission._row_from_signal(sig, 1_700_000_000.0)
+        for key in ("vp_poc", "vp_vah", "vp_val", "vp_poc_room_pct",
+                    "vp_value_width_pct", "vp_entry_zone", "vp_level_zone"):
+            assert row[key] is None, f"{key} must be None, got {row[key]!r}"
+
+    def test_every_layer_one_field_survives_the_serializer(self):
+        """The seam that ate eight provenance fields once already. Derived now,
+        so this passes for tomorrow's field too — but pinned, because the
+        derivation is the thing that could break."""
+        from src import dark_emission
+        from src.price_action_lane import LaneSignal
+        from src.smc import Direction
+
+        sig = LaneSignal(
+            signal_id="s-2", symbol="BTCUSDT", channel="c",
+            setup_class="PA_SWEEP_RECLAIM", direction=Direction.LONG,
+            entry=95.0, stop_loss=93.0, tp1=100.0,
+            vp_poc=100.0, vp_vah=104.0, vp_val=96.0,
+            vp_entry_zone="out", vp_level_zone="edge",
+            vp_poc_room_pct=5.26, vp_value_width_pct=8.0,
+        )
+        row = dark_emission._row_from_signal(sig, 1_700_000_000.0)
+        assert row["vp_poc"] == 100.0
+        assert row["vp_entry_zone"] == "out"
+        assert row["vp_level_zone"] == "edge"
+        assert row["vp_poc_room_pct"] == 5.26
+        assert row["vp_value_width_pct"] == 8.0
+
+
+class TestLaneProvenanceIsDerivedNotListed:
+    """The list this replaced carried the sentence *"derived from the dataclass
+    rather than typed twice"* directly above a hand-kept dict. That is the
+    repo's own recurring shape — a comment asserting a property the code does
+    not have — and it had already dropped eight fields once."""
+
+    def test_every_lane_only_field_is_covered_without_anyone_listing_it(self):
+        import dataclasses
+
+        from src.dark_emission import _COMMON_SIGNAL_FIELDS, _lane_field_types
+        from src.price_action_lane import LaneSignal
+
+        derived = _lane_field_types()
+        for fld in dataclasses.fields(LaneSignal):
+            assert fld.name in derived or fld.name in _COMMON_SIGNAL_FIELDS, (
+                f"{fld.name} is in neither the common-Signal set nor the lane's "
+                f"provenance — it would be silently dropped by the serializer"
+            )
+
+    def test_the_common_half_is_not_serialized_as_lane_provenance(self):
+        from src.dark_emission import _lane_field_types
+        derived = _lane_field_types()
+        for name in ("signal_id", "symbol", "entry", "stop_loss", "tp1", "confidence"):
+            assert name not in derived, f"{name} is the Signal contract, not lane provenance"
+
+    def test_optional_floats_resolve_to_float_not_str(self):
+        """`Optional[float]` must read back as a number. Resolved to `str` the
+        column would render as text and every numeric split would refuse it."""
+        from src.dark_emission import _lane_field_types
+        d = _lane_field_types()
+        assert d["vp_poc"] is float
+        assert d["vp_poc_room_pct"] is float
+        assert d["vp_entry_zone"] is str

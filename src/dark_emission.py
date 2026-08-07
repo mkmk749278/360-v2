@@ -488,25 +488,57 @@ def reset_ledger(ledger: Optional[DarkLedger] = None) -> None:
 # --------------------------------------------------------------------------- #
 
 
-#: Fields a `price_action_lane.LaneSignal` carries that an ordinary `Signal`
-#: does not, with the type each one is read back as. Derived from the dataclass
-#: rather than typed twice — a hand-kept second list is the drift this repo has
-#: paid for under three different names.
-LANE_PROVENANCE_FIELDS: Dict[str, type] = {
-    "level_price": float,
-    "level_type": str,
-    "level_source_tf": str,
-    "level_score": float,
-    "sweep_extreme": float,
-    "sweep_depth_pct": float,
-    "delta_quote": float,
-    "rr": float,
-    # Layer 1 — which timeframe `regime` describes. The scanner classifies on
-    # 5m and this lane triggers on 15m, so a regime label with no timeframe
-    # beside it is the same class of omission as a percentage with no
-    # denominator ("never pool timeframes silently").
-    "regime_tf": str,
-}
+#: Fields the ordinary `Signal` path already serializes. Everything else on a
+#: `LaneSignal` is the lane's own provenance.
+#:
+#: **This is the half that does not grow.** It is the `Signal` contract; the
+#: lane-specific half is the one that gains a column every time the program adds
+#: a layer, which is exactly why the derivation runs in that direction.
+_COMMON_SIGNAL_FIELDS: frozenset = frozenset({
+    "signal_id", "symbol", "channel", "setup_class", "direction",
+    "entry", "stop_loss", "tp1", "tp2", "tp3",
+    "dark_gate", "confidence", "entry_regime", "entry_regime_15m",
+    "mc_context_key", "valid_for_minutes", "pair_admission",
+})
+
+
+def _lane_field_types() -> Dict[str, type]:
+    """The lane's own columns, **derived from the dataclass** — really, this time.
+
+    The list this replaced carried the sentence *"derived from the dataclass
+    rather than typed twice — a hand-kept second list is the drift this repo has
+    paid for under three different names"* directly above a hand-kept second
+    list. Eight provenance fields had already been dropped by this serializer
+    once (Session 114), and a comment asserting the property is not the property:
+    the next field added to `LaneSignal` would have been silently discarded with
+    that docstring still on screen claiming it could not be.
+
+    Imported inside the function because `price_action_lane` imports this module
+    (lazily, inside its own functions) and a module-level import here would make
+    the direction of that cycle depend on which one loads first.
+    """
+    import dataclasses
+    import typing
+
+    from src.price_action_lane import LaneSignal
+
+    hints = typing.get_type_hints(LaneSignal)
+    out: Dict[str, type] = {}
+    for fld in dataclasses.fields(LaneSignal):
+        if fld.name in _COMMON_SIGNAL_FIELDS:
+            continue
+        ann = hints.get(fld.name, str)
+        args = [a for a in typing.get_args(ann) if a is not type(None)]  # noqa: E721
+        base = args[0] if args else ann
+        out[fld.name] = base if base in (str, float, int) else str
+    return out
+
+
+def __getattr__(name: str) -> Any:
+    """Expose `LANE_PROVENANCE_FIELDS` without importing the lane at module load."""
+    if name == "LANE_PROVENANCE_FIELDS":
+        return _lane_field_types()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _lane_provenance(sig: Any) -> Dict[str, Any]:
@@ -517,7 +549,7 @@ def _lane_provenance(sig: Any) -> Dict[str, Any]:
     empty string. Ops reads the `None` as `unstamped` and renders a dash.
     """
     out: Dict[str, Any] = {}
-    for key, kind in LANE_PROVENANCE_FIELDS.items():
+    for key, kind in _lane_field_types().items():
         raw = getattr(sig, key, None)
         if raw is None or raw == "":
             out[key] = None
