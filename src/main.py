@@ -3416,7 +3416,26 @@ class CryptoSignalEngine:
             # failure (an arm anchoring to a 40h-old bar and back-replaying the
             # gap) survived long enough to publish a row.
             refused = int(h.get("refused_open") or 0)
-            tail = f"; {refused} arms not opened (stale anchor)" if refused else ""
+            tail = f"; {refused} arms not opened (no series / stale anchor)" if refused else ""
+            # …and the population that would be harmed, which is signals owed a
+            # measurement rather than arms owed a verdict (#815). A probe keyed
+            # only on arms cannot see a book the lane never reached: on
+            # 2026-08-08 the unarmed 18% of delivered trades ran −1.643%/trade
+            # against +0.753% for the armed ones, and every counter here read
+            # healthy throughout because none of them was keyed on it.
+            try:
+                cov = _live.get_ledger().coverage()
+                seen = int(cov.get("signals_seen") or 0)
+                unarmed = int(cov.get("unarmed") or 0) + int(cov.get("partly_armed") or 0)
+                if seen:
+                    tail += (
+                        f"; covering {seen - unarmed}/{seen} signals "
+                        f"({100.0 * (seen - unarmed) / seen:.0f}%)"
+                    )
+            except Exception:
+                # Coverage is context on a probe about stepping. It must never
+                # be the reason this probe cannot answer.
+                pass
             if stepped == 0 and missed == 0:
                 return True, f"no open arms{tail}"
             if missed == 0:

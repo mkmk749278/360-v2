@@ -1200,3 +1200,239 @@ class TestARegressedSeriesIsNotARolledOutBar:
         assert arm["bars_seen"] > 4, "it consumed the new bars"
         assert arm["last_bar_ms"] == float(base + 11 * 60_000)
         assert arm["exit_reason"] != live.EXIT_BAR_ROLLED_OUT
+
+
+# --------------------------------------------------------------------------- #
+# Coverage — the population the verdict does NOT cover
+# --------------------------------------------------------------------------- #
+#
+# Every guard above asks whether an arm that EXISTS measured honestly. None of
+# them could see a delivered signal that never became an arm, and that was the
+# largest exclusion of all: a guest-session audit on 2026-08-08 joined this
+# ledger to `signal_performance.json` and found 18.4% of delivered trades with
+# no arm, running -1.643%/trade at 10.7% win against +0.753% and 43.5% for the
+# armed ones. The page's "+0.588%/arm" was therefore a winner-enriched subset
+# reported as if it were the book.
+#
+# This is #815's rule ("key a probe on the population that would be harmed")
+# arriving one step earlier than any previous fix in this module: not arms owed
+# a verdict, but signals owed a measurement.
+
+
+def _e2e_signal(signal_id="SIG-COV", symbol="TESTUSDT", **kw):
+    from src.channels.base import Signal
+    from src.smc import Direction
+
+    fields = dict(
+        channel="scalp", symbol=symbol, direction=Direction.LONG,
+        entry=180.0, stop_loss=175.0, tp1=190.0, tp2=195.0,
+        signal_id=signal_id, setup_class="MOVER_TREND_PULLBACK",
+    )
+    fields.update(kw)
+    return Signal(**fields)
+
+
+def test_a_signal_with_no_series_is_counted_not_silently_skipped():
+    """The defect this whole block exists for: an unarmed signal left no trace.
+
+    Driven through the real ``observe_signal`` against a real
+    ``HistoricalDataStore`` holding candles for 15m only, so the 5m arm cannot
+    open for the honest reason. Before the fix both the census and
+    ``refused_open`` were untouched here and the signal vanished from every
+    count in the system.
+    """
+    live.reset_sar_cache()
+    live.reset_health()
+    ledger = live.SarLiveLedger(path="")
+    bars = _rising(80)
+    store = _seed_store("TESTUSDT", bars, intervals=("15m",))
+    sig = _e2e_signal()
+
+    live.observe_signal(sig, store, price=181.0, ledger=ledger, now_ts=_now_at(79))
+
+    cov = ledger.coverage()
+    assert cov["signals_seen"] == 1
+    assert cov["partly_armed"] == 1, "15m armed, 5m not — neither covered nor missing"
+    assert cov["fully_armed"] == 0
+    assert cov["reasons"].get(live.OPEN_REFUSED_NO_SERIES) == 1
+    miss = cov["misses"][0]
+    assert miss["armed"] == ["15m"]
+    assert miss["missing"] == {"5m": live.OPEN_REFUSED_NO_SERIES}
+    # …and it reaches the health counter the probe reads, too.
+    assert live.step_health()["refused_open"] == 0  # rolls into `last` on cycle
+    live.roll_health_cycle()
+    assert live.step_health()["refused_open"] == 1
+
+
+def test_coverage_is_current_state_not_first_attempt():
+    """A series arriving late must clear the miss, not leave a stale one.
+
+    Otherwise the census reports a coverage gap that has already healed, which
+    is the "blank needs a cause before it gets a caption" failure pointed at a
+    fraction rather than at a panel.
+    """
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="")
+    bars = _rising(80)
+    store = _seed_store("TESTUSDT", bars, intervals=("15m",))
+    sig = _e2e_signal()
+    live.observe_signal(sig, store, price=181.0, ledger=ledger, now_ts=_now_at(79))
+    assert ledger.coverage()["partly_armed"] == 1
+
+    # The 5m series shows up on a later cycle.
+    store2 = _seed_store("TESTUSDT", bars, intervals=("5m", "15m"))
+    live.reset_sar_cache()
+    live.observe_signal(sig, store2, price=181.0, ledger=ledger, now_ts=_now_at(79))
+
+    cov = ledger.coverage()
+    assert cov["fully_armed"] == 1, "the late arm cleared the miss"
+    assert cov["partly_armed"] == 0
+    assert cov["misses"] == []
+
+
+def test_coverage_survives_a_restart():
+    """Flush without load is worse than neither.
+
+    Coverage is a CUMULATIVE claim about the book, so a restart resetting it to
+    zero would make the fraction describe only the time since the last deploy
+    while reading exactly like the whole window — the same shape as the two
+    structural ledgers that erased their own evidence on every deploy.
+    """
+    import tempfile, os as _os
+
+    live.reset_sar_cache()
+    fd, path = tempfile.mkstemp(suffix=".json")
+    _os.close(fd)
+    _os.unlink(path)
+    try:
+        ledger = live.SarLiveLedger(path=path)
+        bars = _rising(80)
+        store = _seed_store("TESTUSDT", bars, intervals=("15m",))
+        live.observe_signal(
+            _e2e_signal(), store, price=181.0, ledger=ledger, now_ts=_now_at(79)
+        )
+        assert ledger.flush(force=True) is True
+
+        restored = live.SarLiveLedger(path=path)
+        restored.load()
+        cov = restored.coverage()
+        assert cov["signals_seen"] == 1
+        assert cov["partly_armed"] == 1
+        assert cov["misses"][0]["missing"] == {"5m": live.OPEN_REFUSED_NO_SERIES}
+        # The armed half is rebuilt from the arms themselves rather than stored
+        # twice — the fix for a drifting mirror is not a second mirror.
+        assert cov["misses"][0]["armed"] == ["15m"]
+    finally:
+        for p in (path, f"{path}.tmp"):
+            if _os.path.exists(p):
+                _os.unlink(p)
+
+
+def test_coverage_is_bounded_and_says_how_much_it_dropped():
+    """A capped ring makes every verdict on it a sample, and the cap must show."""
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="", max_coverage=3)
+    bars = _rising(80)
+    store = _seed_store("TESTUSDT", bars, intervals=("15m",))
+    for i in range(6):
+        live.observe_signal(
+            _e2e_signal(signal_id=f"SIG-{i}"), store, price=181.0,
+            ledger=ledger, timeframes=["15m"], now_ts=_now_at(79) + i,
+        )
+    cov = ledger.coverage()
+    assert cov["signals_seen"] == 3
+    assert cov["evicted"] == 3
+    assert cov["cap"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# The risk denominator (#848), one lane later
+# --------------------------------------------------------------------------- #
+
+
+def test_sl_distance_comes_from_the_stop_the_trade_was_sized_for():
+    """``TradeMonitor`` moves ``sig.stop_loss`` in place; the arm must not follow.
+
+    An arm opening after a BE shift would divide every R by ~0. The evaluator's
+    ``original_sl_distance`` is the stop the trade was SIZED for and is what
+    ``snapshot._original_stop_loss`` already reads.
+    """
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="")
+    bars = _rising(80)
+    store = _seed_store("TESTUSDT", bars, intervals=("15m",))
+    # Entry 180, designed stop 175 (2.78%), then the monitor break-even shifts
+    # the live stop up to entry — which is the state that breaks the fallback.
+    sig = _e2e_signal(stop_loss=180.0)
+    sig.original_sl_distance = 5.0
+    live.observe_signal(
+        sig, store, price=181.0, ledger=ledger, timeframes=["15m"],
+        now_ts=_now_at(79),
+    )
+    arm = ledger.open_arms()[0]
+    assert arm["sl_distance_source"] == "original"
+    assert arm["sl_distance_pct"] == pytest.approx(5.0 / 180.0 * 100.0)
+    # The naive fallback would have produced 0.0 here, and every R on the page
+    # would have divided by it.
+    assert abs(arm["entry"] - arm["stop_loss"]) == 0.0
+
+
+def test_sl_distance_falls_back_but_names_the_fallback():
+    """Refusing outright would empty the population; a silent fallback would
+    redefine a column mid-book. Neither — fall back and say so."""
+    arm = _arm(_rising(60), "LONG", entry=160.0, sl=155.0, tp1=175.0)
+    assert arm["sl_distance_source"] == "live_stop"
+    assert arm["sl_distance_pct"] == pytest.approx(5.0 / 160.0 * 100.0)
+
+
+#: The coverage block ops reads off the flushed ledger. Pinned HERE, on the
+#: producing side, and pinned by **location** as well as by name: the
+#: price-action lane card shipped with an ops fixture that put its block at the
+#: payload's top level while the engine nested it under `derived`, and every ops
+#: test passed over a card that would have rendered NOT REPORTED against the
+#: real engine. Shape right, path wrong.
+OPS_COVERAGE_KEYS = frozenset({
+    "signals_seen", "fully_armed", "partly_armed", "unarmed",
+    "reasons", "misses", "evicted", "cap",
+})
+
+
+def test_the_flushed_payload_carries_coverage_where_ops_looks_for_it(tmp_path):
+    """Driven through the real flush, not through ``coverage()`` directly.
+
+    ``coverage()`` returning the right dict proves nothing about the file: the
+    serializer is its own seam, and a field a writer populates and a serializer
+    drops is invisible at both ends (#842, where `open_time` was added to the
+    store and never survived a restart).
+    """
+    import json
+
+    live.reset_sar_cache()
+    path = str(tmp_path / "arms.json")
+    ledger = live.SarLiveLedger(path=path)
+    store = _seed_store("TESTUSDT", _rising(80), intervals=("15m",))
+    live.observe_signal(
+        _e2e_signal(), store, price=181.0, ledger=ledger, now_ts=_now_at(79)
+    )
+    assert ledger.flush(force=True) is True
+
+    payload = json.loads(open(path).read())
+    assert "coverage" in payload, (
+        "ops reads payload['coverage'] — if this moves, the panel silently "
+        "renders NOT REPORTED against a healthy engine"
+    )
+    # …and it is at the TOP level, not nested. Asserting where it is NOT is the
+    # half that would have caught the price-action card's fixture.
+    assert "coverage" not in (payload.get("derived") or {})
+    cov = payload["coverage"]
+    missing = OPS_COVERAGE_KEYS - set(cov)
+    assert not missing, f"ops reads these and the engine stopped writing them: {missing}"
+    assert cov["signals_seen"] == 1
+    assert cov["partly_armed"] == 1
+    assert cov["reasons"] == {live.OPEN_REFUSED_NO_SERIES: 1}
+
+
+def test_sl_distance_source_is_in_the_ops_contract():
+    """A column ops renders must be pinned on the side that writes it (#817)."""
+    arm = _arm(_rising(60), "LONG", entry=160.0, sl=155.0, tp1=175.0)
+    assert "sl_distance_source" in arm
