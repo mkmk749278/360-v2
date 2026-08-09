@@ -4,6 +4,76 @@
 
 ---
 
+## 🟢 SESSION 117 2026-08-09 — the level was never checked against the exchange; and the second arm
+
+Engine `claude/sar-live-analysis-b29z6u`. Owner: *"live means real data from
+Binance to check whether SAR measuring accurately or not"*, then *"write that
+script and also add max profit hit before hitting SL like live feed and also add
+strategies to check what if you move SL after moving 3% etc"*.
+
+### The verdict on accuracy: sound, and now checkable
+
+Session 116 audited the arm's **inputs**. Nobody had checked its **output** —
+whether the level parked was the level SAR actually had on those bars, which
+needs the exchange's candles rather than the engine's cache of them. Verified
+this session:
+
+| Check | Result |
+|---|---|
+| Engine `parabolic_sar` vs an independent Wilder walk, 5,400 real bars, 12 series | **0.000000% max disagreement**, identical flip counts, 100% direction agreement |
+| `parabolic_sar_live.next_stop` | genuinely one step past the last closed bar, clamped past the last two extremes |
+| `pnl_level_pct` / `pnl_confirm_pct` / `r_level` reconcile from entry+fill | **349 of 349**, zero mismatches |
+| `sar_flip` fills vs the parked level | 245 exactly at level, 47 worse (gap-through), **0 better** |
+| SAR stop width on real 15m alt bars | median 1.49%, p90 8.12%, **max 38.06%** (BTC: 0.31% / 0.70%) |
+
+So the ledger's wide stops are **ordinary SAR on volatile low-cap perps**, not a
+measurement error. `scripts/reconcile_sar_arms.py` closes the loop permanently —
+run it on the VPS where `fapi` is reachable. It refuses rather than guesses:
+`seed_sensitive` when reconstructions disagree with each other, which is rare by
+measurement (0 disagreements from 20 bars of warmup; SAR forgets its seed at
+every flip).
+
+### The analysis the owner asked for, in one line
+
+SAR **is** flipping — 290 of 347 scored arms exit on a flip, and **all 35** rows
+that lost more than their designed SL exited on `sar_flip`. The negativity is
+**risk the trade was never sized for**: when SAR governs it cancels a 3–7%
+designed stop and parks one that has been up to 21% away. Same average as the
+inside-SL bucket (+0.837% vs +0.801%), **1.8× the volatility and the entire loss
+tail** (p5 −7.12% vs −2.76%; 17% of rows losing >5% against 1%).
+
+Against the live exit, joined on `signal_id` to `/track-record`: **+0.650% vs
++0.582%, delta +0.069%/arm, bootstrap 95% CI [−0.454, +0.713]** clustered by
+symbol·side. SAR is better on 46% of head-to-heads — better on SL_HIT rows
+(+0.600%/arm), worse on PROFIT_LOCKED (−0.375%). **No measurable edge.** And the
+book is concentrated: worst 10 campaigns are 17% of arms and −171.4%; 97% of arms
+sit in a multi-arm campaign.
+
+**The obvious fix was checked and NOT recommended.** Capping SAR risk at the
+designed SL saves +87.4% across 35 losers and forfeits −64.8% across **4** winners
+— **3 of them the same symbol**. Net +22.6%, and MAE is unstamped on 42 of the
+162 wider rows so the downside is under-counted. A net whose entire downside rests
+on three rows of one campaign is `FAILED_AUCTION_RECLAIM` arriving from the loss
+side. Finding: confirmed. Fix: not evidenced.
+
+### Shipped
+
+- `scripts/reconcile_sar_arms.py` + 16 tests, one of which corrupts a stop by
+  0.05% and asserts it is caught — a reconciliation that cannot fail is not one.
+- **Held-to-stop arm** (`_step_hold`): max profit before the ORIGINAL stop, with
+  MAE and the drawdown-as-it-stood-at-the-peak. `mfe_pct` could never answer this
+  — it is bounded by the SAR exit by construction (#869's defect, second page).
+- **Stop-management rules** (`src/sar_exit_strategies.py`): BE at +1/2/3/5%, lock,
+  and two trailing rules, stepped forward on the same bars — not replayed, on the
+  page whose identity is that its arms are not replays.
+- Ledger schema **2**, `strategy_catalog` manifest shipped with the file, new
+  `sar_hold_arm` liveness probe, ops panels on `/signals/sar-live`.
+
+**Open for the owner:** whether to cap SAR risk at the designed SL. The data now
+exists on both sides of it; my read is that it is not yet evidenced.
+
+---
+
 ## 🟢 SESSION 116 2026-08-08 — the SAR verdict was measured on a winner-enriched subset
 
 Engine #900, ops #157. A read-only guest session was asked to audit the

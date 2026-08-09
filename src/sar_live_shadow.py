@@ -109,7 +109,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from src import fail_open
+from src import fail_open, sar_exit_strategies
 from src.sar_exit_shadow import SarLive, parabolic_sar_live
 from src.utils import get_logger
 
@@ -217,7 +217,23 @@ OPEN_REFUSED_NO_SERIES = "no_series"
 #: Bumped whenever a stored row's meaning changes. Readers gate on the schema,
 #: never on a date — a migration keyed to a timestamp that predicts a future
 #: deploy is how #802's first fix shipped 88 bad rows as good ones.
-LEDGER_SCHEMA = 1
+#:
+#: 2 (2026-08-09) — the held-to-stop arm and the stop-management rules. No
+#: existing field changed meaning, so nothing is purged and every schema-1 row
+#: keeps its full standing in the SAR verdict. The bump exists so a reader can
+#: tell **"this arm held to its stop and never ran"** from **"this row predates
+#: the arm"** — two states with different next moves, and a blank alone cannot
+#: separate them.
+LEDGER_SCHEMA = 2
+
+#: Terminal states for the held-to-stop arm. Three, not two, for the reason
+#: #839 paid for: a walked window in which the stop was never reached is a
+#: measurement, and a window that could not be walked is the absence of one.
+#: Folding them together divides a rate by rows nobody scored.
+HOLD_OPEN = "OPEN"
+HOLD_SL = "CLOSED_SL"          # reached the original stop — the arm's own verdict
+HOLD_HORIZON = "HORIZON"       # walked to the arm's horizon, still open, peak is a floor
+HOLD_INSUFFICIENT = "INSUFFICIENT"  # the walk broke; terminal and deliberately unscored
 
 
 # --------------------------------------------------------------------------- #
@@ -443,11 +459,16 @@ def _note_series_state(
         arm["stalled_since"] = now
     if now - float(arm["stalled_since"]) < float(abandon_sec):
         return False
-    arm["status"] = STATUS_INSUFFICIENT
-    arm["exit_reason"] = EXIT_FEED_STALLED
-    arm["closed_at"] = now
+    if arm.get("status") == STATUS_RUNNING:
+        arm["status"] = STATUS_INSUFFICIENT
+        arm["exit_reason"] = EXIT_FEED_STALLED
+        arm["closed_at"] = now
     arm["current_price"] = None
     arm["unrealized_pct"] = None
+    # The held arm was walking the same dead feed. Terminating the SAR arm alone
+    # would leave it OPEN forever in a retired row — the frozen-arm class this
+    # module exists to make impossible, reintroduced by the second arm.
+    _hold_insufficient(arm, EXIT_FEED_STALLED, now)
     return True
 
 
@@ -655,6 +676,53 @@ def new_arm(
         "max_sar_risk_pct": None,
         "handover_risk_pct": None,
         "handover_wider_than_sl": None,
+        # ── The held-to-stop arm ────────────────────────────────────────────
+        # A SECOND arm over the same bars, with the SAR exit removed: it holds
+        # to the trade's ORIGINAL stop and records how far the trade was ever
+        # going to run.
+        #
+        # Why `mfe_pct` above cannot answer that. The SAR loop `return`s at its
+        # own exit, so `mfe_pct` is bounded by that exit **by construction** —
+        # it says how far the trade ran before SAR closed it and is
+        # structurally silent on everything after. Rendering it as "max profit"
+        # would be a figure that is always about right and never means what it
+        # says, which is worse than a blank because a blank prompts a question.
+        # Same defect the dark lane paid for in #869; the fix is the same shape.
+        #
+        # The two peaks are never blended and never compared as if they were
+        # the same measurement: one is truncated at an exit, the other is not.
+        "hold_status": HOLD_OPEN,
+        "hold_exit_reason": None,
+        "hold_bars": 0,
+        "hold_fill": None,
+        "hold_pnl_pct": None,
+        "hold_closed_at": None,
+        # The answer to "max profit before hitting SL", measured on bars
+        # strictly BEFORE the stop bar. The stop bar's own favourable wick sits
+        # in `hold_mfe_incl_pct` beside it rather than inside it, so the
+        # assumption is readable instead of embedded.
+        "hold_mfe_pct": 0.0,
+        "hold_mfe_incl_pct": 0.0,
+        "hold_mae_pct": 0.0,
+        # Where the peak was printed, so "how long was the profit available"
+        # is answerable and not merely "how much".
+        "hold_peak_bar": None,
+        "hold_peak_ms": None,
+        # The drawdown as it stood when the peak printed — the ordering MFE and
+        # MAE cannot supply between them, and the one number a "could a tighter
+        # stop have held this" question actually needs.
+        "hold_mae_pre_peak_pct": 0.0,
+        "hold_ambiguous_bar": False,
+        #: Newest close either arm has walked. Used to mark a rule still open at
+        #: the horizon — never a live price, which this row did not walk.
+        "last_close": None,
+        # ── Stop-management what-ifs, stepped on the same bars ──────────────
+        # Per-rule state lives here; `sar_exit_strategies` owns the catalog and
+        # the arithmetic. Ops renders whatever ships in `strategies` and keeps
+        # no second copy of the rules.
+        "strategies": sar_exit_strategies.new_states(
+            float(entry), float(stop_loss), str(side or "").upper()
+        ),
     }
     if sar is None:
         # Refuse. An arm that cannot read SAR at entry does not get a governor
@@ -677,6 +745,127 @@ def new_arm(
         # blank — "SAR governed from bar one" is a fact about this arm.
         _stamp_handover(arm, now=now, bar_ms=opened_ms)
     return arm
+
+
+def sar_arm_open(arm: Dict[str, Any]) -> bool:
+    """Is the SAR arm still owed a verdict?"""
+    return arm.get("status") == STATUS_RUNNING
+
+
+def hold_arm_open(arm: Dict[str, Any]) -> bool:
+    """Is the held-to-stop arm still owed a verdict?
+
+    A schema-1 row carries no ``hold_status`` at all and must read **closed**:
+    it predates the arm, nothing is owed, and treating a missing field as "open"
+    would resurrect every historical row into the open set forever.
+    """
+    return arm.get("hold_status") == HOLD_OPEN
+
+
+def owed_verdict(arm: Dict[str, Any]) -> bool:
+    """Either arm still measuring.
+
+    This is the population the sweep keys on. Keying on the SAR arm alone is
+    #835's shape and #869's corollary in one: the held arm exits at the original
+    stop, which is normally *later* than the SAR flip, so a loop that retires on
+    the SAR close freezes precisely the arm built to outlive it — silently,
+    because a closed row looks correctly complete.
+    """
+    return sar_arm_open(arm) or hold_arm_open(arm)
+
+
+def _hold_insufficient(arm: Dict[str, Any], reason: str, now_ts: float) -> None:
+    """Terminate the held arm with no verdict, naming why.
+
+    Unscored on purpose. An expiry is a walked window in which nothing happened;
+    this is the absence of a measurement, and pooling the two divides a rate by
+    rows nobody scored.
+    """
+    if arm.get("hold_status") != HOLD_OPEN:
+        return
+    arm["hold_status"] = HOLD_INSUFFICIENT
+    arm["hold_exit_reason"] = reason
+    arm["hold_closed_at"] = now_ts
+    # The rules stop with it: their bars came from the same broken walk, and a
+    # rule scored over a window the arm could not walk is a fabricated fill.
+    for st in (arm.get("strategies") or {}).values():
+        if st.get("status") == sar_exit_strategies.ST_OPEN:
+            st["status"] = sar_exit_strategies.ST_HORIZON
+            st["fill"] = None
+            st["pnl_pct"] = None
+
+
+def _step_hold(
+    arm: Dict[str, Any],
+    *,
+    high: float,
+    low: float,
+    open_: float,
+    close: float,
+    bar_ms: float,
+    bar_index: int,
+    now_ts: float,
+) -> bool:
+    """Advance the held-to-stop arm over one closed bar. True if it changed.
+
+    The order inside the bar leans against the arm at every step, because the
+    whole value of this measurement is that it bounds what a stop-management
+    rule could have earned — and a bound computed optimistically bounds nothing:
+
+    * the favourable extreme is recorded **before** the stop is tested, but a
+      peak printed on the stop bar itself lands in ``hold_mfe_incl_pct`` and not
+      in ``hold_mfe_pct``, because OHLC cannot say which came first;
+    * a bar that both prints a new peak and touches the stop is flagged
+      ``hold_ambiguous_bar`` rather than silently resolved the flattering way;
+    * a gap through the stop fills at the bar's open — worse, never better.
+    """
+    entry = float(arm["entry"])
+    if entry <= 0:
+        return False
+    is_long = _is_long(arm["side"])
+    sl = float(arm["stop_loss"])
+    changed = False
+    arm["hold_bars"] = int(arm.get("hold_bars") or 0) + 1
+
+    fav = ((high - entry) if is_long else (entry - low)) / entry * 100.0
+    adv = ((entry - low) if is_long else (high - entry)) / entry * 100.0
+    if adv > float(arm.get("hold_mae_pct") or 0.0):
+        arm["hold_mae_pct"] = adv
+        changed = True
+
+    stop_hit = (low <= sl) if is_long else (high >= sl)
+
+    # Including the stop bar — the optimistic reading, kept beside the
+    # conservative one rather than instead of it.
+    if fav > float(arm.get("hold_mfe_incl_pct") or 0.0):
+        arm["hold_mfe_incl_pct"] = fav
+        changed = True
+
+    if not stop_hit:
+        if fav > float(arm.get("hold_mfe_pct") or 0.0):
+            arm["hold_mfe_pct"] = fav
+            arm["hold_peak_bar"] = bar_index
+            arm["hold_peak_ms"] = bar_ms
+            # The drawdown as it stood when the peak printed. MFE and MAE carry
+            # no ordering between them, so without this no question about
+            # whether a tighter stop would have survived to the peak is
+            # answerable at all.
+            arm["hold_mae_pre_peak_pct"] = float(arm.get("hold_mae_pct") or 0.0)
+            changed = True
+        return changed
+
+    if fav > float(arm.get("hold_mfe_pct") or 0.0):
+        # A new high AND the stop, on one bar. Not counted as reached, and said
+        # out loud — the row is a judgement, not a fact.
+        arm["hold_ambiguous_bar"] = True
+    gapped = (open_ <= sl) if is_long else (open_ >= sl)
+    fill = open_ if gapped else sl
+    arm["hold_status"] = HOLD_SL
+    arm["hold_exit_reason"] = EXIT_STATIC_SL
+    arm["hold_fill"] = float(fill)
+    arm["hold_pnl_pct"] = _pnl_pct(entry, fill, arm["side"])
+    arm["hold_closed_at"] = now_ts
+    return True
 
 
 def _close(
@@ -749,7 +938,11 @@ def step_arm(
     """
     now = time.time() if now_ts is None else float(now_ts)
     try:
-        if arm.get("status") != STATUS_RUNNING:
+        # Keyed on EITHER arm, not on the SAR arm alone. The held arm normally
+        # outlives the SAR flip, so the old guard froze it the moment the thing
+        # it rides finished — #835's shape, and invisible because a closed row
+        # looks complete.
+        if not owed_verdict(arm):
             return False
         times = series["open_time"]
         last_seen = arm.get("last_bar_ms")
@@ -793,13 +986,17 @@ def step_arm(
             # consumed, so bars we never saw have rolled off the front. We
             # cannot know what happened in between and inventing a starting
             # index would be a clamp. The arm stops measuring and says why.
-            arm["status"] = STATUS_INSUFFICIENT
-            arm["exit_reason"] = (
+            rolled = (
                 EXIT_BAR_ROLLED_OUT
                 if oldest is not None and float(last_seen) < oldest
                 else EXIT_BAR_NOT_ON_GRID
             )
-            arm["closed_at"] = now
+            if sar_arm_open(arm):
+                arm["status"] = STATUS_INSUFFICIENT
+                arm["exit_reason"] = rolled
+                arm["closed_at"] = now
+            # The held arm walked the same bars, so it lost the same window.
+            _hold_insufficient(arm, rolled, now)
             return True
         n = len(times)
         changed = False
@@ -842,11 +1039,15 @@ def step_arm(
                 # Refuse, don't clamp. Walking "just the recent tail" would be a
                 # clamp — it would book fills on bars chosen by us rather than by
                 # the market, and the arm cannot know what it missed in between.
-                arm["status"] = STATUS_INSUFFICIENT
-                arm["exit_reason"] = EXIT_SERIES_JUMPED
-                arm["closed_at"] = now
+                if sar_arm_open(arm):
+                    arm["status"] = STATUS_INSUFFICIENT
+                    arm["exit_reason"] = EXIT_SERIES_JUMPED
+                    arm["closed_at"] = now
                 arm["advance_replay_bars"] = float(pending)
                 arm["advance_allowed_bars"] = float(allowed)
+                # Both arms walk the same bars under the same guard: a series
+                # that jumped cannot be walked honestly by either of them.
+                _hold_insufficient(arm, EXIT_SERIES_JUMPED, now)
                 log.warning(
                     "SAR arm {} refused a {:.0f}-bar advance ({:.1f} allowed by "
                     "the clock) — series jumped, not walked",
@@ -857,7 +1058,11 @@ def step_arm(
         for i in range(idx + 1, n):
             hi, lo, op, cl = highs[i], lows[i], opens[i], closes[i]
             arm["last_bar_ms"] = times[i]
-            arm["bars_seen"] = int(arm.get("bars_seen") or 0) + 1
+            # The newest close this row has walked. A rule still open at the
+            # horizon is marked to it rather than to a live mark: the mark comes
+            # from a clock this row does not control, and a measurement may not
+            # grade itself on a clock it did not walk.
+            arm["last_close"] = float(cl)
             # When the arm last actually moved. ``last_swept_at`` says we looked;
             # this says we advanced. Ops leads its rows with the difference.
             arm["last_advance_at"] = now
@@ -866,8 +1071,41 @@ def step_arm(
             # tell a frozen arm from a live one — which is the exact failure
             # this whole module exists to stop being invisible.
             changed = True
+
+            # ── The held arm and the stop-management rules ──────────────────
+            # Advanced FIRST and unconditionally, because they must keep
+            # walking after the SAR arm has closed. Their own bar counters are
+            # separate: `bars_seen` keeps meaning "bars the SAR arm consumed",
+            # so the column ops already renders does not silently change
+            # meaning under a reader.
+            if hold_arm_open(arm):
+                if _step_hold(
+                    arm, high=hi, low=lo, open_=op, close=cl,
+                    bar_ms=times[i], bar_index=i, now_ts=now,
+                ):
+                    changed = True
+                if sar_exit_strategies.step(
+                    arm.get("strategies") or {},
+                    entry=entry, stop_loss=float(arm["stop_loss"]), side=side,
+                    high=hi, low=lo, open_=op, bar_index=i,
+                ):
+                    changed = True
+
+            if not sar_arm_open(arm):
+                # SAR is done; the held arm above is what is still walking. Stop
+                # once neither is, rather than iterating the rest of the window.
+                if not hold_arm_open(arm):
+                    break
+                continue
+
+            arm["bars_seen"] = int(arm.get("bars_seen") or 0) + 1
             # MFE over closed bars, measured before any exit on this bar so the
             # exit bar cannot inflate it.
+            #
+            # Bounded by this arm's OWN exit by construction — the loop stops
+            # advancing it the moment SAR closes. "Max profit before the stop"
+            # is `hold_mfe_pct`, a different measurement over a longer window,
+            # and the two are never blended.
             fav = (hi - entry) if is_long else (entry - lo)
             if entry > 0:
                 arm["mfe_pct"] = max(
@@ -904,7 +1142,8 @@ def step_arm(
                         fill_confirm=cl,
                         now_ts=now,
                     )
-                    return True
+                    changed = True
+                    continue
                 if tp_hit:
                     # A resting limit fills at its own price; a gap through it
                     # does not fill better.
@@ -916,7 +1155,8 @@ def step_arm(
                         fill_confirm=cl,
                         now_ts=now,
                     )
-                    return True
+                    changed = True
+                    continue
                 # Neither hit — has SAR come onside on this bar?
                 live = parabolic_sar_live(
                     highs[: i + 1], lows[: i + 1], step, max_step, last_closed_ms=times[i]
@@ -953,7 +1193,8 @@ def step_arm(
                     fill_confirm=cl,
                     now_ts=now,
                 )
-                return True
+                changed = True
+                continue
             live = parabolic_sar_live(
                 highs[: i + 1], lows[: i + 1], step, max_step, last_closed_ms=times[i]
             )
@@ -1237,6 +1478,17 @@ class SarLiveLedger:
                     # surface at all — which is exactly how ``refused_open``
                     # spent its life inside a probe message nobody reads.
                     "coverage": self.coverage(),
+                    # The stop-management rules as data — labels, kinds and
+                    # thresholds — written ONCE per file rather than repeated on
+                    # every row.
+                    #
+                    # This is the half that makes "ops keeps no second catalog"
+                    # true rather than merely intended. Without it the surface
+                    # has only the rule *keys* off each row, so it must either
+                    # render `be_3` at the reader or keep its own copy of the
+                    # labels — and a hand-kept second copy is the drift this repo
+                    # has paid for under four names. One writer, one reader.
+                    "strategy_catalog": sar_exit_strategies.catalog_manifest(),
                 }
                 self._last_write = now
                 self._dirty = False
@@ -1641,11 +1893,26 @@ def sweep(
             # verdict — visibly, with its own reason.
             opened_at = float(arm.get("opened_at") or now)
             if mo > 0 and (now - opened_at) > float(mo) * 3600.0:
-                arm["status"] = STATUS_INSUFFICIENT
-                arm["exit_reason"] = EXIT_OPEN_AT_HORIZON
-                arm["closed_at"] = now
+                if sar_arm_open(arm):
+                    arm["status"] = STATUS_INSUFFICIENT
+                    arm["exit_reason"] = EXIT_OPEN_AT_HORIZON
+                    arm["closed_at"] = now
                 arm["current_price"] = None
                 arm["unrealized_pct"] = None
+                # The held arm reached the same bound, and its peak is a real
+                # measurement over a walked window — a floor on what the trade
+                # offered, not an absence of one. So it retires as HORIZON
+                # rather than INSUFFICIENT, and stays scored.
+                if hold_arm_open(arm):
+                    arm["hold_status"] = HOLD_HORIZON
+                    arm["hold_exit_reason"] = EXIT_OPEN_AT_HORIZON
+                    arm["hold_closed_at"] = now
+                    sar_exit_strategies.finalize_open(
+                        arm.get("strategies") or {},
+                        entry=float(arm["entry"]),
+                        side=str(arm.get("side") or ""),
+                        last_close=arm.get("last_close"),
+                    )
                 book.retire(arm_id)
                 tally["retired"] += 1
                 # Deliberately NOT a health miss. The arm reached a bound we
@@ -1677,13 +1944,23 @@ def sweep(
                     book.mark_dirty()
                 continue
 
+            # Progress is measured on whichever arm is still walking. Reading
+            # `bars_seen` alone would report every held-arm-only cycle as "no
+            # progress", so a row advancing perfectly well after its SAR flip
+            # would count as stalled and eventually be abandoned.
             before = int(arm.get("bars_seen") or 0)
+            before_hold = int(arm.get("hold_bars") or 0)
             changed = step_arm(arm, series, step=s, max_step=ms, now_ts=now)
-            advanced = int(arm.get("bars_seen") or 0) > before
+            advanced = (
+                int(arm.get("bars_seen") or 0) > before
+                or int(arm.get("hold_bars") or 0) > before_hold
+            )
 
-            # Only a still-running arm has a "how current am I" question; a
-            # closed one already carries its verdict.
-            if arm.get("status") == STATUS_RUNNING:
+            # "How current am I" is a question for any arm still owed a verdict.
+            # Gating this on the SAR arm alone would stop grading freshness on a
+            # row whose held arm is still walking — the stamps ops leads its rows
+            # with would silently freeze at the SAR exit.
+            if owed_verdict(arm):
                 _note_series_state(
                     arm,
                     now=now,
@@ -1702,13 +1979,18 @@ def sweep(
                 tally["current"] += 1
                 record_step(symbol, True, lane=lane)
 
-            if arm.get("status") == STATUS_RUNNING:
-                mark_arm(arm, _price_of(price_fn, symbol))
+            if owed_verdict(arm):
+                # The live mark belongs to the SAR arm's own open row; a row
+                # whose SAR arm has closed carries its verdict and must not be
+                # re-marked, or a resolved fill would drift against a live price.
+                if sar_arm_open(arm):
+                    mark_arm(arm, _price_of(price_fn, symbol))
                 book.mark_dirty()
             else:
-                # Closed by ``step_arm`` (a real exit) or retired by
-                # ``_note_series_state`` (unmeasurable). Either way it leaves the
-                # open set, and ``retire`` marks the ledger dirty itself.
+                # BOTH arms are done — closed by ``step_arm`` (a real exit) or
+                # retired by ``_note_series_state`` (unmeasurable). Retiring on
+                # the SAR arm alone is what would freeze the held arm mid-walk,
+                # and it would be silent because the row looks complete.
                 book.retire(arm_id)
                 tally["retired"] += 1
                 continue
@@ -1858,6 +2140,55 @@ def step_health(lane: str = LANE_LIVE) -> Dict[str, Any]:
             "symbols": dict(last["symbols"]),
             "refused": dict(last["refused"]),
         }
+
+
+def hold_arm_health(ledger: Optional["SarLiveLedger"] = None) -> Dict[str, Any]:
+    """Resolution split across the two arms — the panel #869's corollary asks for.
+
+    "324 resolved" and "324 resolved, all of them one arm" support opposite
+    readings of the same page, and `/sar-exit` shipped the second wearing the
+    first's badge. So the split is a first-class number rather than something a
+    reader has to derive.
+
+    ``one_armed`` is the state worth watching: rows whose SAR arm carries a
+    verdict while the held arm has none. A few are normal — the held arm exits
+    later by design and some rows are simply still walking. A population that is
+    *entirely* one-armed means the second arm is not resolving at all, which is
+    exactly the failure that would be invisible from the SAR columns.
+    """
+    book = ledger if ledger is not None else get_ledger()
+    rows = list(book.open_arms()) + list(book.resolved_arms())
+    out = {
+        "rows": len(rows),
+        "sar_resolved": 0,
+        "hold_resolved": 0,     # reached the original stop — a full verdict
+        "hold_horizon": 0,      # walked to the bound, peak is a floor
+        "hold_insufficient": 0, # unscored, and named apart from the above
+        "hold_open": 0,
+        "pre_arm_rows": 0,      # schema-1: predates the arm, owed nothing
+        "one_armed": 0,
+    }
+    for r in rows:
+        sar_done = r.get("status") not in (None, STATUS_RUNNING)
+        out["sar_resolved"] += 1 if sar_done else 0
+        hs = r.get("hold_status")
+        if hs is None:
+            # Not "the arm found nothing" — this row was written before the arm
+            # existed. Pooling the two would report a resolver fault that is not
+            # happening, on a population that shrinks on its own.
+            out["pre_arm_rows"] += 1
+            continue
+        if hs == HOLD_SL:
+            out["hold_resolved"] += 1
+        elif hs == HOLD_HORIZON:
+            out["hold_horizon"] += 1
+        elif hs == HOLD_INSUFFICIENT:
+            out["hold_insufficient"] += 1
+        else:
+            out["hold_open"] += 1
+            if sar_done:
+                out["one_armed"] += 1
+    return out
 
 
 def reset_health() -> None:
