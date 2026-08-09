@@ -2163,6 +2163,37 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Dark SAR sweep error (fail-open): {}", exc)
 
+            # ── ATR-trail (Chandelier) arms on the dark rows ──────────────
+            # The second mechanism over the same dark rows, so every dark row
+            # carries three outcomes: its own SL/TP1 geometry, a SAR handover,
+            # and an ATR trail.  Owner, 2026-08-09 — and the dark feed is the
+            # population the question actually needs, because the delivered book
+            # is ~59% one path and an exit verdict measured only there is close
+            # to a verdict on that path's geometry.
+            #
+            # Its own try/except beside the SAR one rather than inside it: a
+            # failure sweeping one mechanism must not stop the other, or the two
+            # populations drift apart and the comparison stops meaning anything.
+            try:
+                from src import atr_trail_live as _atr_dark
+                from src import dark_emission as _de_atr
+                from src import sar_live_shadow as _sarlive_atr
+                from src import trail_mechanisms as _mech_atr
+                if _de_atr.enabled() and _atr_dark.enabled():
+                    _dark_atr = await asyncio.to_thread(
+                        _atr_dark.sweep, self.data_store, dark=True
+                    )
+                    _atr_dark.get_dark_ledger().flush(force=True)
+                    _sarlive_atr.roll_health_cycle(
+                        _sarlive_atr.lane_of(_mech_atr.MECH_CHANDELIER, dark=True)
+                    )
+                    if any(_dark_atr.values()):
+                        log.info("Dark ATR-trail arms swept: {}", _dark_atr)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Dark ATR-trail sweep error (fail-open): {}", exc)
+
             # ── Entry-feature stamps: persist the ring ─────────────────────
             # Stamping happens in the evaluator, where the facts become true.
             # This only writes them down. Forced every cycle so an idle lane
@@ -3373,8 +3404,20 @@ class CryptoSignalEngine:
             min_streak=6,          # 30 min sustained
         ))
 
-        def _sar_live_arms() -> Tuple[bool, str]:
-            """The live SAR mechanism must be able to step the arms it holds.
+        def _arm_lane_probe(
+            lane: str,
+            ledger_fn: Any,
+            label: str,
+            enabled_fn: Any,
+        ) -> Any:
+            """One probe body for every (mechanism, delivery) arm population.
+
+            There are four now — SAR and the ATR trail, each over delivered
+            signals and over the dark feed — and they ask exactly the same
+            question: *are the arms this lane holds still being advanced?*  Four
+            copies of that question is the shape this repo has paid for under
+            six names, and the copies drift in the one direction that matters:
+            a lane whose probe was never updated reports healthy forever.
 
             Keyed on **the arms owed a verdict**, not on the live pair universe.
             That distinction is the whole point: #815's ``candle_coverage``
@@ -3400,58 +3443,103 @@ class CryptoSignalEngine:
             not a swallowed failure, and filling ``fail_open`` with non-failures
             is how a real one stops standing out.
             """
-            from config import SAR_LIVE_SHADOW_ENABLED as _live_on
-            if not _live_on:
-                return True, "disabled by config"
-            from src import sar_live_shadow as _live
-            h = _live.step_health()
-            stepped = int(h.get("stepped") or 0)
-            no_series = int(h.get("no_series") or 0)
-            stalled = int(h.get("stalled") or 0)
-            missed = no_series + stalled
-            # Arms we declined to open because the store's newest closed bar was
-            # itself bars old.  Reported, never paged on: no arm exists, so
-            # nothing is owed a verdict, and the refusal is the guard working.
-            # It still has to be *visible* — a silent skip is how the opposite
-            # failure (an arm anchoring to a 40h-old bar and back-replaying the
-            # gap) survived long enough to publish a row.
-            refused = int(h.get("refused_open") or 0)
-            tail = f"; {refused} arms not opened (no series / stale anchor)" if refused else ""
-            # …and the population that would be harmed, which is signals owed a
-            # measurement rather than arms owed a verdict (#815). A probe keyed
-            # only on arms cannot see a book the lane never reached: on
-            # 2026-08-08 the unarmed 18% of delivered trades ran −1.643%/trade
-            # against +0.753% for the armed ones, and every counter here read
-            # healthy throughout because none of them was keyed on it.
-            try:
-                cov = _live.get_ledger().coverage()
-                seen = int(cov.get("signals_seen") or 0)
-                unarmed = int(cov.get("unarmed") or 0) + int(cov.get("partly_armed") or 0)
-                if seen:
-                    tail += (
-                        f"; covering {seen - unarmed}/{seen} signals "
-                        f"({100.0 * (seen - unarmed) / seen:.0f}%)"
+
+            def _probe() -> Tuple[bool, str]:
+                if not enabled_fn():
+                    return True, "disabled by config"
+                from src import sar_live_shadow as _live
+
+                h = _live.step_health(lane)
+                stepped = int(h.get("stepped") or 0)
+                no_series = int(h.get("no_series") or 0)
+                stalled = int(h.get("stalled") or 0)
+                missed = no_series + stalled
+                # Arms we declined to open because the store's newest closed bar
+                # was itself bars old.  Reported, never paged on: no arm exists,
+                # so nothing is owed a verdict, and the refusal is the guard
+                # working.  It still has to be *visible* — a silent skip is how
+                # the opposite failure (an arm anchoring to a 40h-old bar and
+                # back-replaying the gap) survived long enough to publish a row.
+                refused = int(h.get("refused_open") or 0)
+                tail = (
+                    f"; {refused} arms not opened (no series / stale anchor)"
+                    if refused
+                    else ""
+                )
+                # …and the population that would be harmed, which is signals owed
+                # a measurement rather than arms owed a verdict (#815). A probe
+                # keyed only on arms cannot see a book the lane never reached: on
+                # 2026-08-08 the unarmed 18% of delivered trades ran −1.643%/trade
+                # against +0.753% for the armed ones, and every counter here read
+                # healthy throughout because none of them was keyed on it.
+                try:
+                    cov = ledger_fn().coverage()
+                    seen = int(cov.get("signals_seen") or 0)
+                    unarmed = int(cov.get("unarmed") or 0) + int(
+                        cov.get("partly_armed") or 0
                     )
-            except Exception:
-                # Coverage is context on a probe about stepping. It must never
-                # be the reason this probe cannot answer.
-                pass
-            if stepped == 0 and missed == 0:
-                return True, f"no open arms{tail}"
-            if missed == 0:
-                return True, f"{stepped} arms current, none stalled{tail}"
-            symbols = ", ".join(sorted(h.get("symbols") or {})[:6])
-            return False, (
-                f"{missed} live SAR arms could not be advanced this cycle "
-                f"({no_series} no candles, {stalled} bars behind; {stepped} "
-                f"current): {symbols}. Their stops are frozen, so the mechanism "
-                f"is not being measured on those trades."
-            )
+                    if seen:
+                        tail += (
+                            f"; covering {seen - unarmed}/{seen} signals "
+                            f"({100.0 * (seen - unarmed) / seen:.0f}%)"
+                        )
+                except Exception:
+                    # Coverage is context on a probe about stepping. It must
+                    # never be the reason this probe cannot answer.
+                    pass
+                if stepped == 0 and missed == 0:
+                    return True, f"no open arms{tail}"
+                if missed == 0:
+                    return True, f"{stepped} arms current, none stalled{tail}"
+                symbols = ", ".join(sorted(h.get("symbols") or {})[:6])
+                return False, (
+                    f"{missed} {label} arms could not be advanced this cycle "
+                    f"({no_series} no candles, {stalled} bars behind; {stepped} "
+                    f"current): {symbols}. Their stops are frozen, so the "
+                    f"mechanism is not being measured on those trades."
+                )
+
+            return _probe
+
+        def _sar_on() -> bool:
+            from config import SAR_LIVE_SHADOW_ENABLED as _live_on
+
+            return bool(_live_on)
+
+        def _dark_on() -> bool:
+            from src import dark_emission as _de_p
+
+            return bool(_de_p.enabled())
+
+        def _atr_on() -> bool:
+            from src import atr_trail_live as _atr_p
+
+            return _atr_p.enabled()
+
+        from src import atr_trail_live as _atr_probe_mod
+        from src import sar_live_shadow as _sar_probe_mod
+        from src import trail_mechanisms as _mech
 
         fl.add_predicate(PredicateProbe(
             name="sar_live_arms",
-            fn=_sar_live_arms,
+            fn=_arm_lane_probe(
+                _sar_probe_mod.LANE_LIVE,
+                _sar_probe_mod.get_ledger,
+                "live SAR",
+                _sar_on,
+            ),
             min_streak=12,         # 1 min sustained (monitor ticks every 5s)
+        ))
+
+        fl.add_predicate(PredicateProbe(
+            name="atr_trail_live_arms",
+            fn=_arm_lane_probe(
+                _sar_probe_mod.lane_of(_mech.MECH_CHANDELIER, dark=False),
+                _atr_probe_mod.get_ledger,
+                "live ATR-trail",
+                _atr_on,
+            ),
+            min_streak=12,
         ))
 
         def _sar_hold_arm() -> Tuple[bool, str]:
@@ -3508,50 +3596,33 @@ class CryptoSignalEngine:
             min_streak=120,
         ))
 
-        def _dark_sar_arms() -> Tuple[bool, str]:
-            """Are the SAR arms on the DARK rows still being advanced?
-
-            Its own probe reading its own lane's counters, because a stall here
-            and a stall on the delivered-signal arms need different responses:
-            one is a measurement of a mechanism we might adopt, the other is a
-            measurement riding the loop that carries real exits.  Pooling them
-            would let a quiet dark-lane failure hide behind a busy live lane —
-            and, worse, page about the live arms when nothing is wrong with
-            them.
-
-            Same shape as ``sar_live_arms`` deliberately: refusals are reported
-            and never paged on, idle answers True with a reason.
-            """
-            from config import SAR_LIVE_SHADOW_ENABLED as _live_on
-
-            from src import dark_emission as _de_p
-            if not _live_on or not _de_p.enabled():
-                return True, "disabled by config"
-            from src import sar_live_shadow as _live
-
-            h = _live.step_health(_live.LANE_DARK)
-            stepped = int(h.get("stepped") or 0)
-            no_series = int(h.get("no_series") or 0)
-            stalled = int(h.get("stalled") or 0)
-            missed = no_series + stalled
-            refused = int(h.get("refused_open") or 0)
-            tail = f"; {refused} arms not opened (stale anchor)" if refused else ""
-            if stepped == 0 and missed == 0:
-                return True, f"no open dark arms{tail}"
-            if missed == 0:
-                return True, f"{stepped} dark arms current, none stalled{tail}"
-            symbols = ", ".join(sorted(h.get("symbols") or {})[:6])
-            return False, (
-                f"{missed} dark SAR arms could not be advanced this cycle "
-                f"({no_series} no candles, {stalled} bars behind; {stepped} "
-                f"current): {symbols}. The SAR comparison on those dark rows is "
-                f"frozen, so their two outcomes are no longer measured together."
-            )
-
+        # The dark lanes get their OWN probes reading their OWN lane counters,
+        # because a stall here and a stall on the delivered-signal arms need
+        # different responses: one is a measurement of a mechanism we might
+        # adopt, the other is a measurement riding the loop that carries real
+        # exits.  Pooling them would let a quiet dark-lane failure hide behind a
+        # busy live lane — and, worse, page about the live arms when nothing is
+        # wrong with them.
         fl.add_predicate(PredicateProbe(
             name="dark_sar_arms",
-            fn=_dark_sar_arms,
+            fn=_arm_lane_probe(
+                _sar_probe_mod.LANE_DARK,
+                _sar_probe_mod.get_dark_ledger,
+                "dark SAR",
+                lambda: _sar_on() and _dark_on(),
+            ),
             min_streak=3,          # the dark lane sweeps on its own slower loop
+        ))
+
+        fl.add_predicate(PredicateProbe(
+            name="dark_atr_trail_arms",
+            fn=_arm_lane_probe(
+                _sar_probe_mod.lane_of(_mech.MECH_CHANDELIER, dark=True),
+                _atr_probe_mod.get_dark_ledger,
+                "dark ATR-trail",
+                lambda: _atr_on() and _dark_on(),
+            ),
+            min_streak=3,
         ))
 
         def _dark_resolution() -> Tuple[bool, str]:

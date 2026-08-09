@@ -96,6 +96,15 @@ data/feature_liveness.json
 data/sar_live_arms_v1.json
 data/sar_live_arms_v1.json.tmp.tmp
 
+# Every forward-stepped arm ledger, by pattern rather than by name. A
+# hand-kept list here is the same floor as a deny-list anywhere else in this
+# repo: it excludes exactly the files somebody already typed and is silent by
+# construction on the next lane. Adding the ATR trail (2026-08-09) took the
+# count from two to four, and the pattern covers the fifth.
+data/*_arms_v*.json
+data/*_arms_v*.json.tmp
+data/pricing_freshness.json.tmp
+
 # Stray atomic-write sibling from an in-memory ledger (`path=""`) — the
 # ledgers now short-circuit before writing it, and it must never be committed
 # again: it differs on every branch and conflicted on every merge.

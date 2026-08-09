@@ -5777,6 +5777,20 @@ class Scanner:
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     fail_open.record("scanner.dark_sar_observe", exc)
+                # The ATR trail on the same dark row, for the reason the owner
+                # asked for the dark lane at all (2026-08-09): the delivered
+                # book is ~59% MOVER_TREND_PULLBACK, so a delivered-only exit
+                # verdict is close to a verdict on one path's geometry.  These
+                # rows are where "does this exit suit THIS setup" is answerable.
+                # Separate try: a failure opening one mechanism's arm must not
+                # cost the other one its row, or the two populations stop being
+                # the same population and the comparison stops meaning anything.
+                try:
+                    from src import atr_trail_live as _atr
+
+                    _atr.observe_signal(sig, self.data_store, dark=True)
+                except Exception as exc:  # pragma: no cover - defensive
+                    fail_open.record("scanner.dark_atr_trail_observe", exc)
             return bool(_dark_ok)
 
         # Stamp cooldown on success.  Only persist after queue.put succeeds

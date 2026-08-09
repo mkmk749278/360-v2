@@ -748,6 +748,30 @@ SAR_LIVE_SHADOW_MAX_OPEN_HOURS: float = _safe_float(
 )
 
 # ---------------------------------------------------------------------------
+# ATR-trail (Chandelier) live arms — the second mechanism (2026-08-09)
+# ---------------------------------------------------------------------------
+# Owner: "exactly implement same for ATR-trail (Chandelier) … so we can see
+# which actually makes a good setup, then we decide the exit mechanism."
+#
+# Everything above this block is the ARM MACHINERY — warm-up, stall bars,
+# abandon, horizon, timeframes, ledger cap — and it is mechanism-agnostic
+# despite the SAR_LIVE_SHADOW_ prefix.  The names are NOT being changed: they
+# are an env contract on a live VPS, and renaming them would silently restore
+# every default the moment a deploy read a .env that still used the old key.
+# Only the genuinely new knobs are new names.
+#
+# Measurement flag, ON by default, for the reason § Project Phase spells out:
+# a dark measurement shipped OFF produces an empty ops panel and a decision
+# that keeps getting deferred.  These arms place no orders and change no exit.
+ATR_TRAIL_LIVE_ENABLED: bool = _safe_bool("ATR_TRAIL_LIVE_ENABLED", "true")
+
+# Chandelier parameters.  22/3.0 are LeBeau's own, and they are the values ops'
+# exit bake-off has run its "ATR-trail (Chandelier)" column on since it shipped
+# — the two surfaces must not diverge on the parameters and then be compared.
+ATR_TRAIL_PERIOD: int = _safe_int("ATR_TRAIL_PERIOD", "22")
+ATR_TRAIL_MULT: float = _safe_float("ATR_TRAIL_MULT", "3.0")
+
+# ---------------------------------------------------------------------------
 # Tuned-variant shadow arms (2026-07-16 — owner: "tune, don't disable")
 # ---------------------------------------------------------------------------
 # MOVER_AVWAP_SCALP and VOLUME_SURGE_BREAKOUT are three-windows-confirmed

@@ -116,8 +116,8 @@ money-path changes follow dark-first from here.
 - Paid-channel routing changes
 - Regime-per-exit design decisions (§3.2b — data research in progress)
 
-**Wait ~6 minutes before checking CI here.** That is what this repo's `test` job
-takes; ops is ~4 min and `lumin-app` ~10 min. Polling a check run that cannot
+**Wait ~8 minutes before checking CI here.** That is what this repo's `test` job
+takes; ops is ~4 min and `lumin-app` ~16 min. Polling a check run that cannot
 have finished yet burns API calls and turns one wait into six — sleep the known
 duration first, *then* read the conclusion. Treat these as expected durations,
 not deadlines: a job still running at the mark gets another wait, and a job that
@@ -306,7 +306,9 @@ Telegram are both acceptable paging paths.
 | Tuned shadow variants (`@TUNED`) | `src/tuned_variants.py` |
 | Dispatch-staleness V2 (geometry-aware, `@DSV2` shadow) | `src/staleness_v2.py` |
 | SAR exit shadow arm (`@SARBASE`/`@SAREXIT`, dark, **replay**) | `src/sar_exit_shadow.py` |
-| SAR exit mechanism (**live**, forward-stepped in the monitor loop, dark) | `src/sar_live_shadow.py` |
+| Trailing-exit **arm engine** (forward-stepped in the monitor loop, dark) — historically named for SAR, now runs both mechanisms over four lanes | `src/sar_live_shadow.py` |
+| The two trailing mechanisms behind that engine (Parabolic SAR · ATR-trail/Chandelier) | `src/trail_mechanisms.py` |
+| ATR-trail (Chandelier) lane — ledgers + entry points for the second mechanism, delivered and dark | `src/atr_trail_live.py` |
 | Per-path entry-feature stamps (observe-only, joined to the closed-signal record) | `src/entry_features.py` |
 | Entry-quality gate — the consuming half of that lane (**LIVE**, per-rule ops switches) | `src/entry_quality.py` |
 | Structural SL/TP1 snap — level-aware geometry at the enqueue choke point (measure ON, apply OFF + per-path allow-list) | `src/structural_snap.py` |
@@ -1570,3 +1572,47 @@ python -m src.main
   ledger that looks recorded and is reconstructed, which is the single artifact
   `/track-record`'s own rule forbids. A destroyed window is recoverable by
   waiting; a ledger that silently mixes the two is not recoverable at all.
+- **"Exactly the same" is an argument for one implementation, not two.** Asked
+  for an ATR trail measured exactly as SAR is (owner, 2026-08-09), the obvious
+  move is a second `*_live_shadow.py` — and it is the wrong one, because
+  `sar_live_shadow` is not the SAR mechanism. It is the **arm engine**: the
+  anchor-freshness refusal (#836), the per-advance replay guard (#846), the
+  regressed-vs-rolled-off split, the stall stamps (#835), the
+  timestamp-monotonicity refusal (#842/#844), the two fills, the two
+  denominators, the held-to-stop arm and the stop rules (#869) — six sessions of
+  guards, none of which is about SAR. The mechanism is *one value per bar*:
+  where would the stop be parked, and may it govern yet. So the second mechanism
+  added a **parameter** (`src/trail_mechanisms.py`), and the four probe bodies
+  that would have been four near-copies became one factory. Four rules fell out:
+  - **Each mechanism answers "may I govern" its own way.** SAR has a direction,
+    so alignment is that direction agreeing with the side. A chandelier has
+    none, so the equivalent question is whether the level it would park is
+    already past the close. Forcing one definition would make one mechanism
+    answer a question it cannot ask; `up` is therefore `None` for the chandelier
+    and never `False` — "does not answer that" and "says down" are different
+    facts.
+  - **A path-dependent mechanism's state belongs on the ARM, not in a cache.**
+    The SAR walk is a pure function of the window, so it caches per
+    `(symbol, timeframe, bar)`. The chandelier's ratchet is anchored to the
+    arm's own first bar, so two arms on the same symbol and bar legitimately
+    hold different state — sharing a cache entry would hand the second arm the
+    first one's history, which is #846 arriving through a cache instead of
+    through a store and just as silent.
+  - **Health lanes multiply with the mechanism, not just with delivery.** There
+    are four populations now, and the rule that split `live` from `dark` applies
+    identically on the mechanism axis. SAR keeps the bare `live`/`dark` keys —
+    not deference to history, but because `main.py`'s probes and the ops surface
+    read them, and prefixing them would silently empty a probe that then reports
+    a healthy zero.
+  - **Name the second mechanism's exit apart from the first's.** SAR *reverses*;
+    a chandelier stop is simply *touched*. `CLOSED_TRAIL_STOP` beside
+    `CLOSED_SAR_FLIP` costs nothing (the lanes never pool) and one word for two
+    events is how a page stops being able to say what happened.
+
+  And the check worth copying: ops' exit bake-off has printed **"ATR-trail
+  (Chandelier)"** since long before this arm existed, so the engine adopted
+  *that* definition (position-scoped ratchet from the entry bar) rather than
+  TradingView's indicator-scoped one, and a shared vector pins them. Two arms
+  named for the same mechanism measuring different mechanisms already cost a
+  session on 2026-07-31 — and the agreement was verified by driving ops' real
+  simulator, which fills at the engine's level to 1e-9.

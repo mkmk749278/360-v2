@@ -59,7 +59,7 @@ from src.channels.base import Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
 from src.execution import be_policy as _be_policy
 from src.execution import runner_policy as _runner_policy
-from src import sar_live_shadow
+from src import atr_trail_live, sar_live_shadow, trail_mechanisms
 from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
 from src.live_ticks import resolve_recent_ticks
@@ -907,6 +907,13 @@ class TradeMonitor:
             # the SAR walk is cached per closed bar (see _cached_sar_live), so
             # this adds nothing to the hot-path cost budget.  Fail-open inside.
             sar_live_shadow.observe_signal(sig, self._store, price=price)
+            # ...and the ATR trail, on the same signal, the same bars and the
+            # same clock (owner 2026-08-09: "exactly implement same for
+            # ATR-trail (Chandelier)").  Two mechanisms measured on one
+            # population is the only way the comparison means anything — run on
+            # different windows they would differ by the window.  Its own
+            # ledger, never a column in SAR's: see atr_trail_live's docstring.
+            atr_trail_live.observe_signal(sig, self._store, price=price)
 
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
         self._publish_pricing_freshness(signals)
@@ -925,6 +932,14 @@ class TradeMonitor:
         # healed.
         sar_live_shadow.roll_health_cycle()
         sar_live_shadow.get_ledger().flush()
+        # The chandelier lane, stepped and rolled beside it.  Each mechanism
+        # rolls its own health window: pooling them would let a stalled ATR lane
+        # read as a SAR failure, and a healthy SAR lane dilute a real ATR one.
+        atr_trail_live.sweep(self._store, price_fn=self._price_for)
+        sar_live_shadow.roll_health_cycle(
+            sar_live_shadow.lane_of(trail_mechanisms.MECH_CHANDELIER, dark=False)
+        )
+        atr_trail_live.get_ledger().flush()
 
     # Written next to the other data-volume status files (scanner heartbeat,
     # circuit_breaker_status.json) so the watchdog + liveness probe can read

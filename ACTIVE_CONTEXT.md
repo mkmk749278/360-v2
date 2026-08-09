@@ -4,6 +4,91 @@
 
 ---
 
+## 🟢 SESSION 118 2026-08-09 — the second exit mechanism, and the dark lane for both
+
+Engine `claude/sar-atr-trail-signals-i6cyuv`, ops the same branch. Owner: *"look
+SAR live in signals tab — exactly implement same for ATR-trail (Chandelier), and
+also implement ATR-trail (Chandelier) and SAR on dark feed too, then we can see
+which actually makes a good setup, then we decide the exit mechanism. Live feed
+is mostly MVRTP only; in the dark feed at least we have some other paths, so we
+can decide on regular pairs too."* Plus: click-to-copy for the ops guest code.
+
+### The design call, and why it was not a second module
+
+`sar_live_shadow` is **the arm engine, not the SAR mechanism** — every guard in
+it (anchor freshness #836, per-advance replay #846, regressed-vs-rolled-off,
+stall stamps #835, timestamp monotonicity #842/#844, two fills, two
+denominators, the held arm and stop rules #869) is mechanism-agnostic. So the
+ATR trail added a **parameter**, not a 2,200-line copy:
+
+- `src/trail_mechanisms.py` — the whole mechanism surface: *given the bars closed
+  so far, where is the stop parked for the bar now forming, and may it govern
+  this trade yet.* SAR delegates to `parabolic_sar_live`; the chandelier is the
+  position-scoped ratchet (running favourable extreme since the arm opened, less
+  `mult` ATRs, never widening).
+- `src/atr_trail_live.py` — two ledgers and the two entry points. Nothing else.
+- Ledger schema 2 → **3**, additive, `ADDITIVE_FROM_SCHEMAS = {1, 2}`. Pre-schema
+  rows are labelled `sar` on load from the **file's own** mechanism rather than
+  left blank beside rows that carry one.
+
+**Four populations, four files, never pooled:** `sar_live_arms_v1` ·
+`dark_sar_arms_v1` · `atr_trail_arms_v1` · `dark_atr_trail_arms_v1`. Health lanes
+multiply the same way (`lane_of`), and SAR keeps the bare `live`/`dark` keys
+because `main.py`'s probes read them.
+
+The chandelier definition is **ops' bake-off definition**, not TradingView's
+indicator-scoped one — the words "ATR-trail (Chandelier)" have been on
+`/exit-backtest` for weeks, and two arms under one label measuring different
+mechanisms cost a session on 2026-07-31. Verified by driving ops' real simulator
+against a shared vector: it fills at the engine's level to 1e-9.
+
+### Shipped
+
+**Engine**
+- `src/trail_mechanisms.py`, `src/atr_trail_live.py` (new).
+- `sar_live_shadow`: `mechanism` / `mech_params` / `mech_state` on every arm,
+  `mech_exit`, `lane_of`, `STATUS_CLOSED_TRAIL_STOP`, `EXIT_TRAIL_STOP`; the
+  mechanism manifest in every flushed file (one writer, ops keeps no catalog).
+- Wired at the same three sites SAR uses: `trade_monitor` (open + sweep + flush,
+  delivered lane), `scanner._enqueue_signal` (open, dark lane),
+  `main` maintenance loop (sweep + forced flush, dark lane).
+- Four liveness probes off **one** factory — the two SAR probes were near-copies
+  and are now the same code path as the two new ones.
+- Config: `ATR_TRAIL_LIVE_ENABLED` (**ON** — a dark measurement shipped OFF is an
+  empty panel and a deferred decision), `ATR_TRAIL_PERIOD=22`, `ATR_TRAIL_MULT=3.0`.
+  The `SAR_LIVE_SHADOW_*` machinery knobs keep their names deliberately: they are
+  an env contract on a live VPS.
+
+**Ops**
+- `/signals/atr-live` and a `?lane=delivered|dark` selector on **both** pages —
+  one handler, one template, mechanism-aware copy. Nav entry + guest scope.
+- `data_volume.trail_arms` / `trail_arms_provenance` as the single `(mechanism,
+  lane) -> file` lookup; the SAR-named accessors delegate to it.
+- Per-lane staleness (`LANE_STALE_SEC`) — the dark lanes are on the maintenance
+  loop's ~5-min cycle, so the monitor loop's 60s bound would print FROZEN over a
+  healthy lane.
+- `reduce_mechanism` reads the label/params out of the ledger and **badges** the
+  fallback on screen; export stamps `mechanism` + `lane` on every row.
+- `/control/access`: click-to-copy for the one-shot guest code, the `/guest` URL,
+  and both; falls back to selecting the text when the clipboard API is absent.
+- `tests/test_atr_trail_contract.py` — ops' bake-off vs the engine's level.
+
+**Docs:** CI wait timers corrected on owner instruction — engine **~8 min**,
+`lumin-app` **~16 min** (ops unchanged at ~4).
+
+### Open
+
+- **No verdict yet, and none should be quoted.** All four lanes start empty; the
+  ATR ledgers accumulate from this deploy. Read *n* before any average — the dark
+  lane is where the per-path question is answerable, and it will be thin per cell
+  for a while. `FAILED_AUCTION_RECLAIM`'s +0.846R on three rows is the standing
+  reminder.
+- The chandelier is onside at entry far more often than SAR, so it cancels the
+  evaluator's stop from bar one on nearly every arm. Expect `r_level` and
+  `r_level_risk` to diverge more than they do on the SAR page; PnL % leads.
+
+---
+
 ## 🟢 SESSION 117 2026-08-09 — the level was never checked against the exchange; and the second arm
 
 Engine `claude/sar-live-analysis-b29z6u`. Owner: *"live means real data from
