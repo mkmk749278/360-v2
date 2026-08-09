@@ -92,6 +92,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from src import ledger_schema
 from src import fail_open
 from src.delivery_retention import DeliveryRetainedRing
 from src.utils import get_logger
@@ -99,6 +100,15 @@ from src.utils import get_logger
 log = get_logger("structural_veto")
 
 SCHEMA = 1
+
+#: Older schemas this build reads unchanged. EMPTY on purpose: no bump here has
+#: been declared additive, so every one drops its window — which is safe but is
+#: a *decision*, not an accident. Before bumping SCHEMA, ask whether the change
+#: only ADDS fields; if so add the old number here, or the first flush after
+#: deploy silently destroys the ledger (`ledger_schema`, and the 371 SAR rows
+#: lost on 2026-08-09).
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset()
+
 _DEFAULT_PATH = os.path.join("data", "structural_veto_v1.json")
 _MAX_ROWS = 4000
 
@@ -423,7 +433,10 @@ class VetoLedger:
         try:
             with open(self._path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
-            if int(payload.get("schema") or 0) != SCHEMA:
+            _ok, _why = ledger_schema.accepts(
+                payload.get("schema"), SCHEMA, ADDITIVE_FROM_SCHEMAS
+            )
+            if not _ok:
                 log.info(
                     "{}: ledger schema {} != {}, starting fresh",
                     "structural_veto", payload.get("schema"), SCHEMA,

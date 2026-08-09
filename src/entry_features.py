@@ -200,6 +200,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from src import ledger_schema
 from src import fail_open
 from src.market_context import classify_session
 from src.delivery_retention import DeliveryRetainedRing
@@ -218,6 +219,15 @@ log = get_logger("entry_features")
 #: about an hour of MVRTP stamps — redefining a live measurement is only cheap
 #: while its population is nearly empty, and this was the last moment it was.
 SCHEMA = 2
+
+#: Older schemas this build reads unchanged. EMPTY on purpose: no bump here has
+#: been declared additive, so every one drops its window — which is safe but is
+#: a *decision*, not an accident. Before bumping SCHEMA, ask whether the change
+#: only ADDS fields; if so add the old number here, or the first flush after
+#: deploy silently destroys the ledger (`ledger_schema`, and the 371 SAR rows
+#: lost on 2026-08-09).
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset()
+
 
 _DEFAULT_PATH: str = os.getenv("ENTRY_FEATURES_PATH", "data/entry_features_v1.json")
 
@@ -1110,7 +1120,10 @@ class EntryFeatureLedger:
         try:
             with open(self._path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
-            if int(payload.get("schema") or 0) != SCHEMA:
+            _ok, _why = ledger_schema.accepts(
+                payload.get("schema"), SCHEMA, ADDITIVE_FROM_SCHEMAS
+            )
+            if not _ok:
                 log.info(
                     "entry_features: ledger schema {} != {}, starting fresh",
                     payload.get("schema"), SCHEMA,

@@ -109,7 +109,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from src import fail_open, sar_exit_strategies
+from src import fail_open, ledger_schema, sar_exit_strategies
 from src.sar_exit_shadow import SarLive, parabolic_sar_live
 from src.utils import get_logger
 
@@ -218,13 +218,30 @@ OPEN_REFUSED_NO_SERIES = "no_series"
 #: never on a date — a migration keyed to a timestamp that predicts a future
 #: deploy is how #802's first fix shipped 88 bad rows as good ones.
 #:
-#: 2 (2026-08-09) — the held-to-stop arm and the stop-management rules. No
-#: existing field changed meaning, so nothing is purged and every schema-1 row
-#: keeps its full standing in the SAR verdict. The bump exists so a reader can
-#: tell **"this arm held to its stop and never ran"** from **"this row predates
-#: the arm"** — two states with different next moves, and a blank alone cannot
-#: separate them.
+#: 2 (2026-08-09) — the held-to-stop arm and the stop-management rules. Purely
+#: **additive**: no existing field changed meaning. The bump exists so a reader
+#: can tell **"this arm held to its stop and never ran"** from **"this row
+#: predates the arm"** — two states with different next moves, and a blank alone
+#: cannot separate them.
+#:
+#: **This comment used to end "so nothing is purged and every schema-1 row keeps
+#: its full standing", and that was false when it was written.** `load()`
+#: compared `!=` and returned, so shipping this bump overwrote 371 rows — the
+#: whole SAR window — with no error and no empty screen. Being additive is not a
+#: property a comment can assert; it is one `ADDITIVE_FROM_SCHEMAS` below has to
+#: declare, and `tests/test_ledger_schema.py` now fails if the old shape returns.
 LEDGER_SCHEMA = 2
+
+#: Older schemas this build reads **unchanged**, because the bump only added
+#: fields. Schema 1 rows carry every field the SAR verdict is computed from and
+#: simply have no held arm — which `hold_arm_open` already reports as closed and
+#: ops already buckets as `pre_arm`, owed nothing.
+#:
+#: Declaring this is not cosmetic: the 1 → 2 bump shipped without it and the
+#: first flush after deploy overwrote 371 rows. A bump that redefines a field
+#: instead of adding one must NOT be listed here — then old and new rows
+#: disagree about what a column means and the drop is correct.
+ADDITIVE_FROM_SCHEMAS = frozenset({1})
 
 #: Terminal states for the held-to-stop arm. Three, not two, for the reason
 #: #839 paid for: a walked window in which the stop was never reached is a
@@ -1505,18 +1522,39 @@ class SarLiveLedger:
             return False
 
     def load(self) -> None:
-        """Restore from disk. A schema mismatch drops the file rather than
-        reinterpreting rows written under different rules."""
+        """Restore from disk, reading forward across **additive** schema bumps.
+
+        The old version compared `!=` and returned, which destroyed 371 rows on
+        the 2026-08-09 deploy — the whole SAR measurement window — for a bump
+        whose own comment said nothing would be purged. A schema-1 row carries
+        every field the SAR verdict is computed from; it simply has no held arm,
+        which readers already render as `pre_arm` because it is owed nothing.
+        See `ledger_schema` for why the two kinds of bump differ.
+        """
         try:
             if not os.path.exists(self._path):
                 return
             with open(self._path) as fh:
                 payload = json.load(fh)
-            if int(payload.get("schema") or 0) != LEDGER_SCHEMA:
+            ok, refusal = ledger_schema.accepts(
+                payload.get("schema"), LEDGER_SCHEMA, ADDITIVE_FROM_SCHEMAS
+            )
+            if not ok:
+                # Count without `or []`: that is the numpy-truthiness shape the
+                # hard limit forbids, and the guard test is deliberately blunt
+                # about it rather than reasoning per call site about whether the
+                # value happens to be a list today.
+                stored_open = payload.get("open")
+                stored_resolved = payload.get("resolved")
                 log.warning(
-                    "SAR live ledger schema {} != {} — starting clean",
+                    "SAR live ledger schema {} not readable by {} ({}) — "
+                    "starting clean; {} open and {} resolved rows are being "
+                    "discarded",
                     payload.get("schema"),
                     LEDGER_SCHEMA,
+                    refusal,
+                    len(stored_open) if isinstance(stored_open, list) else 0,
+                    len(stored_resolved) if isinstance(stored_resolved, list) else 0,
                 )
                 return
             with self._lock:

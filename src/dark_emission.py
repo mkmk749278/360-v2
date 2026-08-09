@@ -93,6 +93,7 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
+from src import ledger_schema
 from src import fail_open
 from src.utils import get_logger
 
@@ -131,6 +132,15 @@ _MAX_PATHS: int = int(os.getenv("DARK_EMISSION_MAX_PATHS", "32"))
 
 #: Ledger schema. Readers gate on this, never on a date (#802).
 LEDGER_SCHEMA = 1
+
+#: Older schemas this build reads unchanged. EMPTY on purpose: no bump here has
+#: been declared additive, so every one drops its window — which is safe but is
+#: a *decision*, not an accident. Before bumping LEDGER_SCHEMA, ask whether the change
+#: only ADDS fields; if so add the old number here, or the first flush after
+#: deploy silently destroys the ledger (`ledger_schema`, and the 371 SAR rows
+#: lost on 2026-08-09).
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset()
+
 
 STATUS_OPEN = "OPEN"
 STATUS_TP1 = "CLOSED_TP1"
@@ -450,7 +460,11 @@ class DarkLedger:
                 return
             with open(self._path, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
-            if not isinstance(raw, dict) or int(raw.get("schema") or 0) != LEDGER_SCHEMA:
+            _ok, _why = ledger_schema.accepts(
+                (raw or {}).get("schema") if isinstance(raw, dict) else None,
+                LEDGER_SCHEMA, ADDITIVE_FROM_SCHEMAS,
+            )
+            if not isinstance(raw, dict) or not _ok:
                 # A schema bump drops rows rather than reinterpreting them.
                 return
             for row in raw.get("rows") or []:
