@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from src import sar_live_shadow as live
+from src import trail_mechanisms
 from src.sar_exit_shadow import parabolic_sar_levels, parabolic_sar_live
 
 STEP = 0.02
@@ -57,10 +58,26 @@ def _falling(n, start=200.0, step_dn=1.0):
     ]
 
 
-def _live_of(bars):
+def _live_of(bars, side="LONG"):
+    """The anchor point, from the REAL producer.
+
+    ``trail_mechanisms.point`` is what the engine calls, so a test that
+    hand-built a ``TrailPoint`` here would assert its own assumption about the
+    shape back at itself — the ``zone_distance_atr`` failure, which cost a
+    session by passing on a shape nothing has ever produced.
+    """
     s = _series(bars)
-    return parabolic_sar_live(
-        s["high"], s["low"], STEP, MAX_STEP, last_closed_ms=s["open_time"][-1]
+    return trail_mechanisms.point(
+        trail_mechanisms.MECH_SAR,
+        None,
+        s["high"],
+        s["low"],
+        s["close"],
+        len(s["high"]) - 1,
+        side=side,
+        state={},
+        params={"step": STEP, "max_step": MAX_STEP},
+        last_closed_ms=s["open_time"][-1],
     )
 
 
@@ -107,8 +124,11 @@ def test_live_refuses_rather_than_clamping_on_short_or_mismatched_input():
 
 def test_live_carries_the_bar_time_it_was_computed_from():
     bars = _rising(60)
-    got = _live_of(bars)
-    assert got.last_closed_ms == _series(bars)["open_time"][-1]
+    s = _series(bars)
+    got = parabolic_sar_live(
+        s["high"], s["low"], STEP, MAX_STEP, last_closed_ms=s["open_time"][-1]
+    )
+    assert got.last_closed_ms == s["open_time"][-1]
 
 
 # --------------------------------------------------------------------------- #
@@ -127,7 +147,7 @@ def _arm(bars, side, entry, sl, tp1, tf="15m"):
         entry=entry,
         stop_loss=sl,
         tp1=tp1,
-        sar=_live_of(bars),
+        point=_live_of(bars, side),
         opened_ms=s["open_time"][-1],
         now_ts=1_700_000_000.0,
     )
@@ -163,7 +183,7 @@ def test_no_sar_at_entry_refuses_instead_of_inventing_a_governor():
         entry=100.0,
         stop_loss=97.0,
         tp1=106.0,
-        sar=None,
+        point=None,
         opened_ms=1.0,
     )
     assert arm["status"] == live.STATUS_INSUFFICIENT
@@ -590,14 +610,11 @@ def test_the_sweep_advances_an_arm_whose_signal_is_gone():
     ledger = live.SarLiveLedger(path="/tmp/sar_live_test_orphan.json")
     bars = _falling(80)
     store = _seed_store("GONEUSDT", bars, intervals=("15m",))
-    sar = parabolic_sar_live(
-        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
-        last_closed_ms=1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS,
-    )
+    sar = _live_of(bars, "SHORT")
     ledger.add(live.new_arm(
         signal_id="SIG-ORPHAN", symbol="GONEUSDT", side="SHORT",
         setup_class="BREAKDOWN_SHORT", timeframe="15m",
-        entry=100.0, stop_loss=103.0, tp1=97.0, sar=sar,
+        entry=100.0, stop_loss=103.0, tp1=97.0, point=sar,
         opened_ms=1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS,
         now_ts=_now_at(len(bars) - 1),
     ))
@@ -627,15 +644,12 @@ def test_a_stalled_arm_says_so_instead_of_publishing_a_stale_stop_as_current():
     bars = _falling(80)
     store = _seed_store("KORUUSDT", bars, intervals=("15m",))
     last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
-    sar = parabolic_sar_live(
-        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
-        last_closed_ms=last_ms,
-    )
+    sar = _live_of(bars, "SHORT")
     opened = _now_at(len(bars) - 1)
     ledger.add(live.new_arm(
         signal_id="SIG-STALL", symbol="KORUUSDT", side="SHORT",
         setup_class="BREAKDOWN_SHORT", timeframe="15m",
-        entry=11.77, stop_loss=12.1231, tp1=11.26, sar=sar,
+        entry=11.77, stop_loss=12.1231, tp1=11.26, point=sar,
         opened_ms=last_ms, now_ts=opened,
     ))
     frozen_stop = ledger.get("SIG-STALL:15m")["sar_stop"]
@@ -679,15 +693,12 @@ def test_a_stall_past_the_abandon_bound_refuses_rather_than_filling():
     bars = _falling(80)
     store = _seed_store("KORUUSDT", bars, intervals=("15m",))
     last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
-    sar = parabolic_sar_live(
-        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
-        last_closed_ms=last_ms,
-    )
+    sar = _live_of(bars, "SHORT")
     opened = _now_at(len(bars) - 1)
     ledger.add(live.new_arm(
         signal_id="SIG-ABANDON", symbol="KORUUSDT", side="SHORT",
         setup_class="BREAKDOWN_SHORT", timeframe="15m",
-        entry=11.77, stop_loss=12.1231, tp1=11.26, sar=sar,
+        entry=11.77, stop_loss=12.1231, tp1=11.26, point=sar,
         opened_ms=last_ms, now_ts=opened,
     ))
     live.sweep(store, ledger=ledger, now_ts=opened + 3600, abandon_sec=1800)
@@ -711,15 +722,12 @@ def test_a_current_arm_between_bars_is_not_a_stall():
     bars = _falling(80)
     store = _seed_store("LIVEUSDT", bars, intervals=("15m",))
     last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
-    sar = parabolic_sar_live(
-        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
-        last_closed_ms=last_ms,
-    )
+    sar = _live_of(bars, "SHORT")
     opened = _now_at(len(bars) - 1)
     ledger.add(live.new_arm(
         signal_id="SIG-QUIET", symbol="LIVEUSDT", side="SHORT",
         setup_class="BREAKDOWN_SHORT", timeframe="15m",
-        entry=100.0, stop_loss=103.0, tp1=97.0, sar=sar,
+        entry=100.0, stop_loss=103.0, tp1=97.0, point=sar,
         opened_ms=last_ms, now_ts=opened,
     ))
     # Mid-bar: the bar now trading has not closed. Nothing is owed.
@@ -734,14 +742,11 @@ def test_an_arm_the_store_cannot_supply_is_a_miss_not_a_step():
     bars = _falling(80)
     store = _seed_store("LIVEUSDT", bars, intervals=("15m",))
     last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
-    sar = parabolic_sar_live(
-        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
-        last_closed_ms=last_ms,
-    )
+    sar = _live_of(bars, "SHORT")
     ledger.add(live.new_arm(
         signal_id="SIG-NOSERIES", symbol="DELISTEDUSDT", side="SHORT",
         setup_class="X", timeframe="15m", entry=100.0, stop_loss=103.0,
-        tp1=97.0, sar=sar, opened_ms=last_ms, now_ts=_now_at(len(bars) - 1),
+        tp1=97.0, point=sar, opened_ms=last_ms, now_ts=_now_at(len(bars) - 1),
     ))
     tally = live.sweep(store, ledger=ledger, now_ts=_now_at(len(bars)))
     assert tally["no_series"] == 1
@@ -759,15 +764,12 @@ def test_an_arm_open_past_the_horizon_refuses_rather_than_running_forever():
     bars = _falling(80)
     store = _seed_store("LIVEUSDT", bars, intervals=("15m",))
     last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
-    sar = parabolic_sar_live(
-        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
-        last_closed_ms=last_ms,
-    )
+    sar = _live_of(bars, "SHORT")
     opened = _now_at(len(bars) - 1)
     ledger.add(live.new_arm(
         signal_id="SIG-HORIZON", symbol="LIVEUSDT", side="SHORT",
         setup_class="X", timeframe="15m", entry=100.0, stop_loss=103.0,
-        tp1=97.0, sar=sar, opened_ms=last_ms, now_ts=opened,
+        tp1=97.0, point=sar, opened_ms=last_ms, now_ts=opened,
     ))
     tally = live.sweep(
         store, ledger=ledger, now_ts=opened + 49 * 3600, max_open_hours=48

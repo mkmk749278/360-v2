@@ -90,7 +90,7 @@ def main(out_path: str) -> None:
             signal_id="BRKDN-C74F2BE4", symbol="KORUUSDT", side="SHORT",
             setup_class="BREAKDOWN_SHORT", timeframe=tf,
             entry=11.77, stop_loss=12.1231, tp1=11.26,
-            sar=sar, opened_ms=last,
+            point=sar, opened_ms=last,
             anchor_bars_behind=live.bars_behind(last, tf, opened_at),
             now_ts=opened_at,
         ))
@@ -104,7 +104,7 @@ def main(out_path: str) -> None:
         signal_id="MVRTP-F22476CD", symbol="SLXUSDT", side="SHORT",
         setup_class="MOVER_TREND_PULLBACK", timeframe="15m",
         entry=0.08592, stop_loss=0.08787286, tp1=0.083565987072,
-        sar=slx_sar, opened_ms=slx_last,
+        point=slx_sar, opened_ms=slx_last,
         anchor_bars_behind=live.bars_behind(slx_last, "15m", opened_at),
         now_ts=opened_at,
     ))

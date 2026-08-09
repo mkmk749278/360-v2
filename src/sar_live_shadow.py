@@ -109,11 +109,29 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from src import fail_open, ledger_schema, sar_exit_strategies
+from src import fail_open, ledger_schema, sar_exit_strategies, trail_mechanisms
 from src.sar_exit_shadow import SarLive, parabolic_sar_live
+from src.trail_mechanisms import MECH_CHANDELIER, MECH_SAR, TrailPoint
 from src.utils import get_logger
 
 log = get_logger(__name__)
+
+#: **This module is the arm engine, not the SAR mechanism.** It was written for
+#: SAR and keeps the name because ``sar_live_arms_v1.json``, the ops fixtures
+#: generated from it and the ``SAR_LIVE_SHADOW_*`` env contract on the VPS all
+#: point at it; renaming a module across three repos to improve a noun is churn
+#: with a live-config failure mode attached. What it actually owns is the part
+#: no mechanism should re-implement: the anchor freshness check, the walk, the
+#: per-advance replay guard, the two fills, the held-to-stop arm, the
+#: stop-management rules, the ledger, the sweep and the health census.
+#:
+#: The mechanism — *where would the stop be parked for the bar now forming* —
+#: lives entirely in ``src/trail_mechanisms.py`` and arrives here as one value.
+#: Adding the ATR trail (owner, 2026-08-09: "exactly implement same for
+#: ATR-trail (Chandelier)") therefore added a parameter, not a module: a second
+#: copy of six sessions' worth of guards is the drift this repo has paid for
+#: under six names, and "exactly the same" is an argument for one implementation
+#: rather than two.
 
 #: Health is per **lane**, not global. Two ledgers are swept — arms on delivered
 #: signals and arms on dark-feed rows — and pooling their counters would let a
@@ -122,6 +140,24 @@ log = get_logger(__name__)
 #: a number is only readable if you can say which population it describes.
 LANE_LIVE = "live"
 LANE_DARK = "dark"
+
+
+def lane_of(mechanism: str, dark: bool) -> str:
+    """The health-lane key for one (mechanism, delivery) population.
+
+    There are four populations now, not two — SAR and the chandelier, each over
+    delivered signals and over the dark feed — and the rule the two lanes were
+    split under applies just as hard on the mechanism axis: a stalled chandelier
+    lane must not page as though the SAR arms had frozen, and a healthy SAR lane
+    must not dilute a real chandelier failure.
+
+    SAR keeps the bare ``live``/``dark`` keys. That is not deference to history:
+    those keys are what ``main.py``'s liveness probes and the ops surface read,
+    and prefixing them would silently empty a probe that then reports a healthy
+    zero — the fault-that-is-not-happening this repo keeps paying for.
+    """
+    base = LANE_DARK if dark else LANE_LIVE
+    return base if str(mechanism) == MECH_SAR else f"{mechanism}:{base}"
 
 
 # --------------------------------------------------------------------------- #
@@ -134,17 +170,44 @@ GOV_GEOMETRY = "GEOMETRY"
 
 STATUS_RUNNING = "RUNNING"
 STATUS_CLOSED_SAR_FLIP = "CLOSED_SAR_FLIP"
+#: The chandelier's own terminal state. A separate name rather than reusing
+#: ``CLOSED_SAR_FLIP`` for both mechanisms: SAR *reverses* — the level it
+#: breaches is a direction change — while a chandelier stop is simply touched,
+#: and a reader who cannot tell those apart from the status has been handed the
+#: same word for two different events. The lanes never pool, so nothing is lost
+#: by naming them honestly and a great deal is lost by not.
+STATUS_CLOSED_TRAIL_STOP = "CLOSED_TRAIL_STOP"
 STATUS_CLOSED_SL = "CLOSED_SL"
 STATUS_CLOSED_TP1 = "CLOSED_TP1"
 STATUS_INSUFFICIENT = "INSUFFICIENT"
 
 CLOSED_STATUSES = frozenset(
-    {STATUS_CLOSED_SAR_FLIP, STATUS_CLOSED_SL, STATUS_CLOSED_TP1}
+    {
+        STATUS_CLOSED_SAR_FLIP,
+        STATUS_CLOSED_TRAIL_STOP,
+        STATUS_CLOSED_SL,
+        STATUS_CLOSED_TP1,
+    }
 )
 
 EXIT_SAR_FLIP = "sar_flip"
+EXIT_TRAIL_STOP = "trail_stop"
 EXIT_STATIC_SL = "static_sl"
 EXIT_STATIC_TP1 = "static_tp1"
+
+#: How each mechanism names its own exit. Derived from the mechanism rather
+#: than branched on at the call site, so a third mechanism adds a row here and
+#: nothing else — and a mechanism missing from this map fails loudly at the one
+#: place that reads it instead of silently booking a SAR flip.
+_MECH_EXIT: Dict[str, Tuple[str, str]] = {
+    MECH_SAR: (EXIT_SAR_FLIP, STATUS_CLOSED_SAR_FLIP),
+    MECH_CHANDELIER: (EXIT_TRAIL_STOP, STATUS_CLOSED_TRAIL_STOP),
+}
+
+
+def mech_exit(mechanism: str) -> Tuple[str, str]:
+    """``(exit_reason, status)`` for a mechanism's own exit."""
+    return _MECH_EXIT.get(str(mechanism or ""), (EXIT_SAR_FLIP, STATUS_CLOSED_SAR_FLIP))
 
 #: Why an arm stopped being measurable. These are not exits — nothing filled,
 #: and every one of them is excluded from the verdict rather than scored.
@@ -230,7 +293,16 @@ OPEN_REFUSED_NO_SERIES = "no_series"
 #: whole SAR window — with no error and no empty screen. Being additive is not a
 #: property a comment can assert; it is one `ADDITIVE_FROM_SCHEMAS` below has to
 #: declare, and `tests/test_ledger_schema.py` now fails if the old shape returns.
-LEDGER_SCHEMA = 2
+#: 3 (2026-08-09) — the mechanism dimension: ``mechanism``, ``mech_params``
+#: and ``mech_state`` on every row, plus a ``mechanism`` manifest in the file.
+#: **Additive.** No existing field changes meaning: a schema-1 or schema-2 row
+#: carries no ``mechanism`` key and the only thing that has ever written these
+#: files is SAR, so ``load()`` labels those rows ``sar`` rather than leaving a
+#: reader to guess. Every older row keeps its full standing in the verdict — and
+#: this time that sentence is enforced by ``ADDITIVE_FROM_SCHEMAS`` below rather
+#: than asserted by a comment, which is exactly the distinction the 1 → 2 bump
+#: destroyed 371 rows failing to make.
+LEDGER_SCHEMA = 3
 
 #: Older schemas this build reads **unchanged**, because the bump only added
 #: fields. Schema 1 rows carry every field the SAR verdict is computed from and
@@ -241,7 +313,7 @@ LEDGER_SCHEMA = 2
 #: first flush after deploy overwrote 371 rows. A bump that redefines a field
 #: instead of adding one must NOT be listed here — then old and new rows
 #: disagree about what a column means and the drop is correct.
-ADDITIVE_FROM_SCHEMAS = frozenset({1})
+ADDITIVE_FROM_SCHEMAS = frozenset({1, 2})
 
 #: Terminal states for the held-to-stop arm. Three, not two, for the reason
 #: #839 paid for: a walked window in which the stop was never reached is a
@@ -303,6 +375,64 @@ def reset_sar_cache() -> None:
     """Test hook — the cache is module-global and process-lifetime."""
     with _sar_cache_lock:
         _sar_cache.clear()
+
+
+def _anchor_point(
+    mechanism: str,
+    symbol: str,
+    timeframe: str,
+    series: Dict[str, List[float]],
+    *,
+    side: str,
+    state: Dict[str, Any],
+    params: Dict[str, float],
+) -> Optional[TrailPoint]:
+    """The mechanism's level at the bar an arm is about to anchor to.
+
+    SAR goes through the per-closed-bar cache above: it is a pure function of
+    the window, so every arm opening on the same symbol/timeframe/bar wants the
+    same answer and there is no reason to walk it twice.
+
+    The chandelier deliberately does **not**. Its ratchet is anchored to the arm
+    — the running extreme starts at the arm's own first bar — so two arms on the
+    same symbol and bar legitimately hold different state, and a shared cache
+    entry would hand the second arm the first one's history. That is the
+    frozen-then-refreshed defect (#846) arriving through a cache instead of
+    through a store, and it would be silent in exactly the same way.
+    """
+    times = series["open_time"]
+    upto = len(times) - 1
+    if mechanism == MECH_SAR:
+        live = _cached_sar_live(
+            symbol,
+            timeframe,
+            series["high"],
+            series["low"],
+            times[-1],
+            float(params.get("step", 0.02)),
+            float(params.get("max_step", 0.2)),
+        )
+        if live is None:
+            return None
+        onside = bool(live.up) if _is_long(side) else (not bool(live.up))
+        return TrailPoint(
+            next_stop=float(live.next_stop), up=bool(live.up), onside=onside
+        )
+    ctx = trail_mechanisms.prepare(
+        mechanism, series["high"], series["low"], series["close"], params
+    )
+    return trail_mechanisms.point(
+        mechanism,
+        ctx,
+        series["high"],
+        series["low"],
+        series["close"],
+        upto,
+        side=side,
+        state=state,
+        params=params,
+        last_closed_ms=times[-1],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -493,11 +623,6 @@ def _is_long(side: str) -> bool:
     return str(side or "").upper() == "LONG"
 
 
-def _aligned(sar_up: bool, side: str) -> bool:
-    """Does SAR sit on the trade's side? One definition, used everywhere."""
-    return bool(sar_up) if _is_long(side) else (not bool(sar_up))
-
-
 def _risk_pct(entry: float, stop: float, side: str) -> Optional[float]:
     """How much of the entry a stop puts at risk, as a positive percentage.
 
@@ -578,13 +703,16 @@ def new_arm(
     entry: float,
     stop_loss: float,
     tp1: float,
-    sar: Optional[SarLive],
+    point: Optional[TrailPoint],
     opened_ms: Optional[float],
     anchor_bars_behind: Optional[float] = None,
     original_sl_distance: float = 0.0,
+    mechanism: str = MECH_SAR,
+    mech_params: Optional[Dict[str, float]] = None,
+    mech_state: Optional[Dict[str, Any]] = None,
     now_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Open one arm, deciding its governor from SAR at generation.
+    """Open one arm, deciding its governor from the mechanism at generation.
 
     Alignment at entry is recorded **here**, where it becomes true, not in a
     later pass. #802 put exactly this fact in a 48h resolve path and 261 of 277
@@ -619,6 +747,18 @@ def new_arm(
         sl_distance_source = "none"
     arm: Dict[str, Any] = {
         "schema": LEDGER_SCHEMA,
+        # Which mechanism produced every level on this row, and under which
+        # parameters. Stamped rather than implied by the file it landed in: a
+        # row that cannot say which population it belongs to becomes
+        # unattributable the moment it is exported or read beside another
+        # lane's — the same reason ``lane`` is stamped beside it.
+        "mechanism": str(mechanism),
+        "mech_params": dict(mech_params or {}),
+        # The mechanism's own carried state (the chandelier's ratchet). Lives on
+        # the arm, so it survives a restart with the arm rather than being
+        # silently re-derived from whatever window the store happens to hold —
+        # which is #846 arriving through the back door.
+        "mech_state": dict(mech_state or {}),
         "arm_id": f"{signal_id}:{timeframe}",
         "signal_id": signal_id,
         "symbol": symbol,
@@ -741,9 +881,9 @@ def new_arm(
             float(entry), float(stop_loss), str(side or "").upper()
         ),
     }
-    if sar is None:
-        # Refuse. An arm that cannot read SAR at entry does not get a governor
-        # invented for it — it measures nothing and says so.
+    if point is None:
+        # Refuse. An arm that cannot read its mechanism at entry does not get a
+        # governor invented for it — it measures nothing and says so.
         arm["status"] = STATUS_INSUFFICIENT
         arm["exit_reason"] = EXIT_NO_SAR_AT_ENTRY
         arm["aligned_at_entry"] = None
@@ -752,11 +892,11 @@ def new_arm(
         arm["sar_up"] = None
         arm["closed_at"] = now
         return arm
-    aligned = _aligned(sar.up, side)
+    aligned = bool(point.onside)
     arm["aligned_at_entry"] = aligned
     arm["governor"] = GOV_SAR if aligned else GOV_GEOMETRY
-    _apply_stop(arm, sar.next_stop)
-    arm["sar_up"] = bool(sar.up)
+    _apply_stop(arm, point.next_stop)
+    arm["sar_up"] = point.up
     if aligned:
         # The handover is immediate, so it is stamped at entry rather than left
         # blank — "SAR governed from bar one" is a fact about this arm.
@@ -940,8 +1080,8 @@ def step_arm(
     arm: Dict[str, Any],
     series: Dict[str, List[float]],
     *,
-    step: float,
-    max_step: float,
+    step: Optional[float] = None,
+    max_step: Optional[float] = None,
     now_ts: Optional[float] = None,
 ) -> bool:
     """Advance one arm over every bar that has closed since it was last stepped.
@@ -1026,6 +1166,42 @@ def step_arm(
         entry = float(arm["entry"])
         side = arm["side"]
         is_long = _is_long(side)
+        # The mechanism, resolved once per walk from the arm itself. Reading it
+        # off the row rather than from a parameter is what lets ``sweep``
+        # advance a mixed ledger without knowing which mechanism any arm runs —
+        # and what makes a row written under one mechanism impossible to advance
+        # under another after a config change.
+        mech = str(arm.get("mechanism") or MECH_SAR)
+        params = dict(arm.get("mech_params") or {})
+        if not params:
+            params = trail_mechanisms.default_params(mech)
+        if mech == MECH_SAR:
+            # Explicit overrides stay honoured (the tests and the fixture
+            # generator drive them), but they never silently replace a parameter
+            # the arm was opened under: a row whose levels were computed at two
+            # different step values is a population that cannot be split later.
+            if step is not None:
+                params.setdefault("step", float(step))
+            if max_step is not None:
+                params.setdefault("max_step", float(max_step))
+        mstate = arm.setdefault("mech_state", {})
+        mech_ctx = trail_mechanisms.prepare(mech, highs, lows, closes, params)
+        mech_reason, mech_status = mech_exit(mech)
+
+        def _mech_point(upto: int) -> Optional[TrailPoint]:
+            return trail_mechanisms.point(
+                mech,
+                mech_ctx,
+                highs,
+                lows,
+                closes,
+                upto,
+                side=side,
+                state=mstate,
+                params=params,
+                last_closed_ms=times[upto],
+            )
+
         if arm.get("first_step_bars") is None and n > idx + 1:
             arm["first_step_bars"] = n - idx - 1
 
@@ -1174,13 +1350,11 @@ def step_arm(
                     )
                     changed = True
                     continue
-                # Neither hit — has SAR come onside on this bar?
-                live = parabolic_sar_live(
-                    highs[: i + 1], lows[: i + 1], step, max_step, last_closed_ms=times[i]
-                )
+                # Neither hit — has the mechanism come onside on this bar?
+                live = _mech_point(i)
                 if live is not None:
-                    arm["sar_up"] = bool(live.up)
-                    if _aligned(live.up, side):
+                    arm["sar_up"] = live.up
+                    if live.onside:
                         arm["governor"] = GOV_SAR
                         _apply_stop(arm, live.next_stop)
                         _stamp_handover(arm, now=now, bar_ms=times[i])
@@ -1191,12 +1365,10 @@ def step_arm(
             # this bar could breach.
             parked = arm.get("sar_stop")
             if parked is None:
-                live = parabolic_sar_live(
-                    highs[: i + 1], lows[: i + 1], step, max_step, last_closed_ms=times[i]
-                )
+                live = _mech_point(i)
                 if live is not None:
                     _apply_stop(arm, live.next_stop)
-                    arm["sar_up"] = bool(live.up)
+                    arm["sar_up"] = live.up
                 continue
             parked = float(parked)
             breached = (lo <= parked) if is_long else (hi >= parked)
@@ -1204,20 +1376,18 @@ def step_arm(
                 gapped = (op <= parked) if is_long else (op >= parked)
                 _close(
                     arm,
-                    reason=EXIT_SAR_FLIP,
-                    status=STATUS_CLOSED_SAR_FLIP,
+                    reason=mech_reason,
+                    status=mech_status,
                     fill_level=op if gapped else parked,
                     fill_confirm=cl,
                     now_ts=now,
                 )
                 changed = True
                 continue
-            live = parabolic_sar_live(
-                highs[: i + 1], lows[: i + 1], step, max_step, last_closed_ms=times[i]
-            )
+            live = _mech_point(i)
             if live is not None:
                 _apply_stop(arm, live.next_stop)
-                arm["sar_up"] = bool(live.up)
+                arm["sar_up"] = live.up
         return changed
     except Exception as exc:
         fail_open.record("sar_live_shadow.step_arm", exc)
@@ -1249,8 +1419,16 @@ class SarLiveLedger:
         path: Optional[str] = None,
         max_resolved: int = 2000,
         max_coverage: int = 4000,
+        mechanism: str = MECH_SAR,
     ) -> None:
         self._path = path or self.DEFAULT_PATH
+        #: Which mechanism this file's arms run. One ledger per mechanism per
+        #: lane, never a `mechanism` column in a shared file: these are the
+        #: numbers an adoption decision reads, and a consumer that has not heard
+        #: of a second mechanism cannot filter it out — whereas a consumer
+        #: pointed at a file it does not open cannot see it at all. Same
+        #: reasoning that already keeps the dark lane in its own file.
+        self._mechanism = str(mechanism or MECH_SAR)
         self._max_resolved = int(max_resolved)
         self._max_coverage = int(max_coverage)
         self._lock = threading.RLock()
@@ -1506,6 +1684,15 @@ class SarLiveLedger:
                     # labels — and a hand-kept second copy is the drift this repo
                     # has paid for under four names. One writer, one reader.
                     "strategy_catalog": sar_exit_strategies.catalog_manifest(),
+                    # The mechanism as data, written once per file. Ops labels
+                    # the page and its columns from this rather than mapping a
+                    # key it keeps its own copy of — one writer, one reader, and
+                    # a mechanism the surface has never heard of renders badged
+                    # rather than renamed.
+                    "mechanism": trail_mechanisms.manifest(
+                        self._mechanism,
+                        trail_mechanisms.default_params(self._mechanism),
+                    ),
                 }
                 self._last_write = now
                 self._dirty = False
@@ -1563,6 +1750,16 @@ class SarLiveLedger:
                 }
                 self._resolved = list(payload.get("resolved", []))
                 self._trim()
+                # Label the pre-mechanism rows rather than leave them blank.
+                # Every row written before schema 3 was SAR — that is a fact,
+                # not a guess, because SAR was the only mechanism that existed —
+                # and a blank `mechanism` on an old row would read as "the
+                # engine stopped stamping" on the page beside rows that do carry
+                # one. `_default_mechanism` is the file's own, so a chandelier
+                # ledger cannot inherit a SAR label from this branch.
+                for a in list(self._open.values()) + self._resolved:
+                    if not a.get("mechanism"):
+                        a["mechanism"] = self._mechanism
                 # Restore the census too. Flush without load is how two
                 # structural ledgers erased their own window on every deploy —
                 # with flush and no load the file is actively deleted while the
@@ -1713,6 +1910,8 @@ def observe_signal(
     stall_bars: Optional[float] = None,
     ledger: Optional[SarLiveLedger] = None,
     lane: str = LANE_LIVE,
+    mechanism: str = MECH_SAR,
+    mech_params: Optional[Dict[str, float]] = None,
     now_ts: Optional[float] = None,
 ) -> None:
     """Open this signal's arms on first sight. Advancing is ``sweep``'s job.
@@ -1744,7 +1943,18 @@ def observe_signal(
         # three surfaces drawing different SAR would make them incomparable.
         s = SAR_EXIT_SHADOW_STEP if step is None else step
         ms = SAR_EXIT_SHADOW_MAX_STEP if max_step is None else max_step
+        mech = str(mechanism or MECH_SAR)
+        params = dict(mech_params or trail_mechanisms.default_params(mech))
+        if mech == MECH_SAR:
+            params["step"], params["max_step"] = float(s), float(ms)
+        # The warm-up is the larger of the lane's own floor and the mechanism's
+        # hard minimum. Taking the lane's alone would let a 22-period chandelier
+        # open on a window that cannot produce an ATR at all, and the arm would
+        # then refuse at the anchor — counted as a mechanism refusal when the
+        # real fault is the window. Refuse for the right reason or the census
+        # sends the reader to the wrong subsystem.
         wu = SAR_LIVE_SHADOW_WARMUP_BARS if warmup is None else warmup
+        wu = max(int(wu), trail_mechanisms.min_bars(mech, params))
         book = ledger if ledger is not None else get_ledger()
         now = time.time() if now_ts is None else float(now_ts)
 
@@ -1810,14 +2020,15 @@ def observe_signal(
                     )
                     _note(tf, False, OPEN_REFUSED_STALE_ANCHOR)
                     continue
-                live = _cached_sar_live(
+                mstate: Dict[str, Any] = {}
+                live = _anchor_point(
+                    mech,
                     symbol,
                     tf,
-                    series["high"],
-                    series["low"],
-                    series["open_time"][-1],
-                    s,
-                    ms,
+                    series,
+                    side=side,
+                    state=mstate,
+                    params=params,
                 )
                 _arm = new_arm(
                         signal_id=signal_id,
@@ -1833,9 +2044,12 @@ def observe_signal(
                         original_sl_distance=float(
                             getattr(sig, "original_sl_distance", 0.0) or 0.0
                         ),
-                        sar=live,
+                        point=live,
                         opened_ms=series["open_time"][-1],
                         anchor_bars_behind=anchor_behind,
+                        mechanism=mech,
+                        mech_params=params,
+                        mech_state=mstate,
                         now_ts=now,
                 )
                 # Stamped on the row, not only implied by which file it landed
@@ -1860,8 +2074,6 @@ def sweep(
     store: Any,
     *,
     price_fn: Optional[Any] = None,
-    step: Optional[float] = None,
-    max_step: Optional[float] = None,
     warmup: Optional[int] = None,
     stall_bars: Optional[float] = None,
     abandon_sec: Optional[float] = None,
@@ -1891,8 +2103,6 @@ def sweep(
     tally = {"advanced": 0, "current": 0, "stalled": 0, "no_series": 0, "series_corrupt": 0, "retired": 0}
     try:
         from config import (
-            SAR_EXIT_SHADOW_MAX_STEP,
-            SAR_EXIT_SHADOW_STEP,
             SAR_LIVE_SHADOW_ABANDON_SEC,
             SAR_LIVE_SHADOW_ENABLED,
             SAR_LIVE_SHADOW_MAX_OPEN_HOURS,
@@ -1902,8 +2112,6 @@ def sweep(
 
         if not SAR_LIVE_SHADOW_ENABLED:
             return tally
-        s = SAR_EXIT_SHADOW_STEP if step is None else step
-        ms = SAR_EXIT_SHADOW_MAX_STEP if max_step is None else max_step
         wu = SAR_LIVE_SHADOW_WARMUP_BARS if warmup is None else warmup
         sb = SAR_LIVE_SHADOW_STALL_BARS if stall_bars is None else stall_bars
         ab = SAR_LIVE_SHADOW_ABANDON_SEC if abandon_sec is None else abandon_sec
@@ -1962,7 +2170,18 @@ def sweep(
                 )
                 continue
 
-            series, series_reason = _series_with_reason(store, symbol, tf, wu)
+            # The window this arm's own mechanism needs, never a shared
+            # constant: a ledger can hold two mechanisms with different hard
+            # floors, and applying one arm's floor to another is how a row gets
+            # refused for a reason that is not its own.
+            arm_wu = max(
+                int(wu),
+                trail_mechanisms.min_bars(
+                    str(arm.get("mechanism") or MECH_SAR),
+                    dict(arm.get("mech_params") or {}),
+                ),
+            )
+            series, series_reason = _series_with_reason(store, symbol, tf, arm_wu)
             if series is None:
                 tally["no_series"] += 1
                 if series_reason == STALL_SERIES_CORRUPT:
@@ -1988,7 +2207,11 @@ def sweep(
             # would count as stalled and eventually be abandoned.
             before = int(arm.get("bars_seen") or 0)
             before_hold = int(arm.get("hold_bars") or 0)
-            changed = step_arm(arm, series, step=s, max_step=ms, now_ts=now)
+            # No mechanism parameters passed: each arm carries its own, so a
+            # ledger holding two mechanisms (or one mechanism under two
+            # parameter sets after a config change) advances every row under the
+            # parameters it was opened with rather than under today's.
+            changed = step_arm(arm, series, now_ts=now)
             advanced = (
                 int(arm.get("bars_seen") or 0) > before
                 or int(arm.get("hold_bars") or 0) > before_hold

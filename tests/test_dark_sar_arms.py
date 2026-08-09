@@ -221,13 +221,13 @@ def test_a_stale_anchor_is_refused_in_the_dark_lane_as_well(timestamped_store):
 def _running_arm(tf="15m", **kw):
     # The real collaborator's type, not a dict with keys I invented — a mock
     # whose shape I chose cannot verify a contract I got wrong (#798).
-    from src.sar_exit_shadow import SarLive
+    from src.trail_mechanisms import TrailPoint
 
     arm = sar.new_arm(
         signal_id="SIG-1", symbol="AAAUSDT", side="LONG",
         setup_class="MOVER_TREND_PULLBACK", timeframe=tf,
         entry=100.0, stop_loss=97.0, tp1=106.0,
-        sar=SarLive(up=True, next_stop=96.0, last_closed_ms=1_700_000_000_000.0),
+        point=TrailPoint(next_stop=96.0, up=True, onside=True),
         opened_ms=1_700_000_000_000.0,
         anchor_bars_behind=0.0, now_ts=1_700_000_000.0,
     )

@@ -22,7 +22,7 @@ import pytest
 
 from src import sar_exit_strategies as strat
 from src import sar_live_shadow as live
-from src.sar_exit_shadow import parabolic_sar_live
+from src import trail_mechanisms
 
 STEP, MAX_STEP = 0.02, 0.2
 BAR_MS = 900_000.0
@@ -46,9 +46,20 @@ def _rising(n, start=100.0, step_up=1.0):
     ]
 
 
-def _live_of(bars):
+def _live_of(bars, side="LONG"):
+    """Anchor point from the real producer, never a hand-built shape."""
     s = _series(bars)
-    return parabolic_sar_live(s["high"], s["low"], STEP, MAX_STEP)
+    return trail_mechanisms.point(
+        trail_mechanisms.MECH_SAR,
+        None,
+        s["high"],
+        s["low"],
+        s["close"],
+        len(s["high"]) - 1,
+        side=side,
+        state={},
+        params={"step": STEP, "max_step": MAX_STEP},
+    )
 
 
 def _arm(bars, side, entry, sl, tp1, tf="15m"):
@@ -62,7 +73,7 @@ def _arm(bars, side, entry, sl, tp1, tf="15m"):
         entry=entry,
         stop_loss=sl,
         tp1=tp1,
-        sar=_live_of(bars),
+        point=_live_of(bars, side),
         opened_ms=s["open_time"][-1],
         now_ts=1_700_000_000.0,
     )
@@ -176,7 +187,7 @@ def test_sweep_does_not_retire_while_the_hold_arm_is_open():
     ledger = live.SarLiveLedger(path="")
     ledger.add(arm)
     tally = live.sweep(
-        _Store(), ledger=ledger, step=STEP, max_step=MAX_STEP,
+        _Store(), ledger=ledger,
         warmup=10, now_ts=_now_at(len(all_bars)),
     )
     assert tally["retired"] == 0
