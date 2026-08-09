@@ -3454,6 +3454,60 @@ class CryptoSignalEngine:
             min_streak=12,         # 1 min sustained (monitor ticks every 5s)
         ))
 
+        def _sar_hold_arm() -> Tuple[bool, str]:
+            """Is the SECOND arm resolving, or only the first?
+
+            The held-to-stop arm exits at the ORIGINAL stop, normally later than
+            the SAR flip — so it is precisely the arm a sweep keyed on the SAR
+            status would freeze, and it would be silent because the row looks
+            complete (#835's shape, #869's corollary). ``sar_live_arms`` above
+            cannot see this: it grades whether arms were *stepped*, and a frozen
+            held arm inside a retired row is not stepped at all.
+
+            So this watches the population that would be harmed — rows whose SAR
+            arm has a verdict — and asks how many of them the held arm has
+            settled. Some lag is correct and expected. *Everything* lagging,
+            with nothing ever resolving, is the failure.
+
+            Rows written before the arm shipped carry no ``hold_status`` and are
+            excluded rather than counted as unresolved: they are owed nothing,
+            and folding them in would report a fault that is not happening on a
+            population that shrinks on its own.
+            """
+            from config import SAR_LIVE_SHADOW_ENABLED as _live_on
+            if not _live_on:
+                return True, "disabled by config"
+            from src import sar_live_shadow as _live
+
+            h = _live.hold_arm_health()
+            settled = int(h.get("hold_resolved") or 0) + int(h.get("hold_horizon") or 0)
+            unscored = int(h.get("hold_insufficient") or 0)
+            still_open = int(h.get("hold_open") or 0)
+            one_armed = int(h.get("one_armed") or 0)
+            scored_pop = settled + unscored + still_open
+            if scored_pop == 0:
+                return True, "no rows carry a held arm yet"
+            if settled + unscored > 0:
+                return True, (
+                    f"{settled} held arms settled, {unscored} unscored, "
+                    f"{still_open} still walking ({one_armed} awaiting the second arm)"
+                )
+            return False, (
+                f"{still_open} rows carry an OPEN held arm and not one has ever "
+                f"settled ({one_armed} of them already have a SAR verdict). The "
+                f"second arm is not advancing, so every 'max profit before SL' "
+                f"figure describes a walk that stopped."
+            )
+
+        fl.add_predicate(PredicateProbe(
+            name="sar_hold_arm",
+            fn=_sar_hold_arm,
+            # Slower than the step probe: this is a population-level question,
+            # and the held arm is *meant* to lag the SAR one, so a short streak
+            # would page on ordinary lag.
+            min_streak=120,
+        ))
+
         def _dark_sar_arms() -> Tuple[bool, str]:
             """Are the SAR arms on the DARK rows still being advanced?
 
