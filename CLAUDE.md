@@ -1528,3 +1528,45 @@ python -m src.main
   headings from another, the headings are a contract too**, and *render the page
   once before calling a panel done* — this is the 2026-08-06 panel surf's lesson
   arriving during implementation instead of a week later.
+- **An additive schema bump that drops its own ledger is the "flush without
+  load" defect one level up — and I shipped it the same day I quoted the rule.**
+  `sar_live_shadow.LEDGER_SCHEMA` went 1 → 2 to add the held-to-stop arm. The
+  bump added fields and changed no existing meaning, and the constant's own
+  comment said so: *"nothing is purged and every schema-1 row keeps its full
+  standing in the SAR verdict."* `load()` compared `stored != CURRENT` and
+  returned, so the first flush after the deploy **overwrote 371 rows** — 4 live
+  arms and 367 resolved, the entire window an adoption decision reads. Nothing
+  crashed; every panel rendered correctly over zero rows, which is
+  indistinguishable from a quiet lane, and the file's mtime was seconds old.
+
+  It is `LANE_PROVENANCE_FIELDS` exactly — **a docstring asserting a property
+  the code beneath it does not have, checkable in one command, and nobody ran
+  the command.** The tell was available before deploy: grep the loader.
+
+  **A schema bump has two kinds with opposite correct behaviours.** *Additive*
+  (fields appear, existing ones keep their meaning) — old rows are still true
+  and are most of the evidence, so dropping them makes the estimate smaller
+  rather than cleaner; this is *"filter, do not purge"* arriving at the
+  serializer. *Redefining* (a field means something else) — old and new rows now
+  disagree about what a column **is**, and there the drop is right. The two are
+  not distinguishable from the schema number, so the code has to say which it
+  is: `ledger_schema.accepts()` takes the additive set as a **required**
+  argument, so a new ledger cannot inherit the old behaviour by forgetting — it
+  must state which older schemas it reads, and `frozenset()` is a valid answer
+  that somebody chose. Reading **forward** is always refused: an old build
+  meeting a newer file would be guessing what a field it has never seen means.
+
+  **Five ledgers carried the identical `!=` loader** (`sar_live_shadow`,
+  `dark_emission`, `entry_features`, `structural_snap`, `structural_veto`), so
+  this was not one mistake but one mistake waiting in five places for whoever
+  bumped next — the `is_tradfi_perp` audit shape again. Two derived tests now
+  hold the line: every schema-gated loader must declare `ADDITIVE_FROM_SCHEMAS`,
+  and no module may compare a stored schema with bare inequality.
+
+  Corollary on the cleanup, because the tempting fix is worse than the loss: an
+  ops CSV export of the window survived, and **restoring from it would have been
+  wrong.** It is the flattened render columns, not the rows — no nested
+  `strategies`, no field the page does not show — so re-injecting it produces a
+  ledger that looks recorded and is reconstructed, which is the single artifact
+  `/track-record`'s own rule forbids. A destroyed window is recoverable by
+  waiting; a ledger that silently mixes the two is not recoverable at all.
