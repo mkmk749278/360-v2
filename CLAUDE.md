@@ -1483,3 +1483,48 @@ python -m src.main
   **The fix is always the same shape — derive the requirement from the tree
   rather than write it in a list** — and the tell is always the same question:
   *who reads this, and does the thing that writes it run first?*
+- **A guard on the inputs is not a check of the output — and the check nobody
+  had run was the cheap one.** Six sessions of `sar_live_shadow` defects
+  (#835/#836/#842/#846, the regressed-vs-rolled-off split, the two fills, the
+  two denominators) all ask *did this arm measure honestly*, and all of them
+  reason about the arm's **inputs**: is the anchor current, did the walk jump,
+  are the timestamps sorted. None of them ever asked whether the level the arm
+  **parked** was the level SAR actually had on those bars. That question needs
+  the exchange's own candles, which is precisely what the engine's store is a
+  *cache* of, so a stale bucket or a mid-walk re-seed produces an
+  arithmetically perfect SAR over the wrong inputs while every guard passes.
+  `scripts/reconcile_sar_arms.py` closes it: fetch the bars, rebuild the level,
+  diff. Verified 2026-08-09 — the indicator is **bit-exact** against an
+  independent Wilder walk over 5,400 real bars, the recorded fills reconcile on
+  349 of 349 rows, and 245 of 292 `sar_flip` fills sat exactly on the parked
+  level with 47 worse (gap-through) and **zero better**. Corollary that made it
+  possible: **SAR forgets its seed.** Every flip resets the extreme point and
+  the acceleration factor, so a walk converges regardless of where it started —
+  measured at 0 disagreements from 20 bars of warmup, against 13/177 at 3. That
+  is what lets a reconstruction be compared to the engine's at all, and where
+  it does *not* hold the row is refused as `seed_sensitive` rather than
+  reported as a mismatch.
+- **A second arm inherits the first's guards only if it rides the first's
+  walk.** The held-to-stop arm added to `sar_live_shadow` (max profit before the
+  original stop, plus the stop-management rules) is stepped inside the *same*
+  bar loop as the SAR arm rather than resolving on its own pass — so the anchor
+  check, the per-advance replay guard, the regressed-vs-rolled-off split and the
+  timestamp-monotonicity refusal all cover it without a line of new code. This
+  is the direct application of *"a measurement lane does not need a resolver, and
+  the ones that grew their own each cost a session"*: the cheapest correct arm is
+  the one that reuses a walk somebody already hardened. What it does **not**
+  inherit is the first arm's *lifetime* — that half is #869's corollary and had
+  to be built (`owed_verdict`, progress counted on either arm, retire only when
+  both are done), because the held arm exits later than the SAR flip by design.
+- **The label seam, and why the render caught what sixteen tests did not.** The
+  per-arm strategy state carries a rule *key*; the human-readable label lives in
+  the catalog. Ops therefore rendered `be_3`, `lock1_3`, `trail2_3` at the reader
+  — correct numbers under names nobody outside this file can read. Every test
+  passed, because each asserted `status` / `armed` / `pnl_pct` and none asserted
+  the label; the defect existed only on screen. Fixed by shipping
+  `catalog_manifest()` **in the ledger**, once per file, so there is one writer
+  and one reader and a rule the manifest does not describe renders badged rather
+  than renamed. Two habits: **when a table's cells come from one repo and its
+  headings from another, the headings are a contract too**, and *render the page
+  once before calling a panel done* — this is the 2026-08-06 panel surf's lesson
+  arriving during implementation instead of a week later.
