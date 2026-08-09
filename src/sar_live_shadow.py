@@ -199,6 +199,20 @@ STALL_BARS_BEHIND = "bars_behind"
 #: exists, so nothing is owed a verdict — but it is a *measurement* we declined
 #: to take and it is counted where the owner can see it.
 OPEN_REFUSED_STALE_ANCHOR = "stale_anchor"
+#: ``_series`` handed back nothing at open time: the store has no usable series
+#: for this symbol/timeframe, so there is no bar to anchor to.
+#:
+#: **This was uncounted for the lane's whole life**, on the reasoning that no arm
+#: exists so nothing is owed a verdict. That is right about the *arm* and wrong
+#: about the *book*: the population that would be harmed is delivered signals
+#: owed a measurement (#815), and it was invisible. Guest-session audit
+#: 2026-08-08, joining the ledger to the closed-signal record over the arm
+#: window: **18.4% of delivered trades never got an arm, and that slice ran
+#: −1.643%/trade at 10.7% win against +0.753% and 43.5% for the armed slice**
+#: (67.9% SL_HIT against 36.3%). The page's ``+0.588%/arm`` therefore described
+#: a winner-enriched subset of the book, and no counter anywhere could have said
+#: so — the one exclusion that mattered most was the one nothing measured.
+OPEN_REFUSED_NO_SERIES = "no_series"
 
 #: Bumped whenever a stored row's meaning changes. Readers gate on the schema,
 #: never on a date — a migration keyed to a timestamp that predicts a future
@@ -529,6 +543,7 @@ def new_arm(
     sar: Optional[SarLive],
     opened_ms: Optional[float],
     anchor_bars_behind: Optional[float] = None,
+    original_sl_distance: float = 0.0,
     now_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Open one arm, deciding its governor from SAR at generation.
@@ -537,11 +552,33 @@ def new_arm(
     later pass. #802 put exactly this fact in a 48h resolve path and 261 of 277
     rows carried no verdict as a result; the value needs no future candle, so
     there is no defensible reason for it to arrive late.
+
+    **The risk denominator comes from the evaluator's stamp, not from the live
+    stop.** ``TradeMonitor`` moves ``sig.stop_loss`` in place — BE shift, TP1
+    park, trail — so ``abs(entry - stop_loss)`` is the #848 fallback that
+    returns the wrong number for *precisely* the rows that have the defect: an
+    arm opening after a BE shift would divide every R by a stop distance of
+    roughly zero. ``original_sl_distance`` is what the evaluator sized the trade
+    for and is what ``snapshot._original_stop_loss`` and the Layer-C writer
+    already read; this lane simply never travelled onto it.
+
+    The fallback is kept rather than refused — an arm with no R is an arm out of
+    the population, and emptying the population is worse than a denominator that
+    is right today — but it is **named** (``sl_distance_source``) so the two
+    populations stay separable. Same call as ``cvd_source``: a value whose
+    meaning changed gets a source column, not a silent redefinition.
     """
     now = time.time() if now_ts is None else float(now_ts)
-    sl_distance_pct = (
-        abs(entry - stop_loss) / entry * 100.0 if entry > 0 and stop_loss > 0 else 0.0
-    )
+    osd = float(original_sl_distance or 0.0)
+    if entry > 0 and osd > 0:
+        sl_distance_pct = osd / entry * 100.0
+        sl_distance_source = "original"
+    elif entry > 0 and stop_loss > 0:
+        sl_distance_pct = abs(entry - stop_loss) / entry * 100.0
+        sl_distance_source = "live_stop"
+    else:
+        sl_distance_pct = 0.0
+        sl_distance_source = "none"
     arm: Dict[str, Any] = {
         "schema": LEDGER_SCHEMA,
         "arm_id": f"{signal_id}:{timeframe}",
@@ -554,6 +591,10 @@ def new_arm(
         "stop_loss": float(stop_loss),
         "tp1": float(tp1),
         "sl_distance_pct": sl_distance_pct,
+        # Which stop that distance came from. ``live_stop`` rows are the ones a
+        # BE shift could have corrupted, and pooling them with ``original`` rows
+        # is how a denominator silently changes meaning mid-population.
+        "sl_distance_source": sl_distance_source,
         "opened_at": now,
         "opened_bar_ms": opened_ms,
         "last_bar_ms": opened_ms,
@@ -945,14 +986,147 @@ class SarLiveLedger:
     #: while nothing wrote it, and the page looked full the whole time.
     DEFAULT_PATH = os.getenv("SAR_LIVE_SHADOW_PATH", "data/sar_live_arms_v1.json")
 
-    def __init__(self, path: Optional[str] = None, max_resolved: int = 2000) -> None:
+    def __init__(
+        self,
+        path: Optional[str] = None,
+        max_resolved: int = 2000,
+        max_coverage: int = 4000,
+    ) -> None:
         self._path = path or self.DEFAULT_PATH
         self._max_resolved = int(max_resolved)
+        self._max_coverage = int(max_coverage)
         self._lock = threading.RLock()
         self._open: Dict[str, Dict[str, Any]] = {}
         self._resolved: List[Dict[str, Any]] = []
+        #: signal_id -> what this signal got. See ``note_signal``.
+        self._coverage: Dict[str, Dict[str, Any]] = {}
+        self._coverage_evicted = 0
         self._dirty = False
         self._last_write = 0.0
+
+    # -- coverage -------------------------------------------------------- #
+
+    def note_signal(
+        self,
+        signal_id: str,
+        *,
+        symbol: str,
+        side: str,
+        setup_class: str,
+        timeframe: str,
+        armed: bool,
+        reason: str = "",
+        now: Optional[float] = None,
+    ) -> None:
+        """Record whether this signal got an arm on this timeframe, and why not.
+
+        **The arms answer "how did the mechanism do"; only this answers "on what
+        fraction of the book".** Which signals *have* arms is derivable from the
+        ledger — which signals were seen and got none is not derivable from
+        anything, and that is the population an adoption decision needs, because
+        a missing arm is not a missing row at random.
+
+        Guest-session audit 2026-08-08, joining this ledger to
+        ``signal_performance.json`` over the arm window: 124 of 152 delivered
+        trades had an arm (81.6%) and the 28 without ran **−1.643%/trade at
+        10.7% win, 67.9% SL_HIT**, against **+0.753% and 43.5%** for the armed
+        ones. So the verdict on screen was measured on a winner-enriched subset
+        and said 100% of nothing — the #832 rule ("what fraction resolved, and
+        is the unresolved part random?") applied rigorously to arms that exist
+        and never once to signals that never became arms.
+
+        Current state, not first attempt: a signal whose series arrives on the
+        fifth cycle *is* covered, so an arm appearing clears the miss rather
+        than leaving a stale one behind. A signal that closes and stops being
+        observed freezes at whatever it last was, which is the honest record —
+        it never got that arm.
+
+        Bounded, with the eviction count kept **beside** the data: a capped ring
+        makes every verdict on it a sample, and a cap nobody printed is how
+        ``dispatch_cooldown`` read ``n=396`` with no way to tell 396 from 396
+        of 24,000.
+        """
+        try:
+            ts = time.time() if now is None else float(now)
+            tf = str(timeframe or "")
+            with self._lock:
+                row = self._coverage.get(signal_id)
+                if row is None:
+                    if len(self._coverage) >= self._max_coverage:
+                        oldest = min(
+                            self._coverage,
+                            key=lambda k: float(
+                                self._coverage[k].get("first_seen") or 0.0
+                            ),
+                        )
+                        self._coverage.pop(oldest, None)
+                        self._coverage_evicted += 1
+                    row = {
+                        "signal_id": signal_id,
+                        "symbol": symbol,
+                        "side": str(side or "").upper(),
+                        "setup_class": setup_class,
+                        "first_seen": ts,
+                        "armed": [],
+                        "missing": {},
+                    }
+                    self._coverage[signal_id] = row
+                row["last_seen"] = ts
+                if armed:
+                    row["missing"].pop(tf, None)
+                    if tf not in row["armed"]:
+                        row["armed"].append(tf)
+                else:
+                    if tf not in row["armed"]:
+                        row["missing"][tf] = reason or "unknown"
+                self._dirty = True
+        except Exception as exc:
+            fail_open.record("sar_live_shadow.note_signal", exc)
+
+    def coverage(self) -> Dict[str, Any]:
+        """The census, shaped for the file and for ops.
+
+        ``fully`` / ``partly`` / ``none`` rather than a single percentage: an arm
+        on 5m and none on 15m is neither covered nor missing, and the two
+        timeframes are reported as independent experiments everywhere else on
+        this surface.
+        """
+        with self._lock:
+            rows = [dict(r) for r in self._coverage.values()]
+            evicted = int(self._coverage_evicted)
+        full = sum(1 for r in rows if r["armed"] and not r["missing"])
+        part = sum(1 for r in rows if r["armed"] and r["missing"])
+        none = sum(1 for r in rows if not r["armed"])
+        reasons: Dict[str, int] = {}
+        for r in rows:
+            for why in r["missing"].values():
+                reasons[why] = reasons.get(why, 0) + 1
+        return {
+            "signals_seen": len(rows),
+            "fully_armed": full,
+            "partly_armed": part,
+            "unarmed": none,
+            "reasons": reasons,
+            "evicted": evicted,
+            "cap": int(self._max_coverage),
+            # The unarmed and partly-armed rows themselves, so ops can show
+            # WHICH signals the verdict does not cover rather than only how
+            # many. A count says how many rows are missing and cannot say which
+            # way they lean.
+            "misses": [
+                {
+                    "signal_id": r["signal_id"],
+                    "symbol": r["symbol"],
+                    "side": r["side"],
+                    "setup_class": r["setup_class"],
+                    "first_seen": r["first_seen"],
+                    "armed": list(r["armed"]),
+                    "missing": dict(r["missing"]),
+                }
+                for r in rows
+                if r["missing"]
+            ][-400:],
+        }
 
     # -- accessors ------------------------------------------------------- #
 
@@ -1057,6 +1231,12 @@ class SarLiveLedger:
                     "written_at": now,
                     "open": list(self._open.values()),
                     "resolved": self._resolved,
+                    # Coverage rides the same artifact ops already loads. A
+                    # separate file would be a second thing to keep in sync, and
+                    # a counter that lives only in ``step_health`` reaches no
+                    # surface at all — which is exactly how ``refused_open``
+                    # spent its life inside a probe message nobody reads.
+                    "coverage": self.coverage(),
                 }
                 self._last_write = now
                 self._dirty = False
@@ -1093,6 +1273,56 @@ class SarLiveLedger:
                 }
                 self._resolved = list(payload.get("resolved", []))
                 self._trim()
+                # Restore the census too. Flush without load is how two
+                # structural ledgers erased their own window on every deploy —
+                # with flush and no load the file is actively deleted while the
+                # page reports a healthy one. Coverage is a *cumulative* claim
+                # about the book, so a restart resetting it to zero would make
+                # the fraction describe only the time since the last deploy
+                # while reading like the whole window.
+                cov = payload.get("coverage") or {}
+                self._coverage = {}
+                for row in cov.get("misses") or []:
+                    sid = row.get("signal_id")
+                    if not sid:
+                        continue
+                    self._coverage[str(sid)] = {
+                        "signal_id": str(sid),
+                        "symbol": row.get("symbol") or "",
+                        "side": row.get("side") or "",
+                        "setup_class": row.get("setup_class") or "",
+                        "first_seen": row.get("first_seen") or 0.0,
+                        "last_seen": row.get("first_seen") or 0.0,
+                        "armed": list(row.get("armed") or []),
+                        "missing": dict(row.get("missing") or {}),
+                    }
+                self._coverage_evicted = int(cov.get("evicted") or 0)
+                # Fully-armed signals are not carried in ``misses`` — they are
+                # derivable from the arms themselves, which this same load has
+                # just restored. Rebuild them from there rather than persisting
+                # the same fact twice: the fix for a drifting mirror is not a
+                # second mirror.
+                for arm in list(self._open.values()) + self._resolved:
+                    sid = str(arm.get("signal_id") or "")
+                    tf = str(arm.get("timeframe") or "")
+                    if not sid:
+                        continue
+                    row = self._coverage.get(sid)
+                    if row is None:
+                        row = {
+                            "signal_id": sid,
+                            "symbol": arm.get("symbol") or "",
+                            "side": arm.get("side") or "",
+                            "setup_class": arm.get("setup_class") or "",
+                            "first_seen": arm.get("opened_at") or 0.0,
+                            "last_seen": arm.get("opened_at") or 0.0,
+                            "armed": [],
+                            "missing": {},
+                        }
+                        self._coverage[sid] = row
+                    row["missing"].pop(tf, None)
+                    if tf and tf not in row["armed"]:
+                        row["armed"].append(tf)
         except Exception as exc:
             fail_open.record("sar_live_shadow.load", exc)
 
@@ -1236,18 +1466,41 @@ def observe_signal(
         if side not in ("LONG", "SHORT"):
             return
 
+        setup_class = str(getattr(sig, "setup_class", "") or "")
+
+        def _note(tf: str, armed: bool, reason: str = "") -> None:
+            book.note_signal(
+                signal_id,
+                symbol=symbol,
+                side=side,
+                setup_class=setup_class,
+                timeframe=tf,
+                armed=armed,
+                reason=reason,
+                now=now,
+            )
+
         for tf in tfs:
             arm_id = f"{signal_id}:{tf}"
             arm = book.get(arm_id)
             if arm is None:
                 if book.has(arm_id):
-                    continue  # already resolved — do not re-open it
+                    _note(tf, True)  # already resolved — do not re-open it
+                    continue
                 series = _series(store, symbol, tf, wu)
                 if series is None:
-                    # Not counted in arm health: no arm exists yet, so nothing is
-                    # owed a verdict. The probe's population is arms, and mixing
-                    # "could not open" into it would let a quiet failure to
-                    # *advance* hide behind a busy failure to *open*.
+                    # Kept out of *arm health* for the original reason — the
+                    # probe's population is arms, and mixing "could not open"
+                    # into it would let a quiet failure to advance hide behind a
+                    # busy failure to open. But out of the probe is not out of
+                    # the record: this is the single largest exclusion from the
+                    # verdict and it was counted nowhere at all, so the page
+                    # could report a mechanism's edge without ever saying which
+                    # fraction of the book it had been able to look at.
+                    record_open_refusal(
+                        symbol, tf, OPEN_REFUSED_NO_SERIES, lane=lane
+                    )
+                    _note(tf, False, OPEN_REFUSED_NO_SERIES)
                     continue
                 # An arm anchors to "the newest closed bar the store holds right
                 # now" and steps from there. When that bar is *itself* hours old
@@ -1265,6 +1518,7 @@ def observe_signal(
                     record_open_refusal(
                         symbol, tf, OPEN_REFUSED_STALE_ANCHOR, anchor_behind, lane=lane
                     )
+                    _note(tf, False, OPEN_REFUSED_STALE_ANCHOR)
                     continue
                 live = _cached_sar_live(
                     symbol,
@@ -1279,11 +1533,16 @@ def observe_signal(
                         signal_id=signal_id,
                         symbol=symbol,
                         side=side,
-                        setup_class=str(getattr(sig, "setup_class", "") or ""),
+                        setup_class=setup_class,
                         timeframe=tf,
                         entry=float(getattr(sig, "entry", 0.0) or 0.0),
                         stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
                         tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
+                        # The stop the evaluator SIZED for, not the one the
+                        # monitor may already have moved (#848).
+                        original_sl_distance=float(
+                            getattr(sig, "original_sl_distance", 0.0) or 0.0
+                        ),
                         sar=live,
                         opened_ms=series["open_time"][-1],
                         anchor_bars_behind=anchor_behind,
@@ -1295,11 +1554,13 @@ def observe_signal(
                 # a comparison, or read beside rows from the other lane.
                 _arm["lane"] = str(lane)
                 book.add(_arm)
+                _note(tf, True)
                 continue
             # The arm already exists — ``sweep`` advances it. Marking it here as
             # well would only duplicate what the sweep does moments later, and
             # counting it here is what made the liveness probe read healthy over
             # frozen arms.
+            _note(tf, True)
             mark_arm(arm, price)
     except Exception as exc:
         fail_open.record("sar_live_shadow.observe_signal", exc)

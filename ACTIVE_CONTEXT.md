@@ -4,6 +4,115 @@
 
 ---
 
+## 🟢 SESSION 116 2026-08-08 — the SAR verdict was measured on a winner-enriched subset
+
+Engine #900, ops #157. A read-only guest session was asked to audit the
+price-action data, then SAR live, then — the question that produced everything
+below — **"is it measuring accurately or not, find it out first"**.
+
+### The mechanics are sound. I tried to break them and could not.
+
+Line-by-line audit of `src/sar_live_shadow.py` against the exported ledger: the
+bar is located by its own timestamp (not clock arithmetic, #800); the
+series-jumped guard runs at **every** advance, not just the first (#846);
+past-end-of-window is split from rolled-off (#2026-08-02); SHORT PnL is negated;
+a gap through the stop fills at the bar's open, never better; MFE/MAE are taken
+before the exit on the same bar so the exit bar cannot inflate them; an
+ambiguous SL+TP bar resolves pessimistically **and flags itself**. 2 `suspect`
+and 18 `INSUFFICIENT` arms were excluded and named rather than scored.
+
+**One latent hazard, empirically clean.** `new_arm` computed
+`sl_distance_pct = abs(entry - stop_loss)/entry` — literally the #848 fallback
+this file names as the bug — reading the *mutable* `sig.stop_loss` that
+`trade_monitor` moves in place. It had not bitten: min `sl_distance_pct` 0.940%,
+p5 2.17%, no zeros, and all 172 arm pairs agreeing exactly, so every arm had
+opened before any BE shift. Now reads `original_sl_distance` with the fallback
+**named** (`sl_distance_source`) rather than silent.
+
+### The defect: 18% of the delivered book never got an arm, and it was the worst 18%
+
+Joining the ledger to `signal_performance.json` over the arm window
+(2026-07-30 → 08-08, 152 delivered closed trades):
+
+| | n | avg PnL | win | SL_HIT share |
+|---|---|---|---|---|
+| **Got an arm** | 124 (81.6%) | **+0.753%** | 43.5% | 36.3% |
+| **No arm** | 28 (18.4%) | **−1.643%** | **10.7%** | **67.9%** |
+
+`PROFIT_LOCKED` is 41.1% of the armed slice and 7.1% of the unarmed one. It holds
+across join tolerances (at a loose 0.5% entry match the unarmed slice still reads
+−1.550% at 14.3% win), it is spread across every day of the window rather than
+being a startup artifact, and only 1 of 28 is a symbol absent from the ledger
+entirely — so it is per-signal, not per-symbol.
+
+**So `+0.588%/arm` described a winner-enriched subset of the book.** This is
+#832's own rule — *what fraction of the population resolved, and is the
+unresolved part random?* — applied rigorously to arms that exist and **never once
+to signals that never became arms**.
+
+### Why nothing on screen could have said so
+
+Two counters existed and neither reached the owner. `observe_signal`'s
+`_series is None` branch was a bare `continue` under the comment *"Not counted in
+arm health: no arm exists yet, so nothing is owed a verdict"* — right about the
+*arm*, wrong about the *book*, and it was the largest exclusion of all.
+`record_open_refusal` counted only stale anchors, and its own docstring says
+*"it belongs on screen beside the arms it explains the absence of"* — it did not:
+`step_health` has two consumers, both in `main.py`'s probe, and `grep` for it
+across the ops repo returned nothing.
+
+**#815 one step earlier than any previous fix in this module**: not arms owed a
+verdict, but *signals owed a measurement*.
+
+### What shipped
+
+- `SarLiveLedger.note_signal` / `.coverage()` — a per-signal census, three states
+  (`fully` / `partly` / `unarmed`, because an arm on 5m and none on 15m is
+  neither), bounded with the eviction count kept beside the data, **persisted in
+  the ledger and restored on load** (coverage is a cumulative claim; a restart
+  resetting it would make the fraction describe only the time since the last
+  deploy while reading like the whole window).
+- The armed half is rebuilt from the arms themselves on load rather than stored
+  twice — the fix for a drifting mirror is not a second mirror.
+- The liveness probe now reports coverage beside `refused_open`.
+- Ops `/signals/sar-live` grew the panel, **deliberately unfiltered** (a selector
+  cannot change how much of the book the lane could arm — the stated exception to
+  #90 rather than a silent one), iterating the *engine's* reason keys with ops
+  copy looked up, `unclassified` for anything new.
+- `signal_id` leads `/track-record/trades.csv`. Its absence is why this audit had
+  to join on `(symbol, direction, entry)` at six significant figures — 366 rows,
+  365 distinct keys, and a coverage answer that moved between 81.6% and 90.8%
+  purely with the matching tolerance.
+- `scripts/gen_ops_sar_coverage_fixture.py` drives the real `observe_signal` and
+  the real `flush`, so the ops fixture is engine output rather than a shape ops
+  chose. The engine test asserts `coverage` is at the payload top level **and not
+  under `derived`** — the price-action card's fixture got the shape right and the
+  path wrong, and every ops test passed over it.
+
+### What the numbers become
+
+The paired comparison (SAR arm vs the actual delivered exit on the same signals,
+122 matched) reads **+0.122%/signal, median −0.131%, SAR better on 50 of 122**.
+Decomposed: SL_HIT **+0.764pp** (SAR cuts losers earlier), PROFIT_LOCKED
+**−0.406pp** (gives back on winners), BREAKEVEN_EXIT +0.346pp. Corrected for
+coverage — unarmed trades keep their current exit, because a missing series is
+exactly the condition under which SAR could not have been parked in real time —
+the whole-book effect is **≈ +0.100%/delivered signal**, ~+$76 at $500 notional
+over 9.3 days.
+
+**Still not a promotion.** Top 10 arms of 325 carry 113% of the total; remove them
+and the sign flips. The one durable-looking effect is the SL_HIT bucket across 44
+signals, which points at a much narrower question than "adopt SAR as the exit":
+*does a SAR-derived stop improve only the losing tail?*
+
+**Direction check, stated because it cuts both ways:** the unarmed slice is
+SL_HIT-heavy and SAR beats the actual exit on SL_HIT, so naively imputing it would
+make SAR look *better*. Not done — those trades are unarmed precisely because the
+mechanism was not operable on them. That is a fact about deployability, not a gap
+to fill with a guess, and nothing reweights anything.
+
+---
+
 ## 🟢 SESSION 115 2026-08-07 — the price-action lane had three of its four layers
 
 Engine #897, ops #150 / #151. The owner read the lane's page and asked two

@@ -1439,6 +1439,39 @@ python -m src.main
   them. "Check the direction of every recommendation, not only its premise",
   arriving at a fix that was one field away from being shipped backwards.
 
+- **Every exclusion this module guards is an exclusion from a population it
+  already had. Ask what never entered it.** `sar_live_shadow` is the most
+  carefully guarded lane in the repo — six sessions bought the anchor check, the
+  per-advance replay guard, the regressed-vs-rolled-off split, the stall stamps,
+  the two fills and the two denominators. Every one of them asks *did this arm
+  measure honestly*, and an audit against them found nothing (2026-08-08). Then
+  joining the ledger to `signal_performance.json` showed **18.4% of delivered
+  trades never got an arm at all, and that slice ran −1.643%/trade at 10.7% win
+  against +0.753% and 43.5% for the armed one** — 67.9% SL_HIT against 36.3%. The
+  page's `+0.588%/arm` was a winner-enriched subset presented as the mechanism's
+  result on our book.
+
+  The cause is one line, and its comment is the whole lesson: `observe_signal`'s
+  `_series is None` branch was a bare `continue` under *"Not counted in arm
+  health: no arm exists yet, so nothing is owed a verdict."* That reasoning is
+  **correct about the arm and wrong about the book**, and it protected the
+  largest exclusion in the lane from ever being counted. `record_open_refusal`
+  caught only the stale-anchor case, and its own docstring — *"it belongs on
+  screen beside the arms it explains the absence of"* — was false: `step_health`
+  had two consumers, both inside `main.py`'s probe, and grep for it across ops
+  returned nothing.
+
+  This is #815 (*key a probe on the population that would be harmed*) arriving
+  one step earlier than any previous fix here: not arms owed a verdict, but
+  **signals owed a measurement**. And it is #832's own rule (*what fraction of
+  the population resolved, and is the unresolved part random?*) applied
+  rigorously to arms that exist and never once to signals that never became
+  arms. Corollary on the fix's direction, because it cuts both ways: the unarmed
+  slice is SL_HIT-heavy and SAR beats the live exit on SL_HIT, so imputing it
+  would make SAR look **better**. Don't — a signal is unarmed because its series
+  was missing or stale, which is the same condition under which the mechanism
+  could not have been computed or parked live. That is a fact about
+  **deployability**, not a gap to fill with a guess.
 - **The one defect shape worth naming, because it happened six times in a
   day: a seam.** Two halves that each look complete — wired but called on the
   wrong clock, written but read by nothing, set but dropped by the serializer,
