@@ -1478,6 +1478,17 @@ class SarLiveLedger:
                     # surface at all — which is exactly how ``refused_open``
                     # spent its life inside a probe message nobody reads.
                     "coverage": self.coverage(),
+                    # The stop-management rules as data — labels, kinds and
+                    # thresholds — written ONCE per file rather than repeated on
+                    # every row.
+                    #
+                    # This is the half that makes "ops keeps no second catalog"
+                    # true rather than merely intended. Without it the surface
+                    # has only the rule *keys* off each row, so it must either
+                    # render `be_3` at the reader or keep its own copy of the
+                    # labels — and a hand-kept second copy is the drift this repo
+                    # has paid for under four names. One writer, one reader.
+                    "strategy_catalog": sar_exit_strategies.catalog_manifest(),
                 }
                 self._last_write = now
                 self._dirty = False
