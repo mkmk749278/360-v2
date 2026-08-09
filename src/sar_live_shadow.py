@@ -1540,6 +1540,12 @@ class SarLiveLedger:
                 payload.get("schema"), LEDGER_SCHEMA, ADDITIVE_FROM_SCHEMAS
             )
             if not ok:
+                # Count without `or []`: that is the numpy-truthiness shape the
+                # hard limit forbids, and the guard test is deliberately blunt
+                # about it rather than reasoning per call site about whether the
+                # value happens to be a list today.
+                stored_open = payload.get("open")
+                stored_resolved = payload.get("resolved")
                 log.warning(
                     "SAR live ledger schema {} not readable by {} ({}) — "
                     "starting clean; {} open and {} resolved rows are being "
@@ -1547,8 +1553,8 @@ class SarLiveLedger:
                     payload.get("schema"),
                     LEDGER_SCHEMA,
                     refusal,
-                    len(payload.get("open") or []),
-                    len(payload.get("resolved") or []),
+                    len(stored_open) if isinstance(stored_open, list) else 0,
+                    len(stored_resolved) if isinstance(stored_resolved, list) else 0,
                 )
                 return
             with self._lock:
