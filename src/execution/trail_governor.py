@@ -114,6 +114,13 @@ REFUSE_NO_LEVEL = "no_level"
 REFUSE_INDEX_COLD = "index_cold"
 REFUSE_KILL_SWITCH = "kill_switch"
 REFUSE_DISABLED = "disabled"
+#: The configured governing timeframe is not one the candle store carries.
+#: Named apart from ``no_series`` deliberately: that one means "this symbol has
+#: no window", which sends a reader to the feed. This means "the setting is not
+#: a timeframe", which is one character in ops — and on 2026-08-10 the two were
+#: indistinguishable while the governor sat permanently inert reporting a feed
+#: fault that was not happening.
+REFUSE_BAD_TF = "bad_timeframe"
 
 #: How far behind the clock the newest closed bar may sit before the governor
 #: refuses to park a level off it, in multiples of the bar width.  Two bars of
@@ -436,6 +443,13 @@ async def step_position(
     if not ladder_untouched(position):
         _refuse(REFUSE_LADDER)
         return REFUSE_LADDER
+
+    if sar_live_shadow.timeframe_seconds(timeframe) is None:
+        # Refuse before touching the store. Asking it for a bucket keyed on a
+        # string no writer ever uses returns None, which is indistinguishable
+        # from a symbol with no candles.
+        _refuse(REFUSE_BAD_TF)
+        return REFUSE_BAD_TF
 
     params = _params_for(mechanism)
     warmup = trail_mechanisms.min_bars(mechanism, params)
