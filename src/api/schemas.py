@@ -505,6 +505,10 @@ class TunableEntry(BaseModel):
     max: Optional[float] = None
     unit: str = ""
     category: str
+    #: Closed set of valid values for a ``str`` tunable, or None for free text.
+    #: Ops renders a select when present — a two-valued setting shipped as a
+    #: text box is how ``trail_governor_timeframe`` got stored as "5".
+    choices: Optional[list[str]] = None
 
 
 class TunablesState(BaseModel):

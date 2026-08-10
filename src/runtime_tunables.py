@@ -27,7 +27,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -53,6 +53,18 @@ class Tunable:
     min_value: Optional[float] = None
     max_value: Optional[float] = None
     unit: str = ""
+    #: For a ``str`` tunable whose valid values are a closed set. When present
+    #: ``set_values`` REFUSES anything outside it and ops renders a select
+    #: rather than a text box.
+    #:
+    #: Added 2026-08-10 after ``trail_governor_timeframe`` was stored as
+    #: ``"5"``. It has exactly two valid values, shipped as free text, and
+    #: ``set_values`` range-checks only float/int — so an invalid value was
+    #: accepted, and the live trail governor then refused every position with
+    #: ``no_series`` (the candle store is keyed ``"5m"``/``"15m"``, so
+    #: ``get_candles(sym, "5")`` is None forever). A typo became a permanently
+    #: inert money-path mechanism reporting a candle-feed fault.
+    choices: Optional[Tuple[str, ...]] = None
 
 
 def _build_registry() -> Dict[str, Tunable]:
@@ -217,6 +229,7 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="str",
             default=TRAIL_GOVERNOR_TIMEFRAME,
+            choices=("5m", "15m"),
             category="Stops & exits",
         ),
         Tunable(
@@ -1441,6 +1454,10 @@ class RuntimeTunables:
             value = _coerce(tun, raw)
             if value is None:
                 raise ValueError(f"{key}: cannot parse {raw!r} as {tun.type}")
+            if tun.choices and str(value) not in tun.choices:
+                raise ValueError(
+                    f"{key}: {value!r} is not one of {', '.join(tun.choices)}"
+                )
             if tun.type in ("float", "int"):
                 if tun.min_value is not None and value < tun.min_value:
                     raise ValueError(f"{key}: {value} below minimum {tun.min_value}")
@@ -1557,6 +1574,7 @@ def snapshot() -> List[Dict[str, Any]]:
                 "max": tun.max_value,
                 "unit": tun.unit,
                 "category": tun.category,
+                "choices": list(tun.choices) if tun.choices else None,
             }
         )
     return out

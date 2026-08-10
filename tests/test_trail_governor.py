@@ -514,3 +514,86 @@ def test_the_diag_is_published_from_the_engine_container():
     assert handler.index("published_trail_governor") < handler.index(
         "build_diag"
     ), "the local build must be the FALLBACK, not the first choice"
+
+
+# --------------------------------------------------------------------------- #
+# The typo that made the whole mechanism inert (owner-reported 2026-08-10)
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_bad_timeframe_is_named_not_reported_as_a_missing_feed():
+    """GUARD — this cost the owner a live test window.
+
+    `trail_governor_timeframe` has exactly two valid values, shipped as a FREE
+    TEXT box, and `set_values` range-checks only float/int — so `"5"` was
+    accepted. The candle store is keyed `"5m"`/`"15m"`, so `get_candles(sym,
+    "5")` is None forever, and the governor refused every position as
+    `no_series`: "No usable candle window for the symbol."
+
+    The mechanism was permanently inert while the ops panel sent the reader to
+    debug the candle feed. Two causes, one word apart, one bucket — exactly the
+    conflation this repo keeps paying for.
+    """
+    pos = _pos()
+    placer = FakePlacer()
+    out = await tg.step_position(
+        pos, FakeStore(_rising_series()), timeframe="5",
+        placer_factory=lambda uid: placer, now_ts=_now_for(_rising_series()),
+    )
+    assert out == tg.REFUSE_BAD_TF
+    assert tg.health()["refusals"][tg.REFUSE_BAD_TF] == 1
+    assert tg.REFUSE_NO_SERIES not in tg.health()["refusals"], (
+        "a bad timeframe must never be counted as a missing candle window"
+    )
+    assert placer.calls == []
+
+
+async def test_a_valid_timeframe_still_reaches_the_store():
+    """The guard must not refuse the values that actually work."""
+    series = _rising_series()
+    pos = _pos()
+    placer = FakePlacer()
+    out = await tg.step_position(
+        pos, FakeStore(series), timeframe="15m",
+        placer_factory=lambda uid: placer, now_ts=_now_for(series),
+    )
+    assert out == "handover"
+
+
+def test_the_governing_timeframe_declares_its_valid_values():
+    """GUARD — a two-valued setting must not be typeable.
+
+    Without `choices` the ops panel renders a text box and `set_values`
+    accepts anything, which is how "5" was stored.
+    """
+    from src import runtime_tunables as rt
+    from src import sar_live_shadow
+
+    tun = rt.registry()["trail_governor_timeframe"]
+    assert tun.choices == ("5m", "15m")
+    # ...and every declared choice must be a timeframe the store can serve,
+    # or the select would offer a value that makes the governor inert.
+    for choice in tun.choices:
+        assert sar_live_shadow.timeframe_seconds(choice) is not None, (
+            f"{choice!r} is offered in ops but the candle store cannot serve it"
+        )
+
+
+def test_choices_are_published_so_ops_can_render_a_select():
+    from src import runtime_tunables as rt
+
+    entry = next(
+        e for e in rt.snapshot() if e["key"] == "trail_governor_timeframe"
+    )
+    assert entry["choices"] == ["5m", "15m"]
+
+
+def test_a_value_outside_choices_is_refused_at_the_write():
+    """The write must reject, not store-and-ignore. `set_values` needs a live
+    client, so this drives the validation directly."""
+    from src import runtime_tunables as rt
+
+    tun = rt.registry()["trail_governor_timeframe"]
+    assert tun.choices is not None
+    assert "5" not in tun.choices
+    assert "15m" in tun.choices
