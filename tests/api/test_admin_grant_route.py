@@ -330,3 +330,21 @@ def test_auto_trade_enable_503_when_kill_switch_uninitialised(grant_setup):
         json={"firebase_uid": "fb-anyone-123", "enabled": True},
     )
     assert r.status_code == 503
+
+
+def test_lookup_says_nothing_rather_than_default_without_an_override_store(
+    grant_setup,
+):
+    """"Could not read" and "set to default" are different facts (#911).
+
+    This app is built with no overrides store, so the honest answer is null.
+    Reporting ``"default"`` would tell the owner a mechanism is off on the
+    strength of a store nobody asked — and the ops card renders the two
+    differently for exactly that reason.
+    """
+    owner_client, _, _, _ = grant_setup
+    body = owner_client.get(
+        "/api/admin/users/lookup", params={"phone": "+15551230000"}
+    ).json()
+    assert body["exit_mechanism"] is None
+    assert body["governor_enabled"] is None

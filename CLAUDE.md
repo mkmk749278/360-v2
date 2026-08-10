@@ -1616,3 +1616,42 @@ python -m src.main
   named for the same mechanism measuring different mechanisms already cost a
   session on 2026-07-31 — and the agreement was verified by driving ops' real
   simulator, which fills at the engine's level to 1e-9.
+- **An idempotence key that only advances on success is a retry storm, and the
+  docstring will say otherwise.** `trail_governor._park` leaves the previous
+  stop resting on a rejection and returns False — correct, and its comment
+  promises *"retrying next bar"*. But the bar it retries from is
+  `trail_last_bar_ms`, which is written **only after a successful park**, so the
+  `same_bar` guard never engaged after a failure and the identical level went
+  back to Binance on every monitor tick. Measured live on the owner's account
+  2026-08-10: two governed positions, `place_failed` +24 a minute, forever,
+  against an exchange that has IP-banned this box before. Nothing was unsafe —
+  the position kept its designed stop throughout — which is exactly why it could
+  run indefinitely without anyone noticing. **Ask of every "retry later": what
+  advances the clock it is measured against, and does a failure advance it?**
+  The deferral is free here for a reason worth checking before copying it: the
+  level is *fixed for the bar*, so re-asking the same question of the same bar
+  cannot get a different answer, and the protection is untouched while it waits.
+- **A counter is not a cause on a path that talks to a vendor.** `place_failed`
+  said the exchange refused and could not say what it said: -2021 (the level is
+  already through the mark), -1111 (rounding), -4015 (duplicate client id) and a
+  disconnected key are one integer and four different fixes. The reason existed
+  the whole time — in a `log.warning`, which needs `docker exec`, while the
+  owner reads the panel. Same class as *"blank needs a cause before it gets a
+  caption"*, arriving on the one path that spends money, and the ops copy beside
+  it made it worse by calling the state *"the safe failure"*: true about
+  protection, silent about a handover that will never happen. Keep the vendor's
+  own words in a bounded ring **with the unbounded count beside it**, and let
+  "no code" mean *the rejection did not come from the vendor* rather than zero.
+- **A setter that reads its value back still needs a READER, or the control can
+  only ever show its first option.** `POST /api/admin/users/exit-mechanism`
+  reads the stored value back rather than echoing the request — deliberately,
+  with a docstring saying so — and `GET /api/admin/users/lookup` never carried
+  the field at all. So the ops select was three hardcoded options with nothing
+  selected: an account already handed to SAR rendered *"default (SL/TP FSM —
+  unchanged)"* on every reload, and the owner's only evidence that his write had
+  landed was a flash message that had already scrolled past (owner-caught
+  2026-08-10). #817 with the arrow reversed, at the one control that decides how
+  a real position closes. **A write surface is unfinished until the same page
+  can show what is stored** — and the display needs three states, not two,
+  because an engine that predates the field must read *not reported* rather than
+  inherit the meaning of `default`.

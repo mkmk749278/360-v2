@@ -150,6 +150,32 @@ def register(
             raise HTTPException(
                 status_code=404, detail=f"no user with phone {phone}"
             )
+        # The exit mechanism is READ BACK here from the store the setter
+        # writes, never mirrored or assumed. Without it the ops select can
+        # only ever render its first option, which is how an account already
+        # handed to SAR read as "default" on every reload (2026-08-10).
+        exit_mechanism: Optional[str] = None
+        governor_enabled: Optional[bool] = None
+        if user_overrides is not None:
+            try:
+                stored = await user_overrides.aget_auto_trade(int(user.user_id))
+                exit_mechanism = str(stored.get("exit_mechanism") or "default")
+            except Exception as exc:  # noqa: BLE001
+                # Left as None — "could not read" and "set to default" are
+                # different facts and the panel renders them differently.
+                log.warning(
+                    "admin_user_lookup: exit_mechanism read failed user_id={} "
+                    "exc={}", user.user_id, exc,
+                )
+        if exit_mechanism is not None:
+            try:
+                from src import runtime_tunables as _rt
+
+                governor_enabled = bool(_rt.get("trail_governor_enabled"))
+            except Exception:  # pragma: no cover — tunables optional
+                from config import TRAIL_GOVERNOR_ENABLED as _cfg
+
+                governor_enabled = bool(_cfg)
         return AdminUserLookupResponse(
             user_id=user.user_id,
             phone=user.phone_e164,
@@ -157,6 +183,8 @@ def register(
             paid_until=user.paid_until.isoformat() if user.paid_until else None,
             display_name=user.display_name,
             onboarded=user.onboarded_at is not None,
+            exit_mechanism=exit_mechanism,
+            governor_enabled=governor_enabled,
         )
 
     @app.post(

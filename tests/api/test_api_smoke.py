@@ -2907,3 +2907,75 @@ def test_admin_exit_mechanism_requires_exactly_one_identifier(
     ):
         r = owner_client.post("/api/admin/users/exit-mechanism", json=payload)
         assert r.status_code in (422, 503), (payload, r.status_code)
+
+
+# ---------------------------------------------------------------------------
+# ...and the SETTER needs a READER, or ops can only ever show its first option.
+#
+# Found 2026-08-10 (#911) from the owner's screenshot: he had handed his own
+# account to SAR, the flash confirmed it, and the ops select still rendered
+# "default (SL/TP FSM — unchanged)" on every reload. The write was fine; the
+# lookup carried no such field, so the page had nothing to pre-select from and
+# no way to display the state it had just changed. #817 with the arrow
+# reversed, at the one control that decides how a real position closes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def lookup_client(engine: _StubEngine, tmp_path):
+    """Owner client over a real UserStore AND a real UserOverridesStore.
+
+    Both halves are real on purpose: this pins a cross-repo contract, and a
+    stub whose keys I chose would assert my own assumption back at me.
+    """
+    from src.api.auth import mint_token, OWNER_TIER
+    from src.api.user_overrides import UserOverridesStore
+    from src.api.users import UserStore
+
+    users = UserStore(str(tmp_path / "lumin.sqlite"))
+    user = users.get_or_create_by_phone("+15551239999")
+    overrides = UserOverridesStore(tmp_path / "overrides.sqlite")
+    overrides._conn.execute("PRAGMA foreign_keys=OFF")
+    app = build_app(
+        engine,
+        jwt_secret=_TEST_SECRET,
+        allow_static=False,
+        user_store=users,
+        user_overrides=overrides,
+    )
+    token = mint_token(secret=_TEST_SECRET, tier=OWNER_TIER)
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"}), user
+
+
+def test_lookup_reads_back_the_exit_mechanism_the_setter_wrote(lookup_client):
+    """GUARD — the ops control reads its current state from this field.
+
+    Driven end to end through both real endpoints rather than the store, so a
+    field renamed on either side fails here instead of quietly emptying a page.
+    """
+    client, user = lookup_client
+    set_r = client.post(
+        "/api/admin/users/exit-mechanism",
+        json={"phone": user.phone_e164, "exit_mechanism": "sar"},
+    )
+    assert set_r.status_code == 200, set_r.text
+
+    r = client.get("/api/admin/users/lookup", params={"phone": user.phone_e164})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["exit_mechanism"] == "sar", (
+        "the lookup does not report what the setter stored — the ops select "
+        "would render its first option over an account handed to SAR"
+    )
+    # The per-user value alone changes nothing, so the master switch travels
+    # beside it: SAR-with-governor-off and SAR-live are different states and a
+    # page showing only the first would call an inert setting live.
+    assert "governor_enabled" in body
+
+
+def test_lookup_reports_default_for_an_account_that_never_opted_in(lookup_client):
+    client, user = lookup_client
+    body = client.get(
+        "/api/admin/users/lookup", params={"phone": user.phone_e164}
+    ).json()
+    assert body["exit_mechanism"] == "default"

@@ -1429,6 +1429,23 @@ class AdminUserLookupResponse(BaseModel):
     paid_until: Optional[str] = None
     display_name: Optional[str] = None
     onboarded: bool
+    #: The account's live exit mechanism, read from the same store
+    #: ``POST /api/admin/users/exit-mechanism`` writes.  Added 2026-08-10 (#911)
+    #: because the setter had no companion reader: the ops select was a static
+    #: three-option list, so an account handed to SAR still rendered
+    #: "default (SL/TP FSM — unchanged)" on every reload and the owner had no
+    #: way to see the state he had just written.  A write surface with no
+    #: read-back is #817 with the arrow reversed, and this file already carries
+    #: the rule the setter was built on — *read the value back from the store
+    #: rather than echoing the request*.
+    #:
+    #: ``None`` means the engine could not answer (no per-user override store),
+    #: which is not the same fact as ``"default"`` and must not render as one.
+    exit_mechanism: Optional[str] = None
+    #: The engine-wide master switch, beside it for the same reason the setter
+    #: returns it: the per-user value alone changes nothing, and a reader who
+    #: sees SAR without seeing this cannot tell running from armed-and-inert.
+    governor_enabled: Optional[bool] = None
 
 
 class AdminAutoTradeEnableRequest(BaseModel):

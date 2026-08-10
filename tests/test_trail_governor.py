@@ -597,3 +597,166 @@ def test_a_value_outside_choices_is_refused_at_the_write():
     assert tun.choices is not None
     assert "5" not in tun.choices
     assert "15m" in tun.choices
+
+
+# --------------------------------------------------------------------------- #
+# A rejection has to say what the exchange said (#911)
+# --------------------------------------------------------------------------- #
+
+
+class RejectingPlacer(FakePlacer):
+    """Fails the way Binance does — a typed error carrying the response body.
+
+    Built from the real exception rather than a hand-written stand-in: a fake
+    whose shape I chose cannot verify a field I read wrongly.
+    """
+
+    def __init__(self, code: int = -2021, msg: str = "Order would immediately trigger.") -> None:
+        super().__init__(fail_place=True)
+        self._code, self._msg = code, msg
+
+    async def place_stop_loss(self, **kw: Any) -> Any:
+        from src.execution.order_placer import OrderRejectedByBinance
+        from src.security.signing_service import protocol as sig_protocol
+
+        self.calls.append("place_FAIL")
+        resp = sig_protocol.SignResponse(
+            id="x", ok=False, binance_status=400,
+            binance_body={"code": self._code, "msg": self._msg},
+            error_code=sig_protocol.ERR_BINANCE_HTTP_ERROR,
+            error_message=f"Binance returned {self._code}: {self._msg}",
+        )
+        raise OrderRejectedByBinance(
+            f"order placement failed (phase=place): code={sig_protocol.ERR_BINANCE_HTTP_ERROR} "
+            f"status=400 message=Binance returned {self._code}: {self._msg}",
+            signing_response=resp,
+        )
+
+
+async def test_a_rejection_publishes_the_exchange_s_own_reason():
+    """A bare counter cannot be acted on.
+
+    -2021 (level already through the mark), -1111 (rounding) and a dead key all
+    increment the same integer and need three different fixes, and the log line
+    that distinguishes them needs `docker exec` — which the panel's reader does
+    not have.
+    """
+    series = _rising_series()
+    pos = _pos()
+    placer = RejectingPlacer()
+    out = await tg.step_position(
+        pos, FakeStore(series), timeframe="15m",
+        placer_factory=lambda uid: placer, now_ts=_now_for(series),
+    )
+    assert out == "place_failed"
+    failures = tg.health()["place_failures"]
+    assert len(failures) == 1
+    row = failures[0]
+    assert row["binance_code"] == -2021
+    assert row["symbol"] == "BTCUSDT" and row["side"] == "LONG"
+    assert row["kind"] == "OrderRejectedByBinance"
+    assert "immediately trigger" in row["error"]
+    assert row["level"] > 0
+
+
+async def test_a_non_binance_failure_has_no_code_rather_than_a_zero():
+    """"The exchange refused" and "we never reached the exchange" are different
+    findings; a 0 there would read as a Binance code nobody can look up."""
+    series = _rising_series()
+    pos = _pos()
+    placer = FakePlacer(fail_place=True)  # plain OrderPlacementError, no body
+    await tg.step_position(
+        pos, FakeStore(series), timeframe="15m",
+        placer_factory=lambda uid: placer, now_ts=_now_for(series),
+    )
+    row = tg.health()["place_failures"][0]
+    assert row["binance_code"] is None
+
+
+async def test_the_failure_ring_is_bounded_but_the_count_is_not():
+    """The ring rides in a snapshot written every ~15s, so it is capped — and a
+    capped buffer feeding a display must publish the total beside it."""
+    series = _rising_series()
+    placer = FakePlacer(fail_place=True)
+    for i in range(tg.PLACE_FAILURE_RING + 4):
+        pos = _pos(signal_id=f"SIG{i}")
+        await tg.step_position(
+            pos, FakeStore(series), timeframe="15m",
+            placer_factory=lambda uid: placer, now_ts=_now_for(series),
+        )
+    health = tg.health()
+    assert len(health["place_failures"]) == tg.PLACE_FAILURE_RING
+    assert health["place_failed"] == tg.PLACE_FAILURE_RING + 4
+
+
+# --------------------------------------------------------------------------- #
+# ...and it must not re-ask the exchange about a bar it already refused
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_refused_bar_is_not_re_submitted_on_the_next_sweep():
+    """GUARD — `trail_last_bar_ms` only advances on SUCCESS, so before this the
+    `same_bar` idempotence guard never engaged after a rejection and the
+    governor re-submitted the identical level every sweep. The sweep rides the
+    monitor clock, so "retrying next bar" in the docstring was ~12 attempts a
+    minute per position, forever, against an exchange that has IP-banned this
+    box before. Measured live 2026-08-10: 2 positions, +24 rejections/minute.
+    """
+    series = _rising_series()
+    pos = _pos()
+    placer = RejectingPlacer()
+    common = dict(
+        placer_factory=lambda uid: placer, now_ts=_now_for(series),
+    )
+    first = await tg.step_position(pos, FakeStore(series), timeframe="15m", **common)
+    second = await tg.step_position(pos, FakeStore(series), timeframe="15m", **common)
+    third = await tg.step_position(pos, FakeStore(series), timeframe="15m", **common)
+
+    assert first == "place_failed"
+    assert second == third == "retry_deferred"
+    assert placer.calls == ["place_FAIL"], "re-submitted a level already refused"
+    health = tg.health()
+    assert health["place_failed"] == 1
+    assert health["retry_deferred"] == 2
+    # Deferring costs no protection: the original stop never moved.
+    assert pos.sl_order_id == 501 and pos.trail_governing is False
+
+
+async def test_a_new_bar_retries_immediately_after_a_rejection():
+    """The deferral is per BAR, not a backoff — a new bar is a new level and a
+    new question, and a rejection that never retried would be a mechanism that
+    stops at its first bad bar."""
+    series = _rising_series()
+    pos = _pos()
+    placer = RejectingPlacer()
+    await tg.step_position(
+        pos, FakeStore(series), timeframe="15m",
+        placer_factory=lambda uid: placer, now_ts=_now_for(series),
+    )
+    assert placer.calls == ["place_FAIL"]
+
+    # One more closed bar arrives.
+    grown = _rising_series(n=61)
+    ok_placer = FakePlacer()
+    out = await tg.step_position(
+        pos, FakeStore(grown), timeframe="15m",
+        placer_factory=lambda uid: ok_placer, now_ts=_now_for(grown),
+    )
+    assert out == "handover"
+    assert tg.health()["retry_deferred"] == 0
+
+
+async def test_forget_clears_the_refused_bar_with_the_rest_of_the_state():
+    series = _rising_series()
+    pos = _pos()
+    placer = RejectingPlacer()
+    await tg.step_position(
+        pos, FakeStore(series), timeframe="15m",
+        placer_factory=lambda uid: placer, now_ts=_now_for(series),
+    )
+    tg.forget(pos.firebase_uid, pos.signal_id)
+    out = await tg.step_position(
+        pos, FakeStore(series), timeframe="15m",
+        placer_factory=lambda uid: placer, now_ts=_now_for(series),
+    )
+    assert out == "place_failed", "a forgotten position kept a stale refusal"
