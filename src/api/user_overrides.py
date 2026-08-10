@@ -124,7 +124,20 @@ _AUTO_TRADE_KEYS = frozenset({
     "paper_path_preference",
     "paper_regime_preference",
     "notional_usd",
+    "exit_mechanism",
 })
+
+#: Per-user exit mechanism (2026-08-10).  ``default`` is the SL/TP FSM every
+#: user has always run.  The other two hand the exit to the live trail
+#: governor once the mechanism comes onside — the same mechanisms
+#: ``trail_mechanisms`` measures, now placing real orders.
+#:
+#: Deliberately per-user rather than a global flag: the owner asked to test
+#: this on his own capital only ("only for me not for us not for users"), and
+#: B17's pre-TP / invalidation settings already establish that exit behaviour
+#: is a per-user column.  A global switch could not express "one account".
+EXIT_MECHANISM_DEFAULT = "default"
+EXIT_MECHANISMS = frozenset({EXIT_MECHANISM_DEFAULT, "sar", "chandelier"})
 
 # The three live eligibility columns and their PAPER counterparts.  Live
 # is consumed by ``dispatch_signal_to_active_users`` (real orders); paper
@@ -213,6 +226,7 @@ CREATE TABLE IF NOT EXISTS user_auto_trade_settings (
     paper_path_preference    TEXT,     -- PAPER counterpart of path_preference
     paper_regime_preference  TEXT,     -- PAPER counterpart of regime_preference
     notional_usd             REAL,     -- per-user notional cap; NULL = engine default ($500)
+    exit_mechanism           TEXT,     -- NULL/"default" = SL/TP FSM; "sar"/"chandelier" = live trail governor
     updated_at               TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
@@ -524,6 +538,16 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
                 token = value.strip().lower()
                 if token in ("off", "paper", "live", "both"):
                     out[key] = token
+        elif key == "exit_mechanism":
+            # Reject an unknown mechanism outright rather than storing it and
+            # letting the governor fall back at dispatch time.  A silent
+            # fallback here would read as "SAR is on" in the API response
+            # while the FSM ran the default exit — the money path must not
+            # disagree with the surface that claims to control it.
+            if isinstance(value, str):
+                token = value.strip().lower()
+                if token in EXIT_MECHANISMS:
+                    out[key] = token
         elif key == "position_size_pct":
             if isinstance(value, (int, float)) and 0 < float(value) <= 100:
                 out[key] = float(value)
@@ -627,6 +651,7 @@ class UserOverridesStore:
         self._migrate_auto_trade_symbol_preference()
         self._migrate_auto_trade_path_regime_preference()
         self._migrate_auto_trade_notional_usd()
+        self._migrate_auto_trade_exit_mechanism()
         self._migrate_auto_trade_pause_columns()
         self._migrate_referral_converted_at()
         log.info("UserOverridesStore opened at {}", self._path)
@@ -698,6 +723,28 @@ class UserOverridesStore:
             log.info(
                 "UserOverridesStore: added user_auto_trade_settings."
                 "notional_usd column (2026-05-20 per-user notional override)"
+            )
+
+    def _migrate_auto_trade_exit_mechanism(self) -> None:
+        """Idempotent ALTER for the ``exit_mechanism`` column.
+
+        Added 2026-08-10 — per-user live trail governor.  NULL on existing
+        rows means "default", i.e. the SL/TP FSM every account has always
+        run, so an un-migrated row fails toward the *unchanged* exit rather
+        than toward a mechanism nobody opted into.  That direction matters:
+        this column decides whether a real stop order is cancelled and
+        re-placed every bar on somebody's live capital.
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_auto_trade_settings)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "exit_mechanism" not in cols:
+            self._conn.execute(
+                "ALTER TABLE user_auto_trade_settings ADD COLUMN "
+                "exit_mechanism TEXT"
+            )
+            log.info(
+                "UserOverridesStore: added user_auto_trade_settings."
+                "exit_mechanism column (2026-08-10 per-user trail governor)"
             )
 
     def _migrate_auto_trade_symbol_preference(self) -> None:
@@ -1010,8 +1057,8 @@ class UserOverridesStore:
                     path_preference, regime_preference,
                     paper_symbol_preference, paper_path_preference,
                     paper_regime_preference,
-                    notional_usd, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    notional_usd, exit_mechanism, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     mode = excluded.mode,
                     position_size_pct = excluded.position_size_pct,
@@ -1024,6 +1071,7 @@ class UserOverridesStore:
                     paper_path_preference = excluded.paper_path_preference,
                     paper_regime_preference = excluded.paper_regime_preference,
                     notional_usd = excluded.notional_usd,
+                    exit_mechanism = excluded.exit_mechanism,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -1039,6 +1087,7 @@ class UserOverridesStore:
                     _json_list("paper_path_preference"),
                     _json_list("paper_regime_preference"),
                     merged.get("notional_usd"),
+                    merged.get("exit_mechanism"),
                     now,
                 ),
             )
@@ -2389,6 +2438,41 @@ def resolve_invalidation_mode_uid(firebase_uid: str, default: str) -> str:
         return default
 
 
+def resolve_exit_mechanism_uid(firebase_uid: str) -> str:
+    """Per-user live exit mechanism, or ``"default"`` (the SL/TP FSM).
+
+    Same soft-fail shape as :func:`resolve_invalidation_mode_uid`, and the
+    direction of the failure matters more here than anywhere else in this
+    module: every error path returns ``default``, so a store blip, a missing
+    user row or an unrecognised stored token all leave the position on the
+    exit it has always had.  The governor can only ever be reached by an
+    explicit, valid, stored opt-in.
+    """
+    if _SINGLETON is None:
+        return EXIT_MECHANISM_DEFAULT
+    try:
+        from src.api import users as _users
+
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return EXIT_MECHANISM_DEFAULT
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return EXIT_MECHANISM_DEFAULT
+        row = _SINGLETON.get_auto_trade(int(user.user_id))
+        mech = row.get("exit_mechanism")
+        if isinstance(mech, str) and mech.lower() in EXIT_MECHANISMS:
+            return mech.lower()
+        return EXIT_MECHANISM_DEFAULT
+    except Exception as exc:
+        log.debug(
+            "resolve_exit_mechanism_uid: lookup failed uid={} ({}); "
+            "defaulting to {}",
+            firebase_uid, type(exc).__name__, EXIT_MECHANISM_DEFAULT,
+        )
+        return EXIT_MECHANISM_DEFAULT
+
+
 def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
     """Return the per-user auto-trade ``mode`` for ``firebase_uid``, or
     None when the user has no row / store is offline / lookup fails.
@@ -2674,6 +2758,7 @@ _AUTO_TRADE_COL_TYPES: Dict[str, str] = {
     "paper_path_preference": "json_list",
     "paper_regime_preference": "json_list",
     "notional_usd": "float",
+    "exit_mechanism": "str",
     "paused_reason": "str",
     "paused_at": "str",
 }

@@ -2700,3 +2700,77 @@ def test_referral_admin_commissions_owner_gated(engine, tmp_path) -> None:
         json={"commission_ids": []},
     )
     assert r.status_code == 200 and r.json() == {"ok": True, "updated": 0}
+
+
+# ---------------------------------------------------------------------------
+# /internal/diag/trail-governor — the cross-repo contract for the ops page
+#
+# This is the PRODUCING side's pin. Ops renders these keys, and a field one
+# repo writes and no repo reads (or reads at a path the writer never used) is
+# the defect class that cost a session on `zone_distance_atr` and again on the
+# price-action lane card. So the assertions below drive the REAL handler and
+# name the keys ops depends on, rather than asserting a shape somebody chose.
+# ---------------------------------------------------------------------------
+
+
+def test_trail_governor_diag_requires_owner_tier(
+    client: TestClient, owner_client: TestClient
+) -> None:
+    assert client.get("/internal/diag/trail-governor").status_code == 403
+    assert owner_client.get("/internal/diag/trail-governor").status_code == 200
+
+
+def test_trail_governor_diag_carries_the_keys_ops_renders(
+    owner_client: TestClient,
+) -> None:
+    """The contract, at the top level — NOT nested.
+
+    The ops fixture in `tests/test_trail_governor_page.py` reads these off the
+    payload root. A fixture chooses a location and then agrees with you about
+    it, so the location is asserted here, against the real endpoint.
+    """
+    body = owner_client.get("/internal/diag/trail-governor").json()
+    for key in ("schema", "enabled", "timeframe", "health", "rows"):
+        assert key in body, f"ops reads {key!r} and the engine did not send it"
+    assert isinstance(body["health"], dict)
+    assert isinstance(body["rows"], list)
+    # The refusal mix is what lets the page distinguish four empty tables.
+    assert "refusals" in body["health"]
+
+
+def test_trail_governor_diag_defaults_to_off_and_governs_nothing(
+    owner_client: TestClient,
+) -> None:
+    """Default-OFF is the whole safety story for this flag; pin it end to end
+    rather than only at the config constant."""
+    body = owner_client.get("/internal/diag/trail-governor").json()
+    assert body["enabled"] is False
+    assert body["rows"] == []
+
+
+def test_trail_governor_diag_reports_a_cold_index_rather_than_an_empty_book(
+    owner_client: TestClient, monkeypatch
+) -> None:
+    """`index_cold` is a distinct state ops renders separately. If it were
+    dropped, a governor that cannot see the book would read as a quiet one."""
+    from src.execution import position_state as _ps
+
+    monkeypatch.setattr(_ps, "index_open_positions", lambda: None)
+    body = owner_client.get("/internal/diag/trail-governor").json()
+    assert body["index_cold"] is True
+    assert body["open_total"] is None
+
+
+def test_trail_governor_diag_carries_its_cause_on_failure(
+    owner_client: TestClient, monkeypatch
+) -> None:
+    """"Cannot report" and "nothing governed" must not render identically."""
+    from src.execution import position_state as _ps
+
+    def _boom():
+        raise RuntimeError("index exploded")
+
+    monkeypatch.setattr(_ps, "index_open_positions", _boom)
+    body = owner_client.get("/internal/diag/trail-governor").json()
+    assert "error" in body
+    assert "index exploded" in body["error"]

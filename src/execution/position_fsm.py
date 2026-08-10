@@ -255,6 +255,8 @@ class PositionFSM:
             self._apply_sl_fill(position, event)
         elif phase == "sl_be":
             self._apply_sl_be_fill(position, event)
+        elif phase == "trail":
+            self._apply_trail_fill(position, event)
         elif phase == "close":
             self._apply_close_fill(position, event)
         elif phase == "funding_close":
@@ -1049,6 +1051,47 @@ class PositionFSM:
             position.close_reason = "SL"
         self._untrack_symbol(position.symbol)
 
+    def _apply_trail_fill(
+        self,
+        position: _position_state.Position,
+        event: _events.OrderTradeUpdate,
+    ) -> None:
+        """Live trail-governor stop fill — terminal.
+
+        The governor parks a ``closePosition=true`` stop at the mechanism's
+        level and re-places it every closed bar, so the fill closes the whole
+        remaining position exactly as an SL fill does.
+
+        Its own ``close_reason`` rather than "SL", and the distinction is not
+        cosmetic: at handover the governor cancelled the evaluator's stop, so a
+        trade closing here did **not** hit the level the trade was sized
+        against.  Booking it as "SL" would put it in the same bucket as a
+        designed-risk stop-out and make the live test unreadable in exactly the
+        artifact it exists to produce.  ``trail_mechanisms`` already draws this
+        line one layer down — a SAR flip and a chandelier touch are different
+        events with different names — and pooling them here would undo it.
+
+        A late fill from a *superseded* stop lands here too: the replace path
+        cancels the old order after the new one is live, and a cancel that lost
+        a race to a trigger is a real exit at a real price.  Nothing special is
+        needed — the first fill takes the position terminal and the FSM's own
+        late-event guard skips whatever follows.
+        """
+        position.closed_qty = position.total_qty  # closePosition
+        position.realized_pnl_total += event.realized_pnl
+        position.state = _position_state.PositionState.CLOSED
+        position.closed_at = datetime.now(timezone.utc)
+        if position.close_reason == "":
+            position.close_reason = "TRAIL_STOP"
+        # Drop the per-position mechanism state; the position is over.
+        try:
+            from src.execution import trail_governor as _tg
+
+            _tg.forget(position.firebase_uid, position.signal_id)
+        except Exception:  # pragma: no cover — never block a terminal close
+            pass
+        self._untrack_symbol(position.symbol)
+
     def _apply_sl_be_fill(
         self,
         position: _position_state.Position,
@@ -1122,6 +1165,12 @@ async def place_signal(
     entry_regime_15m: str = "",    # 15m stateless regime at entry
     atr_percentile_at_entry: float = 50.0,
     atr_value_at_entry: float = 0.0,
+    # Per-user live trail governor (2026-08-10).  Stamped HERE, at placement,
+    # rather than read per bar: the hot-loop rule forbids a SQLite read on the
+    # governor's clock, and stamping also means a mid-flight settings change
+    # cannot adopt a position that is already running under the FSM exit.
+    # "" / "default" = the SL/TP FSM, which is every user but the opted-in one.
+    exit_mechanism: str = "",
     order_placer_factory: Optional[
         Callable[[str], _order_placer.OrderPlacer]
     ] = None,
@@ -1247,6 +1296,7 @@ async def place_signal(
             atr_percentile_at_entry=atr_percentile_at_entry,
             atr_value_at_entry=atr_value_at_entry,
             protection_mode=protection_mode,
+            exit_mechanism=exit_mechanism,
             entry_expires_at=_expires_at,
         )
         _position_state.put_position(position)
@@ -1352,6 +1402,7 @@ async def place_signal(
         atr_percentile_at_entry=atr_percentile_at_entry,
         atr_value_at_entry=atr_value_at_entry,
         protection_mode=protection_mode,
+        exit_mechanism=exit_mechanism,
     )
     _position_state.put_position(position)
 

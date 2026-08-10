@@ -608,6 +608,27 @@ GEOMETRY_AB_STAMP_COOLDOWN_SEC: float = _safe_float("GEOMETRY_AB_STAMP_COOLDOWN_
 # after reading what it will cost and what it will produce.  Even switched on it
 # is observe-only: no live exit, FSM transition, or dispatch consults it.
 SAR_EXIT_SHADOW_ENABLED: bool = _safe_bool("SAR_EXIT_SHADOW_ENABLED", "false")
+
+# --- Live trailing-exit governor (2026-08-10) ------------------------------
+#
+# The one flag in this file that can move a real stop order.  Everything named
+# SAR_/ATR_ above it measures; this places.
+#
+# DEFAULT-OFF, and it stays off even for the owner until he flips it from ops.
+# Note this is NOT the dark-first "measurement ON / effect OFF" pair — there is
+# no measurement half here, because the measurement already shipped and is what
+# produced the decision to test this.  This flag is purely the effect, so
+# default-OFF is the whole safety story, alongside the per-user
+# ``exit_mechanism`` column that decides *whose* capital it may touch.  Both
+# must be set: a global ON with nobody opted in governs nothing.
+TRAIL_GOVERNOR_ENABLED: bool = _safe_bool("TRAIL_GOVERNOR_ENABLED", "false")
+# Which arm governs the live stop.  The measurement lane runs 5m and 15m as
+# independent arms on the same signal; only one can own a real order, so the
+# owner picks (2026-08-10: "both we enable it from ops either one").  The other
+# timeframe keeps recording in the shadow lane, so the comparison survives.
+TRAIL_GOVERNOR_TIMEFRAME: str = _safe_choice(
+    "TRAIL_GOVERNOR_TIMEFRAME", "15m", frozenset({"5m", "15m"})
+)
 # Wilder's acceleration factor: start/increment, and its cap.  These are the
 # bake-off's defaults — changing them makes the shadow measure a different
 # indicator than the one the 6-month result describes.

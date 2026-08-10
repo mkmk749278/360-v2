@@ -59,6 +59,7 @@ from src.channels.base import Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
 from src.execution import be_policy as _be_policy
 from src.execution import runner_policy as _runner_policy
+from src.execution import trail_governor
 from src import atr_trail_live, sar_live_shadow, trail_mechanisms
 from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
@@ -940,6 +941,19 @@ class TradeMonitor:
             sar_live_shadow.lane_of(trail_mechanisms.MECH_CHANDELIER, dark=False)
         )
         atr_trail_live.get_ledger().flush()
+        # ...and the one arm that is not an arm.  Everything above records
+        # where a stop WOULD have been parked; this places it, for the users
+        # who opted in (2026-08-10, owner-only).  Same clock as the shadow
+        # lanes on purpose: the live governor and the measurement it is
+        # validated against must not disagree about which bar is current.
+        # Fail-open inside — a governed position that cannot be stepped keeps
+        # the stop it already has, which is protected, not naked.
+        try:
+            await trail_governor.sweep(self._store)
+        except Exception as exc:
+            from src import fail_open
+
+            fail_open.record("trade_monitor.trail_governor_sweep", exc)
 
     # Written next to the other data-volume status files (scanner heartbeat,
     # circuit_breaker_status.json) so the watchdog + liveness probe can read
