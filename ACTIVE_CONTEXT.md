@@ -4,6 +4,85 @@
 
 ---
 
+## 🟢 SESSION 120 2026-08-10 — the handover was impossible by construction (-4130)
+
+Engine + ops `claude/trail-governor-sar-arming-029tfu` (second pass, after #913 /
+ops #164 made the rejection readable). Owner: *"proceed, open PR and merge and
+recheck again in ops continue work till it works"*.
+
+### What the panel said the moment it could
+
+```
+SQDUSDT LONG  0.04381  -4130  "An open stop or take profit order with GTE and
+SQDUSDT LONG  0.04367  -4130   closePosition in the direction is existing."
+SQDUSDT LONG  0.04350  -4130
+```
+
+`cycles 526 · handovers 0 · place_failed 3 · retry_deferred 76 · not_onside 122`
+
+Three rejections at three different levels — one per bar with a fresh SAR level,
+which is #913's retry gate working (76 deferrals against 3 real attempts).
+
+### The design assumption was true about fills and false about acceptance
+
+`trail_governor` places the new stop **before** cancelling the one it replaces,
+so the position is never naked, and its docstring argued the case: two
+`closePosition` orders carry no quantity, so the nearer level triggers, the
+position goes to zero, and the second finds nothing to close.
+
+Every word of that is right about what happens **when they fill**. Binance never
+lets the second one **rest**. And by the naked-position invariant a governed
+position always has a stop resting, so the first step of every handover collided
+with the protection the handover exists to replace: **the mechanism could not
+have handed over, for any position, ever.**
+
+Reading code produces a hypothesis about behaviour, never a measurement of it —
+this file's own rule, and the seam was never exercised against the exchange.
+
+### The fix: same ordering, different order shape
+
+`place_stop_loss` takes an optional `quantity`; with it the order is
+`reduceOnly` + size instead of `closePosition`. The governor sends the
+position's own remaining size on every park.
+
+**The evidence this coexists is the running system, not the documentation**: the
+entire TP ladder is `reduceOnly` with a size and rests alongside the
+`closePosition` SL on every live position right now. It is equally safe on a
+double trigger — `reduceOnly` cannot open or flip a position, and Binance
+auto-cancels reduce-only orders once the position closes.
+
+`remaining_qty` is re-derived per park rather than cached: too large is capped by
+the exchange (harmless), too small silently leaves a residual naked. A size that
+rounds to zero is a **refusal** (`no_quantity`), never an order for nothing.
+
+Note honestly: `ladder_untouched` refuses any position with `closed_qty > 0`, so
+today remaining always equals entry size and the sizing is defence in depth. It
+is still the right number, because the failure it prevents is silent.
+
+### Shipped
+
+**Engine** — `order_placer.place_stop_loss(quantity=…)`; `trail_governor`
+`remaining_qty` + `REFUSE_NO_QUANTITY`; module docstring rewritten (the old one
+argued for the shape that could not be placed).
+**Ops** — `no_quantity` refusal copy; the `orphan_cancel` paragraph no longer
+describes both resting stops as `closePosition`, because one of them is not.
+
+Guards verified by reverting: the quantity tests fail against the old call.
+
+### Open
+
+- **Watch for the first handover.** Nothing here proves the exchange accepts it;
+  it proves we send the shape the TP ladder already uses. `handovers` going 0 → 1
+  on the panel is the only evidence that counts.
+- Panel sweep the same session: all 29 guest pages 200. Eight probes violating on
+  `/truth` — the actionable ones are `sar_resolution_progress` (0 verdicts, 483
+  records owed one — this is why `/signals/sar` reads UNAVAILABLE) and
+  `entry_quality_effective` (over its blast-radius cap, suppression held back).
+  **`/alerts` reads `PULL ONLY`** — no `FIREBASE_SERVICE_ACCOUNT`, so nothing
+  pages the owner at all while a live money-path canary runs.
+
+---
+
 ## 🟢 SESSION 119 2026-08-10 — the governor could not hand over, and could not say why
 
 Engine + ops `claude/trail-governor-sar-arming-029tfu`. Owner: *"look at trail

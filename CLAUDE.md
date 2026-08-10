@@ -1655,3 +1655,23 @@ python -m src.main
   can show what is stored** — and the display needs three states, not two,
   because an engine that predates the field must read *not reported* rather than
   inherit the meaning of `default`.
+- **A safety argument about FILLS is not an argument about ACCEPTANCE, and the
+  exchange only ever tested the second one.** `trail_governor` places the new
+  stop before cancelling the old one so the position is never naked, and its
+  docstring justified that with `closePosition` semantics: such an order carries
+  no quantity, so two resting at once cannot double-fill — the nearer level
+  triggers, the position goes to zero, the other finds nothing to close. True,
+  checkable, and beside the point. Binance answers a second `closePosition` stop
+  in the same direction with **-4130** *"An open stop or take profit order with
+  GTE and closePosition in the direction is existing"*, so the second one never
+  rests at all — and by the naked-position invariant a governed position always
+  has a stop resting. **The handover was impossible for every position from the
+  day it shipped**, and the code was internally consistent the whole time.
+  Same class as the depth-stream path (2026-08-05): *exercise a vendor seam once
+  before shipping it*, and note both were found only because the ops surface
+  shipped alongside. The repair keeps the ordering and changes the order
+  **shape** — `reduceOnly` with the position's size — and the evidence that this
+  coexists with a `closePosition` SL is **the running system**, not the docs: the
+  whole TP ladder is already that shape and rests beside the SL on every live
+  position. When choosing between two vendor behaviours, look for the one your
+  own production book is already demonstrating.
