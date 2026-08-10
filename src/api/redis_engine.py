@@ -136,6 +136,7 @@ class RedisEngineFacade:
         self._alerts: Optional[list] = None
         self._data_intake: Optional[dict] = None
         self._router_delivery: Optional[dict] = None
+        self._trail_governor: Optional[dict] = None
         self._refreshed_at: float = 0.0
 
     # ------------------------------------------------------------------
@@ -166,6 +167,8 @@ class RedisEngineFacade:
             self._data_intake = _store.decode(intake_raw)
             rd_raw = await self._redis.client.get(_store.KEY_ROUTER_DELIVERY)
             self._router_delivery = _store.decode(rd_raw)
+            tg_raw = await self._redis.client.get(_store.KEY_TRAIL_GOVERNOR)
+            self._trail_governor = _store.decode(tg_raw)
         except Exception:
             log.exception("redis_engine: failed to refresh state from Redis")
 
@@ -187,6 +190,18 @@ class RedisEngineFacade:
         isolated mode and falls back to a live build otherwise.
         """
         return self._positions_diag
+
+    def published_trail_governor(self) -> Optional[dict]:
+        """The engine-computed trail-governor X-ray, or None when absent.
+
+        Present only on the facade. The governor's counters and the open
+        position index live in the engine container's memory, so unlike the
+        other published blocks there is no meaningful local fallback here —
+        a live build in this process would report ``index_cold`` forever.
+        ``None`` means the engine has not written one, which is a different
+        state from "the governor is governing nothing".
+        """
+        return self._trail_governor
 
     def published_data_intake(self) -> Optional[dict]:
         """The engine-computed data-intake X-ray published to Redis, or None.

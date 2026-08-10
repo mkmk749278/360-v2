@@ -448,3 +448,69 @@ async def test_sweep_refuses_a_cold_index_rather_than_reading_it_as_empty(monkey
     out = await tg.sweep(FakeStore(_rising_series()))
     assert out.get("index_cold") is True
     assert tg.health()["refusals"][tg.REFUSE_INDEX_COLD] == 1
+
+
+# --------------------------------------------------------------------------- #
+# The process seam — caught on the deploy that shipped it
+# --------------------------------------------------------------------------- #
+
+
+def test_build_diag_reports_a_cold_index_rather_than_an_empty_book(monkeypatch):
+    """`index_cold` and "nothing governed" must stay distinguishable."""
+    monkeypatch.setattr(ps, "index_open_positions", lambda: None)
+    out = tg.build_diag()
+    assert out["index_cold"] is True
+    assert out["open_total"] is None
+    assert out["rows"] == []
+
+
+def test_build_diag_carries_its_cause_on_failure(monkeypatch):
+    def _boom():
+        raise RuntimeError("index exploded")
+
+    monkeypatch.setattr(ps, "index_open_positions", _boom)
+    out = tg.build_diag()
+    assert "index exploded" in out["error"]
+
+
+def test_the_diag_is_published_from_the_engine_container():
+    """GUARD — the defect this test exists for shipped to production.
+
+    The governor's counters and the open-position index are in-process state
+    of the ENGINE container. The first cut of `/internal/diag/trail-governor`
+    built the payload locally, so in isolated mode (live on the VPS) it
+    reported `index_cold` forever while the governor ran perfectly in the
+    other container: the panel described the API process.
+
+    Both sibling diags already carried the publish-then-read pattern. This
+    derives the requirement from the tree rather than restating it:
+    the writer must publish it, the facade must expose it, and the handler
+    must consult the facade before building anything locally.
+    """
+    from src.api import redis_engine, server, snapshot_store, snapshot_writer
+
+    writer_src = Path(inspect.getfile(snapshot_writer)).read_text()
+    assert "_write_trail_governor" in writer_src
+    # Defining a method is not calling it — pin the call site.
+    assert "await self._write_trail_governor()" in writer_src, (
+        "the writer defines the publisher but the cycle never calls it"
+    )
+
+    assert hasattr(snapshot_store, "KEY_TRAIL_GOVERNOR")
+    assert hasattr(redis_engine.RedisEngineFacade, "published_trail_governor")
+
+    facade_src = Path(inspect.getfile(redis_engine)).read_text()
+    assert "KEY_TRAIL_GOVERNOR" in facade_src, (
+        "the facade exposes the accessor but never refreshes it from Redis"
+    )
+
+    server_src = Path(inspect.getfile(server)).read_text()
+    handler = server_src[server_src.index("async def trail_governor_diag"):]
+    handler = handler[: handler.index("@app.get")]
+    assert "published_trail_governor" in handler, (
+        "the handler builds the payload locally without consulting the "
+        "published snapshot — it will report index_cold in isolated mode"
+    )
+    assert handler.index("published_trail_governor") < handler.index(
+        "build_diag"
+    ), "the local build must be the FALLBACK, not the first choice"
