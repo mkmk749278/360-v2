@@ -4,6 +4,107 @@
 
 ---
 
+## 🟢 SESSION 119 2026-08-10 — the governor could not hand over, and could not say why
+
+Engine + ops `claude/trail-governor-sar-arming-029tfu`. Owner: *"look at trail
+governor SAR exit mechanism not Arming why"*, then — after fixing the timeframe —
+*"these are already set, but even after changing exit mechanism still showing
+default only, live status not showing"*.
+
+### What the live surface actually said
+
+Read from a read-only guest session against `ops.luminapp.org`, twice, eight
+minutes apart, because a cumulative counter cannot say whether a fault is still
+happening:
+
+| | first read | second read |
+|---|---|---|
+| `cycles` | 3368 | 3384 |
+| `bad_timeframe` | 4052 | **4084** |
+| `handovers` | 0 | 0 |
+
+**Two refusals per cycle — both governed positions, every sweep.** The governing
+timeframe read `5`. #910 had already diagnosed that value the same morning and
+shipped the write-side refusal, the `choices`, and the ops select; what it could
+not do is correct the value **already stored**, because `RuntimeTunables.get()`
+validates nothing against `choices`. The write path was refusing a value the read
+path kept serving. One dropdown, and the owner fixed it.
+
+Then the counters moved again, and the failure moved with them:
+
+| | after the timeframe fix | +60s |
+|---|---|---|
+| `bad_timeframe` | 4156 | 4156 *(frozen — fixed)* |
+| `place_failed` | 14 | **38** |
+| `handovers` | 0 | 0 |
+
+The governor now computed a level, reached `_park`, and **Binance refused every
+placement** — 2 per sweep, ~24 rejected orders a minute, indefinitely. Two
+defects behind that, and neither is about SAR.
+
+### 1. `place_failed` was a bare counter
+
+-2021 (the level is already through the mark), -1111 (rounding), -4015
+(duplicate id) and a disconnected key increment the same integer and have four
+different fixes. The reason existed only in a `log.warning` — which needs
+`docker exec`, and the owner reads the panel. `build_diag` published the count
+and nothing else, and the ops copy called it *"the safe failure"*, which is true
+about protection and silent about a handover that will never happen.
+
+The last 8 rejections now ride in the health block with `binance_code`, `kind`
+and the exchange's own message (`None` code = *the rejection did not come from
+Binance*, never a zero), and ops renders them under the counters. Bounded ring,
+**unbounded count printed beside it**.
+
+### 2. "Retrying next bar" was retrying every sweep
+
+`trail_last_bar_ms` advances **only on a successful park**, so the `same_bar`
+idempotence guard never engaged after a rejection: the identical level went back
+to the exchange on every monitor tick. The module docstring said *"retries next
+bar"* the whole time — a property checkable in one command, and nobody ran it.
+`_failed_bar` makes the deferral real (`retry_deferred`, counted, on screen) and
+costs nothing: the previous stop is resting throughout, and the level is fixed
+for the bar, so re-asking cannot get a different answer.
+
+### 3. The exit-mechanism control had no reader
+
+The owner's second message. `POST /api/admin/users/exit-mechanism` reads its
+value back from the store — deliberately, per its own docstring — but
+`GET /api/admin/users/lookup` **never carried the field**, and the ops select was
+three hardcoded options with no `selected`. So an account already handed to SAR
+rendered *"default (SL/TP FSM — unchanged)"* on every reload, and the only
+evidence the write had landed was a flash that had scrolled away. #817 with the
+arrow reversed, at the one control that decides how a real position closes.
+
+The lookup now returns `exit_mechanism` + `governor_enabled`; the card states the
+live state before the control, in three distinguishable states — **LIVE**,
+**SET, NOT RUNNING** (master switch off), and *not reported* (an engine that
+predates the field, which is not the same fact as `default`).
+
+### Shipped
+
+**Engine** — `trail_governor`: `place_failures` ring + `_binance_code` +
+`retry_deferred` + `_failed_bar`; `AdminUserLookupResponse.exit_mechanism` /
+`governor_enabled` read from `user_overrides`.
+**Ops** — placement-rejection table on `/signals/trail-governor`; exit-mechanism
+state + preselected option on `/control/users`.
+
+Every new guard verified by reverting: 3 fail without the rejection detail, 1
+without the retry gate, 2 without the lookup field, 5 without the ops card.
+
+### Open
+
+- **The governor has still never handed over.** These changes make the exchange's
+  reason readable; they do not choose the fix. Read `binance_code` on the new
+  table before touching the mechanism — a -2021 on a level that has just come
+  onside is a mark-vs-close question, and a -1111 is `symbol_filters`.
+- `runtime_tunables.get()` still serves a stored value its own write path would
+  refuse. Left deliberately: falling back to the default would have armed a live
+  money-path mechanism at a timeframe nobody chose. The governor refuses loudly
+  (`bad_timeframe`) and ops badges the invalid value on Control.
+
+---
+
 ## 🟢 SESSION 118 2026-08-09 — the second exit mechanism, and the dark lane for both
 
 Engine `claude/sar-atr-trail-signals-i6cyuv`, ops the same branch. Owner: *"look

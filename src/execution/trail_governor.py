@@ -144,6 +144,13 @@ def _now() -> float:
 _health_lock = threading.Lock()
 
 
+#: How many placement rejections to keep, newest last.  Bounded because this
+#: rides in a snapshot written every ~15s; the count beside it is unbounded, so
+#: the ring never becomes the denominator (the Suppression Quality Audit's
+#: lesson — when a bounded buffer feeds a display, publish the total too).
+PLACE_FAILURE_RING = 8
+
+
 def _blank_health() -> Dict[str, Any]:
     return {
         "governed": 0,
@@ -151,8 +158,17 @@ def _blank_health() -> Dict[str, Any]:
         "replaced": 0,
         "unchanged": 0,
         "place_failed": 0,
+        "retry_deferred": 0,
         "orphan_cancel": 0,
         "refusals": {},
+        #: The last few rejections, with the exchange's own words.  A bare
+        #: counter here is "blank needs a cause before it gets a caption" on
+        #: the one path that spends money: -2021 (the level is already through
+        #: the mark), -1111 (rounding), -4015 (duplicate id) and a dead key
+        #: all read as the identical integer, and they have four different
+        #: fixes.  Not a log line, because the log needs `docker exec` and the
+        #: owner reads the panel (2026-08-10, #911).
+        "place_failures": [],
         "cycles": 0,
     }
 
@@ -171,6 +187,57 @@ def _refuse(reason: str) -> None:
         refusals[reason] = int(refusals.get(reason, 0)) + 1
 
 
+def _binance_code(exc: Exception) -> Optional[int]:
+    """The exchange's own error code, when it gave one.
+
+    ``None`` means *the rejection did not come from Binance* (signing service
+    down, key not connected, a bug on our side) — a different next move, so it
+    is never rendered as a zero.
+    """
+    resp = getattr(exc, "signing_response", None)
+    body = getattr(resp, "binance_body", None)
+    if isinstance(body, dict):
+        code = body.get("code")
+        if isinstance(code, (int, float)):
+            return int(code)
+    return None
+
+
+def _record_place_failure(
+    *,
+    symbol: str,
+    side: str,
+    signal_id: str,
+    seq: int,
+    level: float,
+    exc: Exception,
+    ts: float,
+) -> None:
+    """Keep the last few rejections so the panel can say *why*.
+
+    ``str(exc)`` is already self-contained — ``_raise_for`` formats
+    ``code=… status=… message=…`` — and carries no key material: the signing
+    service never returns a secret and the message is the exchange's own
+    response text.  It is truncated anyway, because an unbounded string in a
+    snapshot written every 15s is a cost decision, not a display one.
+    """
+    entry = {
+        "ts": ts,
+        "symbol": symbol,
+        "side": side,
+        "signal_id": signal_id,
+        "seq": seq,
+        "level": float(level),
+        "kind": type(exc).__name__,
+        "binance_code": _binance_code(exc),
+        "error": str(exc)[:300],
+    }
+    with _health_lock:
+        ring = _health.setdefault("place_failures", [])
+        ring.append(entry)
+        del ring[:-PLACE_FAILURE_RING]
+
+
 def health() -> Dict[str, Any]:
     """A snapshot for the liveness probe and the ops panel.
 
@@ -181,6 +248,7 @@ def health() -> Dict[str, Any]:
     with _health_lock:
         out = dict(_health)
         out["refusals"] = dict(out.get("refusals", {}))
+        out["place_failures"] = [dict(e) for e in out.get("place_failures", [])]
         return out
 
 
@@ -213,15 +281,45 @@ def _state_for(uid: str, signal_id: str) -> Dict[str, Any]:
         return _mech_state.setdefault(key, {})
 
 
+#: ``(firebase_uid, signal_id) -> the bar whose level the exchange refused``.
+#:
+#: The retry cadence is a property of ``trail_last_bar_ms``, which is advanced
+#: only on a SUCCESSFUL park — so before this existed a rejected level was
+#: re-submitted on **every sweep**, not on every bar.  The sweep rides the
+#: monitor clock, so "retrying next bar" in the docstring above was in fact ~12
+#: attempts a minute per position, indefinitely, against an exchange this box
+#: has already been IP-banned by once.  Measured on the owner's account
+#: 2026-08-10: two positions, +24 rejected placements per minute, forever.
+#:
+#: Deferring costs nothing: a rejection leaves the previous protection resting
+#: untouched, so the position is covered for the whole wait, and the level is
+#: fixed for the bar — re-asking the same question of the same bar cannot get a
+#: different answer.  In memory, so a restart re-tries immediately, which is the
+#: right direction for a transient fault.
+_failed_bar: Dict[Tuple[str, str], float] = {}
+
+
+def _mark_failed_bar(uid: str, signal_id: str, bar_ms: float) -> None:
+    with _mech_state_lock:
+        _failed_bar[(uid, signal_id)] = float(bar_ms)
+
+
+def _bar_already_refused(uid: str, signal_id: str, bar_ms: float) -> bool:
+    with _mech_state_lock:
+        return _failed_bar.get((uid, signal_id)) == float(bar_ms)
+
+
 def forget(uid: str, signal_id: str) -> None:
     """Drop a closed position's mechanism state."""
     with _mech_state_lock:
         _mech_state.pop((uid, signal_id), None)
+        _failed_bar.pop((uid, signal_id), None)
 
 
 def reset_state_for_test() -> None:
     with _mech_state_lock:
         _mech_state.clear()
+        _failed_bar.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -373,6 +471,15 @@ async def _park(
         )
     except _order_placer.OrderPlacementError as exc:
         _count("place_failed")
+        _record_place_failure(
+            symbol=position.symbol,
+            side=position.side,
+            signal_id=position.signal_id,
+            seq=seq,
+            level=float(rounded),
+            exc=exc,
+            ts=_now(),
+        )
         log.warning(
             "trail_governor: park FAILED uid={} signal_id={} seq={} level={} "
             "exc={} — previous protection left in place, retrying next bar",
@@ -477,11 +584,21 @@ async def step_position(
             _count("unchanged")
         return decision
 
+    bar_ms = float(series["open_time"][-1])
+    if _bar_already_refused(position.firebase_uid, position.signal_id, bar_ms):
+        # The exchange has already refused this bar's level. Re-submitting it
+        # every sweep cannot change the answer and spends API weight to be told
+        # so; the existing protection is resting throughout. Counted, never
+        # silent — a deferral and a success must not look alike.
+        _count("retry_deferred")
+        return "retry_deferred"
+
     placer = placer_factory(position.firebase_uid)
     ok = await _park(
         position, level, placer=placer, handover=(decision == "handover")
     )
     if not ok:
+        _mark_failed_bar(position.firebase_uid, position.signal_id, bar_ms)
         return "place_failed"
 
     position.trail_last_bar_ms = series["open_time"][-1]
