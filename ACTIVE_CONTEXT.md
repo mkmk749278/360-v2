@@ -4,6 +4,98 @@
 
 ---
 
+## 🟢 SESSION 119 2026-08-10 — the measurement became an order, and the control page got arranged
+
+Engine `claude/sar-atrb-chandler-signals-cwgbdk` (#908) then two same-day repairs
+(#909, #910); ops #160–#163. Owner: *"can we enable auto trading for this SAR
+Signals to test in real only for me not for users"*, then *"open PRs and merge
+after green and guide me how to setup"*, then *"actually arrange all the control
+panel for easy access"*.
+
+Owner's three decisions, taken via `AskUserQuestion`: **both mechanisms, staged**
+(SAR first, dark-feed paths later) · **uncapped — true SAR**, no cap at the
+designed SL · **both timeframes computed, the governing one switchable from ops**.
+
+### What shipped: `src/execution/trail_governor.py`
+
+Ten sessions of trailing work had measured where a stop *would* have been parked.
+This places it. Per-user opt-in (`exit_mechanism` = `default` | `sar` |
+`chandelier`), so the owner's account runs the mechanism and no subscriber is
+touched — the user-visible flag is the per-user column itself.
+
+- **Never naked is a property of CALL ORDER, not of retry success.** `_park`
+  places the new CONDITIONAL stop **then** cancels the superseded one. Binance
+  `closePosition=true` carries no quantity, so two resting stops cannot
+  over-close; a cancel-first ordering leaves a window where a gap costs the
+  position. BE-shift's cancel-then-place is the pattern deliberately *not*
+  copied.
+- **Refuse, never adopt mid-flight.** `ladder_touched` (pre-TP fired, BE shifted,
+  a TP leg filled) is a refusal, not a takeover — the governor only ever governs
+  a position whose geometry is still the one it was dispatched with.
+- `decide()` is pure and separately tested; `step_position` / `sweep` do the I/O.
+- Fills land through the FSM as `TRAIL_STOP` (`coid_trail`, `_apply_trail_fill`),
+  so a governor exit is nameable apart from an SL hit in every downstream record.
+
+### Three defects, all shipped the same day, all found by reading rather than by CI
+
+1. **A column reachable by nothing** (#908, caught while writing the setup
+   guide). `exit_mechanism` had a store, a migration and a UI and **no API field**
+   — `AutoTradeSettings` never declared it, so `model_dump(exclude_unset=True)`
+   dropped it on every write. The banned scaffold, shipped by me, and the tell was
+   that the setup guide could not be written without inventing a step.
+2. **The process seam** (#909). `/internal/diag/trail-governor` built its X-ray in
+   the **API** container, which cannot see the engine's in-process position index —
+   so the page read `INDEX COLD` in production while the governor was fine. Both
+   sibling diags already used publish-then-read through Redis; this one was
+   written as if the engine served HTTP. **Isolated mode is not an implementation
+   detail of the deployment, it is a fact about which process holds the state.**
+3. **A two-valued setting typed as free text** (#910, owner-caught). The owner set
+   the timeframe from ops and typed `5`. The store keys `"5m"`/`"15m"`;
+   `set_values` validated floats and ints and nothing else, so the governor was
+   **permanently inert with the switch reading ON** — every position refused,
+   silently. Fixed at both ends: `Tunable.choices` makes it unselectable-wrong from
+   ops (`<select>`, not a text box), and `REFUSE_BAD_TF` names it at the sweep so a
+   value arriving any other way is a counted refusal rather than a silence.
+
+### The control panel (ops #161–#163)
+
+77 tunables sat between the safety switches and the mode toggle, so on a phone the
+kill switch and the positions table were several screens below a wall of knobs.
+
+- **#161** — section order (safety · mode · positions · tunables · danger · audit),
+  jump nav, collapsible categories, a filter, and a `changed` badge answering the
+  question the page could not: *what did I change?*
+- **#162** — the pills "all looked the same": every anchor was correct and
+  scrolled its target **behind two stacked sticky bars**. `--sticky-h` is
+  *measured* at runtime, because `header nav` wraps on a phone and a hardcoded
+  value would have been right on desktop and wrong on the device it was reported
+  from.
+- **#163** — the strip named five switches and omitted **the only one that moves a
+  real stop order**. The tile reads the governor's own diag rather than
+  `trail_governor_enabled`, because defect 3 above is precisely the case where the
+  two disagree — a tile sourced from the switch would have shown green all day.
+  Every tile now links to the control that sets it; the danger zone is framed
+  apart from five reversible toggles.
+
+### Open
+
+- **Nothing has been governed yet.** `TRAIL_GOVERNOR_ENABLED` and the owner's
+  `exit_mechanism` are the two switches; until a position opens with the mechanism
+  onside, `/signals/trail-governor` reads `armed`. The refusal mix is the thing to
+  read first — `not_onside` is the pre-handover state and is expected, and it is
+  why Binance still shows the evaluator's SL and TP orders on a governed symbol.
+- **Stage 2 is not built.** Opening the dark-feed paths to the owner's account was
+  the second half of "both, staged" and is deliberately not started.
+- **Read the risk columns before any PnL.** SAR cancels the designed stop and
+  parks one that has been up to 21% away (Session 117); the chandelier is onside
+  at entry far more often, so it replaces the stop from bar one on nearly every
+  arm. A governed loss is risk the trade was never sized for.
+- Three label defects still open on `app/templates/sar_live.html` — a MUUUSDT SAR
+  anecdote (~line 442), "Confirmed flip, market out" (~line 371), and a raw `SAR`
+  governor enum rendering on the ATR page.
+
+---
+
 ## 🟢 SESSION 118 2026-08-09 — the second exit mechanism, and the dark lane for both
 
 Engine `claude/sar-atr-trail-signals-i6cyuv`, ops the same branch. Owner: *"look
