@@ -901,6 +901,22 @@ class AutoTradeSettings(BaseModel):
             "rejections — e.g. $20 notional at 10× requires $2 margin."
         ),
     )
+    exit_mechanism: Optional[Literal["default", "sar", "chandelier"]] = Field(
+        default=None,
+        description=(
+            "Which mechanism owns the EXIT for this user's live positions "
+            "(2026-08-10). ``'default'`` (and null) is the SL/TP FSM every "
+            "account has always run. ``'sar'`` / ``'chandelier'`` hand the "
+            "exit to the live trail governor: once the mechanism comes onside "
+            "it cancels the evaluator's SL and TP ladder and re-parks a stop "
+            "at the mechanism's level on every closed bar. "
+            "Requires the engine-wide ``trail_governor_enabled`` tunable to "
+            "be ON as well — this field alone changes nothing. "
+            "The mechanism's stop is frequently WIDER than the stop the trade "
+            "was sized for (54% of measured SAR handovers), so a position can "
+            "carry more risk than its designed SL implies."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1449,6 +1465,52 @@ class AdminAutoTradeEnableResponse(BaseModel):
     firebase_uid: str
     phone: Optional[str] = None
     auto_trade_disabled: bool
+
+
+class AdminExitMechanismRequest(BaseModel):
+    """Body of ``POST /api/admin/users/exit-mechanism``.
+
+    The owner-facing way to opt one account into the live trail governor
+    (2026-08-10).  It exists because the alternative was the account holder
+    PUTting their own ``/api/settings/user/auto-trade`` from the Lumin app,
+    and the app has no control for this field — so without this endpoint the
+    per-user column could only be reached with a hand-minted Firebase token.
+
+    This is a **money-path** write: setting anything but ``default`` means the
+    engine will cancel that user's evaluator SL and TP ladder at handover and
+    manage the exit itself.  It still does nothing unless the engine-wide
+    ``trail_governor_enabled`` tunable is also ON — two switches, deliberately.
+    """
+
+    phone: Optional[str] = Field(default=None, min_length=8, max_length=18)
+    firebase_uid: Optional[str] = Field(
+        default=None, min_length=8, max_length=128
+    )
+    exit_mechanism: Literal["default", "sar", "chandelier"] = Field(
+        ...,
+        description=(
+            "'default' returns the user to the ordinary SL/TP FSM exit; "
+            "'sar' / 'chandelier' hand the exit to the live trail governor."
+        ),
+    )
+    reason: str = Field(
+        default="", max_length=200, description="Audit note."
+    )
+
+
+class AdminExitMechanismResponse(BaseModel):
+    """Read back from the store rather than echoing the request — the engine
+    is the source of truth, and a response that echoed would report success
+    for a value the coercion layer rejected."""
+
+    ok: bool
+    user_id: int
+    phone: Optional[str] = None
+    exit_mechanism: str
+    #: Engine-wide master switch. Published beside the per-user value because
+    #: the setting alone changes nothing, and an operator who sets one and not
+    #: the other must not read "ok" as "it is running".
+    governor_enabled: bool
 
 
 class AdminGrantTierRequest(BaseModel):

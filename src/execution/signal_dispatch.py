@@ -1126,6 +1126,10 @@ async def dispatch_signal_to_active_users(
         #                            invalidations — trade_monitor.py ~2057)
         #   • management_mode='entry' → place_signal lays NO TP ladder
         # The SL is still placed, so the naked-position invariant holds.
+        # Per-user live exit mechanism (2026-08-10).  Read once here and
+        # stamped on the Position, never re-read per bar — the governor runs
+        # on the monitor clock and a SQLite read there is the hot-loop rule.
+        user_exit_mechanism = _uo.resolve_exit_mechanism_uid(uid)
         management_mode = _uo.resolve_symbol_management_uid(uid, symbol)
         if management_mode == "entry":
             user_grab_fraction = 0.0
@@ -1231,6 +1235,7 @@ async def dispatch_signal_to_active_users(
                 entry_regime_15m=regime_label_15m or "",
                 atr_percentile_at_entry=float(atr_percentile),
                 atr_value_at_entry=float(atr_value),
+                exit_mechanism=user_exit_mechanism,
             )
             # Record the successful placement for the user-facing
             # Recent Activity card.  Soft-fail inside the helper.

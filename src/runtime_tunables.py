@@ -121,6 +121,8 @@ def _build_registry() -> Dict[str, Tunable]:
         STRUCTURAL_SNAP_APPLY_PATHS,
         STRUCTURAL_SNAP_MEASURE,
         SUPPRESSION_AUDIT_ENABLED,
+        TRAIL_GOVERNOR_ENABLED,
+        TRAIL_GOVERNOR_TIMEFRAME,
     )
 
     items = [
@@ -179,6 +181,42 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="str",
             default=STRUCTURAL_SNAP_APPLY_PATHS,
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="trail_governor_enabled",
+            label="Live trail governor — PLACES REAL ORDERS",
+            description=(
+                "The only switch on this page that moves a real stop order. "
+                "ON = for each open position whose USER has opted into a trail "
+                "mechanism (per-user exit_mechanism column), the engine parks "
+                "the mechanism's stop once it comes onside, cancels the "
+                "evaluator's SL and TP ladder at that handover, and re-places "
+                "the stop on every closed bar (place-then-cancel, so the "
+                "position is never naked). OFF = every position keeps the SL/TP "
+                "FSM exit, unchanged. This flag AND a per-user opt-in are both "
+                "required: ON with nobody opted in governs nothing. Enabled "
+                "2026-08-10 for an owner-only live test — the measured edge "
+                "over the current exit does NOT exclude zero, so this is a "
+                "canary, not a rollout."
+            ),
+            type="bool",
+            default=TRAIL_GOVERNOR_ENABLED,
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="trail_governor_timeframe",
+            label="Live trail governor — governing timeframe",
+            description=(
+                "Which arm owns the real stop: 5m or 15m. The measurement lane "
+                "runs both as independent arms on the same signal, but only one "
+                "can own an order. The other keeps recording in the shadow "
+                "lane, so the timeframe comparison survives the live test. "
+                "Changing this re-parks on the next closed bar of the new "
+                "timeframe; it never leaves a position unprotected."
+            ),
+            type="str",
+            default=TRAIL_GOVERNOR_TIMEFRAME,
             category="Stops & exits",
         ),
         Tunable(

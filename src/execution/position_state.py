@@ -47,6 +47,7 @@ This module is **CRUD only** — the FSM transition logic lives in
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -222,6 +223,30 @@ class Position:
     # Default "managed" so any un-stamped / pre-upgrade row fails toward MORE
     # protection, never less.
     protection_mode: str = "managed"
+    # --- live trail governor (2026-08-10) -------------------------------
+    # Stamped at signal placement from the user's ``exit_mechanism`` setting
+    # so the governor never re-reads SQLite per bar (the hot-loop rule), and
+    # so a mid-flight settings change cannot re-govern a position that is
+    # already running.  "" / "default" = the SL/TP FSM, unchanged.
+    exit_mechanism: str = ""
+    # False until the mechanism comes onside and takes the exit over.  Before
+    # handover the evaluator's SL and TP1 are live and untouched; after it,
+    # they are cancelled and ``trail_stop_order_id`` is the only stop.
+    trail_governing: bool = False
+    #: algoId of the currently parked trail stop (0 = none parked).
+    trail_stop_order_id: int = 0
+    #: Price of that parked stop.  Persisted because the ratchet is enforced
+    #: against it after a restart — mechanism state is rebuilt by re-walking,
+    #: but the stop we already told Binance about is a fact, not a derivation.
+    trail_stop_price: float = 0.0
+    #: Monotonic re-place counter.  Every amend mints a new clientAlgoId
+    #: (Binance rejects a duplicate), so the sequence is part of the coid and
+    #: the FSM parses it back out to recognise the fill.
+    trail_stop_seq: int = 0
+    #: ms timestamp of the newest closed bar the governor has consumed.  The
+    #: governor acts once per bar; this is what makes it idempotent across
+    #: sweeps and is the clock a staleness probe reads (#835).
+    trail_last_bar_ms: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +273,15 @@ _COID_CLOSE_SUFFIX = "_close"
 # positions within the pre-funding window.  Separate suffix so the FSM
 # logs FUNDING_EXIT rather than REGIME_EXIT as the close_reason.
 _COID_FUNDING_CLOSE_SUFFIX = "_funding_close"
+# The live trail governor re-parks its stop on every closed bar, and Binance
+# rejects a duplicate clientAlgoId — so unlike every suffix above, this one is
+# NOT deterministic per signal: it carries a monotonic sequence
+# (``_trail3``).  ``parse_coid`` therefore matches it by pattern rather than
+# by equality, and the sequence is discarded once parsed: the FSM only needs
+# to know a trail stop filled, and *which* re-place it was is the governor's
+# bookkeeping, already on the position.
+_COID_TRAIL_PREFIX = "_trail"
+_COID_TRAIL_RE = re.compile(r"^(?P<signal_id>.+)_trail(?P<seq>\d+)$")
 
 
 def coid(signal_id: str, phase: str) -> str:
@@ -271,6 +305,16 @@ def coid_entry(signal_id: str) -> str:
 
 def coid_sl(signal_id: str) -> str:
     return coid(signal_id, _COID_SL_SUFFIX)
+
+
+def coid_trail(signal_id: str, seq: int) -> str:
+    """clientAlgoId for the ``seq``-th trail stop parked on this signal.
+
+    Sequenced because the governor re-parks every bar and Binance rejects a
+    duplicate id.  Kept well inside the 36-char limit: ``lumin_`` (6) +
+    signal_id + ``_trail`` (6) + the sequence.
+    """
+    return coid(signal_id, f"{_COID_TRAIL_PREFIX}{int(seq)}")
 
 
 def coid_sl_be(signal_id: str) -> str:
@@ -324,11 +368,18 @@ def parse_coid(client_order_id: str) -> Optional[tuple[str, str]]:
     SKIP for foreign orders rather than crash.
 
     ``phase`` is one of: "entry" | "sl" | "sl_be" | "pretp" |
-    "close" | "funding_close" | "tp1" | "tp2" | "tp3".
+    "close" | "funding_close" | "tp1" | "tp2" | "tp3" | "trail".
     """
     if not client_order_id.startswith("lumin_"):
         return None
     rest = client_order_id[len("lumin_"):]
+    # Checked before the suffix loop: a trail coid ends in a digit, so it can
+    # never collide with a fixed suffix, but matching it first keeps the two
+    # schemes from having to reason about each other.  The sequence is parsed
+    # and dropped — see ``_COID_TRAIL_PREFIX``.
+    trail = _COID_TRAIL_RE.match(rest)
+    if trail is not None:
+        return (trail.group("signal_id"), "trail")
     # Order matters: longer suffixes must be checked FIRST so
     # ``..._sl_be`` doesn't get classified as ``..._sl`` (and
     # ``..._funding_close`` doesn't get classified as ``..._close``).
@@ -562,6 +613,28 @@ def index_open_positions_for_symbol(symbol: str) -> Optional[list["Position"]]:
                 if pos.state == PositionState.OPEN and pos.symbol == symbol:
                     out.append(pos)
         return out
+
+
+def index_open_positions() -> Optional[list["Position"]]:
+    """Every OPEN position across all users, from the live index.
+
+    ``None`` when the index is inactive — and callers must treat that as
+    "cannot answer", never as "none open".  There is deliberately no
+    Firestore fallback: this is swept once per monitor cycle, and a
+    collection-group query on that clock is the exact shape that cost
+    ₹4,552/month in Session 24.  The governor counts the refusal and pages
+    instead, because a sweep that silently sees nothing is indistinguishable
+    from a book with nothing in it.
+    """
+    with _lock:
+        if not _index_active:
+            return None
+        return [
+            pos
+            for bucket in _index.values()
+            for pos in bucket.values()
+            if pos.state == PositionState.OPEN
+        ]
 
 
 def init_position_state(service_account_path: Optional[str] = None) -> None:
@@ -813,6 +886,12 @@ def _to_firestore_dict(position: Position) -> dict:
         "close_reason": position.close_reason,
         "realized_pnl_total": position.realized_pnl_total,
         "protection_mode": position.protection_mode,
+        "exit_mechanism": position.exit_mechanism,
+        "trail_governing": position.trail_governing,
+        "trail_stop_order_id": position.trail_stop_order_id,
+        "trail_stop_price": position.trail_stop_price,
+        "trail_stop_seq": position.trail_stop_seq,
+        "trail_last_bar_ms": position.trail_last_bar_ms,
     }
 
 
@@ -873,4 +952,14 @@ def _from_firestore_dict(data: dict) -> Position:
         # Default "managed": an un-stamped / pre-manual-builder row is an auto
         # position and must keep full protection (fail toward MORE safety).
         protection_mode=str(data.get("protection_mode", "managed")),
+        # A doc written before the governor shipped carries none of these.
+        # Every default is the un-governed state, so a pre-upgrade position
+        # keeps the exit it was placed with rather than being adopted by a
+        # mechanism mid-flight.
+        exit_mechanism=str(data.get("exit_mechanism", "")),
+        trail_governing=bool(data.get("trail_governing", False)),
+        trail_stop_order_id=int(data.get("trail_stop_order_id", 0)),
+        trail_stop_price=float(data.get("trail_stop_price", 0.0)),
+        trail_stop_seq=int(data.get("trail_stop_seq", 0)),
+        trail_last_bar_ms=float(data.get("trail_last_bar_ms", 0.0)),
     )

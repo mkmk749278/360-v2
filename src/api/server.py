@@ -1832,6 +1832,93 @@ def build_app(
             )
 
     @app.get(
+        "/internal/diag/trail-governor",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def trail_governor_diag() -> dict:
+        """The live trailing-exit governor: what it is doing to real orders.
+
+        This is the ops surface for the one mechanism in the system that both
+        measures and *places*.  It answers three questions the measurement
+        pages structurally cannot:
+
+        * which positions are actually governed right now, and by what;
+        * where each parked stop sits and how many bars ago it was re-placed —
+          a governed position whose stop stopped moving is the #835 shape with
+          money behind it, and the row must be able to say so;
+        * why the rest are **not** governed, named rather than pooled.
+
+        The refusal mix is the point.  A governor that governs nothing looks
+        exactly like a quiet book unless it can say which nothing it is —
+        disabled, nobody opted in, a stale series, a ladder already touched.
+        """
+        out: dict = {"schema": 1}
+        try:
+            from src import runtime_tunables as _rt
+            from src.execution import position_state as _ps
+            from src.execution import trail_governor as _tg
+
+            try:
+                enabled = bool(_rt.get("trail_governor_enabled"))
+                timeframe = str(_rt.get("trail_governor_timeframe"))
+            except Exception:
+                from config import TRAIL_GOVERNOR_ENABLED, TRAIL_GOVERNOR_TIMEFRAME
+
+                enabled, timeframe = TRAIL_GOVERNOR_ENABLED, TRAIL_GOVERNOR_TIMEFRAME
+            out["enabled"] = enabled
+            out["timeframe"] = timeframe
+            out["health"] = _tg.health()
+
+            positions = _ps.index_open_positions()
+            if positions is None:
+                # Distinct from "no open positions" — see index_open_positions.
+                out["index_cold"] = True
+                out["rows"] = []
+                out["open_total"] = None
+                return out
+            out["index_cold"] = False
+            out["open_total"] = len(positions)
+            now_ms = time.time() * 1000.0
+            rows = []
+            for p in positions:
+                mech = str(getattr(p, "exit_mechanism", "") or "").lower()
+                if mech not in _tg.GOVERNABLE:
+                    continue
+                last_bar = float(getattr(p, "trail_last_bar_ms", 0.0) or 0.0)
+                rows.append({
+                    "signal_id": p.signal_id,
+                    "symbol": p.symbol,
+                    "side": p.side,
+                    "mechanism": mech,
+                    "governing": bool(getattr(p, "trail_governing", False)),
+                    "entry": float(
+                        p.entry_price_filled or p.entry_price_target or 0.0
+                    ),
+                    "designed_sl": float(getattr(p, "sl_price", 0.0) or 0.0),
+                    "parked_stop": float(getattr(p, "trail_stop_price", 0.0) or 0.0),
+                    "stop_order_id": int(getattr(p, "trail_stop_order_id", 0) or 0),
+                    "seq": int(getattr(p, "trail_stop_seq", 0) or 0),
+                    "last_bar_ms": last_bar or None,
+                    # Freshness is graded on the ENGINE's own stamp, never on
+                    # the reader's clock — a surface may not grade its own
+                    # liveness on a clock it supplies (#108).
+                    "bar_age_sec": (
+                        (now_ms - last_bar) / 1000.0 if last_bar > 0 else None
+                    ),
+                    "ladder_untouched": _tg.ladder_untouched(p),
+                })
+            out["rows"] = rows
+            out["governed"] = len(rows)
+            return out
+        except Exception as exc:  # noqa: BLE001
+            log.exception("/internal/diag/trail-governor failed")
+            # Carries its own cause: "cannot report" and "nothing governed"
+            # have different fixes and must not render identically.
+            out["error"] = f"{type(exc).__name__}: {exc}"
+            return out
+
+    @app.get(
         "/internal/diag/data-intake",
         tags=["internal-diag"],
         dependencies=[Depends(owner_required)],
@@ -2451,6 +2538,7 @@ def build_app(
         app,
         user_store=user_store,
         owner_required=owner_required,
+        user_overrides=user_overrides,
     )
 
     # ---- Binance connect flow (server-side execution, B18 + §3.9) ----

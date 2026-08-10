@@ -2700,3 +2700,210 @@ def test_referral_admin_commissions_owner_gated(engine, tmp_path) -> None:
         json={"commission_ids": []},
     )
     assert r.status_code == 200 and r.json() == {"ok": True, "updated": 0}
+
+
+# ---------------------------------------------------------------------------
+# /internal/diag/trail-governor — the cross-repo contract for the ops page
+#
+# This is the PRODUCING side's pin. Ops renders these keys, and a field one
+# repo writes and no repo reads (or reads at a path the writer never used) is
+# the defect class that cost a session on `zone_distance_atr` and again on the
+# price-action lane card. So the assertions below drive the REAL handler and
+# name the keys ops depends on, rather than asserting a shape somebody chose.
+# ---------------------------------------------------------------------------
+
+
+def test_trail_governor_diag_requires_owner_tier(
+    client: TestClient, owner_client: TestClient
+) -> None:
+    assert client.get("/internal/diag/trail-governor").status_code == 403
+    assert owner_client.get("/internal/diag/trail-governor").status_code == 200
+
+
+def test_trail_governor_diag_carries_the_keys_ops_renders(
+    owner_client: TestClient,
+) -> None:
+    """The contract, at the top level — NOT nested.
+
+    The ops fixture in `tests/test_trail_governor_page.py` reads these off the
+    payload root. A fixture chooses a location and then agrees with you about
+    it, so the location is asserted here, against the real endpoint.
+    """
+    body = owner_client.get("/internal/diag/trail-governor").json()
+    for key in ("schema", "enabled", "timeframe", "health", "rows"):
+        assert key in body, f"ops reads {key!r} and the engine did not send it"
+    assert isinstance(body["health"], dict)
+    assert isinstance(body["rows"], list)
+    # The refusal mix is what lets the page distinguish four empty tables.
+    assert "refusals" in body["health"]
+
+
+def test_trail_governor_diag_defaults_to_off_and_governs_nothing(
+    owner_client: TestClient,
+) -> None:
+    """Default-OFF is the whole safety story for this flag; pin it end to end
+    rather than only at the config constant."""
+    body = owner_client.get("/internal/diag/trail-governor").json()
+    assert body["enabled"] is False
+    assert body["rows"] == []
+
+
+def test_trail_governor_diag_reports_a_cold_index_rather_than_an_empty_book(
+    owner_client: TestClient, monkeypatch
+) -> None:
+    """`index_cold` is a distinct state ops renders separately. If it were
+    dropped, a governor that cannot see the book would read as a quiet one."""
+    from src.execution import position_state as _ps
+
+    monkeypatch.setattr(_ps, "index_open_positions", lambda: None)
+    body = owner_client.get("/internal/diag/trail-governor").json()
+    assert body["index_cold"] is True
+    assert body["open_total"] is None
+
+
+def test_trail_governor_diag_carries_its_cause_on_failure(
+    owner_client: TestClient, monkeypatch
+) -> None:
+    """"Cannot report" and "nothing governed" must not render identically."""
+    from src.execution import position_state as _ps
+
+    def _boom():
+        raise RuntimeError("index exploded")
+
+    monkeypatch.setattr(_ps, "index_open_positions", _boom)
+    body = owner_client.get("/internal/diag/trail-governor").json()
+    assert "error" in body
+    assert "index exploded" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# exit_mechanism must be reachable from an API, or the per-user column is a
+# scaffold: storage the engine consumes and nothing can write.
+#
+# Found 2026-08-10 while writing the setup guide — `AutoTradeSettings` had no
+# such field, so `model_dump(exclude_unset=True)` dropped it and the column
+# could not be set by anything. The schema/store seam, one layer above the
+# dead-parameter class these tests already guard.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def overrides_client(engine: _StubEngine, tmp_path) -> TestClient:
+    """Owner-tier client wired to a REAL UserOverridesStore.
+
+    The default fixture passes no store, so the settings endpoints 503 — and a
+    round-trip test that skips is not a guard. This one drives the actual
+    SQLite store the engine reads at dispatch.
+    """
+    from src.api.auth import mint_token, OWNER_TIER
+    from src.api.user_overrides import UserOverridesStore
+
+    store = UserOverridesStore(tmp_path / "overrides.sqlite")
+    store._conn.execute("PRAGMA foreign_keys=OFF")
+    app = build_app(
+        engine,
+        jwt_secret=_TEST_SECRET,
+        allow_static=False,
+        user_overrides=store,
+    )
+    # ``sub="user-<id>"`` — an anonymous device token resolves to no profile
+    # and 404s on every per-user settings route.
+    token = mint_token(secret=_TEST_SECRET, sub="user-1", tier=OWNER_TIER)
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
+
+
+def test_exit_mechanism_survives_the_real_settings_put(
+    overrides_client: TestClient,
+) -> None:
+    """Drive the real endpoint against the real store, then read it back.
+
+    A test asserting the pydantic field exists would pass over a payload the
+    store never receives — the point is the round trip. Against the pre-fix
+    schema this fails: `model_dump(exclude_unset=True)` drops an undeclared
+    field, so the PUT succeeds and the GET returns nothing.
+    """
+    r = overrides_client.put(
+        "/api/settings/user/auto-trade", json={"exit_mechanism": "sar"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["exit_mechanism"] == "sar"
+    assert (
+        overrides_client.get(
+            "/api/settings/user/auto-trade"
+        ).json()["exit_mechanism"]
+        == "sar"
+    )
+
+
+def test_exit_mechanism_can_be_set_back_to_default(
+    overrides_client: TestClient,
+) -> None:
+    """The way off the governor has to work as well as the way on."""
+    overrides_client.put(
+        "/api/settings/user/auto-trade", json={"exit_mechanism": "sar"}
+    )
+    r = overrides_client.put(
+        "/api/settings/user/auto-trade", json={"exit_mechanism": "default"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["exit_mechanism"] == "default"
+
+
+def test_setting_an_unrelated_field_does_not_clear_exit_mechanism(
+    overrides_client: TestClient,
+) -> None:
+    """A partial PUT merges. If saving notional silently reverted the exit to
+    the FSM, a governed position would change owner mid-flight."""
+    overrides_client.put(
+        "/api/settings/user/auto-trade", json={"exit_mechanism": "sar"}
+    )
+    r = overrides_client.put(
+        "/api/settings/user/auto-trade", json={"notional_usd": 50.0}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["exit_mechanism"] == "sar"
+
+
+def test_settings_put_rejects_an_unknown_exit_mechanism(
+    owner_client: TestClient,
+) -> None:
+    """A typo must 422 rather than be stored, or the API reports success for
+    a value the engine will silently ignore."""
+    r = owner_client.put(
+        "/api/settings/user/auto-trade", json={"exit_mechanism": "parabolic"}
+    )
+    assert r.status_code == 422, r.status_code
+
+
+def test_exit_mechanism_defaults_to_none_and_never_to_a_mechanism(
+    owner_client: TestClient,
+) -> None:
+    """An account that never opted in must read as unset. Defaulting this to
+    a mechanism would opt every user into a money-path change at once."""
+    body = owner_client.get("/api/settings/user/auto-trade").json()
+    assert body.get("exit_mechanism") in (None, "default")
+
+
+def test_admin_exit_mechanism_route_is_owner_gated(
+    client: TestClient, owner_client: TestClient
+) -> None:
+    payload = {"firebase_uid": "test-uid-123", "exit_mechanism": "sar"}
+    assert client.post(
+        "/api/admin/users/exit-mechanism", json=payload
+    ).status_code == 403
+    # Owner tier gets past the gate (404/503 downstream is fine — the point
+    # is that the gate is not what refused).
+    assert owner_client.post(
+        "/api/admin/users/exit-mechanism", json=payload
+    ).status_code != 403
+
+
+def test_admin_exit_mechanism_requires_exactly_one_identifier(
+    owner_client: TestClient,
+) -> None:
+    for payload in (
+        {"exit_mechanism": "sar"},
+        {"phone": "+911234567890", "firebase_uid": "u1", "exit_mechanism": "sar"},
+    ):
+        r = owner_client.post("/api/admin/users/exit-mechanism", json=payload)
+        assert r.status_code in (422, 503), (payload, r.status_code)
