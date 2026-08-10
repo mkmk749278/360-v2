@@ -34,6 +34,8 @@ from src.utils import get_logger
 from .schemas import (
     AdminAutoTradeEnableRequest,
     AdminAutoTradeEnableResponse,
+    AdminExitMechanismRequest,
+    AdminExitMechanismResponse,
     AdminGrantTierRequest,
     AdminGrantTierResponse,
     AdminUserLookupResponse,
@@ -47,8 +49,87 @@ def register(
     *,
     user_store: Any,
     owner_required: Callable,
+    user_overrides: Any = None,
 ) -> None:
     """Register the admin user-lookup + tier-grant routes on the given app."""
+
+    @app.post(
+        "/api/admin/users/exit-mechanism",
+        response_model=AdminExitMechanismResponse,
+        tags=["admin"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def admin_set_exit_mechanism(
+        req: AdminExitMechanismRequest,
+    ) -> AdminExitMechanismResponse:
+        """Opt one account into (or out of) the live trail governor.
+
+        The owner-facing path for a setting that otherwise has none: the
+        Lumin app has no control for ``exit_mechanism``, so without this
+        endpoint the column could only be written by hand-minting the
+        account holder's own Firebase token.
+
+        Two things it deliberately does:
+
+        * **Reads the value back from the store** rather than echoing the
+          request.  ``_coerce_auto_trade`` silently drops an unrecognised
+          mechanism, so an echo would report success for a write that did
+          not happen.
+        * **Publishes the engine-wide master switch beside it.**  The
+          per-user value alone changes nothing, and an operator who sets one
+          without the other must not read ``ok: true`` as "it is running".
+        """
+        if user_overrides is None or user_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        if (req.phone is None) == (req.firebase_uid is None):
+            raise HTTPException(
+                status_code=422,
+                detail="provide exactly one of 'phone' or 'firebase_uid'",
+            )
+        if req.phone is not None:
+            user = await user_store.aget_by_phone(req.phone)
+        else:
+            user = await asyncio.to_thread(
+                user_store.get_by_firebase_uid, req.firebase_uid
+            )
+        if user is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no user matching {req.phone or req.firebase_uid}",
+            )
+
+        await user_overrides.aupdate_auto_trade(
+            int(user.user_id), {"exit_mechanism": req.exit_mechanism}
+        )
+        stored = await user_overrides.aget_auto_trade(int(user.user_id))
+        effective = str(stored.get("exit_mechanism") or "default")
+
+        governor_on = False
+        try:
+            from src import runtime_tunables as _rt
+
+            governor_on = bool(_rt.get("trail_governor_enabled"))
+        except Exception:  # pragma: no cover — tunables optional
+            from config import TRAIL_GOVERNOR_ENABLED as _cfg
+
+            governor_on = bool(_cfg)
+
+        log.info(
+            "admin_set_exit_mechanism: user_id={} phone={} requested={} "
+            "stored={} governor_enabled={} reason={!r}",
+            user.user_id, getattr(user, "phone_e164", None),
+            req.exit_mechanism, effective, governor_on, req.reason,
+        )
+        return AdminExitMechanismResponse(
+            ok=(effective == req.exit_mechanism),
+            user_id=int(user.user_id),
+            phone=getattr(user, "phone_e164", None),
+            exit_mechanism=effective,
+            governor_enabled=governor_on,
+        )
 
     @app.get(
         "/api/admin/users/lookup",

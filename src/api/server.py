@@ -2538,6 +2538,7 @@ def build_app(
         app,
         user_store=user_store,
         owner_required=owner_required,
+        user_overrides=user_overrides,
     )
 
     # ---- Binance connect flow (server-side execution, B18 + §3.9) ----
