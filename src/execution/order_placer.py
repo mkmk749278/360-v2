@@ -330,8 +330,9 @@ class OrderPlacer:
         direction: str,
         stop_price: float,
         coid_override: Optional[str] = None,
+        quantity: Optional[float] = None,
     ) -> OrderPlacementResult:
-        """Conditional stop order with ``closePosition=true``.
+        """Conditional stop order, ``closePosition=true`` by default.
 
         Uses ``/fapi/v1/algoOrder`` with ``algoType=CONDITIONAL`` +
         ``type=STOP_MARKET`` per the Binance mandatory migration effective
@@ -353,6 +354,29 @@ class OrderPlacer:
         BE-shift uses ``_sl_be`` to distinguish the new order from the
         original on User Data Stream fill events.
 
+        ``quantity`` switches the order from ``closePosition=true`` to an
+        explicit ``reduceOnly`` size, and it exists because **Binance refuses a
+        second ``closePosition`` stop in the same direction while one is
+        resting**:
+
+            -4130 "An open stop or take profit order with GTE and
+                   closePosition in the direction is existing."
+
+        Measured live 2026-08-10 on the trail governor, which places the new
+        stop *before* cancelling the one it replaces precisely so the position
+        is never naked.  That ordering is correct about fills — two
+        ``closePosition`` orders cannot double-close — and it is not about
+        *acceptance*: the exchange never lets the second one rest, so the
+        governor's handover was structurally impossible for any position
+        carrying a stop, which by the naked-position invariant is all of them.
+
+        ``reduceOnly`` with a size is the shape this file already uses for the
+        whole TP ladder, and those coexist with the ``closePosition`` SL on
+        every live position today — that is the evidence this works, not an
+        argument from the docs.  It is equally safe on a double trigger:
+        ``reduceOnly`` cannot open or flip a position, and Binance
+        auto-cancels reduce-only orders once the position closes.
+
         Returns ``OrderPlacementResult`` with ``order_id = algoId`` so
         callers can store it and pass it to ``cancel_algo_order``.
         """
@@ -367,10 +391,25 @@ class OrderPlacer:
             "algoType": "CONDITIONAL",
             "type": "STOP_MARKET",
             "triggerPrice": _price_str(rounded),
-            "closePosition": "true",
             "workingType": "MARK_PRICE",
             "clientAlgoId": coid,
         }
+        if quantity is None:
+            params["closePosition"] = "true"
+        else:
+            # Floor to stepSize, then refuse rather than send a zero: a
+            # quantity that rounds away is an input that cannot support the
+            # order, and a stop for 0 would "succeed" while protecting
+            # nothing. A clamp is not a guard.
+            qty = _sf.round_qty(symbol, float(quantity))
+            if qty <= 0:
+                raise ValueError(
+                    f"place_stop_loss: quantity {quantity!r} rounds to {qty} "
+                    f"at {symbol}'s stepSize — refusing to place a stop that "
+                    f"protects nothing"
+                )
+            params["quantity"] = _qty_str(qty)
+            params["reduceOnly"] = "true"
         return await self._submit_algo_order(
             params=params,
             phase="sl",

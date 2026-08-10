@@ -760,3 +760,108 @@ async def test_forget_clears_the_refused_bar_with_the_rest_of_the_state():
         placer_factory=lambda uid: placer, now_ts=_now_for(series),
     )
     assert out == "place_failed", "a forgotten position kept a stale refusal"
+
+
+# --------------------------------------------------------------------------- #
+# The order SHAPE, which is what made the handover impossible (#915)
+# --------------------------------------------------------------------------- #
+
+
+class CapturingPlacer(FakePlacer):
+    """Records the params the placer was asked for, not just that it was called.
+
+    The defect being guarded lives entirely in the request body: every count,
+    every ordering assertion and all 37 tests in this file passed while the
+    exchange refused every single order.
+    """
+
+    async def place_stop_loss(self, **kw: Any) -> Any:
+        self.placed.append(kw)
+        self.calls.append("place")
+        self._next_id += 1
+
+        class _R:
+            order_id = self._next_id
+
+        r = _R()
+        r.order_id = self._next_id
+        return r
+
+
+async def test_the_governor_stop_carries_a_quantity_not_close_position():
+    """GUARD — the whole feature turned on this one argument.
+
+    Binance answers a second closePosition stop in the same direction with
+    -4130, and by the naked-position invariant a governed position always has
+    one resting. So a governor stop placed without a quantity can never be
+    accepted, and `handovers` stays 0 forever while every counter reads healthy.
+    """
+    series = _rising_series()
+    pos = _pos()
+    placer = CapturingPlacer()
+    out = await tg.step_position(
+        pos, FakeStore(series), timeframe="15m",
+        placer_factory=lambda uid: placer, now_ts=_now_for(series),
+    )
+    assert out == "handover"
+    assert placer.placed, "nothing was placed"
+    kw = placer.placed[0]
+    assert kw.get("quantity") is not None, (
+        "governor stop sent without a quantity — Binance will refuse it with "
+        "-4130 while the designed SL is resting"
+    )
+    assert kw["quantity"] == pos.total_qty
+
+
+async def test_the_quantity_is_what_is_left_not_the_entry_size():
+    """Driven at ``_park`` rather than through ``step_position``, deliberately.
+
+    ``ladder_untouched`` refuses any position with ``closed_qty > 0``, so today
+    a governed position's remaining size always equals its entry size and this
+    branch cannot be reached from the sweep. That makes the sizing defence in
+    depth rather than load-bearing — and it is still the right number to send,
+    because the failure it prevents is silent: too large is capped by the
+    exchange, too small leaves a residual naked with a stop that looks placed.
+    """
+    pos = _pos(total_qty=1.0, closed_qty=0.4)
+    placer = CapturingPlacer()
+    ok = await tg._park(pos, 98.0, placer=placer, handover=True)
+    assert ok is True
+    assert placer.placed[0]["quantity"] == pytest.approx(0.6)
+
+
+async def test_a_position_with_nothing_left_is_refused_not_sent_as_zero():
+    """A stop for 0 would be accepted and protect nothing — the one failure
+    this module exists to make impossible."""
+    pos = _pos(total_qty=1.0, closed_qty=1.0)
+    placer = CapturingPlacer()
+    ok = await tg._park(pos, 98.0, placer=placer, handover=True)
+    assert ok is False
+    assert placer.placed == [], "sent an order for nothing"
+    assert tg.health()["refusals"].get(tg.REFUSE_NO_QUANTITY) == 1
+    assert pos.sl_order_id == 501, "gave up the designed stop over an empty book"
+
+
+async def test_remaining_qty_mirrors_the_fsm_arithmetic():
+    assert tg.remaining_qty(_pos(total_qty=1.0, closed_qty=0.25)) == pytest.approx(0.75)
+    assert tg.remaining_qty(_pos(total_qty=1.0, closed_qty=2.0)) == 0.0
+    assert tg.remaining_qty(_pos(total_qty=0.0, closed_qty=0.0)) == 0.0
+
+
+def test_the_placer_sends_reduce_only_and_never_both_shapes():
+    """Drive the REAL parameter builder rather than asserting my own mock.
+
+    closePosition and reduceOnly+quantity are mutually exclusive on Binance;
+    sending both is a rejection, and sending neither is an unbounded order.
+    """
+    import inspect
+
+    from src.execution import order_placer as op
+
+    src = inspect.getsource(op.OrderPlacer.place_stop_loss)
+    assert "quantity" in inspect.signature(op.OrderPlacer.place_stop_loss).parameters
+    # The two shapes are branches of one if/else, so neither can be sent with
+    # the other — pinned on the source because the alternative is a live order.
+    assert 'params["closePosition"] = "true"' in src
+    assert 'params["reduceOnly"] = "true"' in src
+    assert src.index("if quantity is None:") < src.index('params["closePosition"]')

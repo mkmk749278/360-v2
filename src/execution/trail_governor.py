@@ -33,14 +33,34 @@ governor re-parks on **every closed bar**, so the same ordering would open a
 naked window every bar of every governed trade — dozens per position — against
 a hard limit that has no exceptions.
 
-It is avoidable, and the reason is a detail of how the stop is placed:
-``place_stop_loss`` submits a CONDITIONAL algo order with
-``closePosition=true``.  Such an order carries **no quantity** — it closes
-whatever the position is when it triggers — so two of them resting at once
-cannot double-fill or flip the position: the nearer level triggers, the
-position goes to zero, and the second is left with nothing to close.  Two
-stops is an over-protected state, not a dangerous one.  So the order of
-operations is inverted:
+It is avoidable, and the reason is a detail of how the stop is placed: two
+protective orders may rest at once, so the new one can go up before the old one
+comes down.
+
+**The first cut got the mechanism of that right and the vendor wrong, and it
+cost the whole feature.**  It placed the governor's stop with
+``closePosition=true``, reasoning that such an order carries no quantity, so two
+of them cannot double-fill: the nearer level triggers, the position goes to
+zero, the other finds nothing to close.  Every word of that is true about
+*fills* and silent about *acceptance* — Binance answers a second
+``closePosition`` order in the same direction with
+
+    -4130 "An open stop or take profit order with GTE and closePosition in the
+           direction is existing."
+
+and by the naked-position invariant a governed position **always** has a stop
+resting, so the first step of every handover collided with the protection it
+was replacing.  `handovers` sat at 0 with `place_failed` climbing, for every
+position, from the day this shipped (owner-caught 2026-08-10, #913/#915).
+
+The fix keeps the ordering and changes the order *shape*: the governor's stop is
+``reduceOnly`` with the position's own quantity.  That is what the entire TP
+ladder already uses, and those coexist with the ``closePosition`` SL on every
+live position — the evidence is the running system, not the documentation.  It
+is equally safe on a double trigger, because ``reduceOnly`` cannot open or flip
+a position and Binance auto-cancels reduce-only orders once the position closes.
+
+So the order of operations is:
 
 1. compute the level for the bar now forming;
 2. **place** the new stop (new sequence in the coid — Binance rejects a
@@ -121,6 +141,11 @@ REFUSE_DISABLED = "disabled"
 #: indistinguishable while the governor sat permanently inert reporting a feed
 #: fault that was not happening.
 REFUSE_BAD_TF = "bad_timeframe"
+#: Nothing left to protect — the position's remaining size is zero or unreadable.
+#: Named apart from every placement failure because no order was attempted and
+#: the exchange was never asked: this is our own book saying there is nothing to
+#: park a stop over.
+REFUSE_NO_QUANTITY = "no_quantity"
 
 #: How far behind the clock the newest closed bar may sit before the governor
 #: refuses to park a level off it, in multiples of the bar width.  Two bars of
@@ -461,6 +486,20 @@ async def _park(
     """
     seq = int(getattr(position, "trail_stop_seq", 0) or 0) + 1
     rounded = _sf.round_price(position.symbol, level)
+    qty = remaining_qty(position)
+    if qty <= 0:
+        # Nothing left to protect. Refused rather than sent as a zero — a stop
+        # for no quantity would be accepted and protect nothing, which is the
+        # one failure this module exists to make impossible.
+        _refuse(REFUSE_NO_QUANTITY)
+        log.warning(
+            "trail_governor: no remaining quantity uid={} signal_id={} "
+            "total={} closed={} — not parking",
+            position.firebase_uid, position.signal_id,
+            getattr(position, "total_qty", None),
+            getattr(position, "closed_qty", None),
+        )
+        return False
     try:
         placed = await placer.place_stop_loss(
             signal_id=position.signal_id,
@@ -468,6 +507,10 @@ async def _park(
             direction=position.side,
             stop_price=rounded,
             coid_override=_position_state.coid_trail(position.signal_id, seq),
+            # reduceOnly + size, NOT closePosition — see the module docstring
+            # and #915: Binance refuses a second closePosition stop in the same
+            # direction, which made the handover impossible.
+            quantity=qty,
         )
     except _order_placer.OrderPlacementError as exc:
         _count("place_failed")
@@ -523,6 +566,21 @@ async def _park(
                 attr, oid, position.firebase_uid, position.signal_id, exc,
             )
     return True
+
+
+def remaining_qty(position: Any) -> float:
+    """How much of the position a stop must still cover.
+
+    The governor only adopts an untouched ladder, so at handover this is the
+    whole entry size — but it is re-derived on **every** re-park rather than
+    cached, because a stop sized from a stale number is the one way a
+    ``reduceOnly`` order can under-protect: too large is harmless (the exchange
+    caps a reduce-only fill at the position), too small silently leaves a
+    residual naked.  Mirrors ``position_fsm``'s own arithmetic.
+    """
+    total = float(getattr(position, "total_qty", 0.0) or 0.0)
+    closed = float(getattr(position, "closed_qty", 0.0) or 0.0)
+    return max(0.0, total - closed)
 
 
 def _params_for(mechanism: str) -> Dict[str, float]:
