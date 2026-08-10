@@ -84,6 +84,7 @@ class SnapshotWriter:
         await self._write_engine_state()
         await self._write_positions_diag()
         await self._write_data_intake()
+        await self._write_trail_governor()
         await self._write_router_delivery()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             await self._write_activity()
@@ -134,6 +135,32 @@ class SnapshotWriter:
     def _build_positions_diag(self) -> dict:
         from src.api.snapshot import build_positions_diag
         return build_positions_diag(self._engine).model_dump(mode="json")
+
+    async def _write_trail_governor(self) -> None:
+        """Publish the live trail-governor X-ray computed engine-side.
+
+        Same reason as the two above, and this one is the sharpest case: the
+        governor's counters and the open-position index are **in-process state
+        of the engine container**. The API container's facade cannot see
+        either, so a handler that built this locally would report
+        ``index_cold`` and zeroed counters forever while the governor ran
+        perfectly here — a panel describing the wrong process, on the one
+        mechanism in the system that places real orders.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(
+                self._executor, self._build_trail_governor
+            )
+            await self._set(
+                _store.KEY_TRAIL_GOVERNOR, data, _store.TTL_TRAIL_GOVERNOR
+            )
+        except Exception:
+            log.exception("snapshot_writer: failed to write trail_governor")
+
+    def _build_trail_governor(self) -> dict:
+        from src.execution.trail_governor import build_diag
+        return build_diag()
 
     async def _write_data_intake(self) -> None:
         """Publish the data-intake X-ray computed engine-side.

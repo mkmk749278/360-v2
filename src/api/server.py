@@ -1849,74 +1849,30 @@ def build_app(
           money behind it, and the row must be able to say so;
         * why the rest are **not** governed, named rather than pooled.
 
-        The refusal mix is the point.  A governor that governs nothing looks
-        exactly like a quiet book unless it can say which nothing it is —
-        disabled, nobody opted in, a stale series, a ladder already touched.
+        Isolated mode: the engine container computes this (the position index
+        and the governor's counters are in-process state the facade cannot
+        see) and publishes it.  Consult the published snapshot first, fall
+        back to a live build otherwise — the same shape as
+        ``/internal/diag/positions`` and ``/internal/diag/data-intake``.
+
+        The first cut built it live unconditionally, so in isolated mode it
+        reported ``index_cold`` and zeroed counters forever while the governor
+        ran perfectly in the other container — a panel describing the API
+        process rather than the engine.
         """
-        out: dict = {"schema": 1}
         try:
-            from src import runtime_tunables as _rt
-            from src.execution import position_state as _ps
-            from src.execution import trail_governor as _tg
-
-            try:
-                enabled = bool(_rt.get("trail_governor_enabled"))
-                timeframe = str(_rt.get("trail_governor_timeframe"))
-            except Exception:
-                from config import TRAIL_GOVERNOR_ENABLED, TRAIL_GOVERNOR_TIMEFRAME
-
-                enabled, timeframe = TRAIL_GOVERNOR_ENABLED, TRAIL_GOVERNOR_TIMEFRAME
-            out["enabled"] = enabled
-            out["timeframe"] = timeframe
-            out["health"] = _tg.health()
-
-            positions = _ps.index_open_positions()
-            if positions is None:
-                # Distinct from "no open positions" — see index_open_positions.
-                out["index_cold"] = True
-                out["rows"] = []
-                out["open_total"] = None
-                return out
-            out["index_cold"] = False
-            out["open_total"] = len(positions)
-            now_ms = time.time() * 1000.0
-            rows = []
-            for p in positions:
-                mech = str(getattr(p, "exit_mechanism", "") or "").lower()
-                if mech not in _tg.GOVERNABLE:
-                    continue
-                last_bar = float(getattr(p, "trail_last_bar_ms", 0.0) or 0.0)
-                rows.append({
-                    "signal_id": p.signal_id,
-                    "symbol": p.symbol,
-                    "side": p.side,
-                    "mechanism": mech,
-                    "governing": bool(getattr(p, "trail_governing", False)),
-                    "entry": float(
-                        p.entry_price_filled or p.entry_price_target or 0.0
-                    ),
-                    "designed_sl": float(getattr(p, "sl_price", 0.0) or 0.0),
-                    "parked_stop": float(getattr(p, "trail_stop_price", 0.0) or 0.0),
-                    "stop_order_id": int(getattr(p, "trail_stop_order_id", 0) or 0),
-                    "seq": int(getattr(p, "trail_stop_seq", 0) or 0),
-                    "last_bar_ms": last_bar or None,
-                    # Freshness is graded on the ENGINE's own stamp, never on
-                    # the reader's clock — a surface may not grade its own
-                    # liveness on a clock it supplies (#108).
-                    "bar_age_sec": (
-                        (now_ms - last_bar) / 1000.0 if last_bar > 0 else None
-                    ),
-                    "ladder_untouched": _tg.ladder_untouched(p),
-                })
-            out["rows"] = rows
-            out["governed"] = len(rows)
-            return out
+            published = getattr(engine, "published_trail_governor", None)
+            if callable(published):
+                raw = published()
+                if raw is not None:
+                    return raw
+            from src.execution.trail_governor import build_diag
+            return build_diag()
         except Exception as exc:  # noqa: BLE001
             log.exception("/internal/diag/trail-governor failed")
             # Carries its own cause: "cannot report" and "nothing governed"
             # have different fixes and must not render identically.
-            out["error"] = f"{type(exc).__name__}: {exc}"
-            return out
+            return {"schema": 1, "error": f"{type(exc).__name__}: {exc}"}
 
     @app.get(
         "/internal/diag/data-intake",

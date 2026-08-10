@@ -575,3 +575,86 @@ def _default_placer_factory(firebase_uid: str) -> Any:
     from src.execution import position_fsm as _fsm
 
     return _fsm._default_order_placer_factory(firebase_uid)
+
+
+# --------------------------------------------------------------------------- #
+# The X-ray — built HERE, in the engine container, for the same reason the
+# positions and data-intake diags are.
+# --------------------------------------------------------------------------- #
+
+
+def build_diag() -> Dict[str, Any]:
+    """What the governor is doing to real orders, as a plain dict.
+
+    **This must run in the engine container.** The position index and this
+    module's counters are in-process state; in isolated mode the API
+    container's ``RedisEngineFacade`` cannot see either, so an endpoint that
+    built this locally would report ``index_cold`` and zeroed counters forever
+    — a panel describing the API process rather than the engine.
+
+    Caught on the deploy that shipped it (2026-08-10): the page rendered
+    INDEX COLD in production while the governor itself was running fine, which
+    is the "dark work must be observable" failure with the mechanism working
+    and only the surface broken. Both sibling diags already carried the
+    publish-then-read pattern; this one did not.
+    """
+    out: Dict[str, Any] = {"schema": 1}
+    try:
+        from config import TRAIL_GOVERNOR_ENABLED, TRAIL_GOVERNOR_TIMEFRAME
+
+        enabled, timeframe = TRAIL_GOVERNOR_ENABLED, TRAIL_GOVERNOR_TIMEFRAME
+        try:
+            from src import runtime_tunables as _rt
+
+            enabled = bool(_rt.get("trail_governor_enabled"))
+            timeframe = str(_rt.get("trail_governor_timeframe"))
+        except Exception as exc:
+            fail_open.record("trail_governor.build_diag:tunables", exc)
+        out["enabled"] = enabled
+        out["timeframe"] = timeframe
+        out["health"] = health()
+
+        positions = _position_state.index_open_positions()
+        if positions is None:
+            out["index_cold"] = True
+            out["rows"] = []
+            out["open_total"] = None
+            return out
+        out["index_cold"] = False
+        out["open_total"] = len(positions)
+        now_ms = _now() * 1000.0
+        rows: List[Dict[str, Any]] = []
+        for p in positions:
+            mech = str(getattr(p, "exit_mechanism", "") or "").lower()
+            if mech not in GOVERNABLE:
+                continue
+            last_bar = float(getattr(p, "trail_last_bar_ms", 0.0) or 0.0)
+            rows.append({
+                "signal_id": p.signal_id,
+                "symbol": p.symbol,
+                "side": p.side,
+                "mechanism": mech,
+                "governing": bool(getattr(p, "trail_governing", False)),
+                "entry": float(
+                    p.entry_price_filled or p.entry_price_target or 0.0
+                ),
+                "designed_sl": float(getattr(p, "sl_price", 0.0) or 0.0),
+                "parked_stop": float(getattr(p, "trail_stop_price", 0.0) or 0.0),
+                "stop_order_id": int(getattr(p, "trail_stop_order_id", 0) or 0),
+                "seq": int(getattr(p, "trail_stop_seq", 0) or 0),
+                "last_bar_ms": last_bar or None,
+                # Graded on the bar the governor consumed, stamped here in the
+                # engine — a surface may not grade its own liveness on a clock
+                # it supplies (#108).
+                "bar_age_sec": (
+                    (now_ms - last_bar) / 1000.0 if last_bar > 0 else None
+                ),
+                "ladder_untouched": ladder_untouched(p),
+            })
+        out["rows"] = rows
+        out["governed"] = len(rows)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.exception("trail_governor.build_diag failed")
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
