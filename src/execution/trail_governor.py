@@ -263,6 +263,13 @@ def _blank_health() -> Dict[str, Any]:
         #: ``exits``/``stops_filled`` beside it as the unbounded totals.
         "outcomes": [],
         "stops_filled": 0,
+        #: One exit seen by two observers — the FSM's user-data-stream fill and
+        #: the sweep's `-2022` "already flat" branch. The ledger deduplicates
+        #: them; this counts how often it had to, because a rising number means
+        #: the two are racing more often than expected. Initialised here so the
+        #: key exists before the first race: a counter that appears only once it
+        #: is non-zero cannot be read as "zero so far".
+        "duplicate_fills": 0,
         "refusals": {},
         #: The last few rejections, with the exchange's own words.  A bare
         #: counter here is "blank needs a cause before it gets a caption" on
@@ -397,13 +404,6 @@ def record_outcome(
         "parked_stop": float(getattr(position, "trail_stop_price", 0.0) or 0.0),
         "seq": int(getattr(position, "trail_stop_seq", 0) or 0),
     }
-    with _health_lock:
-        if exit_kind == "trail_stop":
-            _health["stops_filled"] = int(_health.get("stops_filled", 0)) + 1
-        ring = _health.setdefault("outcomes", [])
-        ring.append(entry)
-        del ring[:-OUTCOME_RING]
-
     # ...and to the ledger that survives a deploy.  The ring above is in memory,
     # capped at 40, and destroyed on every restart — which on a mechanism that
     # re-deploys several times a session makes "history" a list of the last few
@@ -414,16 +414,50 @@ def record_outcome(
     # Written HERE rather than by a later pass, at the one moment the fill is
     # known — a value derivable at stamp time but computed later does not merely
     # arrive late, it silently shrinks every population that reads it (#802).
+    #
+    # **The counter is incremented from the ledger's answer, not beside it.**
+    # Observed live 2026-08-11, minutes after #917 deployed: `stops_filled: 2`
+    # over a record holding **one** row. Both were right — the FSM books a
+    # trail fill from the user-data stream and the sweep's `-2022` branch books
+    # it when it finds the book already flat, so the ledger deduplicated one
+    # exit seen by two observers exactly as designed, while a counter sitting
+    # outside that decision counted the observations. Two numbers for one thing
+    # on one page, and the reader has no way to tell which is the book.
+    #
+    # So `add()` decides: accepted → a distinct exit; rejected → a duplicate,
+    # counted under its own name because a rising duplicate count means the two
+    # observers are racing more often than expected, which is information
+    # rather than noise.
+    accepted = False
     try:
         from src import trail_history as _th
 
-        _th.record(dict(entry, uid=getattr(position, "firebase_uid", "")))
+        accepted = _th.record(
+            dict(entry, uid=getattr(position, "firebase_uid", ""))
+        )
     except Exception as exc:  # noqa: BLE001
         # Fail-open: losing the history row must never cost the exit that
         # produced it.  Counted, because a measurement that stops writing while
         # the thing it measures keeps working is the seam this repo keeps
         # paying for.
         fail_open.record("trail_governor.record_outcome:history", exc)
+        # The write failed, so nothing is in the record — but the exit DID
+        # happen. Counted as accepted so the counter never under-reports a real
+        # fill; the page reconciles the gap against the ledger's own row count
+        # and says which of "not yet flushed" and "could not write" it is.
+        accepted = True
+
+    with _health_lock:
+        if not accepted:
+            _health["duplicate_fills"] = int(
+                _health.get("duplicate_fills", 0)
+            ) + 1
+        elif exit_kind == "trail_stop":
+            _health["stops_filled"] = int(_health.get("stops_filled", 0)) + 1
+        if accepted:
+            ring = _health.setdefault("outcomes", [])
+            ring.append(entry)
+            del ring[:-OUTCOME_RING]
 
 
 def health() -> Dict[str, Any]:

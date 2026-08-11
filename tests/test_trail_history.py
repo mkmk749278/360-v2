@@ -309,3 +309,72 @@ def test_the_diag_publishes_the_record_with_its_denominator():
     assert diag["history_stats"]["evicted"] == 1
     # Newest FIRST for a reader; the ledger's own order is newest last.
     assert [r["signal_id"] for r in diag["history"]] == ["C", "B"]
+
+
+def test_the_counter_agrees_with_the_record_by_construction():
+    """GUARD, from what the deployed page showed.
+
+    Minutes after #917 went live the counters read `stops_filled: 2` over a
+    record holding **one** row. Both were right: the FSM books a trail fill
+    from the user-data stream and the sweep's `-2022` branch books it when it
+    finds the book already flat, so the ledger deduplicated one exit seen by two
+    observers exactly as designed — while a counter sitting outside that
+    decision counted the observations. Two numbers for one thing on one page.
+
+    The counter now takes the ledger's answer, so a duplicate lands in
+    `duplicate_fills` and can never inflate the exit count.
+    """
+    tg.reset_health_for_test()
+    pos = ps.Position(
+        signal_id="SIGD", firebase_uid="UIDD", symbol="BTCUSDT", side="LONG",
+        state=ps.PositionState.OPEN, entry_price_target=100.0,
+        entry_price_filled=100.0, sl_price=97.0, tp1_price=103.0,
+        tp2_price=106.0, tp3_price=110.0, total_qty=1.0, tp1_qty=0.3,
+        tp2_qty=0.3, tp3_qty=0.4, exit_mechanism="sar", trail_stop_seq=1,
+    )
+    tg.record_outcome(pos, exit_price=98.0, exit_kind=th.FILL_TRAIL_STOP)
+    tg.record_outcome(pos, exit_price=98.0, exit_kind=th.FILL_TRAIL_STOP)
+
+    health = tg.health()
+    assert len(th.get_ledger().rows()) == 1
+    assert health["stops_filled"] == 1
+    assert health["duplicate_fills"] == 1
+    # ...and the in-memory ring the page used to read agrees too, rather than
+    # holding a second copy of one trade.
+    assert len(health["outcomes"]) == 1
+
+
+def test_duplicate_fills_exists_before_the_first_race():
+    """A counter that appears only once it is non-zero cannot be read as
+    "zero so far" — the reader cannot tell it from a key nobody writes."""
+    tg.reset_health_for_test()
+    assert tg.health()["duplicate_fills"] == 0
+
+
+def test_a_failed_history_write_still_counts_the_exit():
+    """The write failed; the exit still happened. Counted as accepted so the
+    counter never under-reports a real fill — the page reconciles the gap
+    against the ledger's own row count and names which cause it is."""
+    tg.reset_health_for_test()
+
+    def _boom(row):
+        raise RuntimeError("disk gone")
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(th, "record", _boom)
+    try:
+        pos = ps.Position(
+            signal_id="SIGE", firebase_uid="UIDE", symbol="BTCUSDT",
+            side="LONG", state=ps.PositionState.OPEN,
+            entry_price_target=100.0, entry_price_filled=100.0,
+            sl_price=97.0, tp1_price=103.0, tp2_price=106.0, tp3_price=110.0,
+            total_qty=1.0, tp1_qty=0.3, tp2_qty=0.3, tp3_qty=0.4,
+            exit_mechanism="sar",
+        )
+        tg.record_outcome(pos, exit_price=98.0, exit_kind=th.FILL_TRAIL_STOP)
+    finally:
+        mp.undo()
+    health = tg.health()
+    assert health["stops_filled"] == 1
+    assert health["duplicate_fills"] == 0
