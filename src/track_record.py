@@ -537,8 +537,11 @@ def build_signal_list(
     # opening a day wants the last thing that happened at the top.
     out["matched"] = len(rows)
     out["truncated"] = len(rows) > limit
-    out["items"] = [
-        {
+    items = []
+    for r in rows[:limit]:
+        gross = _f(r.get("pnl_pct"))
+        net = None if gross is None else gross - fee_pct
+        items.append({
             "signal_id": r.get("signal_id", ""),
             "symbol": r.get("symbol", ""),
             "direction": r.get("direction", ""),
@@ -549,17 +552,9 @@ def build_signal_list(
             "closed_at": (
                 r["closed_at"].isoformat() if r.get("closed_at") else ""
             ),
-            "pnl_pct": _f(r.get("pnl_pct")),
-            "net_pct": (
-                None if _f(r.get("pnl_pct")) is None
-                else _f(r.get("pnl_pct")) - fee_pct
-            ),
-            "net_usd": money(
-                None if _f(r.get("pnl_pct")) is None
-                else _f(r.get("pnl_pct")) - fee_pct,
-                amount,
-            ),
-        }
-        for r in rows[:limit]
-    ]
+            "pnl_pct": gross,
+            "net_pct": net,
+            "net_usd": money(net, amount),
+        })
+    out["items"] = items
     return out
