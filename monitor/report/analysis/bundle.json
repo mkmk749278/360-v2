@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-10T02:46:36.308440+00:00",
-  "generated_at_ts": 1786329996.3084397,
+  "generated_at": "2026-08-11T02:40:30.558193+00:00",
+  "generated_at_ts": 1786416030.5581932,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "b59600f9785d6b6ae8173da95a237fe200efe73a",
+  "git_sha": "c39c59d894a356ccd3f8c1c0dd9d7c1efa4ece05",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 9806,
-    "strategy_matrix_scored_cells": 3803,
+    "strategy_matrix_cells": 10071,
+    "strategy_matrix_scored_cells": 3898,
     "performance_setups": 14,
     "suppression_gates": 0
   },
@@ -37,6 +37,13 @@
         "verdict": "STRONG"
       },
       {
+        "strategy": "RANGE_FADE",
+        "context_key": "LONDON/MARKUP/NORMAL/BTC_NEUTRAL/MIDCAP",
+        "edge_r": 3.194451660054504,
+        "n": 19,
+        "verdict": "STRONG"
+      },
+      {
         "strategy": "VOLUME_SURGE_BREAKOUT",
         "context_key": "NY/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL/MIDCAP",
         "edge_r": 2.6778677738626224,
@@ -48,13 +55,6 @@
         "context_key": "NY/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL",
         "edge_r": 2.0382737144134846,
         "n": 50,
-        "verdict": "STRONG"
-      },
-      {
-        "strategy": "VOLUME_SURGE_BREAKOUT",
-        "context_key": "LONDON/MARKUP/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": 1.8668460619175877,
-        "n": 16,
         "verdict": "STRONG"
       }
     ],
