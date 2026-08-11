@@ -194,3 +194,99 @@ class TestMissingRecord:
         assert got["unavailable_reason"] == "missing"
         assert got["items"] == []
         tr.reset_cache()
+
+
+class TestSignalList:
+    """The drill-down: which signals made a day what it was.
+
+    A headline nobody can open is a claim rather than a record. The property
+    that matters is that the list under a bar IS the bar — same population,
+    same close-time filter, same fee — because two surfaces disagreeing about
+    one day is exactly the seam this system keeps paying for.
+    """
+
+    def test_a_day_filter_selects_the_same_rows_the_bucket_counted(self, client):
+        record = client.get("/api/track-record?days=30").json()
+        for day in record["items"]:
+            listed = client.get(
+                f"/api/track-record/signals?date={day['date']}"
+            ).json()
+            assert listed["matched"] == day["n"], day["date"]
+
+    def test_the_window_list_matches_the_window_summary(self, client):
+        record = client.get("/api/track-record?days=30").json()
+        listed = client.get("/api/track-record/signals?days=30").json()
+        assert listed["matched"] == record["summary"]["n"]
+
+    def test_rows_carry_what_a_reader_needs_to_recognise_the_trade(self, client):
+        listed = client.get("/api/track-record/signals?days=30").json()
+        row = listed["items"][0]
+        for key in ("signal_id", "symbol", "direction", "setup", "outcome",
+                    "entry", "closed_at", "pnl_pct", "net_pct", "net_usd"):
+            assert key in row, key
+
+    def test_newest_first(self, client):
+        listed = client.get("/api/track-record/signals?days=30").json()
+        stamps = [r["closed_at"] for r in listed["items"]]
+        assert stamps == sorted(stamps, reverse=True)
+
+    def test_the_fee_is_charged_here_too(self, client):
+        listed = client.get("/api/track-record/signals?days=30").json()
+        row = next(r for r in listed["items"] if r["pnl_pct"] is not None)
+        assert row["net_pct"] == pytest.approx(
+            row["pnl_pct"] - listed["fee_pct"]
+        )
+
+    def test_an_unreadable_outcome_is_listed_with_null_money(self, tmp_path,
+                                                             monkeypatch):
+        """Included, not dropped.
+
+        It is part of what closed that day, and omitting it would make the
+        list disagree with the count above it. The shortfall is named on the
+        summary instead.
+        """
+        now = datetime.now(tz=timezone.utc)
+        path = tmp_path / "signal_performance.json"
+        path.write_text(json.dumps([
+            {"symbol": "A", "direction": "LONG", "entry": 1.0, "pnl_pct": None,
+             "terminal_outcome_timestamp": now.timestamp()},
+        ]), encoding="utf-8")
+        tr.reset_cache()
+        monkeypatch.setattr(tr, "DEFAULT_RECORD_PATH", str(path))
+        app = build_app(_StubEngine(), jwt_secret=_TEST_SECRET, allow_static=False)
+        listed = TestClient(app).get("/api/track-record/signals").json()
+        assert listed["matched"] == 1
+        assert listed["items"][0]["pnl_pct"] is None
+        assert listed["items"][0]["net_usd"] is None
+        tr.reset_cache()
+
+    def test_the_cap_is_applied_after_filtering_and_says_when_it_bit(
+        self, tmp_path, monkeypatch
+    ):
+        now = datetime.now(tz=timezone.utc)
+        path = tmp_path / "signal_performance.json"
+        path.write_text(json.dumps([
+            {"symbol": f"S{i}", "direction": "LONG", "entry": 1.0,
+             "pnl_pct": 1.0,
+             "terminal_outcome_timestamp": (now - timedelta(minutes=i)).timestamp()}
+            for i in range(20)
+        ]), encoding="utf-8")
+        tr.reset_cache()
+        monkeypatch.setattr(tr, "DEFAULT_RECORD_PATH", str(path))
+        app = build_app(_StubEngine(), jwt_secret=_TEST_SECRET, allow_static=False)
+        listed = TestClient(app).get("/api/track-record/signals?limit=5").json()
+        # `matched` reports the true population; only the render is capped.
+        assert listed["matched"] == 20
+        assert listed["truncated"] is True
+        assert len(listed["items"]) == 5
+        tr.reset_cache()
+
+    def test_off_returns_an_empty_list_with_a_named_reason(self, client,
+                                                           monkeypatch):
+        from src import runtime_tunables as rt
+
+        monkeypatch.setattr(rt, "get", lambda key: False)
+        got = client.get("/api/track-record/signals").json()
+        assert got["enabled"] is False
+        assert got["unavailable_reason"] == "disabled"
+        assert got["items"] == []

@@ -207,9 +207,18 @@ def reduce_records(records: Any) -> List[Dict[str, Any]]:
             continue
         closed = close_time(rec)
         out.append({
+            # ``signal_id`` is the JOIN KEY across every measurement lane in
+            # this engine, and leaving it off an export once turned a one-line
+            # coverage check into a session of matching on rounded prices.
+            "signal_id": str(rec.get("signal_id", "")),
             "symbol": str(rec.get("symbol", "")),
             "direction": str(rec.get("direction", "")).upper(),
             "setup": str(rec.get("setup_class") or "UNKNOWN"),
+            # The regime at ENTRY. Knowable only at entry, so records closed
+            # before the engine stamped it read UNPLACED rather than being
+            # handed a guess — there is no honest backfill.
+            "regime": str(rec.get("entry_regime") or "").strip() or "UNPLACED",
+            "outcome": str(rec.get("outcome_label") or ""),
             "entry": rec.get("entry"),
             "pnl_pct": rec.get("pnl_pct"),
             "closed_at": closed,
@@ -451,3 +460,106 @@ def build_track_record(
     payload["summary"] = summarize(rows, amount=amount, fee_pct=fee_pct)
     payload["items"] = bucket_days(rows, amount=amount, fee_pct=fee_pct, now=now)
     return payload
+
+
+#: A render bound on the per-signal list, applied AFTER filtering, never inside
+#: a reducer. Truncating before a filter starves the rarest population hardest
+#: — ops learned that when "delivered to users" silently meant "delivered,
+#: within the newest 300" of a 2,000-row ledger. The response says when it bit.
+SIGNALS_LIMIT = 200
+
+
+def build_signal_list(
+    *,
+    days: int = 30,
+    date: str = "",
+    amount: float = DEFAULT_AMOUNT_USDT,
+    fee_pct: float = DEFAULT_FEE_PCT,
+    limit: int = SIGNALS_LIMIT,
+    path: Optional[str] = None,
+    now: Optional[datetime] = None,
+    enabled: bool = True,
+) -> Dict[str, Any]:
+    """The individual closed signals behind the daily buckets.
+
+    This is the drill-down: a reader who sees a red day should be able to ask
+    *which signals* made it red, and a headline nobody can open is a claim
+    rather than a record.
+
+    ``date`` (``YYYY-MM-DD``, UTC) narrows to one day; empty means the whole
+    ``days`` window. The day filter is applied to the **close** time, exactly as
+    the buckets are, so the list under a bar is the bar.
+
+    Rows with no readable ``pnl_pct`` are **included** and carry ``null`` money.
+    They are part of what closed that day, and omitting them would make the
+    list disagree with the count above it — the shortfall is named on the
+    summary rather than hidden by dropping rows.
+    """
+    now = now or datetime.now(tz=timezone.utc)
+    days = max(MIN_DAYS, min(int(days), MAX_DAYS))
+    amount = max(0.0, float(amount))
+    fee_pct = max(0.0, float(fee_pct))
+    limit = max(1, min(int(limit), SIGNALS_LIMIT))
+
+    out: Dict[str, Any] = {
+        "enabled": enabled,
+        "unavailable_reason": "" if enabled else "disabled",
+        "days": days,
+        "date": date,
+        "amount_usdt": amount,
+        "fee_pct": fee_pct,
+        "matched": 0,
+        "truncated": False,
+        "items": [],
+    }
+    if not enabled:
+        return out
+
+    all_rows, error = load_rows(path)
+    if error:
+        out["unavailable_reason"] = error
+        return out
+
+    if date:
+        rows = [
+            r for r in all_rows
+            if r.get("closed_at") is not None
+            and r["closed_at"].strftime("%Y-%m-%d") == date
+        ]
+    else:
+        start = floor_day(now - timedelta(days=days))
+        rows = [
+            r for r in all_rows
+            if r.get("closed_at") is not None and r["closed_at"] >= start
+        ]
+
+    # Newest first — ``reduce_records`` already sorts that way, and a reader
+    # opening a day wants the last thing that happened at the top.
+    out["matched"] = len(rows)
+    out["truncated"] = len(rows) > limit
+    out["items"] = [
+        {
+            "signal_id": r.get("signal_id", ""),
+            "symbol": r.get("symbol", ""),
+            "direction": r.get("direction", ""),
+            "setup": r.get("setup", ""),
+            "regime": r.get("regime", ""),
+            "outcome": r.get("outcome", ""),
+            "entry": _f(r.get("entry")),
+            "closed_at": (
+                r["closed_at"].isoformat() if r.get("closed_at") else ""
+            ),
+            "pnl_pct": _f(r.get("pnl_pct")),
+            "net_pct": (
+                None if _f(r.get("pnl_pct")) is None
+                else _f(r.get("pnl_pct")) - fee_pct
+            ),
+            "net_usd": money(
+                None if _f(r.get("pnl_pct")) is None
+                else _f(r.get("pnl_pct")) - fee_pct,
+                amount,
+            ),
+        }
+        for r in rows[:limit]
+    ]
+    return out

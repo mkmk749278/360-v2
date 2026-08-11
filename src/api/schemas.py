@@ -475,6 +475,53 @@ class TrackRecordResponse(BaseModel):
     )
 
 
+class TrackRecordSignal(BaseModel):
+    """One closed signal behind the daily buckets — the drill-down row.
+
+    A headline nobody can open is a claim rather than a record, so a reader who
+    sees a red day can ask which signals made it red.
+
+    ``pnl_pct`` is null where the outcome could not be read. The row is still
+    listed: it is part of what closed that day, and dropping it would make the
+    list disagree with the count above it.
+    """
+
+    signal_id: str = ""
+    symbol: str = ""
+    direction: str = ""
+    setup: str = ""
+    regime: str = Field(
+        "", description="Regime at ENTRY. 'UNPLACED' where the engine had not "
+        "yet stamped it — knowable only at entry, so never backfilled."
+    )
+    outcome: str = Field("", description="Terminal label, e.g. TP1_HIT / SL_HIT")
+    entry: Optional[float] = None
+    closed_at: str = Field("", description="ISO-8601 UTC")
+    pnl_pct: Optional[float] = Field(None, description="Gross move")
+    net_pct: Optional[float] = Field(None, description="After the round trip")
+    net_usd: Optional[float] = Field(None, description="At amount_usdt")
+
+
+class TrackRecordSignalsResponse(BaseModel):
+    """The per-signal list for a window, or for one UTC day.
+
+    ``truncated`` says the render cap bit. The cap is applied **after**
+    filtering: truncating first starves the rarest population hardest, which is
+    how "delivered to users" once silently meant "delivered, within the newest
+    300" of a 2,000-row ledger.
+    """
+
+    enabled: bool = True
+    unavailable_reason: str = ""
+    days: int = 30
+    date: str = Field("", description="YYYY-MM-DD when narrowed to one day")
+    amount_usdt: float = 100.0
+    fee_pct: float = 0.07
+    matched: int = Field(0, description="Rows the filter selected, before the cap")
+    truncated: bool = False
+    items: List[TrackRecordSignal] = Field(default_factory=list)
+
+
 class AutoModeChangeRequest(BaseModel):
     mode: Literal["off", "paper", "live"]
 

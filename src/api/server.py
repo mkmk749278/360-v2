@@ -107,6 +107,7 @@ from .schemas import (
     OtpVerify,
     PnlHistoryResponse,
     TrackRecordResponse,  # noqa: F401 — response_model on /api/track-record
+    TrackRecordSignalsResponse,  # noqa: F401 — /api/track-record/signals
     PositionsDiagResponse,
     PositionsResponse,
     InvalidationSettings,
@@ -2222,6 +2223,54 @@ def build_app(
             "public, max-age=60, stale-while-revalidate=300"
         )
         return TrackRecordResponse(**payload)
+
+    @app.get(
+        "/api/track-record/signals",
+        response_model=TrackRecordSignalsResponse,
+        tags=["pulse"],
+    )
+    async def track_record_signals_get(
+        response: Response,
+        days: int = Query(30, ge=1, le=365),
+        date: str = Query(
+            "",
+            max_length=10,
+            description="YYYY-MM-DD (UTC) to narrow to a single day. Empty "
+            "means the whole `days` window.",
+        ),
+        limit: int = Query(200, ge=1, le=200),
+    ) -> TrackRecordSignalsResponse:
+        """The individual closed signals behind a day, or behind the window.
+
+        Same population, same close-time filter and same fee as
+        ``/api/track-record``, so the list under a bar IS the bar. Unauthenticated
+        for the same reason: this is the pooled delivered book, not an account.
+        """
+        from src import runtime_tunables as _rt
+        from src import track_record as _track_record
+        from config import (
+            TRACK_RECORD_DEFAULT_AMOUNT_USDT as _tr_amount,
+            TRACK_RECORD_DEFAULT_FEE_PCT as _tr_fee,
+            TRACK_RECORD_PUBLIC_ENABLED as _tr_enabled_default,
+        )
+
+        try:
+            enabled = bool(_rt.get("track_record_public_enabled"))
+        except Exception:  # noqa: BLE001 — a tunable read must never 500 a page
+            enabled = bool(_tr_enabled_default)
+
+        payload = _track_record.build_signal_list(
+            days=days,
+            date=date.strip(),
+            amount=float(_tr_amount),
+            fee_pct=float(_tr_fee),
+            limit=limit,
+            enabled=enabled,
+        )
+        response.headers["Cache-Control"] = (
+            "public, max-age=60, stale-while-revalidate=300"
+        )
+        return TrackRecordSignalsResponse(**payload)
 
     @app.post(
         "/api/auto-mode",
