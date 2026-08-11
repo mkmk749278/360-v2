@@ -4,6 +4,81 @@
 
 ---
 
+## 🟢 SESSION 121 2026-08-11 — a new subscriber can now read the record on day one
+
+Engine + ops + app, branch `claude/pnl-history-pulse-page-w9xtru`. Owner: *"we
+need to implement PnL history from track record in ops to Pulse page in app"*,
+with Binance's Futures PNL Analysis as the reference and *"don't exactly copy
+from Binance we need to maintain our unique nature"*; then *"look at Binance how
+actually implemented that interactive PnL card … detailed signals list in
+details and etc first analyse that"*.
+
+### The gap, seen rather than assumed
+
+Signed into the app as a fresh user (registered test number, local web build per
+`docs/AI_AGENT_APP_ACCESS.md`). The Pulse tab shows a regime bar, an upsell,
+**"Trading not enabled yet"**, and three recent signals. **No evidence the
+product works, anywhere** — because `paper_book_registry` starts empty at
+enrolment, and that is exactly the audience deciding whether to subscribe. Ops
+has reduced the recorded closed-signal book since 2026-07-28; the app had no
+route to it.
+
+### What shipped
+
+| Where | What |
+|---|---|
+| `src/track_record.py` | The reducer. Daily buckets + a per-signal list, cached on the record file's own mtime/size |
+| `GET /api/track-record` · `/signals` | Unauthenticated — the book is pooled and identical for every caller, and the reader it exists for has no trades |
+| `track_record_public_enabled` | Runtime tunable, default ON. Ops can pull a subscriber-facing claim without a redeploy |
+| app `track_record_card.dart` | Compact Pulse tile under the user's own P&L |
+| app `track_record_page.dart` | The drill-down: bars⇄calendar, tap-a-day, running total on its own axis, signals list |
+| ops `test_track_record_contract.py` | Byte-identical vector to the engine's, so the two cannot drift |
+
+**Not a money-path change** — no score, no dispatch, no exit — so dark-first does
+not apply. The tunable is a kill switch and the commit message says so rather
+than letting a later reader mistake it for dark-first.
+
+### Verified against the live book, not only against tests
+
+Running the new reducer over ops' own 30d per-trade export reproduces **407
+trades, 394 moves, +51.85 net USDT, +80.34 gross, 28.49 fees, 141W/266L**, best
++12.71 / worst −9.60 — every published headline exactly. Then driven in the real
+app: the card reads the same, and tapping 8 Aug reads **+$26.18 over 28 signals
+at 13W/15L**, matching the CSV row.
+
+### Three things worth keeping
+
+- **The headline is money at a stated size, and that is a safety call.** Summing
+  per-trade percentages at a fixed notional is arithmetically fine and reads as
+  something it is not: "+51.85%" over a month looks like an account return,
+  while the book needed ~400 USDT to hold its peak concurrent positions. A
+  reader cannot be expected to make that correction, and the figure flatters us
+  when they fail to.
+- **A day on which nothing closed reads `—`, never `0.00`.** For an exchange a
+  zero day is true. Here `0.00` asserts that signals closed and netted flat.
+  This is most of why the calendar earns its place beside the bars — the bar
+  chart omits such a day and cannot draw the difference between quiet and
+  missing.
+- **Two defects were found by LOOKING at the render, and neither was visible to
+  a test.** (1) The chart gave positive and negative values independent vertical
+  room, so a −$22.85 day drew about a third as tall as a +$26.18 day — every
+  number right, the chart saying the losses were small, which is the one
+  direction a performance surface must never be wrong in. (2) An edit script
+  aborted between rewriting the card's footer and adding its tap handler, so the
+  card said *"Tap for every day and every signal"* over a card that did nothing;
+  **29 passing tests saw none of it**, because the promise and the control are
+  two halves that only meet on screen. Both are pinned now.
+
+### Open for the owner
+
+- The card is **live on merge**. If the framing of a public performance claim
+  needs a second look before real subscribers see it, flip
+  `track_record_public_enabled` off in ops — no deploy needed.
+- The endpoint is unauthenticated by design (pooled book, no identity). Worth a
+  conscious nod: it is the one public read surface on the engine.
+
+---
+
 ## 🟢 SESSION 120 2026-08-10 — the handover was impossible by construction (-4130)
 
 Engine + ops `claude/trail-governor-sar-arming-029tfu` (second pass, after #913 /
