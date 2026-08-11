@@ -2252,6 +2252,28 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Structural-veto flush error (fail-open): {}", exc)
 
+            # ── Trail-governor exit history: the RECORD, not a measurement ──
+            # Every governed position that has actually closed, with which fill
+            # closed it and at what price. `handovers`/`replaced` say the
+            # machine is turning; this is what it earned.
+            #
+            # `measure_enabled()` here is unconditionally True, deliberately.
+            # Every other lane in this loop gates on its own measurement switch;
+            # gating this one on TRAIL_GOVERNOR_ENABLED would stop persisting
+            # exits the moment somebody switches the governor off — which is the
+            # first thing anyone does when a live mechanism misbehaves, i.e.
+            # exactly when the last few exits are the evidence. A record of real
+            # money has no off switch, and unlike every counterfactual here it
+            # cannot be re-derived by waiting for a fresh window.
+            try:
+                from src import trail_history as _th
+                if _th.measure_enabled():
+                    _th.get_ledger().flush(force=True)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Trail-history flush error (fail-open): {}", exc)
+
             # ── Stop-geometry A/B: classify the FIXED/ATR pair ledger ──────
             # Same forward measure, dedicated store; both arms land in the
             # edge matrix as X@FIXED / X@ATR shadow rows so ops + the truth

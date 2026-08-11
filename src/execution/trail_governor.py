@@ -233,6 +233,12 @@ PLACE_FAILURE_RING = 8
 #: ride beside it, so a reader can never mistake the sample for the population.
 OUTCOME_RING = 40
 
+#: How many history rows ride in the diag payload.  The full record lives in
+#: `trail_history`'s ledger on the data volume and ops reads it from there; this
+#: is the tail the panel shows without a second fetch.  Bounded because this
+#: payload is written into a snapshot every ~15s.
+HISTORY_IN_DIAG = 50
+
 
 def _blank_health() -> Dict[str, Any]:
     return {
@@ -397,6 +403,27 @@ def record_outcome(
         ring = _health.setdefault("outcomes", [])
         ring.append(entry)
         del ring[:-OUTCOME_RING]
+
+    # ...and to the ledger that survives a deploy.  The ring above is in memory,
+    # capped at 40, and destroyed on every restart — which on a mechanism that
+    # re-deploys several times a session makes "history" a list of the last few
+    # minutes.  These are real fills on a real account: unlike every
+    # counterfactual in this repo they cannot be re-derived by waiting, because
+    # the position is closed and the bars have moved on.
+    #
+    # Written HERE rather than by a later pass, at the one moment the fill is
+    # known — a value derivable at stamp time but computed later does not merely
+    # arrive late, it silently shrinks every population that reads it (#802).
+    try:
+        from src import trail_history as _th
+
+        _th.record(dict(entry, uid=getattr(position, "firebase_uid", "")))
+    except Exception as exc:  # noqa: BLE001
+        # Fail-open: losing the history row must never cost the exit that
+        # produced it.  Counted, because a measurement that stops writing while
+        # the thing it measures keeps working is the seam this repo keeps
+        # paying for.
+        fail_open.record("trail_governor.record_outcome:history", exc)
 
 
 def health() -> Dict[str, Any]:
@@ -1123,6 +1150,29 @@ def build_diag() -> Dict[str, Any]:
         out["enabled"] = enabled
         out["timeframe"] = timeframe
         out["health"] = health()
+
+        # The persisted record of closed governed positions.  Bounded HERE
+        # rather than shipping the whole file, because this payload rides a
+        # snapshot written every ~15s and an unbounded list on that clock is the
+        # hot-path shape the cost rules forbid — ops reads the full ledger off
+        # the data volume for its history tab and export.
+        #
+        # `history_stats` carries the eviction count beside it: a verdict
+        # computed on a capped buffer is a verdict on a sample, and a reader in
+        # another process cannot see the cap.
+        try:
+            from src import trail_history as _th
+
+            ledger = _th.get_ledger()
+            out["history"] = list(reversed(ledger.recent(HISTORY_IN_DIAG)))
+            out["history_stats"] = ledger.stats()
+            out["history_summary"] = _th.summary()
+        except Exception as exc:  # noqa: BLE001
+            # Named rather than silent: "the engine did not report history" and
+            # "there is no history" are different states with different fixes,
+            # and ops renders them apart.
+            fail_open.record("trail_governor.build_diag:history", exc)
+            out["history_error"] = f"{type(exc).__name__}: {exc}"
 
         positions = _position_state.index_open_positions()
         if positions is None:
