@@ -110,6 +110,7 @@ def _build_registry() -> Dict[str, Tunable]:
         GEOMETRY_AB_ENABLED,
         SAR_EXIT_SHADOW_ENABLED,
         STALE_TF_REFUSE_ENABLED,
+        TRACK_RECORD_PUBLIC_ENABLED,
         TUNED_VARIANTS_ENABLED,
         LOSS_STREAK_CAP_HOURS,
         LOSS_STREAK_ESCALATION_ENABLED,
@@ -1281,6 +1282,27 @@ def _build_registry() -> Dict[str, Tunable]:
             type="bool",
             default=MANUAL_TRADE_BUILDER_ENABLED,
             category="Execution",
+        ),
+        Tunable(
+            key="track_record_public_enabled",
+            label="Public track record (Lumin Pulse)",
+            description=(
+                "Serve the recorded delivered-signal book on "
+                "GET /api/track-record, which the Lumin app's Pulse tab "
+                "renders so a new subscriber can read the product's actual "
+                "history before their own paper book has a row in it. Every "
+                "number is RECORDED — trade_monitor wrote it at the terminal "
+                "transition — never replayed or reconstructed, and it is the "
+                "pooled signal book, not any user's account. This is not a "
+                "money-path switch: it changes no score, no dispatch and no "
+                "exit. It is here rather than in .env so a subscriber-facing "
+                "performance claim can be pulled without a redeploy. OFF → "
+                "the endpoint returns an empty book with "
+                "unavailable_reason='disabled' and the app hides the card."
+            ),
+            type="bool",
+            default=TRACK_RECORD_PUBLIC_ENABLED,
+            category="Measurement",
         ),
     ]
 

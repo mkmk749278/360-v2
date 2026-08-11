@@ -106,6 +106,7 @@ from .schemas import (
     OtpRequestResponse,
     OtpVerify,
     PnlHistoryResponse,
+    TrackRecordResponse,  # noqa: F401 — response_model on /api/track-record
     PositionsDiagResponse,
     PositionsResponse,
     InvalidationSettings,
@@ -2142,6 +2143,85 @@ def build_app(
             user_overrides=user_overrides,
         )
         return PnlHistoryResponse(**payload)
+
+    @app.get(
+        "/api/track-record",
+        response_model=TrackRecordResponse,
+        tags=["pulse"],
+    )
+    async def track_record_get(
+        response: Response,
+        days: int = Query(
+            None,
+            ge=1,
+            le=365,
+            description="Whole UTC days back from midnight today. Bounds "
+            "mirror track_record.MIN_DAYS / MAX_DAYS, which clamp again.",
+        ),
+        amount: float = Query(
+            None,
+            ge=0.0,
+            le=1_000_000.0,
+            description="Position notional every dollar figure assumes. The "
+            "same thing signal_dispatch means by notional, so no leverage is "
+            "assumed. Percentages are unaffected by it.",
+        ),
+        fee_pct: float = Query(
+            None,
+            ge=0.0,
+            le=10.0,
+            description="Round trip, both legs, as a percentage of notional. "
+            "0 renders the gross book.",
+        ),
+    ) -> TrackRecordResponse:
+        """The recorded track record of every signal the engine delivered.
+
+        **Deliberately unauthenticated and identical for every caller.** This is
+        the pooled delivered-signal book, not anybody's account: a brand-new
+        subscriber with no trades of their own needs to read it on their first
+        open, which is the whole reason it exists. Adding an identity here would
+        buy nothing and would imply a per-user book this endpoint does not have —
+        for that, ``/api/pnl/history`` is the per-user ledger and the two are
+        not reconcilable.
+
+        The reduction is cached on the record file's own mtime/size inside
+        ``track_record.load_rows``, so this is a dict walk over an already-parsed
+        list rather than a re-parse per request — a page every user loads is a
+        hot path in everything but name.
+        """
+        from src import runtime_tunables as _rt
+        from src import track_record as _track_record
+        from config import (
+            TRACK_RECORD_DEFAULT_AMOUNT_USDT as _tr_amount,
+            TRACK_RECORD_DEFAULT_DAYS as _tr_days,
+            TRACK_RECORD_DEFAULT_FEE_PCT as _tr_fee,
+            TRACK_RECORD_PUBLIC_ENABLED as _tr_enabled_default,
+        )
+
+        # Read the switch from the tunable, not from the env constant: the
+        # owner must be able to pull a subscriber-facing performance claim
+        # from the ops panel without waiting on a redeploy. ``get`` falls back
+        # to the env default whenever Firestore is not wired, so single-process
+        # mode and the tests behave exactly as the config says.
+        try:
+            enabled = bool(_rt.get("track_record_public_enabled"))
+        except Exception:  # noqa: BLE001 — a tunable read must never 500 a page
+            enabled = bool(_tr_enabled_default)
+
+        payload = _track_record.build_track_record(
+            days=days if days is not None else int(_tr_days),
+            amount=amount if amount is not None else float(_tr_amount),
+            fee_pct=fee_pct if fee_pct is not None else float(_tr_fee),
+            enabled=enabled,
+        )
+        # A closed signal lands at most once a minute and the book is identical
+        # for every caller, so a shared cache is safe and cheap. The engine's
+        # own mtime gate means a stale edge here costs a minute of freshness on
+        # a 30-day chart, never a wrong number.
+        response.headers["Cache-Control"] = (
+            "public, max-age=60, stale-while-revalidate=300"
+        )
+        return TrackRecordResponse(**payload)
 
     @app.post(
         "/api/auto-mode",

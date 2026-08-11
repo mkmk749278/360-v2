@@ -4280,3 +4280,39 @@ FCM_MAX_SENDS_PER_MIN: int = _safe_int("FCM_MAX_SENDS_PER_MIN", "60")
 #: normal traffic is ≤2 calls per topic per boot/rotation, so a small cap
 #: shuts down token-spraying without ever touching a real client.
 FCM_TOPIC_PROXY_MAX_PER_MIN: int = _safe_int("FCM_TOPIC_PROXY_MAX_PER_MIN", "12")
+
+# ── Delivered-signal track record (subscriber-facing, src/track_record.py) ──
+#
+# The Lumin app's Pulse tab renders the *recorded* closed-signal book so a new
+# subscriber can read the product's actual history on day one, before their own
+# paper book has a single row in it.  Nothing here is reconstructed — every
+# number comes from ``data/signal_performance.json``, written by
+# ``trade_monitor`` at each terminal transition.
+#
+# Default ON, because a measurement nobody can reach is not shipped and the
+# owner asked for this card by name.  This is **not** a money-path change — it
+# touches no evaluator, no score, no dispatch and no exit — so the dark-first
+# rule (§ Project Phase) does not apply to it.  The switch exists so the owner
+# can pull a subscriber-facing performance claim in one env flip without an app
+# release, which is a different guarantee from dark-first and a weaker one; it
+# is named here so nobody later reads it as the latter.
+TRACK_RECORD_PUBLIC_ENABLED: bool = _safe_bool("TRACK_RECORD_PUBLIC_ENABLED", "true")
+
+#: Default window the app asks for, and the hard ceiling on what it may ask.
+#: The ceiling is a *render* bound on the caller's behalf: the series is one
+#: point per day, so 365 is already the largest chart worth drawing.
+TRACK_RECORD_DEFAULT_DAYS: int = _safe_int("TRACK_RECORD_DEFAULT_DAYS", "30")
+
+#: Position notional a dollar figure assumes when the caller does not say.
+#: The same thing ``signal_dispatch`` means by notional in
+#: ``raw_qty = notional / entry_price``, so no leverage is invented anywhere.
+TRACK_RECORD_DEFAULT_AMOUNT_USDT: float = _safe_float(
+    "TRACK_RECORD_DEFAULT_AMOUNT_USDT", "100.0"
+)
+
+#: Round trip, both legs, as a percentage of notional — Binance USD-M maker
+#: 0.02% in + taker 0.05% out.  The owner's 30d window runs roughly ten times
+#: more fee than edge, so a gross-only figure would answer the wrong question.
+TRACK_RECORD_DEFAULT_FEE_PCT: float = _safe_float(
+    "TRACK_RECORD_DEFAULT_FEE_PCT", "0.07"
+)
