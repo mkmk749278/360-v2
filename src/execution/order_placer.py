@@ -331,6 +331,7 @@ class OrderPlacer:
         stop_price: float,
         coid_override: Optional[str] = None,
         quantity: Optional[float] = None,
+        working_type: str = "MARK_PRICE",
     ) -> OrderPlacementResult:
         """Conditional stop order, ``closePosition=true`` by default.
 
@@ -346,7 +347,27 @@ class OrderPlacer:
         was not sent").
 
         Fires for the full remaining position when ``stop_price`` is
-        touched on MARK_PRICE — less wick-prone than CONTRACT_PRICE.
+        touched on ``working_type``, MARK_PRICE by default — less wick-prone
+        than CONTRACT_PRICE, which is the right trade for an SL nobody is
+        measuring against a candle.
+
+        ``working_type`` exists for the one caller where that default is
+        **wrong**: the trail governor.  Its level comes from
+        ``trail_mechanisms.point()``, and the measurement lane it is supposed
+        to reproduce (``sar_live_shadow.step_arm``) decides a touch with
+        ``lo <= parked`` on **kline** lows — last price.  A stop resting on
+        MARK_PRICE therefore fires on a different series than the arm scores,
+        and the two disagree in both directions: on 2026-08-11 the INXUSDT 5m
+        arm booked ``CLOSED_SAR_FLIP`` at 0.008689 while the live order at the
+        identical 0.0086890 was still resting, because the last price touched
+        the level and the mark price never did.
+
+        The alignment is deliberately made **here** rather than by moving the
+        arm onto mark price: the arm's fills are a corpus an adoption decision
+        reads, and re-defining its touch rule would silently redate every row
+        in it — an additive change to the executor against a redefining one to
+        the measurement (#904's distinction).  Only the governor passes this;
+        every existing caller keeps MARK_PRICE untouched.
 
         ``coid_override`` lets the BE-shift re-place an SL with a new
         ``clientAlgoId`` (since you can't modify SL price in place; you
@@ -374,8 +395,18 @@ class OrderPlacer:
         whole TP ladder, and those coexist with the ``closePosition`` SL on
         every live position today — that is the evidence this works, not an
         argument from the docs.  It is equally safe on a double trigger:
-        ``reduceOnly`` cannot open or flip a position, and Binance
-        auto-cancels reduce-only orders once the position closes.
+        ``reduceOnly`` cannot open or flip a position.
+
+        **It does NOT auto-cancel when the position closes, and this docstring
+        said it did.**  The claim was carried over from ``place_trailing_stop``
+        — a native ``TRAILING_STOP_MARKET``, a different order type — and
+        nothing ever exercised it for a CONDITIONAL ``STOP_MARKET``.  Measured
+        2026-08-11: PROMUSDT closed at 10:16:51 and its reduce-only governor
+        stop was still resting 28 minutes later.  So whoever places one of
+        these owns cancelling it; see ``signal_dispatch._PROTECTIVE_ORDER_ATTRS``,
+        which is derived from the ``Position`` dataclass rather than typed out,
+        because this is the second hand-kept list of protective ids to have
+        gone stale.
 
         Returns ``OrderPlacementResult`` with ``order_id = algoId`` so
         callers can store it and pass it to ``cancel_algo_order``.
@@ -391,7 +422,7 @@ class OrderPlacer:
             "algoType": "CONDITIONAL",
             "type": "STOP_MARKET",
             "triggerPrice": _price_str(rounded),
-            "workingType": "MARK_PRICE",
+            "workingType": working_type,
             "clientAlgoId": coid,
         }
         if quantity is None:
