@@ -26,6 +26,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+from src import trail_history as th
 from src import trail_mechanisms
 from src.execution import order_placer as op
 from src.execution import position_state as ps
@@ -152,9 +153,15 @@ def _now_for(series: Dict[str, List[float]], width_s: float = 900.0) -> float:
 def _clean():
     tg.reset_health_for_test()
     tg.reset_state_for_test()
+    # `record_outcome` writes through to the persisted record, so the ledger is
+    # swapped for an in-memory one. Without this the suite would both leak rows
+    # between tests AND write `data/trail_exits_v1.json` into the repo — the
+    # stray-.tmp defect that ran for two months, arriving at a new ledger.
+    th.reset_ledger(th.TrailExitLedger(path=""))
     yield
     tg.reset_health_for_test()
     tg.reset_state_for_test()
+    th.reset_ledger(None)
 
 
 @pytest.fixture(autouse=True)
@@ -315,8 +322,12 @@ async def test_orphaned_cancel_after_exit_is_counted_not_swallowed():
 def test_outcome_pnl_is_signed_toward_the_trade():
     """Same convention as the arm's ``pnl_level_pct``, so the two are
     comparable without a conversion nobody would remember to apply."""
-    tg.record_outcome(_pos(side="LONG"), exit_price=95.0, exit_kind="trail_stop")
-    tg.record_outcome(_pos(side="SHORT"), exit_price=95.0, exit_kind="trail_stop")
+    tg.record_outcome(
+        _pos(side="LONG", signal_id="L1"), exit_price=95.0, exit_kind="trail_stop"
+    )
+    tg.record_outcome(
+        _pos(side="SHORT", signal_id="S1"), exit_price=95.0, exit_kind="trail_stop"
+    )
     longs, shorts = tg.health()["outcomes"]
     assert longs["pnl_pct"] == pytest.approx(-5.0)
     assert shorts["pnl_pct"] == pytest.approx(5.0)
@@ -336,8 +347,8 @@ def test_the_two_fills_are_never_pooled():
     here, exactly as there is none on ``/signals/sar-live``."""
     health = tg.health()
     assert "avg_pnl_pct" not in health
-    tg.record_outcome(_pos(), exit_price=95.0, exit_kind="trail_stop")
-    tg.record_outcome(_pos(), exit_price=99.0, exit_kind="flip_close")
+    tg.record_outcome(_pos(signal_id="A"), exit_price=95.0, exit_kind="trail_stop")
+    tg.record_outcome(_pos(signal_id="B"), exit_price=99.0, exit_kind="flip_close")
     assert {o["exit_kind"] for o in tg.health()["outcomes"]} == {
         "trail_stop", "flip_close",
     }
@@ -348,7 +359,9 @@ def test_outcome_ring_is_bounded_and_publishes_its_total():
     """A bounded buffer feeding a display publishes the unbounded count beside
     it, or the sample silently becomes the denominator."""
     for i in range(tg.OUTCOME_RING + 5):
-        tg.record_outcome(_pos(), exit_price=95.0 + i, exit_kind="trail_stop")
+        tg.record_outcome(
+            _pos(signal_id=f"S{i}"), exit_price=95.0 + i, exit_kind="trail_stop"
+        )
     health = tg.health()
     assert len(health["outcomes"]) == tg.OUTCOME_RING
     assert health["stops_filled"] == tg.OUTCOME_RING + 5
