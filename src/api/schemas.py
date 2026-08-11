@@ -379,6 +379,149 @@ class PnlHistoryResponse(BaseModel):
     monthly_pnl_usd: float
 
 
+class TrackRecordSummary(BaseModel):
+    """Aggregate over one selected population — the whole window, or one day.
+
+    Two denominators, deliberately both present. ``n`` is every trade the
+    window selected; ``n_pnl`` is those carrying a readable ``pnl_pct``, and it
+    is what every figure below divides by. They are normally identical, and a
+    client that shows one figure without the other cannot say when they are
+    not — which is exactly how R described 6% of the ops track record for six
+    days while looking like the book.
+
+    There is deliberately **no R anywhere in this response**. ``signal_dispatch``
+    sizes at a fixed notional, so the stop distance is absent from the sizing
+    and R equalises nothing; and it silently drops every row with no entry-risk
+    stamp, which is most of them. PnL needs no denominator.
+    """
+
+    n: int = Field(0, description="Trades selected")
+    moves: int = Field(
+        0,
+        description="Distinct moves those trades describe. Overlapping entries "
+        "into one move exit at the same price and are not independent "
+        "evidence. Disclosure only — nothing is de-duplicated.",
+    )
+    n_pnl: int = Field(0, description="Trades with a readable pnl_pct — the denominator")
+    no_pnl: int = Field(0, description="Trades excluded from every money figure")
+    wins: int = Field(0, description="Trades profitable NET of the round-trip fee")
+    losses: int = 0
+    win_rate: Optional[float] = Field(None, description="wins / n_pnl, 0..1")
+    gross_usd: Optional[float] = Field(None, description="At amount_usdt, before fees")
+    fee_usd: Optional[float] = None
+    net_usd: Optional[float] = None
+    total_pnl_pct: Optional[float] = Field(
+        None, description="Sum of per-trade gross %. Fixed size, no compounding."
+    )
+    avg_pnl_pct: Optional[float] = None
+    total_net_pct: Optional[float] = None
+    avg_net_pct: Optional[float] = None
+    best_pnl_pct: Optional[float] = Field(None, description="Gross — fee not charged twice")
+    worst_pnl_pct: Optional[float] = None
+
+
+class TrackRecordDay(TrackRecordSummary):
+    """One UTC calendar day of closed trades, plus the running curve.
+
+    ``partial_reason`` is ``in_progress`` on the day containing "now" and null
+    on every finished day. A part-period rendering as a whole one flipped a
+    sign on the ops page once; a client must be able to badge the live day
+    rather than let it read as a finished one.
+    """
+
+    date: str = Field(..., description="UTC date, YYYY-MM-DD")
+    partial_reason: Optional[str] = Field(
+        None, description="'in_progress' for today; null for a finished day"
+    )
+    cum_net_usd: float = Field(0.0, description="Running net from the window's start")
+    cum_net_pct: float = 0.0
+
+
+class TrackRecordResponse(BaseModel):
+    """The recorded delivered-signal book — NOT the caller's own paper book.
+
+    Every row behind this is a signal the router confirmed and ``trade_monitor``
+    tracked forward in real time. Nothing is replayed or reconstructed.
+
+    It is pooled across every subscriber and sized at one fixed notional, so it
+    is a different population from ``/api/pnl/history`` (per-user, per-user
+    preferences, compounding, TP partials booked separately). The two are not
+    reconcilable and a client must never present them as the same book.
+    """
+
+    enabled: bool = Field(
+        True, description="False when the owner has switched the public record off"
+    )
+    unavailable_reason: str = Field(
+        "",
+        description="'' when the book rendered. 'disabled' | 'missing' | "
+        "'unreadable' | 'unexpected_shape' otherwise — a blank needs a cause, "
+        "and these have different fixes.",
+    )
+    days: int
+    amount_usdt: float = Field(
+        ..., description="The notional every dollar figure assumes — an input, never hidden"
+    )
+    fee_pct: float = Field(..., description="Round trip, both legs, % of notional")
+    range_start: str = Field(..., description="First UTC day included, YYYY-MM-DD")
+    generated_at: str
+    total_records: int = Field(0, description="Whole ledger, before the window")
+    undateable: int = Field(0, description="Ledger rows with no usable close time")
+    summary: TrackRecordSummary
+    items: List[TrackRecordDay] = Field(
+        default_factory=list,
+        description="Oldest first. Days with no close are ABSENT, not zero — "
+        "nothing closed is not a flat day.",
+    )
+
+
+class TrackRecordSignal(BaseModel):
+    """One closed signal behind the daily buckets — the drill-down row.
+
+    A headline nobody can open is a claim rather than a record, so a reader who
+    sees a red day can ask which signals made it red.
+
+    ``pnl_pct`` is null where the outcome could not be read. The row is still
+    listed: it is part of what closed that day, and dropping it would make the
+    list disagree with the count above it.
+    """
+
+    signal_id: str = ""
+    symbol: str = ""
+    direction: str = ""
+    setup: str = ""
+    regime: str = Field(
+        "", description="Regime at ENTRY. 'UNPLACED' where the engine had not "
+        "yet stamped it — knowable only at entry, so never backfilled."
+    )
+    outcome: str = Field("", description="Terminal label, e.g. TP1_HIT / SL_HIT")
+    entry: Optional[float] = None
+    closed_at: str = Field("", description="ISO-8601 UTC")
+    pnl_pct: Optional[float] = Field(None, description="Gross move")
+    net_pct: Optional[float] = Field(None, description="After the round trip")
+    net_usd: Optional[float] = Field(None, description="At amount_usdt")
+
+
+class TrackRecordSignalsResponse(BaseModel):
+    """The per-signal list for a window, or for one UTC day.
+
+    ``truncated`` says the render cap bit. The cap is applied **after**
+    filtering: truncating first starves the rarest population hardest, which is
+    how "delivered to users" once silently meant "delivered, within the newest
+    300" of a 2,000-row ledger.
+    """
+
+    enabled: bool = True
+    unavailable_reason: str = ""
+    days: int = 30
+    date: str = Field("", description="YYYY-MM-DD when narrowed to one day")
+    amount_usdt: float = 100.0
+    fee_pct: float = 0.07
+    matched: int = Field(0, description="Rows the filter selected, before the cap")
+    truncated: bool = False
+    items: List[TrackRecordSignal] = Field(default_factory=list)
+
+
 class AutoModeChangeRequest(BaseModel):
     mode: Literal["off", "paper", "live"]
 
