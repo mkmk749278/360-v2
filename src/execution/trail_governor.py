@@ -58,7 +58,22 @@ The fix keeps the ordering and changes the order *shape*: the governor's stop is
 ladder already uses, and those coexist with the ``closePosition`` SL on every
 live position — the evidence is the running system, not the documentation.  It
 is equally safe on a double trigger, because ``reduceOnly`` cannot open or flip
-a position and Binance auto-cancels reduce-only orders once the position closes.
+a position: whichever level triggers first closes it and the exchange rejects
+the remainder.
+
+**What that fix got wrong, and it is the same class a third time.**  This
+docstring went on to claim Binance *"auto-cancels reduce-only orders once the
+position closes"* — borrowed from ``place_trailing_stop``'s docstring, which
+describes a native ``TRAILING_STOP_MARKET``, a different order type.  Nobody
+asked the exchange about a CONDITIONAL ``STOP_MARKET``.  It does not: on
+2026-08-11 PROMUSDT closed at 10:16:51 and its governor stop was still resting
+28 minutes later, while ``grep -rn trail_stop_order_id src/`` matched nothing
+outside this module and the dataclass.  A vendor claim inherited from a
+neighbouring order type is not a measurement — the depth-stream path
+(2026-08-05) and the -4130 collision above are the same mistake.  Cancellation
+is owned explicitly now: ``_exit_at_market`` retires the stop with the position,
+and ``signal_dispatch._PROTECTIVE_ORDER_ATTRS`` covers every other close path,
+derived from the dataclass rather than typed out.
 
 So the order of operations is:
 
@@ -71,6 +86,23 @@ A failure at (2) leaves the previous stop exactly where it was and the governor
 retries next bar.  A failure at (3) leaves two live stops and is counted as
 ``orphan_cancel``, retried next bar.  Neither branch is ever naked, and that is
 a property of the ordering rather than of the retry working.
+
+The exit leg, and why a trail alone could never be the mechanism
+-----------------------------------------------------------------
+Both mechanisms exit on something a resting stop cannot express.  SAR
+*reverses*: when it flips, its level jumps to the far side of price, which is
+an instruction to be out — not a stop to park, and Binance answers -2021
+"Order would immediately trigger" if you try.  Until 2026-08-11 this module had
+no verb for it, because ``decide`` asked ``point.onside`` at the handover and
+never again; the flipped level was waved through ``tightens`` (trivially
+"tighter" for a LONG), rejected, and then the retry gate declined to re-ask.
+The position sat on the last pre-flip stop while the measured arm had already
+booked the trade closed.
+
+``_exit_at_market`` is that leg, and it is what makes the two fills the arm
+records reachable live: the resting stop is ``fill @level``, the offside close
+is ``fill @confirm``.  Whichever happens first is what the account gets, which
+is exactly the bracket the measurement publishes.
 
 What it refuses to do
 ---------------------
@@ -155,6 +187,27 @@ REFUSE_NO_QUANTITY = "no_quantity"
 #: is validated against do not disagree about what "current" means.
 STALE_SLACK_BARS = sar_live_shadow._ADVANCE_SLACK_BARS
 
+#: Trigger series for the governor's own stop.  **Not** the ``MARK_PRICE``
+#: default every other protective order in this engine uses, and the difference
+#: is the whole point: ``sar_live_shadow.step_arm`` decides a touch with
+#: ``lo <= parked`` on kline lows, so an order resting on the mark fires on a
+#: series the measurement never looks at.  Measured 2026-08-11 — the INXUSDT 5m
+#: arm booked a closed fill at 0.008689 while the live order at that exact
+#: level was still resting.  A canary whose executor and whose measurement
+#: disagree about what "touched" means cannot answer the question it exists for.
+GOVERNOR_WORKING_TYPE = "CONTRACT_PRICE"
+
+#: Post-handover, the mechanism has come offside — SAR flipped, or the
+#: chandelier's level is already past the close.  This is the mechanism's own
+#: **exit**, and until 2026-08-11 the governor had no verb for it: ``decide``
+#: checked ``onside`` only *before* handover, so a flipped level (which sits on
+#: the far side of price by construction) was waved through ``tightens`` and
+#: sent as a stop, where Binance answered -2021 "Order would immediately
+#: trigger" and the deferral gate then declined to re-ask.  The measured arm
+#: closes here; the live position sat on the last pre-flip stop with the
+#: governor inert.  See ``_exit_at_market``.
+DECIDE_EXIT = "exit"
+
 
 def _now() -> float:
     import time
@@ -175,6 +228,11 @@ _health_lock = threading.Lock()
 #: lesson — when a bounded buffer feeds a display, publish the total too).
 PLACE_FAILURE_RING = 8
 
+#: How many realized governed exits to keep, newest last.  Same bounded-ring
+#: rule as above: ``exits`` and ``stops_filled`` are the unbounded totals and
+#: ride beside it, so a reader can never mistake the sample for the population.
+OUTCOME_RING = 40
+
 
 def _blank_health() -> Dict[str, Any]:
     return {
@@ -185,6 +243,20 @@ def _blank_health() -> Dict[str, Any]:
         "place_failed": 0,
         "retry_deferred": 0,
         "orphan_cancel": 0,
+        #: The mechanism's own exit fired and the position was market-closed
+        #: (``exits``), or the close itself was refused (``exit_failed``).
+        #: Counted apart from ``replaced`` because they are opposite events: one
+        #: moves protection, the other ends the trade, and pooling them would
+        #: make a governor that never exits look identical to one that does.
+        "exits": 0,
+        "exit_failed": 0,
+        #: Realized outcomes of governed exits, newest last — the answer to
+        #: "did the canary make money", which no surface in either repo could
+        #: give before 2026-08-11.  `handovers`/`replaced` say the machine is
+        #: turning; they cannot say what it earned.  Bounded, with
+        #: ``exits``/``stops_filled`` beside it as the unbounded totals.
+        "outcomes": [],
+        "stops_filled": 0,
         "refusals": {},
         #: The last few rejections, with the exchange's own words.  A bare
         #: counter here is "blank needs a cause before it gets a caption" on
@@ -263,6 +335,70 @@ def _record_place_failure(
         del ring[:-PLACE_FAILURE_RING]
 
 
+def record_outcome(
+    position: Any,
+    *,
+    exit_price: float,
+    exit_kind: str,
+    ts: Optional[float] = None,
+) -> None:
+    """Book a governed position's realized exit, so the canary can be read.
+
+    **This is the gap #908 and #160 left.**  Both shipped counters —
+    ``handovers``, ``replaced``, ``place_failed`` — which say the machine is
+    turning and are silent on what it earned.  ``/signals/sar-live`` is the
+    shadow, and ``/track-record`` reads the *signal* record, so the realized
+    result of a governed exit landed on no surface in either repo: the one
+    number the owner's own-capital test exists to produce could not be read
+    anywhere.  "Dark work must be observable" applied to the money leg.
+
+    ``exit_kind`` separates the mechanism's two fills, which the measured arm
+    has always kept apart and which must not be pooled here either:
+
+    ``trail_stop``
+        The parked level was touched — the arm's ``fill @level``.
+    ``flip_close``
+        The mechanism came offside and the position was closed at market —
+        the arm's ``fill @confirm``.  Their difference is the cost of
+        confirmation, and blending them picks the flattering one.
+
+    ``pnl_pct`` is gross and signed toward the trade, matching the arm's
+    ``pnl_level_pct`` exactly so the two are comparable without a conversion
+    nobody would remember to apply.
+    """
+    entry_price = float(
+        getattr(position, "entry_price_filled", 0.0)
+        or getattr(position, "entry_price_target", 0.0)
+        or 0.0
+    )
+    pnl_pct: Optional[float] = None
+    if entry_price > 0 and exit_price > 0:
+        raw = (exit_price - entry_price) / entry_price * 100.0
+        pnl_pct = raw if str(position.side).upper() == "LONG" else -raw
+    entry = {
+        "ts": _now() if ts is None else float(ts),
+        "signal_id": getattr(position, "signal_id", ""),
+        "symbol": getattr(position, "symbol", ""),
+        "side": getattr(position, "side", ""),
+        "mechanism": str(getattr(position, "exit_mechanism", "") or "").lower(),
+        "exit_kind": exit_kind,
+        "entry": entry_price,
+        "exit": float(exit_price),
+        # None rather than 0.0 when the entry price is unreadable: a zero here
+        # would average into the book as a flat trade, which is a claim.
+        "pnl_pct": pnl_pct,
+        "designed_sl": float(getattr(position, "sl_price", 0.0) or 0.0),
+        "parked_stop": float(getattr(position, "trail_stop_price", 0.0) or 0.0),
+        "seq": int(getattr(position, "trail_stop_seq", 0) or 0),
+    }
+    with _health_lock:
+        if exit_kind == "trail_stop":
+            _health["stops_filled"] = int(_health.get("stops_filled", 0)) + 1
+        ring = _health.setdefault("outcomes", [])
+        ring.append(entry)
+        del ring[:-OUTCOME_RING]
+
+
 def health() -> Dict[str, Any]:
     """A snapshot for the liveness probe and the ops panel.
 
@@ -274,6 +410,7 @@ def health() -> Dict[str, Any]:
         out = dict(_health)
         out["refusals"] = dict(out.get("refusals", {}))
         out["place_failures"] = [dict(e) for e in out.get("place_failures", [])]
+        out["outcomes"] = [dict(e) for e in out.get("outcomes", [])]
         return out
 
 
@@ -413,8 +550,10 @@ def decide(
     """The whole decision, with no I/O: ``(level_to_park, reason)``.
 
     ``level_to_park`` is None when nothing should be done, and ``reason`` says
-    which of the several quite different "nothings" it is.  Separated from the
-    placement half so every branch here is testable without an exchange.
+    which of the several quite different "nothings" it is — with one exception
+    that is not a nothing: ``DECIDE_EXIT`` also carries no level, because the
+    action is a market close rather than a stop.  Separated from the placement
+    half so every branch here is testable without an exchange.
     """
     times = series["open_time"]
     highs = series["high"]
@@ -458,6 +597,17 @@ def decide(
             return None, REFUSE_NOT_ONSIDE
         return float(point.next_stop), "handover"
 
+    # Governing, and the mechanism has come offside: this is its EXIT, not a
+    # level to park.  Checked BEFORE `tightens`, which is what let the bug
+    # through — a flipped SAR sits on the far side of price by construction, so
+    # it is trivially "tighter" than the old stop for a LONG and was sent as a
+    # stop the exchange can only reject (-2021).  `onside` was asked at the
+    # handover and never again: a mechanism decision applied at one end of a
+    # position's life is not applied to the position (#836's rule, arriving on
+    # the leg that spends money).
+    if not point.onside:
+        return None, DECIDE_EXIT
+
     parked = float(getattr(position, "trail_stop_price", 0.0) or 0.0)
     if not tightens(position.side, parked, float(point.next_stop)):
         # Includes the equal case: re-placing an identical level would spend
@@ -469,6 +619,151 @@ def decide(
 # --------------------------------------------------------------------------- #
 # Placement half
 # --------------------------------------------------------------------------- #
+
+
+async def _exit_at_market(position: Any, *, placer: Any) -> bool:
+    """The mechanism's own exit: close at market, then retire the resting stop.
+
+    Returns True when the position is closed.  This is the leg the measured arm
+    has always modelled as ``fill @confirm`` — "wait for the bar to close and
+    exit at market" — and which had no implementation at all until 2026-08-11.
+    Without it the mechanism's *definition* ("the trade exits when SAR flips")
+    was unreachable: the governor's only verb was moving a resting stop, so a
+    flip produced an un-placeable level and then silence.
+
+    **Close first, cancel second — the opposite of ``_park``, and for the same
+    reason.**  ``_park`` places before cancelling so the position is never
+    naked while protection is *replaced*.  Here protection is being *retired*
+    along with the position, and the market close is ``reduceOnly``, so it can
+    neither open nor flip anything: closing first means the trade is out at the
+    price the decision was made on, and the stop that outlives it by a few
+    hundred milliseconds is over-protection on a flat book.  Cancelling first
+    would open a naked window for exactly as long as the close takes.
+
+    A failed cancel here is the orphan that PROMUSDT demonstrated on
+    2026-08-11 — a reduce-only stop resting on a closed position, which Binance
+    does **not** clean up for this order type — so it is counted rather than
+    logged, and the FSM's own close path cancels it again from
+    ``_PROTECTIVE_ORDER_ATTRS``.  Two writers on that cancel is deliberate:
+    this one is timely, that one is total.
+    """
+    qty = remaining_qty(position)
+    if qty <= 0:
+        _refuse(REFUSE_NO_QUANTITY)
+        return False
+    fill = 0.0
+    try:
+        result = await placer.place_market_close(
+            signal_id=position.signal_id,
+            symbol=position.symbol,
+            direction=position.side,
+            quantity=qty,
+        )
+        fill = float(getattr(result, "avg_price", 0.0) or 0.0)
+    except _order_placer.OrderPlacementError as exc:
+        if _binance_code(exc) != -2022:
+            # Any other refusal — including one that never reached Binance —
+            # leaves the position exactly as it was: the parked stop is still
+            # resting, so it is protected, and the exit is retried next bar.
+            # Handled in this one handler rather than re-raised into a sibling
+            # `except`, which Python does not re-enter: the first cut did that
+            # and a -1001 escaped the function entirely.
+            _count("exit_failed")
+            _record_place_failure(
+                symbol=position.symbol,
+                side=position.side,
+                signal_id=position.signal_id,
+                seq=int(getattr(position, "trail_stop_seq", 0) or 0),
+                level=float(getattr(position, "trail_stop_price", 0.0) or 0.0),
+                exc=exc,
+                ts=_now(),
+            )
+            log.warning(
+                "trail_governor: mechanism exit FAILED uid={} signal_id={} {} "
+                "exc={} — the parked stop is still resting, so the position "
+                "keeps its protection and the exit is retried next bar",
+                position.firebase_uid, position.signal_id, position.symbol, exc,
+            )
+            return False
+        # -2022 ReduceOnly rejected: the book is already flat — the parked
+        # stop filled between the decision and this call.  The exit happened;
+        # only the leg that reports it lost the race.  Treated as success so
+        # the position goes terminal, exactly as `close_fsm_positions_for_signal`
+        # does, and stamped `trail_stop` because that is what actually filled:
+        # booking it as a flip_close would credit the market leg with a fill
+        # the resting stop took.
+        log.info(
+            "trail_governor: mechanism exit found the book already flat "
+            "uid={} signal_id={} {} — the parked stop filled first",
+            position.firebase_uid, position.signal_id, position.symbol,
+        )
+        record_outcome(
+            position,
+            exit_price=float(getattr(position, "trail_stop_price", 0.0) or 0.0),
+            exit_kind="trail_stop",
+        )
+        _finish_exit(position)
+        _count("exits")
+        return True
+
+    # `avg_price` is 0 on a MARKET order Binance has accepted but not yet
+    # reported a fill for.  Recorded as-is: `record_outcome` writes `pnl_pct
+    # = None` for a non-positive price rather than inventing one, and the FSM's
+    # own close-fill event carries the real average.  A fabricated fill is the
+    # one thing an outcome ledger must never contain.
+    record_outcome(position, exit_price=fill, exit_kind="flip_close")
+
+    oid = int(getattr(position, "trail_stop_order_id", 0) or 0)
+    if oid:
+        try:
+            await placer.cancel_algo_order(symbol=position.symbol, algo_id=oid)
+            position.trail_stop_order_id = 0
+        except _order_placer.OrderPlacementError as exc:
+            _count("orphan_cancel")
+            log.warning(
+                "trail_governor: cancel of the parked stop after a mechanism "
+                "exit FAILED uid={} signal_id={} algo_id={} exc={} — a "
+                "reduce-only stop is resting on a flat position and Binance "
+                "will not retire it; the FSM close path cancels it again",
+                position.firebase_uid, position.signal_id, oid, exc,
+            )
+    _finish_exit(position)
+    return True
+
+
+def _finish_exit(position: Any) -> None:
+    """Retire a governed position after its mechanism exit.
+
+    Marked terminal **here** rather than waiting for the FSM's close-fill
+    event, mirroring ``close_fsm_positions_for_signal``.  The sweep re-reads
+    the open index every cycle, so a position left non-terminal because a WS
+    frame was dropped would be exited again on the next bar — and a second
+    market close on a flat book is exactly the -2022 path above, forever.  The
+    FSM's handler already guards a late event on a terminal position.
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    position.trail_governing = False
+    position.trail_stop_price = 0.0
+    position.state = _position_state.PositionState.CLOSED
+    if not getattr(position, "close_reason", ""):
+        position.close_reason = "TRAIL_EXIT"
+    position.closed_at = now
+    position.last_event_at = now
+    try:
+        _position_state.put_position(position)
+    except Exception as exc:
+        # The exchange position is already flat; losing the write means the
+        # next sweep re-derives from a stale doc and tries once more, which
+        # -2022 absorbs.  Wasteful, not dangerous.
+        fail_open.record("trail_governor.finish_exit", exc)
+    try:
+        from src.execution import pretp_dispatcher as _pd
+
+        _pd.spawn_untrack(position.symbol)
+    except Exception as exc:
+        fail_open.record("trail_governor.finish_exit:untrack", exc)
 
 
 async def _park(
@@ -511,6 +806,9 @@ async def _park(
             # and #915: Binance refuses a second closePosition stop in the same
             # direction, which made the handover impossible.
             quantity=qty,
+            # ...and on the candle series the measurement lane scores against,
+            # not the mark. See GOVERNOR_WORKING_TYPE.
+            working_type=GOVERNOR_WORKING_TYPE,
         )
     except _order_placer.OrderPlacementError as exc:
         _count("place_failed")
@@ -561,8 +859,11 @@ async def _park(
             _count("orphan_cancel")
             log.warning(
                 "trail_governor: cancel of superseded {}={} FAILED uid={} "
-                "signal_id={} exc={} — two stops resting (both closePosition, "
-                "so the nearer one wins); retrying next bar",
+                "signal_id={} exc={} — two stops resting; the new one is "
+                "reduceOnly for the position's size, so whichever level "
+                "triggers first closes the position and the exchange rejects "
+                "the remainder rather than opening or flipping anything. "
+                "Retrying the cancel next bar",
                 attr, oid, position.firebase_uid, position.signal_id, exc,
             )
     return True
@@ -635,6 +936,26 @@ async def step_position(
         timeframe=timeframe,
         now_ts=now_ts,
     )
+    if decision == DECIDE_EXIT:
+        # The mechanism's exit, and the one branch here that carries no level.
+        # Deliberately NOT gated on `_bar_already_refused`: that gate exists
+        # because re-asking the exchange for the same *level* on the same bar
+        # cannot get a different answer, which is true of a stop and false of
+        # a market close — a close that failed on a transient is worth
+        # retrying, and leaving the position in a mechanism that has said exit
+        # is the state this whole change exists to remove.
+        placer = placer_factory(position.firebase_uid)
+        if await _exit_at_market(position, placer=placer):
+            _count("exits")
+            log.info(
+                "trail_governor: mechanism exit uid={} signal_id={} {} {} "
+                "tf={} — offside, closed at market",
+                position.firebase_uid, position.signal_id,
+                position.symbol, position.side, timeframe,
+            )
+            return DECIDE_EXIT
+        return "exit_failed"
+
     if level is None:
         if decision in (REFUSE_STALE, REFUSE_NO_SERIES, REFUSE_NO_LEVEL, REFUSE_NOT_ONSIDE):
             _refuse(decision)

@@ -521,7 +521,22 @@ class Reconciler:
             if quiet_s < _ORDER_HEAL_MIN_QUIET_S:
                 return
 
-        protection_fields = ("trail_order_id", "sl_be_order_id", "sl_order_id")
+        # ``trail_stop_order_id`` is the TRAIL GOVERNOR's stop (#908) and is a
+        # different field from ``trail_order_id``, which is the older native
+        # TRAILING_STOP_MARKET.  One word apart, and its absence here meant a
+        # governed position was invisible to this healer: after handover the
+        # governor cancels ``sl_order_id`` and the ladder, so all three of the
+        # original names read 0 and the position evaluated as permanently
+        # unprotected while its real stop went unwatched.  An externally
+        # cancelled governor stop would have produced no re-place and no
+        # naked-residual page — the naked-position invariant with a hole in it,
+        # on the one feature that moves a stop every bar.
+        protection_fields = (
+            "trail_order_id",
+            "trail_stop_order_id",
+            "sl_be_order_id",
+            "sl_order_id",
+        )
         tp_fields = ("tp1_order_id", "tp2_order_id", "tp3_order_id")
         changed = False
         lost_protection = False
@@ -569,22 +584,43 @@ class Reconciler:
                 fsm_position.firebase_uid, fsm_position.signal_id,
             )
             return
+
+        # Where to re-protect.  For a governed position the recorded
+        # ``sl_price`` is the level the mechanism REPLACED at handover, so
+        # re-placing there would widen risk back to the entry-time stop — the
+        # one thing the governor guarantees never happens ("a trail only
+        # tightens").  Re-protect at the level actually in force, and pick the
+        # tighter of the two rather than trusting either blindly: a governed
+        # position whose parked price is somehow unreadable still deserves its
+        # designed stop, and a pre-handover one has no parked price at all.
+        level = float(fsm_position.sl_price or 0.0)
+        parked = float(getattr(fsm_position, "trail_stop_price", 0.0) or 0.0)
+        if bool(getattr(fsm_position, "trail_governing", False)) and parked > 0:
+            is_long = str(fsm_position.side).upper() == "LONG"
+            level = (
+                max(level, parked) if is_long else
+                (min(level, parked) if level > 0 else parked)
+            )
         log.error(
             "reconciler: position lost its protective stop (external "
-            "cancel) — re-placing uid={} signal_id={} symbol={} sl_price={}",
+            "cancel) — re-placing uid={} signal_id={} symbol={} at={} "
+            "(sl_price={} parked={} governing={})",
             fsm_position.firebase_uid,
             fsm_position.signal_id,
             fsm_position.symbol,
+            level,
             fsm_position.sl_price,
+            parked,
+            bool(getattr(fsm_position, "trail_governing", False)),
         )
-        if fsm_position.sl_price and fsm_position.sl_price > 0:
+        if level > 0:
             try:
                 placer = self._order_placer_factory(fsm_position.firebase_uid)
                 result = await placer.place_stop_loss(
                     signal_id=fsm_position.signal_id,
                     symbol=fsm_position.symbol,
                     direction=fsm_position.side,
-                    stop_price=fsm_position.sl_price,
+                    stop_price=level,
                     coid_override=_position_state.coid_sl_be(
                         fsm_position.signal_id
                     ),
@@ -610,7 +646,8 @@ class Reconciler:
                 )
         else:
             log.critical(
-                "reconciler: cannot re-place stop (no recorded sl_price) "
+                "reconciler: cannot re-place stop (no usable level: "
+                "sl_price and parked stop both unset) "
                 "uid={} signal_id={} symbol={} — operator paged",
                 fsm_position.firebase_uid,
                 fsm_position.signal_id,

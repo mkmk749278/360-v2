@@ -1058,9 +1058,17 @@ class PositionFSM:
     ) -> None:
         """Live trail-governor stop fill — terminal.
 
-        The governor parks a ``closePosition=true`` stop at the mechanism's
-        level and re-places it every closed bar, so the fill closes the whole
-        remaining position exactly as an SL fill does.
+        The governor parks a ``reduceOnly`` stop for the position's own size at
+        the mechanism's level and re-places it every closed bar, so the fill
+        closes the whole remaining position exactly as an SL fill does.  (It
+        was ``closePosition=true`` when #908 shipped and this docstring still
+        said so afterwards; #914 changed the shape because Binance refuses a
+        second ``closePosition`` stop in the same direction (-4130), which made
+        every handover impossible.  ``ladder_untouched`` means the remaining
+        size is always the entry size today, so "the whole remaining position"
+        holds under either shape — but the reason it holds is different, and a
+        safety sentence describing a shape the code no longer has is the kind
+        of wrong a reader cannot detect.)
 
         Its own ``close_reason`` rather than "SL", and the distinction is not
         cosmetic: at handover the governor cancelled the evaluator's stop, so a
@@ -1077,7 +1085,7 @@ class PositionFSM:
         needed — the first fill takes the position terminal and the FSM's own
         late-event guard skips whatever follows.
         """
-        position.closed_qty = position.total_qty  # closePosition
+        position.closed_qty = position.total_qty  # reduceOnly, full size
         position.realized_pnl_total += event.realized_pnl
         position.state = _position_state.PositionState.CLOSED
         position.closed_at = datetime.now(timezone.utc)
@@ -1087,6 +1095,19 @@ class PositionFSM:
         try:
             from src.execution import trail_governor as _tg
 
+            # Book the realized exit before forgetting it.  This is the
+            # mechanism's `fill @level` — the parked stop being touched — and
+            # it is the half of the canary's result that arrives HERE rather
+            # than in the sweep, because the exchange fills it between bars.
+            # Recorded at the price the fill actually happened at, never at
+            # the level we asked for: those differ on a gap, and the gap is
+            # the cost the measurement lane cannot see.
+            _tg.record_outcome(
+                position,
+                exit_price=float(getattr(event, "last_filled_price", 0.0) or 0.0)
+                or float(getattr(event, "average_price", 0.0) or 0.0),
+                exit_kind="trail_stop",
+            )
             _tg.forget(position.firebase_uid, position.signal_id)
         except Exception:  # pragma: no cover — never block a terminal close
             pass

@@ -107,6 +107,36 @@ _consec_insufficient_margin: Dict[str, int] = defaultdict(int)
 # confirming cases also route to CANCEL but can't be detected at dispatch
 # without re-deriving the full FSM logic; RANGING/QUIET are the dominant
 # CANCEL-bound cases (~76% of cycles) and are unambiguous from regime_label.
+#: Every ``Position`` attribute holding the algo id of an order that PROTECTS or
+#: EXITS the position, and which therefore has to come down when the position
+#: does.  **Derived from the dataclass, not typed out**, and that is the whole
+#: point of it existing.
+#:
+#: The two close paths below each carried a hand-written five-name tuple
+#: (``sl_order_id, sl_be_order_id, tp1..tp3``).  #908 added a sixth protective
+#: order — the trail governor's ``trail_stop_order_id`` — and joined neither
+#: list, so a governed position's stop survived every close path in the engine:
+#: PROMUSDT closed 2026-08-11 10:16:51 with its reduce-only stop still resting
+#: 28 minutes later, where it would have fired against whatever position was
+#: opened on that symbol next.  Binance does not retire these for us (see
+#: ``order_placer.place_stop_loss`` — the auto-cancel claim was borrowed from a
+#: different order type and is false for a CONDITIONAL ``STOP_MARKET``).
+#:
+#: A list of names excludes exactly the orders somebody already thought of and
+#: is silent by construction on the next one — the ``is_tradfi_perp`` rule, at
+#: the cleanup layer.  ``tests/test_trail_governor_cleanup.py`` asserts this set
+#: against the dataclass's own fields, so a seventh protective order fails CI
+#: rather than leaking quietly.
+_PROTECTIVE_ORDER_ATTRS: Tuple[str, ...] = (
+    "sl_order_id",
+    "sl_be_order_id",
+    "trail_order_id",
+    "trail_stop_order_id",
+    "tp1_order_id",
+    "tp2_order_id",
+    "tp3_order_id",
+)
+
 _CANCEL_BOUND_REGIMES: frozenset = frozenset({"RANGING", "QUIET"})
 
 # Entry regimes where pre-TP is suppressed when TRENDING_PRETP_SUPPRESSED
@@ -1763,6 +1793,39 @@ async def close_fsm_positions_for_signal(
             )
             continue
 
+        # A position the trail governor has taken over does not answer to the
+        # signal's SL any more — the handover CANCELLED that stop on the
+        # exchange, deliberately, and replaced it with the mechanism's own.
+        #
+        # Without this the handover was cosmetic for any trade that reached its
+        # original SL: TradeMonitor still evaluates the signal against that
+        # level and closes everyone on a hit, so the governed position exited
+        # on a rule the mechanism had removed — and exited WORSE, because what
+        # was a stop resting AT the level became a market close at monitor-loop
+        # latency.  Measured 2026-08-11: PROMUSDT signal SL_HIT at 04:46:39
+        # (-3.00% designed), position market-closed 12s later at 2.177 against
+        # an entry of 2.289 — **-4.89%**.  The canary was being scored on an
+        # exit the mechanism does not have.
+        #
+        # Scoped as narrowly as it can be, and the narrowness is the argument:
+        # ONLY `sl_hit`, and ONLY once `trail_governing` is true.  Pre-handover
+        # the evaluator's SL is still live and still governs, so those close
+        # normally.  `invalidated` / `expired` / `cancelled` continue to close
+        # everyone, governed or not — those are the engine deciding to be out
+        # of the trade entirely rather than a level being touched, and B12's
+        # lockstep guarantee plus the hold-time bound both depend on them.
+        if reason == "sl_hit" and bool(getattr(pos, "trail_governing", False)):
+            log.info(
+                "close_fsm: skipping uid={} signal_id={} {} — the trail "
+                "governor holds this exit (mechanism={}, parked={}); the "
+                "signal's SL was cancelled at handover and is not this "
+                "position's stop",
+                uid, signal_id, pos.symbol,
+                getattr(pos, "exit_mechanism", ""),
+                getattr(pos, "trail_stop_price", 0.0),
+            )
+            continue
+
         placer = _op.OrderPlacer(uid)
 
         # Cancel all open bracket orders — tolerant of -2011/-20121 (already
@@ -1771,13 +1834,8 @@ async def close_fsm_positions_for_signal(
         # also close the position and over-reduce.
         # SL and TP orders are algo orders (placed via /fapi/v1/algoOrder);
         # cancel via cancel_algo_order, not cancel_order.
-        for order_id in (
-            pos.sl_order_id,
-            pos.sl_be_order_id,
-            pos.tp1_order_id,
-            pos.tp2_order_id,
-            pos.tp3_order_id,
-        ):
+        for attr in _PROTECTIVE_ORDER_ATTRS:
+            order_id = int(getattr(pos, attr, 0) or 0)
             if not order_id:
                 continue
             try:
@@ -1942,13 +2000,8 @@ async def close_single_fsm_position(
 
     placer = _op.OrderPlacer(uid)
 
-    for order_id in (
-        pos.sl_order_id,
-        pos.sl_be_order_id,
-        pos.tp1_order_id,
-        pos.tp2_order_id,
-        pos.tp3_order_id,
-    ):
+    for attr in _PROTECTIVE_ORDER_ATTRS:
+        order_id = int(getattr(pos, attr, 0) or 0)
         if not order_id:
             continue
         try:
@@ -1956,8 +2009,8 @@ async def close_single_fsm_position(
         except _op.OrderPlacementError as exc:
             log.warning(
                 "close_single_fsm: cancel_algo_order failed uid={} signal_id={} "
-                "algo_id={} exc={}",
-                uid, signal_id, order_id, exc,
+                "attr={} algo_id={} exc={}",
+                uid, signal_id, attr, order_id, exc,
             )
 
     remaining = pos.total_qty - pos.closed_qty
