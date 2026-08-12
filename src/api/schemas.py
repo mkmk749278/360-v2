@@ -459,6 +459,13 @@ class TrackRecordResponse(BaseModel):
         "and these have different fixes.",
     )
     days: int
+    month: str = Field(
+        "",
+        description="'YYYY-MM' when the caller asked for a CALENDAR month "
+        "rather than a rolling window. The calendar grid uses this; the "
+        "summary and charts use `days`. They are independent controls — a "
+        "month on screen should be the month a reader means by the word.",
+    )
     amount_usdt: float = Field(
         ..., description="The notional every dollar figure assumes — an input, never hidden"
     )
@@ -467,6 +474,12 @@ class TrackRecordResponse(BaseModel):
     generated_at: str
     total_records: int = Field(0, description="Whole ledger, before the window")
     undateable: int = Field(0, description="Ledger rows with no usable close time")
+    earliest_date: str = Field(
+        "",
+        description="Oldest close in the whole record, YYYY-MM-DD. Lets a month "
+        "stepper stop where the record does, so paging back does not walk into "
+        "empty months a reader cannot tell from 'we never traded then'.",
+    )
     summary: TrackRecordSummary
     items: List[TrackRecordDay] = Field(
         default_factory=list,
