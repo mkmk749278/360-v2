@@ -4,6 +4,71 @@
 
 ---
 
+## 🟢 SESSION 123 2026-08-12 — the dark feed gets a control panel
+
+Engine `360-v2#923` + ops `360ce-ops#171`, branch
+`claude/signals-dark-feed-promotion-pffuyu`. Owner asked two things: *"can we
+promote LSD to live feed?"* (LSR — `LIQUIDITY_SWEEP_REVERSAL`), then *"add new
+tab that actually we can promote from dark to live with conditions, each path
+has master control promote switch and then options to add regimes, gates,
+sessions etc … and in dark measuring continuous as usual."*
+
+### The LSR reading, on the live 43-row window (2026-07-31 → 08-12)
+
+**+0.984%/row, 74% win (82% of the 39 that reached a level), +42.3% total, all
+43 resolved.** Best path in the dark book by a wide margin — next is
+`MOVER_AVWAP_SCALP` at +0.177%. It survives every trap this repo has named:
+
+- **not one episode** — positive on 9 of 13 days, drop the best day and it is
+  still +0.778%;
+- **not concentration** — 27 campaigns / 43 rows; the largest contributor is a
+  *single row* (SKYAIUSDT +9.42%, 22% of the total) and removing it leaves
+  +0.783%. Campaign-clustered CI **[+0.42, +1.63]**;
+- **not short beta** — dark SHORT *excluding* LSR is −0.071%/row at 39% win;
+- **not best-of-N** — bootstrap P(≤0) = 0.0005, clears Bonferroni over the 13
+  paths drawn.
+
+Delivered LSR over the same 30d is 6 trades at +0.635%, so this is not switching
+a path on — LSR is live at ~0.2 signals/day and three gates hold it there.
+
+**The finding that decided the design.** The 20 best rows
+(`setup_compat:regime_STRONG_TREND`, +1.354%, 17W/3L) are *exactly* the 20
+`TRENDING_DOWN` rows, all SHORT — **100% with-trend**.
+`REGIME_SETUP_COMPATIBILITY` excludes LSR from `STRONG_TREND` because a
+sweep-reversal *against* a strong trend is the setup's known failure mode, and
+that reasoning is sound and **the matrix cannot express it**: it blocks the setup
+class, not the direction. Zero counter-trend rows were measured, so promoting the
+gate wholesale would ship exactly the untested case the doctrine protects.
+`execution:trigger_not_confirmed` (n=8, +0.192%, CI straddling zero) stays dark.
+
+### What shipped instead of a matrix edit
+
+`src/dark_promotion.py` — a per-path rule (gates · regimes · sessions ·
+direction · confidence floor · per-day cap), enforced at the divert site. A
+promotion removes **exactly one gate**; the router's full second layer still runs
+below. Two flags: `dark_promotion_enabled` defaults **OFF** engine-wide, each
+rule carries its own switch. Every dimension is an explicit allow-list whose
+empty value matches **nothing**, so a half-configured rule is inert rather than
+permissive, and `decide()` answers "stay dark" on any exception.
+
+**Measurement does not stop when a rule goes live** — a promoted row is still
+written to the dark ledger and still walked, marked `promoted`, with the router
+stamping `promoted_delivered` / `promoted_dropped` (+ reason) so `enqueued` is
+never read as delivered.
+
+Ops `/control/promotions` renders the evidence beside the checkbox that selects
+it: n, campaigns, then the average, sorted by evidence and never by edge.
+`/signals/dark-live` gains a delivery filter and the matching panels.
+
+### Open — owner decision
+
+Nothing reaches a subscriber on merge. **Arming `dark_promotion_enabled` and the
+first LSR rule is the sign-off**, and the recommendation is the two gates above
+with `direction=with_trend`. Two things to watch after arming: the router
+haircut (correlation_lock takes ~89% of what it dequeues, so 3.7 dark rows/day
+will not become 3.7 delivered), and that **43/43 dark and 6/6 delivered LSR rows
+are SHORT** — the evaluator supports both sides, so this is the window, not a
+design constraint, and we know nothing about LSR longs.
 ## 🟢 SESSION 122 2026-08-11 — a month is a month, and the size is the reader's own
 
 Same branch, three owner directions after reading the shipped card: *"keep

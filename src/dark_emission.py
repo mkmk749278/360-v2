@@ -91,7 +91,7 @@ import os
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from src import ledger_schema
 from src import fail_open
@@ -131,15 +131,56 @@ _PER_PATH_MAX: int = int(os.getenv("DARK_EMISSION_PER_PATH_MAX", "500"))
 _MAX_PATHS: int = int(os.getenv("DARK_EMISSION_MAX_PATHS", "32"))
 
 #: Ledger schema. Readers gate on this, never on a date (#802).
-LEDGER_SCHEMA = 1
+#:
+#: 2 (2026-08-12) — the promotion block (``promoted`` / ``delivery`` and the
+#: fields beside them, see PROMOTION_FIELDS).  **Additive**: every schema-1
+#: field means exactly what it meant, and a schema-1 row is simply a row from
+#: before any rule existed — which is every row that has ever justified a
+#: promotion, so dropping them would delete the evidence at the moment it
+#: starts being used.  Readers render the absent block as ``unstamped``, its
+#: own bucket, because a missing stamp is not a "no".
+LEDGER_SCHEMA = 2
 
-#: Older schemas this build reads unchanged. EMPTY on purpose: no bump here has
-#: been declared additive, so every one drops its window — which is safe but is
-#: a *decision*, not an accident. Before bumping LEDGER_SCHEMA, ask whether the change
-#: only ADDS fields; if so add the old number here, or the first flush after
-#: deploy silently destroys the ledger (`ledger_schema`, and the 371 SAR rows
-#: lost on 2026-08-09).
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset()
+#: Older schemas this build reads unchanged. Declared, not assumed: the bump
+#: above only ADDS fields, so the window survives it. A bump that redefines a
+#: field must NOT be listed here — old and new rows would then disagree about
+#: what a column is, and pooling them misdescribes both (`ledger_schema`, and
+#: the 371 SAR rows lost on 2026-08-09).
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1})
+
+#: The promotion block, named in one place so the row builder, the CSV export
+#: and the "was this row written before the mechanism" test cannot drift.
+#:
+#: ``delivery`` is the field that matters and it has four states, never two:
+#:
+#: * ``dark`` — diverted at the enqueue site. Reached nobody. What every row
+#:   before 2026-08-12 is, and what most rows still are.
+#: * ``promoted_enqueued`` — a rule matched and the queue accepted it. The
+#:   router has not ruled yet, so this is **not** a delivery.
+#: * ``promoted_delivered`` — the router confirmed delivery. The only state
+#:   that means a subscriber saw it.
+#: * ``promoted_dropped`` — enqueued and then dropped by the router's second
+#:   layer, with the reason beside it.
+#:
+#: The middle two exist because enqueue is not dispatch — the rule this repo
+#: learned when the ops page read "Emitted to live (98)" for a window with 3
+#: real signals (2026-07-25). A promoted row that the correlation lock ate
+#: cost a subscriber nothing and must not be counted as though it did.
+DELIVERY_DARK = "dark"
+DELIVERY_ENQUEUED = "promoted_enqueued"
+DELIVERY_DELIVERED = "promoted_delivered"
+DELIVERY_DROPPED = "promoted_dropped"
+
+PROMOTION_FIELDS: Tuple[str, ...] = (
+    "promoted",
+    "promotion_gate",
+    "promotion_unmet",
+    "promotion_direction",
+    "promotion_note",
+    "delivery",
+    "delivered_at",
+    "router_drop_reason",
+)
 
 
 STATUS_OPEN = "OPEN"
@@ -685,6 +726,21 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         "hold_window_coverage": None,
         "hold_insufficient_reason": None,
         "hold_last_bar_ms": None,
+        # ---- promotion (schema 2) ----
+        # Present from creation, and `False`/`dark` rather than absent, for the
+        # reason every other stamp here is: a reader must never have to tell
+        # "this row was not promoted" from "this row predates promotion". Those
+        # are different populations — the second one is every row that argued
+        # FOR a promotion — and only rows written by an older build carry no
+        # block at all.
+        "promoted": False,
+        "promotion_gate": None,
+        "promotion_unmet": None,
+        "promotion_direction": None,
+        "promotion_note": None,
+        "delivery": DELIVERY_DARK,
+        "delivered_at": None,
+        "router_drop_reason": None,
     }
     # Recorded where it becomes true (#802): the SL distance is knowable the
     # instant the geometry exists and never changes afterwards. Any reader
@@ -698,7 +754,11 @@ def _row_from_signal(sig: Any, now: float) -> dict:
     return row
 
 
-def publish(sig: Any, now_ts: Optional[float] = None) -> bool:
+def publish(
+    sig: Any,
+    now_ts: Optional[float] = None,
+    promotion: Any = None,
+) -> bool:
     """Record a dark signal. Returns True when it entered the ledger.
 
     Called from the **one** site that would otherwise enqueue, so reaching here
@@ -715,6 +775,14 @@ def publish(sig: Any, now_ts: Optional[float] = None) -> bool:
     extracted for both lanes to call, a dark row means *"the scanner would have
     sent this"*, not *"a user would have seen this"* — and the page must say the
     difference rather than let the count read as a feed size.
+
+    ``promotion`` is a :class:`~src.dark_promotion.PromotionDecision` when the
+    caller is about to enqueue this candidate for real instead of diverting it.
+    **The row is written either way**, which is the entire design: a rule going
+    live must not end the measurement that justified it, or the decision
+    freezes at the moment it was made and can never be re-read against fresh
+    rows.  What changes is the row's ``delivery`` state, and ops never pools
+    the two populations — one reached the router and one did not.
     """
     now = time.time() if now_ts is None else float(now_ts)
     try:
@@ -723,17 +791,91 @@ def publish(sig: Any, now_ts: Optional[float] = None) -> bool:
             # No tradeable geometry, nothing to forward-measure. Refuse rather
             # than store a row that can never resolve.
             return False
+        if promotion is not None and getattr(promotion, "promote", False):
+            row.update(promotion.to_row())
+            row["delivery"] = DELIVERY_ENQUEUED
         ledger = get_ledger()
         ok = ledger.add(row)
         if ok:
-            log.info(
-                "[DARK] {} {} {} past {} conf={:.1f} — owner-only, no user, no order",
-                row["symbol"], row["side"], row["setup_class"],
-                row["dark_gate"], row["confidence"],
-            )
+            if row.get("promoted"):
+                log.info(
+                    "[DARK→LIVE] {} {} {} promoted past {} conf={:.1f} — "
+                    "enqueued, router layer still applies",
+                    row["symbol"], row["side"], row["setup_class"],
+                    row["dark_gate"], row["confidence"],
+                )
+            else:
+                log.info(
+                    "[DARK] {} {} {} past {} conf={:.1f} — owner-only, no user, no order",
+                    row["symbol"], row["side"], row["setup_class"],
+                    row["dark_gate"], row["confidence"],
+                )
         return ok
     except Exception as exc:
         fail_open.record("dark_emission.publish", exc)
+        return False
+
+
+def mark_delivered(signal_id: str, now_ts: Optional[float] = None) -> bool:
+    """The router confirmed delivery of a promoted row. Called from one place.
+
+    Keyed on ``signal_id``, which is exact — the SAR provenance promotion
+    beside it matches on (symbol, side, setup, entry) within a window because
+    its store is not id-keyed, and that fuzziness is deliberately not inherited.
+
+    Measurement-only: relabels a ledger row and touches no exit, no FSM, no
+    dispatch. Returns whether a row was found, so the caller's counter can tell
+    "delivered a promoted signal" from "delivered an ordinary one" without
+    inspecting the signal.
+    """
+    return _stamp_delivery(signal_id, DELIVERY_DELIVERED, None, now_ts)
+
+
+def mark_router_dropped(
+    signal_id: str, reason: str, now_ts: Optional[float] = None
+) -> bool:
+    """The router's second layer dropped a promoted row, and why.
+
+    The reason is the finding. "Promoted 20 rows, 14 reached a subscriber" and
+    "promoted 20, 6 reached one, 14 died on the correlation lock" support
+    opposite readings of the same rule — the first looks like the rule is
+    working, the second says the promotion is being spent on a symbol that
+    already has a position and the volume the owner expected will never appear.
+    """
+    return _stamp_delivery(signal_id, DELIVERY_DROPPED, reason, now_ts)
+
+
+def _stamp_delivery(
+    signal_id: str,
+    delivery: str,
+    reason: Optional[str],
+    now_ts: Optional[float] = None,
+) -> bool:
+    sid = str(signal_id or "")
+    if not sid:
+        return False
+    try:
+        ledger = get_ledger()
+        now = time.time() if now_ts is None else float(now_ts)
+        with ledger._lock:  # noqa: SLF001 — same module owns the ring
+            for ring in ledger._paths.values():  # noqa: SLF001
+                for row in ring:
+                    if str(row.get("signal_id") or "") != sid:
+                        continue
+                    if not row.get("promoted"):
+                        # A dark row was never enqueued, so no router verdict
+                        # can be about it. Refusing here rather than stamping
+                        # keeps `delivery` a fact about this row instead of a
+                        # coincidence of ids.
+                        return False
+                    row["delivery"] = delivery
+                    row["delivered_at"] = now
+                    row["router_drop_reason"] = reason
+                    ledger._dirty = True  # noqa: SLF001
+                    return True
+        return False
+    except Exception as exc:
+        fail_open.record("dark_emission.stamp_delivery", exc)
         return False
 
 

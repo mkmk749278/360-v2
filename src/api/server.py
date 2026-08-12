@@ -2645,6 +2645,14 @@ def build_app(
         user_overrides=user_overrides,
     )
 
+    # ---- Dark → live promotion rules (ops Control → Promotions) ----
+    # The write half of the dark lane: which of its measured rows stop being
+    # diverted, under which conditions.  Owner-gated like every other control
+    # route; the engine-side enforcement lives in `src/dark_promotion.py` and
+    # is read from memory at the divert site, never through here.
+    from . import dark_promotion_routes as _dark_promotion_routes
+    _dark_promotion_routes.register(app, owner_required=owner_required)
+
     # ---- Binance connect flow (server-side execution, B18 + §3.9) ----
     # Registers POST /api/binance/connect.  Validates the user's
     # Binance key against B18 rules (withdraw=off, futures=on,
