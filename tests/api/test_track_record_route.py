@@ -290,3 +290,87 @@ class TestSignalList:
         assert got["enabled"] is False
         assert got["unavailable_reason"] == "disabled"
         assert got["items"] == []
+
+
+class TestCalendarMonth:
+    """The calendar grid asks for a month; the chips ask for a window.
+
+    They are independent controls (owner, 2026-08-11), so the route has to
+    serve both and a caller must be able to tell which it got back.
+    """
+
+    def test_a_month_is_served_and_says_so(self, client):
+        now = datetime.now(tz=timezone.utc)
+        got = client.get(f"/api/track-record?month={now:%Y-%m}").json()
+        assert got["month"] == f"{now:%Y-%m}"
+        assert got["range_start"] == f"{now:%Y-%m}-01"
+
+    def test_the_window_and_the_month_are_different_answers(self, client):
+        """Not merely different parameters — the route must not quietly serve
+        the rolling window under a month's heading."""
+        now = datetime.now(tz=timezone.utc)
+        window = client.get("/api/track-record?days=30").json()
+        month = client.get(f"/api/track-record?month={now:%Y-%m}").json()
+        assert window["month"] == ""
+        assert month["month"] != ""
+        assert window["range_start"] != month["range_start"]
+
+    def test_a_bad_month_is_named_rather_than_silently_a_window(self, client):
+        got = client.get("/api/track-record?month=2026-13").json()
+        assert got["unavailable_reason"] == "bad_month"
+        assert got["items"] == []
+
+    def test_earliest_date_reaches_the_caller(self, client):
+        """The month stepper stops on it. Without it a reader paging back
+        cannot tell 'we never traded then' from 'past the record'."""
+        got = client.get("/api/track-record?days=1").json()
+        assert got["earliest_date"], "stepper has no floor to stop at"
+        # Whole-record, not window-scoped: a 1-day window still knows where
+        # the record begins.
+        assert got["earliest_date"] < got["range_start"] or \
+            got["earliest_date"] == got["range_start"]
+
+    def test_the_schema_keeps_the_new_keys(self, client):
+        now = datetime.now(tz=timezone.utc)
+        served = client.get(f"/api/track-record?month={now:%Y-%m}").json()
+        direct = tr.build_track_record(
+            month=f"{now:%Y-%m}", path=tr.DEFAULT_RECORD_PATH,
+        )
+        assert set(direct) - set(served) == set()
+
+
+class TestOneSizeAcrossBothEndpoints:
+    """A list priced at one size under a summary priced at another is two
+    books on one screen.
+
+    Found by rendering the page after a size change (2026-08-11): the headline
+    read +$133.32 at 250 USDT while every signal row below it was still priced
+    at the engine's 100 default, because `/signals` had no `amount` parameter
+    at all. Nothing failed and nothing was empty — the two halves simply
+    described different books, which is this system's standing defect shape.
+    """
+
+    def test_the_signals_list_takes_the_same_size_as_the_summary(self, client):
+        summary = client.get("/api/track-record?days=30&amount=250").json()
+        listed = client.get("/api/track-record/signals?days=30&amount=250").json()
+        assert summary["amount_usdt"] == pytest.approx(250.0)
+        assert listed["amount_usdt"] == pytest.approx(250.0)
+
+    def test_the_rows_actually_reprice(self, client):
+        at100 = client.get("/api/track-record/signals?amount=100").json()
+        at250 = client.get("/api/track-record/signals?amount=250").json()
+        a = next(r for r in at100["items"] if r["net_usd"] is not None)
+        b = next(r for r in at250["items"] if r["signal_id"] == a["signal_id"])
+        assert b["net_usd"] == pytest.approx(a["net_usd"] * 2.5)
+        # ...and the percentages do not move, because a percentage has no size.
+        assert b["pnl_pct"] == pytest.approx(a["pnl_pct"])
+        assert b["net_pct"] == pytest.approx(a["net_pct"])
+
+    def test_the_rows_sum_to_the_summary_at_the_same_size(self, client):
+        """The strongest available check that the two endpoints agree: the
+        list's own money must add up to the summary's."""
+        summary = client.get("/api/track-record?days=30&amount=250").json()
+        listed = client.get("/api/track-record/signals?days=30&amount=250").json()
+        assert not listed["truncated"], "fixture must fit under the cap"
+        total = sum(r["net_usd"] for r in listed["items"] if r["net_usd"] is not None)
+        assert total == pytest.approx(summary["summary"]["net_usd"], abs=1e-9)

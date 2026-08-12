@@ -4,6 +4,66 @@
 
 ---
 
+## 🟢 SESSION 122 2026-08-11 — a month is a month, and the size is the reader's own
+
+Same branch, three owner directions after reading the shipped card: *"keep
+original month as month, week as week"*, *"keep that month card in main pulse
+page"*, and *"give user to enter his own notional number"*. Preceded by *"look
+at Binance how actually implemented that interactive PnL card … first analyse
+that"*, which is what produced the bars⇄calendar toggle and the drill-down list
+in Session 121.
+
+### The calendar was never a calendar
+
+It rolled over whatever the period chips had selected — 12 Jul → 11 Aug,
+straddling two months and starting mid-week. One control answering two
+questions, and a "month" on screen was never the month a reader means by the
+word.
+
+The first cut had **refused** a month stepper, on the reasoning that it implies
+months we have not fetched and an empty January would read as "no trades". The
+answer to that was to **fetch them**, not to avoid the shape —
+`GET /api/track-record?month=YYYY-MM` returns exactly that calendar month, and
+`earliest_date` bounds the stepper at the record's own beginning.
+
+**And fetching the month is what makes a `—` honest.** Under a rolling window a
+missing day might equally be *nothing closed* or *outside the window*; now every
+day of the month was asked for, so an absent day is a fact about the market.
+Verified on the real book: July renders **eleven `—` days before the 12th**,
+because the record starts on 12 July, and the back stepper is at its stop there.
+
+### The size is an input, and the engine still owns the arithmetic
+
+`?amount=` goes to the endpoint and the priced book comes back, echoing
+`amount_usdt` so every figure is labelled with the size the **engine** used. The
+app multiplies nothing. Unset stays distinct from 100 — it sends no `amount` at
+all — so changing the engine default still moves the app.
+
+### Three defects, all found by rendering
+
+- **The signals list was priced at a different size from the summary above it.**
+  `/track-record/signals` had no `amount` parameter at all, so the headline read
+  +$133.32 at 250 USDT over rows still at 100. Nothing failed, nothing was
+  empty: two halves describing different books on one screen. Both endpoints
+  take the size now and a test sums the rows against the summary.
+- **Two layout overflows on a 430px phone** — 132px on the size control, 27px on
+  the day readout, where the clipped element was the *"still running"* badge
+  that says today is not finished.
+
+`MonthCalendar` takes its clock as a parameter: a calendar that cannot be told
+what day it is cannot be tested at a month boundary, which is exactly where
+calendars break. The session then crossed midnight UTC mid-verification and
+rendered that case for real — the 12th as today with `—`, the 13th onward as
+future days with no card. Three states, not two.
+
+### Open for the owner
+
+- Unchanged from Session 121: the card is live on merge, `track_record_public_enabled`
+  pulls it from ops without a deploy, and the endpoints stay unauthenticated by
+  design.
+
+---
+
 ## 🟢 SESSION 121 2026-08-11 — a new subscriber can now read the record on day one
 
 Engine + ops + app, branch `claude/pnl-history-pulse-page-w9xtru`. Owner: *"we

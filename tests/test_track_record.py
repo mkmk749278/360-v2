@@ -434,3 +434,143 @@ class TestNoRAnywhere:
         blob = json.dumps(out).lower()
         for banned in ('"r_', '_r"', '"avg_r', 'sl_distance'):
             assert banned not in blob, banned
+
+
+class TestCalendarMonthMode:
+    """A month on screen must be the month a reader means by the word.
+
+    Added 2026-08-11 on the owner's direction: the calendar grid and the period
+    chips become **independent controls**. Before this the calendar was a
+    rolling grid over whatever window the chips had selected, so "month" meant
+    "the last thirty days", which straddles two of them.
+
+    The mode earns something beyond tidiness. A rolling grid cannot honestly
+    draw a day on which nothing closed, because a missing day might equally be
+    outside the fetched window — the two are different facts and the grid draws
+    them differently. Fetching a whole calendar month removes the ambiguity:
+    every day of it was asked for, so an absent day is a fact about the market.
+    """
+
+    def test_a_month_is_that_month_and_nothing_either_side(self, contract_path):
+        out = tr.build_track_record(
+            month="2026-08", path=contract_path, now=CONTRACT_NOW,
+        )
+        assert out["month"] == "2026-08"
+        assert out["range_start"] == "2026-08-01"
+        # The 2026-08-04 boundary row is August; nothing from July leaks in and
+        # nothing from September could.
+        assert [d["date"] for d in out["items"]] == [
+            "2026-08-04", "2026-08-09", "2026-08-10", "2026-08-11",
+        ]
+
+    def test_it_excludes_a_row_past_the_month_end(self, tmp_path):
+        """The rolling mode is open-ended; a month is CLOSED at both ends.
+
+        A row in September must not appear under August's heading — and the
+        rolling path has no `end` at all, so this is the branch that needed
+        writing rather than reusing.
+        """
+        tr.reset_cache()
+        p = tmp_path / "perf.json"
+        p.write_text(json.dumps([
+            _rec("A", "LONG", 1.0, 1.0, _ts(2026, 8, 31, 23)),
+            _rec("B", "LONG", 1.0, 5.0, _ts(2026, 9, 1, 1)),
+        ]), encoding="utf-8")
+        out = tr.build_track_record(
+            month="2026-08", path=str(p),
+            now=datetime(2026, 9, 5, 12, tzinfo=UTC),
+        )
+        assert [d["date"] for d in out["items"]] == ["2026-08-31"]
+        assert out["summary"]["n"] == 1
+        tr.reset_cache()
+
+    def test_a_month_with_no_trades_is_empty_rather_than_refused(
+        self, contract_path
+    ):
+        """And that emptiness is now MEANINGFUL.
+
+        The month was fetched, so "no rows" is the market being quiet, not our
+        window being elsewhere. That is precisely what lets the grid render `—`
+        on a day instead of having to say "not loaded".
+        """
+        out = tr.build_track_record(
+            month="2026-01", path=contract_path, now=CONTRACT_NOW,
+        )
+        assert out["unavailable_reason"] == ""
+        assert out["items"] == []
+        assert out["summary"]["n"] == 0
+        # ...and the ledger counts still describe the whole record, so a caller
+        # can tell an empty month from an empty record.
+        assert out["total_records"] == CONTRACT_EXPECTED["total_records"]
+
+    def test_month_spans_are_calendar_spans_not_thirty_days(self):
+        for key, first, nxt in [
+            ("2026-01", datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)),
+            ("2026-02", datetime(2026, 2, 1, tzinfo=UTC), datetime(2026, 3, 1, tzinfo=UTC)),
+            ("2026-12", datetime(2026, 12, 1, tzinfo=UTC), datetime(2027, 1, 1, tzinfo=UTC)),
+            # Leap year — 29 days, and the span must still land on the 1st.
+            ("2028-02", datetime(2028, 2, 1, tzinfo=UTC), datetime(2028, 3, 1, tzinfo=UTC)),
+        ]:
+            assert tr.month_span(key) == (first, nxt), key
+
+    def test_an_unparseable_month_is_REFUSED_not_silently_a_window(
+        self, contract_path
+    ):
+        """Falling back to the rolling window would render the wrong period
+        under a month's heading, and the caller could never tell."""
+        for bad in ("2026-13", "August", "2026", "", "2026-1-1"):
+            out = tr.build_track_record(
+                month=bad, path=contract_path, now=CONTRACT_NOW,
+            )
+            if bad == "":
+                # Empty means "no month asked for" — the rolling window, which
+                # is the default and not a refusal.
+                assert out["unavailable_reason"] == ""
+                assert out["month"] == ""
+                continue
+            assert out["unavailable_reason"] == "bad_month", bad
+            assert out["items"] == [], bad
+
+    def test_the_rolling_window_is_untouched_by_the_new_parameter(
+        self, contract_path
+    ):
+        """The two modes are independent controls; adding one must not move
+        the other. This is the contract vector, re-asserted through the same
+        function that now carries a second mode."""
+        out = tr.build_track_record(
+            days=CONTRACT_DAYS, path=contract_path, now=CONTRACT_NOW,
+        )
+        assert out["month"] == ""
+        assert out["range_start"] == CONTRACT_EXPECTED["range_start"]
+        for key, want in CONTRACT_EXPECTED["summary"].items():
+            assert out["summary"][key] == pytest.approx(want, abs=1e-9), key
+
+
+class TestEarliestDate:
+    """Where a month stepper should stop.
+
+    Without it a reader paging backwards walks into empty months forever and
+    cannot tell "we never traded then" from "you are past the beginning of the
+    record" — a blank with no cause, one control over.
+    """
+
+    def test_it_is_the_oldest_close_in_the_WHOLE_record(self, contract_path):
+        # Not the oldest in the window: the stepper needs to know where the
+        # record ends, which a windowed answer cannot say.
+        out = tr.build_track_record(
+            days=1, path=contract_path, now=CONTRACT_NOW,
+        )
+        assert out["earliest_date"] == "2026-08-04"
+
+    def test_it_is_blank_rather_than_a_guess_when_nothing_is_dateable(
+        self, tmp_path
+    ):
+        tr.reset_cache()
+        p = tmp_path / "perf.json"
+        p.write_text(json.dumps([
+            _rec("A", "LONG", 1.0, 1.0, None, timestamp=None, create_timestamp=None),
+        ]), encoding="utf-8")
+        out = tr.build_track_record(path=str(p), now=CONTRACT_NOW)
+        assert out["earliest_date"] == ""
+        assert out["undateable"] == 1
+        tr.reset_cache()
