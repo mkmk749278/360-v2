@@ -172,6 +172,7 @@ from src.cluster_suppression import ClusterSuppressor
 from src.confidence_decay import apply_confidence_decay
 from src.cross_asset import AssetState, check_cross_asset_gate
 from src import dark_emission
+from src import dark_promotion
 from src import fail_open
 from src import pair_penalty as _pair_penalty
 from src.feedback_loop import FeedbackLoop
@@ -5751,47 +5752,83 @@ class Scanner:
         # lock, and signal_dispatch placing real orders on real users' keys.
         # One branch here is the whole safety property.
         if dark_emission.is_dark(sig):
-            _dark_ok = dark_emission.publish(sig)
-            self._suppression_counters[
-                f"dark_emitted:{getattr(sig, 'setup_class', 'UNKNOWN')}"
-            ] += 1
-            # Open the SAR exit arm here, beside the row it belongs to, and for
-            # the same reason `observe_signal` is the only thing that reads a
-            # live signal: entry, SL, TP1, side and setup class are knowable
-            # only where the signal object exists. Anchoring later would anchor
-            # to a bar that is not the entry bar (#836).
-            #
-            # Its own ledger, never the live one — those arms are the evidence
-            # for adopting SAR on the money path and every one of them reached a
-            # subscriber. These reached nobody. Fail-open: a measurement must
-            # never break the divert that keeps this candidate away from users.
-            if _dark_ok:
-                try:
-                    from src import sar_live_shadow as _sar
+            # …and from 2026-08-12 the owner can move a named slice of this
+            # population across it, from ops Control → Promotions.  That makes
+            # the safety property two branches instead of one, so both halves
+            # are written to fail toward the divert: `decide` catches every
+            # exception, every condition dimension is an explicit allow-list
+            # whose empty value matches nothing, and the master switch defaults
+            # OFF.  A promotion removes only the ONE gate this row was carried
+            # past — every other gate above already said yes, and the router's
+            # full second layer still runs below.
+            _promo = dark_promotion.decide(sig, str(getattr(sig, "dark_gate", "")))
+            if _promo.promote:
+                # Measurement does not stop when a rule goes live: the row is
+                # written exactly as a dark row is, marked `promoted`, and the
+                # dark resolver keeps walking it.  The population that argued
+                # for the promotion therefore keeps arriving after it, which is
+                # the only way the decision can be re-read on fresh evidence
+                # instead of frozen at the moment it was taken.
+                if dark_emission.publish(sig, promotion=_promo):
+                    # Charge the blast-radius cap where the promotion actually
+                    # happens, not where it was contemplated — a row the ledger
+                    # refuses must not spend budget, or the bound stops
+                    # describing what reached anyone.
+                    dark_promotion.note_promoted(getattr(sig, "setup_class", ""))
+                self._suppression_counters[
+                    f"dark_promoted:{getattr(sig, 'setup_class', 'UNKNOWN')}"
+                ] += 1
+                # The dark SAR / ATR arms are deliberately NOT opened here.
+                # This signal is about to be delivered, so the delivered lanes
+                # arm it; arming both would put one signal into two lanes whose
+                # entire purpose is that they are different populations.
+                #
+                # Falls THROUGH to `signal_queue.put` below.  This is the only
+                # line in the engine by which a marked candidate reaches it.
+            else:
+                _dark_ok = dark_emission.publish(sig)
+                self._suppression_counters[
+                    f"dark_emitted:{getattr(sig, 'setup_class', 'UNKNOWN')}"
+                ] += 1
+                # Open the SAR exit arm here, beside the row it belongs to, and
+                # for the same reason `observe_signal` is the only thing that
+                # reads a live signal: entry, SL, TP1, side and setup class are
+                # knowable only where the signal object exists. Anchoring later
+                # would anchor to a bar that is not the entry bar (#836).
+                #
+                # Its own ledger, never the live one — those arms are the
+                # evidence for adopting SAR on the money path and every one of
+                # them reached a subscriber. These reached nobody. Fail-open: a
+                # measurement must never break the divert that keeps this
+                # candidate away from users.
+                if _dark_ok:
+                    try:
+                        from src import sar_live_shadow as _sar
 
-                    _sar.observe_signal(
-                        sig,
-                        self.data_store,
-                        ledger=_sar.get_dark_ledger(),
-                        lane=_sar.LANE_DARK,
-                    )
-                except Exception as exc:  # pragma: no cover - defensive
-                    fail_open.record("scanner.dark_sar_observe", exc)
-                # The ATR trail on the same dark row, for the reason the owner
-                # asked for the dark lane at all (2026-08-09): the delivered
-                # book is ~59% MOVER_TREND_PULLBACK, so a delivered-only exit
-                # verdict is close to a verdict on one path's geometry.  These
-                # rows are where "does this exit suit THIS setup" is answerable.
-                # Separate try: a failure opening one mechanism's arm must not
-                # cost the other one its row, or the two populations stop being
-                # the same population and the comparison stops meaning anything.
-                try:
-                    from src import atr_trail_live as _atr
+                        _sar.observe_signal(
+                            sig,
+                            self.data_store,
+                            ledger=_sar.get_dark_ledger(),
+                            lane=_sar.LANE_DARK,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        fail_open.record("scanner.dark_sar_observe", exc)
+                    # The ATR trail on the same dark row, for the reason the
+                    # owner asked for the dark lane at all (2026-08-09): the
+                    # delivered book is ~59% MOVER_TREND_PULLBACK, so a
+                    # delivered-only exit verdict is close to a verdict on one
+                    # path's geometry.  These rows are where "does this exit
+                    # suit THIS setup" is answerable.  Separate try: a failure
+                    # opening one mechanism's arm must not cost the other one
+                    # its row, or the two populations stop being the same
+                    # population and the comparison stops meaning anything.
+                    try:
+                        from src import atr_trail_live as _atr
 
-                    _atr.observe_signal(sig, self.data_store, dark=True)
-                except Exception as exc:  # pragma: no cover - defensive
-                    fail_open.record("scanner.dark_atr_trail_observe", exc)
-            return bool(_dark_ok)
+                        _atr.observe_signal(sig, self.data_store, dark=True)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        fail_open.record("scanner.dark_atr_trail_observe", exc)
+                return bool(_dark_ok)
 
         # Stamp cooldown on success.  Only persist after queue.put succeeds
         # (so a queue overflow doesn't lock out future legitimate signals).

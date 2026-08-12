@@ -127,6 +127,7 @@ def _build_registry() -> Dict[str, Tunable]:
         NOISE_FLOOR_MAX_SL_PCT,
         NOISE_FLOOR_STOPS_ENABLED,
         DARK_EMISSION_ENABLED,
+        DARK_PROMOTION_ENABLED,
         PRESCORING_AUDIT_ENABLED,
         SETUP_TF_CORRECTION_LIVE,
         SHADOW_STRATEGIES_ENABLED,
@@ -1106,6 +1107,29 @@ def _build_registry() -> Dict[str, Tunable]:
             type="bool",
             default=DARK_EMISSION_ENABLED,
             category="Measurement",
+        ),
+        Tunable(
+            key="dark_promotion_enabled",
+            label="Dark → live promotion (master switch)",
+            description=(
+                "Engine-wide arming for the per-path promotion rules set on "
+                "ops Control → Promotions. OFF means every dark row is "
+                "diverted exactly as before, whatever any rule says — this is "
+                "the kill switch for the mechanism, not a rule of its own. ON "
+                "means a diverted candidate matching an ENABLED rule's gate, "
+                "regime, session and direction conditions is enqueued for "
+                "real, and then still faces the router's full second layer "
+                "(correlation lock, cooldowns, concurrency caps, "
+                "same-direction throttle) before reaching anyone. A promoted "
+                "row is STILL written to the dark ledger and still walked, "
+                "with its delivery outcome stamped, so the measurement that "
+                "justified the promotion keeps arriving after it. Each rule "
+                "carries its own per-day blast-radius cap. This is a money-"
+                "path switch: it changes what paid subscribers receive."
+            ),
+            type="bool",
+            default=DARK_PROMOTION_ENABLED,
+            category="Signal gating",
         ),
         Tunable(
             key="entry_features_enabled",

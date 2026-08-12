@@ -1,0 +1,577 @@
+"""Dark → live promotion: the conditions, the fail-closed defaults, the wiring.
+
+The tests that matter here are the ones about **refusing**. Promotion is the
+one mechanism in this repo that deliberately moves rows from a lane that
+reaches nobody into a feed paid subscribers read, so most of its surface area
+is the set of circumstances under which it must decline — and every one of
+those is a silent failure if it regresses, because a promoted signal looks
+exactly like an ordinary one everywhere downstream.
+
+Two things are pinned structurally rather than by value:
+
+* the divert site's AST, so a refactor cannot drop the promotion branch or —
+  much worse — reorder it so a marked candidate reaches ``signal_queue.put``
+  without a decision (``test_divert_site_*``);
+* the ledger's additive-schema declaration, because this change bumps
+  ``LEDGER_SCHEMA`` and the last additive bump in this repo destroyed 371 rows
+  by declaring nothing.
+"""
+from __future__ import annotations
+
+import ast
+import json
+from pathlib import Path
+
+import pytest
+
+from src import dark_emission, dark_promotion
+
+
+class _Sig:
+    """A candidate shaped like the real thing at the divert site."""
+
+    def __init__(
+        self,
+        setup_class="LIQUIDITY_SWEEP_REVERSAL",
+        side="SHORT",
+        regime="TRENDING_DOWN",
+        regime_15m="",
+        session="NY",
+        confidence=70.0,
+        symbol="AAAUSDT",
+    ):
+        self.setup_class = setup_class
+        self.direction = type("D", (), {"value": side})()
+        self.entry_regime = regime
+        self.entry_regime_15m = regime_15m
+        self.mc_session = session
+        self.mc_context_key = f"{session}/MARKDOWN/NORMAL/BTC_NEUTRAL"
+        self.confidence = confidence
+        self.symbol = symbol
+        self.signal_id = f"SIG-{symbol}-{side}"
+        self.channel = "360_SCALP"
+        self.entry = 100.0
+        self.stop_loss = 103.0
+        self.tp1 = 97.0
+        self.tp2 = 95.0
+        self.tp3 = 92.0
+        self.valid_for_minutes = 60.0
+        self.pair_admission = "CORE"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_registry(tmp_path, monkeypatch):
+    dark_promotion.reset_for_test(str(tmp_path / "promotions.json"))
+    monkeypatch.setattr(dark_promotion, "master_enabled", lambda: True)
+    yield
+    dark_promotion.reset_for_test("data/dark_promotions_v1.json")
+
+
+def _lsr_rule(**over):
+    kwargs = dict(
+        setup_class="LIQUIDITY_SWEEP_REVERSAL",
+        enabled=True,
+        gates=["SETUP_COMPAT:REGIME_STRONG_TREND", "EXECUTION:OVEREXTENDED"],
+        regimes=[dark_promotion.ANY],
+        sessions=[dark_promotion.ANY],
+        direction=dark_promotion.DIR_WITH_TREND,
+        max_per_day=25,
+    )
+    kwargs.update(over)
+    return dark_promotion.PromotionRule(**kwargs)
+
+
+# --------------------------------------------------------------------------- #
+# Fail-closed: every way this must decline
+# --------------------------------------------------------------------------- #
+
+
+def test_no_rule_means_no_promotion():
+    d = dark_promotion.decide(_Sig(), "setup_compat:regime_STRONG_TREND")
+    assert d.promote is False
+    assert dark_promotion.DIM_NO_RULE in d.unmet
+
+
+def test_master_switch_off_overrides_every_enabled_rule(monkeypatch):
+    dark_promotion.set_rule(_lsr_rule())
+    monkeypatch.setattr(dark_promotion, "master_enabled", lambda: False)
+    d = dark_promotion.decide(_Sig(), "setup_compat:regime_STRONG_TREND")
+    assert d.promote is False
+    assert d.unmet == [dark_promotion.DIM_MASTER]
+
+
+def test_rule_disabled_means_no_promotion():
+    dark_promotion.set_rule(_lsr_rule(enabled=False))
+    d = dark_promotion.decide(_Sig(), "setup_compat:regime_STRONG_TREND")
+    assert d.promote is False
+    assert dark_promotion.DIM_RULE in d.unmet
+
+
+def test_empty_dimension_matches_nothing_rather_than_everything():
+    """An unfilled allow-list is inert, not permissive.
+
+    The single most dangerous plausible reading of this config. A rule saved
+    with no gates chosen must promote nothing at all — the opposite convention
+    would make a half-finished form a live promotion of the whole path.
+    """
+    rule = dark_promotion.set_rule(_lsr_rule(gates=[]))
+    assert rule.inert is True
+    d = dark_promotion.decide(_Sig(), "setup_compat:regime_STRONG_TREND")
+    assert d.promote is False
+    assert dark_promotion.DIM_GATE in d.unmet
+
+
+def test_wildcard_is_explicit_and_does_match():
+    dark_promotion.set_rule(_lsr_rule(gates=[dark_promotion.ANY]))
+    d = dark_promotion.decide(_Sig(), "execution:trigger_not_confirmed")
+    assert d.promote is True
+
+
+def test_gate_not_in_the_allow_list_stays_dark():
+    """The rule this repo's own LSR reading turns on.
+
+    ``trigger_not_confirmed`` measured +0.192% on 8 rows with a CI straddling
+    zero, against +1.354% on 20 for the STRONG_TREND gate. Promoting per gate
+    rather than per path is the whole point of the gate dimension, so a rule
+    naming two gates must leave the third exactly where it was.
+    """
+    dark_promotion.set_rule(_lsr_rule())
+    assert dark_promotion.decide(
+        _Sig(), "execution:trigger_not_confirmed"
+    ).promote is False
+    assert dark_promotion.decide(
+        _Sig(), "setup_compat:regime_STRONG_TREND"
+    ).promote is True
+
+
+def test_decide_never_raises_and_answers_no_on_a_broken_signal():
+    dark_promotion.set_rule(_lsr_rule())
+
+    class _Exploding:
+        setup_class = "LIQUIDITY_SWEEP_REVERSAL"
+
+        @property
+        def entry_regime(self):
+            raise RuntimeError("boom")
+
+    d = dark_promotion.decide(_Exploding(), "setup_compat:regime_STRONG_TREND")
+    assert d.promote is False
+
+
+# --------------------------------------------------------------------------- #
+# Direction alignment — the condition this mechanism exists for
+# --------------------------------------------------------------------------- #
+
+
+def test_with_trend_admits_a_short_in_a_downtrend():
+    dark_promotion.set_rule(_lsr_rule())
+    d = dark_promotion.decide(
+        _Sig(side="SHORT", regime="TRENDING_DOWN"),
+        "setup_compat:regime_STRONG_TREND",
+    )
+    assert d.promote is True
+
+
+def test_with_trend_refuses_the_counter_trend_case_the_doctrine_protects():
+    """A sweep-reversal SHORT into an uptrend is the setup's known failure mode.
+
+    `REGIME_SETUP_COMPATIBILITY` excludes LSR from STRONG_TREND for this case
+    and cannot express the distinction, because it blocks the setup class and
+    not the direction. This is the half of the gate that must survive the
+    promotion — and there is no measured evidence for it either way, which is
+    exactly why it stays refused.
+    """
+    dark_promotion.set_rule(_lsr_rule())
+    d = dark_promotion.decide(
+        _Sig(side="SHORT", regime="TRENDING_UP"),
+        "setup_compat:regime_STRONG_TREND",
+    )
+    assert d.promote is False
+    assert dark_promotion.DIM_DIRECTION in d.unmet
+
+
+def test_unknown_trend_abstains_rather_than_assuming_alignment():
+    dark_promotion.set_rule(_lsr_rule())
+    d = dark_promotion.decide(
+        _Sig(side="SHORT", regime="RANGING"),
+        "setup_compat:regime_STRONG_TREND",
+    )
+    assert d.promote is False
+    assert d.detail == "trend_unknown"
+
+
+def test_15m_regime_is_a_fallback_for_a_range_label_not_an_override():
+    dark_promotion.set_rule(_lsr_rule())
+    # 5m says nothing about trend, 15m does → the fallback answers.
+    assert dark_promotion.decide(
+        _Sig(side="SHORT", regime="RANGING", regime_15m="TRENDING_DOWN"),
+        "setup_compat:regime_STRONG_TREND",
+    ).promote is True
+    # 5m names a trend → the 15m read must not override it.
+    assert dark_promotion.decide(
+        _Sig(side="SHORT", regime="TRENDING_UP", regime_15m="TRENDING_DOWN"),
+        "setup_compat:regime_STRONG_TREND",
+    ).promote is False
+
+
+def test_trend_of_survives_a_label_the_detector_has_not_taught_us():
+    assert dark_promotion.trend_of("WYCKOFF_MARKDOWN") == "DOWN"
+    assert dark_promotion.trend_of("STRONG_BULL_EXPANSION") == "UP"
+    assert dark_promotion.trend_of("CLEAN_RANGE") is None
+    assert dark_promotion.trend_of("") is None
+
+
+def test_counter_trend_is_its_own_condition_not_the_absence_of_with_trend():
+    dark_promotion.set_rule(_lsr_rule(direction=dark_promotion.DIR_COUNTER_TREND))
+    assert dark_promotion.decide(
+        _Sig(side="SHORT", regime="TRENDING_UP"), "execution:overextended"
+    ).promote is True
+    assert dark_promotion.decide(
+        _Sig(side="SHORT", regime="TRENDING_DOWN"), "execution:overextended"
+    ).promote is False
+    # …and an unknown trend still abstains, on both conditions.
+    assert dark_promotion.decide(
+        _Sig(side="SHORT", regime="RANGING"), "execution:overextended"
+    ).promote is False
+
+
+# --------------------------------------------------------------------------- #
+# The other dimensions
+# --------------------------------------------------------------------------- #
+
+
+def test_regime_and_session_narrow_the_rule():
+    dark_promotion.set_rule(
+        _lsr_rule(regimes=["TRENDING_DOWN"], sessions=["NY", "OVERLAP"])
+    )
+    assert dark_promotion.decide(
+        _Sig(session="NY"), "execution:overextended"
+    ).promote is True
+    assert dark_promotion.decide(
+        _Sig(session="ASIA"), "execution:overextended"
+    ).promote is False
+
+
+def test_unmet_lists_every_failed_dimension_not_just_the_first():
+    """An owner debugging a rule needs the whole answer in one read."""
+    dark_promotion.set_rule(
+        _lsr_rule(regimes=["TRENDING_UP"], sessions=["ASIA"], min_confidence=90.0)
+    )
+    d = dark_promotion.decide(
+        _Sig(session="NY", regime="TRENDING_DOWN", confidence=70.0),
+        "execution:overextended",
+    )
+    assert d.promote is False
+    assert set(d.unmet) >= {
+        dark_promotion.DIM_REGIME,
+        dark_promotion.DIM_SESSION,
+        dark_promotion.DIM_CONFIDENCE,
+    }
+    assert dark_promotion.DIM_GATE in d.matched
+
+
+def test_min_confidence_is_optional_and_absent_means_unfiltered():
+    dark_promotion.set_rule(_lsr_rule(min_confidence=None))
+    assert dark_promotion.decide(
+        _Sig(confidence=1.0), "execution:overextended"
+    ).promote is True
+
+
+# --------------------------------------------------------------------------- #
+# Blast radius
+# --------------------------------------------------------------------------- #
+
+
+def test_daily_cap_bounds_a_rule_and_is_counted_apart_from_a_miss():
+    dark_promotion.set_rule(_lsr_rule(max_per_day=2))
+    for _ in range(2):
+        d = dark_promotion.decide(_Sig(), "execution:overextended")
+        assert d.promote is True
+        dark_promotion.note_promoted("LIQUIDITY_SWEEP_REVERSAL")
+    d = dark_promotion.decide(_Sig(), "execution:overextended")
+    assert d.promote is False
+    # Named apart from a condition miss: this candidate MATCHED the rule, which
+    # is a different finding from one that did not, and pooling them hides a
+    # rule running at its bound behind a rule that never fires.
+    assert d.unmet == [dark_promotion.DIM_CAP]
+    assert dark_promotion.DIM_GATE in d.matched
+
+
+def test_cap_is_charged_by_the_caller_not_by_deciding():
+    """A decision the caller does not act on must not spend budget."""
+    dark_promotion.set_rule(_lsr_rule(max_per_day=1))
+    for _ in range(5):
+        assert dark_promotion.decide(_Sig(), "execution:overextended").promote is True
+    assert dark_promotion.promoted_today("LIQUIDITY_SWEEP_REVERSAL") == 0
+
+
+# --------------------------------------------------------------------------- #
+# Storage
+# --------------------------------------------------------------------------- #
+
+
+def test_set_rule_returns_what_is_stored_not_what_was_asked_for():
+    stored = dark_promotion.set_rule(
+        _lsr_rule(direction="nonsense", gates=["execution:overextended"], max_per_day=-4)
+    )
+    assert stored.direction == dark_promotion.DIR_ANY
+    assert stored.gates == ["EXECUTION:OVEREXTENDED"]
+    assert stored.max_per_day == 0
+
+
+def test_rules_round_trip_through_disk(tmp_path):
+    dark_promotion.set_rule(_lsr_rule(note="promoted on the 43-row window"))
+    path = Path(dark_promotion.REGISTRY_PATH)
+    assert path.exists()
+    payload = json.loads(path.read_text())
+    assert payload["schema"] == dark_promotion.REGISTRY_SCHEMA
+
+    dark_promotion.reset_for_test(str(path))
+    reloaded = dark_promotion.get_rule("LIQUIDITY_SWEEP_REVERSAL")
+    assert reloaded is not None
+    assert reloaded.enabled is True
+    assert reloaded.note == "promoted on the 43-row window"
+    assert reloaded.direction == dark_promotion.DIR_WITH_TREND
+
+
+def test_a_newer_registry_schema_is_refused_rather_than_guessed(tmp_path):
+    path = tmp_path / "future.json"
+    path.write_text(json.dumps({
+        "schema": dark_promotion.REGISTRY_SCHEMA + 1,
+        "rules": [_lsr_rule().normalised().to_dict()],
+    }))
+    dark_promotion.reset_for_test(str(path))
+    assert dark_promotion.all_rules() == []
+
+
+def test_generation_bumps_on_every_write():
+    before = dark_promotion.generation()
+    dark_promotion.set_rule(_lsr_rule())
+    assert dark_promotion.generation() > before
+
+
+def test_delete_removes_the_rule():
+    dark_promotion.set_rule(_lsr_rule())
+    assert dark_promotion.delete_rule("liquidity_sweep_reversal") is True
+    assert dark_promotion.get_rule("LIQUIDITY_SWEEP_REVERSAL") is None
+    assert dark_promotion.delete_rule("LIQUIDITY_SWEEP_REVERSAL") is False
+
+
+# --------------------------------------------------------------------------- #
+# The ledger side: measurement continues, and delivery is not enqueue
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def ledger():
+    led = dark_emission.DarkLedger(path="")
+    dark_emission.reset_ledger(led)
+    yield led
+    dark_emission.reset_ledger(None)
+
+
+def test_a_promoted_row_is_still_written_to_the_dark_ledger(ledger):
+    """The measurement does not stop when the rule goes live.
+
+    The whole design rests on this: if promotion ended the stamping, the
+    evidence for the decision would freeze at the moment it was taken and
+    could never be re-read on fresh rows.
+    """
+    dark_promotion.set_rule(_lsr_rule())
+    sig = _Sig()
+    decision = dark_promotion.decide(sig, "execution:overextended")
+    sig.dark_gate = "execution:overextended"
+    assert dark_emission.publish(sig, promotion=decision) is True
+
+    row = ledger.rows()[0]
+    assert row["promoted"] is True
+    assert row["delivery"] == dark_emission.DELIVERY_ENQUEUED
+    # It is still a fully-formed measurement row, walked by the same resolver.
+    assert row["status"] == dark_emission.STATUS_OPEN
+    assert row["sl_distance_pct"] == pytest.approx(3.0)
+
+
+def test_an_ordinary_dark_row_is_unchanged_and_says_so(ledger):
+    sig = _Sig()
+    sig.dark_gate = "execution:overextended"
+    dark_emission.publish(sig)
+    row = ledger.rows()[0]
+    assert row["promoted"] is False
+    assert row["delivery"] == dark_emission.DELIVERY_DARK
+    assert row["delivered_at"] is None
+
+
+def test_enqueued_is_not_delivered_until_the_router_says_so(ledger):
+    dark_promotion.set_rule(_lsr_rule())
+    sig = _Sig()
+    sig.dark_gate = "execution:overextended"
+    dark_emission.publish(
+        sig, promotion=dark_promotion.decide(sig, "execution:overextended")
+    )
+    assert ledger.rows()[0]["delivery"] == dark_emission.DELIVERY_ENQUEUED
+
+    assert dark_emission.mark_delivered(sig.signal_id) is True
+    row = ledger.rows()[0]
+    assert row["delivery"] == dark_emission.DELIVERY_DELIVERED
+    assert row["delivered_at"] is not None
+
+
+def test_a_router_drop_records_the_reason_not_just_the_fact(ledger):
+    dark_promotion.set_rule(_lsr_rule())
+    sig = _Sig()
+    sig.dark_gate = "execution:overextended"
+    dark_emission.publish(
+        sig, promotion=dark_promotion.decide(sig, "execution:overextended")
+    )
+    assert dark_emission.mark_router_dropped(sig.signal_id, "correlation_lock") is True
+    row = ledger.rows()[0]
+    assert row["delivery"] == dark_emission.DELIVERY_DROPPED
+    assert row["router_drop_reason"] == "correlation_lock"
+
+
+def test_delivery_stamps_refuse_a_row_that_was_never_promoted(ledger):
+    """`delivery` must be a fact about this row, not a coincidence of ids."""
+    sig = _Sig()
+    sig.dark_gate = "execution:overextended"
+    dark_emission.publish(sig)
+    assert dark_emission.mark_delivered(sig.signal_id) is False
+    assert ledger.rows()[0]["delivery"] == dark_emission.DELIVERY_DARK
+
+
+def test_delivery_stamp_on_an_unknown_id_is_a_no_op(ledger):
+    assert dark_emission.mark_delivered("SIG-NOT-HERE") is False
+    assert dark_emission.mark_delivered("") is False
+
+
+# --------------------------------------------------------------------------- #
+# The schema bump — declared additive, and it had better be
+# --------------------------------------------------------------------------- #
+
+
+def test_schema_two_declares_itself_additive_from_one():
+    """The bump that added the promotion block must not destroy the window.
+
+    Every row that argues FOR a promotion was written under schema 1. Dropping
+    them on the first flush after deploy — which is what a bare `!=` loader
+    does, and what cost this repo 371 SAR arms on 2026-08-09 — would delete the
+    evidence at exactly the moment it starts being used.
+    """
+    assert dark_emission.LEDGER_SCHEMA == 2
+    assert 1 in dark_emission.ADDITIVE_FROM_SCHEMAS
+
+
+def test_a_schema_one_ledger_still_loads_and_keeps_its_rows(tmp_path, monkeypatch):
+    """A real schema-1 file, written by the real serializer, must survive.
+
+    Deliberately NOT a hand-built envelope. The first cut of this test wrote
+    ``{"schema": 1, "paths": {...}}`` — a shape nothing has ever produced, and
+    it failed for that reason rather than for the reason it was testing. A
+    fixture chooses a shape and then agrees with you about it; the only way to
+    know a schema-1 ledger loads is to make one the way the engine makes one.
+    """
+    path = tmp_path / "dark_v1.json"
+
+    monkeypatch.setattr(dark_emission, "LEDGER_SCHEMA", 1)
+    writer = dark_emission.DarkLedger(path=str(path))
+    old = _Sig(symbol="OLDUSDT")
+    old.dark_gate = "execution:overextended"
+    dark_emission.reset_ledger(writer)
+    assert dark_emission.publish(old) is True
+    assert writer.flush() is True
+    monkeypatch.undo()
+    dark_emission.reset_ledger(None)
+
+    payload = json.loads(path.read_text())
+    assert payload["schema"] == 1
+
+    # Today's builder still writes the block, so strip it to get the row an
+    # older BUILD would have produced. Derived from PROMOTION_FIELDS rather
+    # than typed out, so the next field added is covered without editing this.
+    for key in dark_emission.PROMOTION_FIELDS:
+        payload["rows"][0].pop(key, None)
+    path.write_text(json.dumps(payload))
+
+    reader = dark_emission.DarkLedger(path=str(path))
+    reader.load()
+    rows = reader.rows()
+    assert [r["signal_id"] for r in rows] == [old.signal_id], (
+        "an additive bump dropped its own window — the 2026-08-09 defect"
+    )
+    # A pre-promotion row carries no block at all, which readers render as its
+    # own bucket. `.get` returning None is the point: absent is not `False`,
+    # because "this row was not promoted" and "this row predates promotion"
+    # are different populations.
+    assert rows[0].get("delivery") is None
+    assert rows[0].get("promoted") is None
+
+
+def test_promotion_fields_are_named_once():
+    """The row builder and every reader agree by construction, not by memory."""
+    sig = _Sig()
+    sig.dark_gate = "execution:overextended"
+    row = dark_emission._row_from_signal(sig, 1_786_000_000.0)
+    for key in dark_emission.PROMOTION_FIELDS:
+        assert key in row, f"{key} declared in PROMOTION_FIELDS but not written"
+
+
+# --------------------------------------------------------------------------- #
+# Wiring — pin the call site, not the import
+# --------------------------------------------------------------------------- #
+
+
+def _enqueue_ast():
+    src = Path("src/scanner/__init__.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_enqueue_signal":
+            return node
+    raise AssertionError("Scanner._enqueue_signal not found")
+
+
+def test_divert_site_consults_the_promotion_decision():
+    """A rule the scanner never asks about is a control panel wired to nothing.
+
+    Pins the CALL, not the import: `src/dark_promotion.py` imported and never
+    consulted is the shape this repo has paid for repeatedly (a dead parameter
+    under a docstring claiming it is shared, a flush with no caller).
+    """
+    calls = [
+        n for n in ast.walk(_enqueue_ast())
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "decide"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "dark_promotion"
+    ]
+    assert calls, "the divert site does not call dark_promotion.decide"
+
+
+def test_divert_site_still_publishes_every_diverted_candidate():
+    """Both branches write a ledger row — promoted and not.
+
+    If a refactor kept the promotion branch and dropped the row it writes, the
+    lane would keep working and silently stop measuring exactly the population
+    an ongoing promotion decision reads.
+    """
+    publishes = [
+        n for n in ast.walk(_enqueue_ast())
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "publish"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "dark_emission"
+    ]
+    assert len(publishes) == 2, (
+        "expected exactly two dark_emission.publish calls at the divert site — "
+        "one for the promoted branch, one for the diverted branch"
+    )
+    assert any(
+        any(kw.arg == "promotion" for kw in call.keywords) for call in publishes
+    ), "the promoted branch must pass its decision to publish()"
+
+
+def test_router_stamps_both_halves_of_the_delivery_verdict():
+    """Enqueue is not dispatch, and only the router closes that gap."""
+    src = Path("src/signal_router.py").read_text(encoding="utf-8")
+    assert "mark_delivered" in src, "the router never confirms a promoted delivery"
+    assert "mark_router_dropped" in src, "the router never records a promoted drop"

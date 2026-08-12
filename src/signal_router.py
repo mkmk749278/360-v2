@@ -748,6 +748,22 @@ class SignalRouter:
         setup = str(getattr(signal, "setup_class", "") or "UNKNOWN")
         self._drop_counters[reason] += 1
         self._drop_counters[f"{reason}:{setup}"] += 1
+        # A promoted dark row learns here that it never reached anyone, and
+        # why. Without this the promotion panel could only say "20 rows were
+        # promoted" — which reads as 20 signals delivered, when the correlation
+        # lock may have eaten most of them. Those two support opposite readings
+        # of the same rule, and only this line can tell them apart. No-ops
+        # (returns False) for every ordinary signal, which is nearly all of
+        # them: the ledger is only asked about ids it might hold.
+        try:
+            from src import dark_emission as _de
+
+            _de.mark_router_dropped(
+                str(getattr(signal, "signal_id", "") or ""), reason
+            )
+        except Exception as exc:  # noqa: BLE001
+            from src import fail_open as _fo
+            _fo.record("signal_router.drop_promoted_stamp", exc)
         try:
             from src import runtime_tunables as _rt
             if not bool(_rt.get("suppression_audit_enabled")):
@@ -1170,6 +1186,21 @@ class SignalRouter:
         except Exception as _prom_exc:
             from src import fail_open
             fail_open.record("router.promote_sar_provenance", _prom_exc)
+
+        # The same point, for the dark→live promotion lane, and for the same
+        # reason: this is the ONLY line that knows a promoted candidate became
+        # a signal a subscriber can see. `promoted_enqueued` is not a delivery
+        # and the ops panel must never round it up to one — the whole rule
+        # about enqueue-is-not-dispatch, arriving at the mechanism that
+        # deliberately puts more rows into the queue. Keyed on `signal_id`,
+        # which is exact; the SAR promotion above matches fuzzily because its
+        # store is not id-keyed, and that is not inherited here.
+        try:
+            from src import dark_emission as _de
+            _de.mark_delivered(str(getattr(signal, "signal_id", "") or ""))
+        except Exception as _dp_exc:
+            from src import fail_open
+            fail_open.record("router.promote_dark_delivery", _dp_exc)
 
         # Retention by delivery (Phase 6). Same point, same reason: enqueue is
         # not delivery, and only this line knows the difference. Every

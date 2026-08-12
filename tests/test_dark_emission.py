@@ -131,8 +131,67 @@ def test_the_divert_sits_before_the_only_enqueue_site_in_the_real_scanner():
     enqueue = src.index("await self.signal_queue.put(sig)")
     assert divert < enqueue, "the dark divert must precede the enqueue"
     branch = src[divert:enqueue]
-    assert "return" in branch, "the dark branch must return, not fall through"
     assert "dark_emission.publish(sig)" in branch
+
+
+def test_the_only_way_past_the_divert_is_an_explicit_promotion_decision():
+    """The divert used to be one branch; since 2026-08-12 it is two.
+
+    ``dark_promotion`` lets the owner move a *named* slice of this population
+    into the live feed, so "the dark branch must return, not fall through" —
+    what this file asserted while there was one branch — is no longer true, and
+    a test that still said so would now pass for an incidental reason (the word
+    ``return`` appearing in the other half). That is the shape this repo keeps
+    paying for: an assertion that outlived its premise and went on being green.
+
+    The property that replaces it is narrower and is the whole safety argument:
+    **the ONLY path from a marked candidate to ``signal_queue.put`` runs
+    through a promotion decision, and every other path returns.** Asserted on
+    the tree rather than on the text, because indentation and comments are
+    exactly what a refactor changes.
+    """
+    import ast
+
+    tree = ast.parse(_scanner_source())
+
+    def _is_dark_test(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Call)
+            and isinstance(node.test.func, ast.Attribute)
+            and node.test.func.attr == "is_dark"
+        )
+
+    divert = next((n for n in ast.walk(tree) if _is_dark_test(n)), None)
+    assert divert is not None, "the dark divert branch is gone"
+    assert not divert.orelse, (
+        "the divert grew an else-branch — every non-dark candidate should "
+        "simply continue to the enqueue below"
+    )
+
+    nested = [n for n in divert.body if isinstance(n, ast.If)]
+    assert len(nested) == 1, (
+        "expected exactly one decision inside the divert (promote or not); "
+        f"found {len(nested)}"
+    )
+    promote = nested[0]
+    assert any(
+        isinstance(n, ast.Attribute) and n.attr == "promote"
+        for n in ast.walk(promote.test)
+    ), "the branch that falls through is not gated on a promotion decision"
+
+    def _returns(body) -> bool:
+        return any(
+            isinstance(n, ast.Return) for stmt in body for n in ast.walk(stmt)
+        )
+
+    assert _returns(promote.orelse), (
+        "the NOT-promoted path must return — a diverted candidate that falls "
+        "through reaches signal_queue.put and therefore real users"
+    )
+    assert not _returns(promote.body), (
+        "the promoted path must fall through to the enqueue, not return"
+    )
 
 
 def test_both_loosened_gates_carry_instead_of_rejecting_in_the_real_scanner():
@@ -142,20 +201,100 @@ def test_both_loosened_gates_carry_instead_of_rejecting_in_the_real_scanner():
         assert f'dark_emission.mark(sig, f"{token}")' in src
 
 
-def test_no_other_module_can_route_a_dark_signal():
-    """The router, the dispatcher and the push path must not have learned
-    about dark signals — if they had, the property would be conditional
-    (six correct skips) rather than structural (one branch)."""
+def test_the_dispatcher_and_push_path_have_never_heard_of_the_dark_lane():
+    """If they had, the property would be conditional (correct skips) rather
+    than structural (one branch)."""
     import inspect
 
-    from src import push_notifications, signal_router
+    from src import push_notifications
     from src.execution import signal_dispatch
 
-    for mod in (signal_router, signal_dispatch, push_notifications):
+    for mod in (signal_dispatch, push_notifications):
         assert "dark_emission" not in inspect.getsource(mod), (
             f"{mod.__name__} references the dark lane — the safety property is "
             "supposed to be that it never has to"
         )
+
+
+def test_the_router_may_RECORD_a_dark_outcome_but_never_BRANCH_on_one():
+    """The one module that legitimately names the lane, and the exact limit.
+
+    The router is where a promoted row learns whether it reached a subscriber,
+    because enqueue is not dispatch and only this hop knows the difference —
+    the same reason ``sar_exit_shadow.promote_to_emitted`` has been called from
+    here since 2026-07-25. So a blanket "the router must not mention
+    dark_emission" is the wrong invariant: it forbids the measurement and says
+    nothing about the danger.
+
+    The danger is the router *deciding* anything from dark state. That would
+    move the safety property from one structural branch in the scanner to a set
+    of correct skips spread across two modules, which is precisely the shape
+    the divert exists to avoid. So this asserts the narrow thing:
+
+    * the router never asks whether a signal is dark (``is_dark`` /
+      ``dark_gate`` / ``DARK_ATTR`` appear nowhere in it);
+    * every dark-lane call it makes is a *recording* entry point from the
+      allow-list below, and each one is a bare statement — never a condition,
+      never a value that steers control flow.
+    """
+    import ast
+    import inspect
+
+    from src import signal_router
+
+    src = inspect.getsource(signal_router)
+
+    for forbidden in ("is_dark", "dark_gate", "DARK_ATTR"):
+        assert forbidden not in src, (
+            f"signal_router reads `{forbidden}` — the router must never ask "
+            "whether a signal is dark, only record what happened to one"
+        )
+
+    #: Write-only stamps. Adding to this list is a deliberate act: anything
+    #: here must record an outcome and must not answer a question.
+    RECORDING_ONLY = {"mark_delivered", "mark_router_dropped"}
+
+    tree = ast.parse(src)
+    dark_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in {"_de", "dark_emission"}
+    ]
+    assert dark_calls, (
+        "the router no longer records promoted deliveries — a promoted row can "
+        "never learn whether it reached anyone"
+    )
+    for call in dark_calls:
+        assert call.func.attr in RECORDING_ONLY, (
+            f"signal_router calls dark_emission.{call.func.attr}, which is not "
+            f"a recording-only entry point ({sorted(RECORDING_ONLY)})"
+        )
+
+    # …and none of them may sit in a position that steers control flow.
+    for node in ast.walk(tree):
+        tests = []
+        if isinstance(node, (ast.If, ast.While)):
+            tests = [node.test]
+        elif isinstance(node, ast.IfExp):
+            tests = [node.test]
+        elif isinstance(node, (ast.Assert, ast.Return)):
+            tests = [node.test if isinstance(node, ast.Assert) else node.value]
+        for test in tests:
+            if test is None:
+                continue
+            for inner in ast.walk(test):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr in RECORDING_ONLY
+                ):
+                    raise AssertionError(
+                        "a dark-lane stamp is being used as a condition or a "
+                        "return value in signal_router — recording an outcome "
+                        "must never decide one"
+                    )
 
 
 def test_is_dark_is_false_for_an_ordinary_signal():

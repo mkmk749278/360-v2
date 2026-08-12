@@ -533,6 +533,14 @@ PRESCORING_AUDIT_ENABLED: bool = _safe_bool("PRESCORING_AUDIT_ENABLED", "true")
 # candidate never enters signal_queue, which is the only route to the router,
 # Telegram, FCM, the app feed and signal_dispatch.
 DARK_EMISSION_ENABLED: bool = _safe_bool("DARK_EMISSION_ENABLED", "true")
+# Dark → live promotion (src/dark_promotion.py).  The user-visible half of the
+# lane above, and therefore the opposite default: OFF.  The measurement flag
+# beside it is ON because a measurement reaches nobody; this one decides which
+# dark rows stop being diverted and start reaching paid subscribers, so it is
+# armed by the owner from ops after reading the measured result — the two-flag
+# rule in CLAUDE.md § Project Phase.  Per-path conditions and per-rule blast-
+# radius caps live in the registry; this is only the master arm.
+DARK_PROMOTION_ENABLED: bool = _safe_bool("DARK_PROMOTION_ENABLED", "false")
 # Feature-liveness watchdog (2026-07-14 incident — 8 features dead silently).
 # Every 5-min audit cycle, compare each measurement pipeline's OUTPUT counter
 # against its UPSTREAM driver and publish data/feature_liveness.json; sustained

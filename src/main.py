@@ -2983,6 +2983,67 @@ class CryptoSignalEngine:
             min_streak=6,          # 30 min of *rising* refusals, not a blip
         ))
 
+        def _dark_promotion_rules() -> Tuple[bool, str]:
+            """Is an armed promotion rule actually promoting anything?
+
+            The failure this catches is a switch in the on position that does
+            nothing, and it has three distinct causes with three different
+            fixes — which is exactly why the detail names which one it is
+            rather than reporting a bare zero:
+
+            * **inert** — the rule is enabled with an empty allow-list, so it
+              matches nothing by construction. Ours to fix, in one form field.
+            * **the dark lane is off** — the rows this rule would promote are
+              being killed by the gate upstream and never reach the decision.
+              The rule is fine; its input is missing.
+            * **conditions unmet** — the rule works and the market has not
+              offered a candidate matching it. Not a fault at all, and the
+              common state for a narrow rule.
+
+            Pages only on the first. A rule waiting for its setup is the quiet
+            case, and a probe that fires on it teaches the owner to ignore the
+            one that matters — the ``cooldown``-is-not-a-refusal rule, arriving
+            at a control surface.
+
+            Returns True when nothing is armed rather than raising: a
+            ``PredicateProbe`` exception becomes a ``fail_open.record``, and
+            "the owner has enabled no rules" is not a swallowed failure.
+            """
+            try:
+                from src import dark_promotion as _dp
+
+                if not _dp.master_enabled():
+                    return True, "master switch off — nothing is promoted"
+                armed = [r for r in _dp.all_rules() if r.enabled]
+                if not armed:
+                    return True, "no rule is enabled"
+                inert = [r.setup_class for r in armed if r.inert]
+                if inert:
+                    return False, (
+                        f"enabled but inert (an allow-list is empty, so nothing "
+                        f"can match): {', '.join(sorted(inert))}"
+                    )
+                if not _dp.snapshot().get("dark_lane_enabled"):
+                    return False, (
+                        f"{len(armed)} rule(s) armed but the dark lane is OFF — "
+                        "the candidates they would promote are being killed by "
+                        "the gate upstream and never reach the decision"
+                    )
+                promoted = sum(
+                    _dp.promoted_today(r.setup_class) for r in armed
+                )
+                return True, (
+                    f"{len(armed)} rule(s) armed, {promoted} promoted today"
+                )
+            except Exception as exc:  # noqa: BLE001
+                return True, f"probe unavailable ({type(exc).__name__})"
+
+        fl.add_predicate(PredicateProbe(
+            name="dark_promotion_rules",
+            fn=_dark_promotion_rules,
+            min_streak=6,          # 30 min — a deploy race must not page
+        ))
+
         def _entry_feature_inputs() -> Tuple[bool, str]:
             """Are the inputs MVRTP ignores actually arriving?
 
