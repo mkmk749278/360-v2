@@ -2157,7 +2157,16 @@ def build_app(
             ge=1,
             le=365,
             description="Whole UTC days back from midnight today. Bounds "
-            "mirror track_record.MIN_DAYS / MAX_DAYS, which clamp again.",
+            "mirror track_record.MIN_DAYS / MAX_DAYS, which clamp again. "
+            "Ignored when `month` is given.",
+        ),
+        month: str = Query(
+            "",
+            max_length=7,
+            description="'YYYY-MM' for exactly that CALENDAR month instead of "
+            "a rolling window. What the app's calendar grid asks for, so that "
+            "a day absent from the answer means nothing closed rather than "
+            "outside the window — different facts, drawn differently.",
         ),
         amount: float = Query(
             None,
@@ -2211,6 +2220,7 @@ def build_app(
 
         payload = _track_record.build_track_record(
             days=days if days is not None else int(_tr_days),
+            month=month.strip(),
             amount=amount if amount is not None else float(_tr_amount),
             fee_pct=fee_pct if fee_pct is not None else float(_tr_fee),
             enabled=enabled,
@@ -2238,6 +2248,15 @@ def build_app(
             description="YYYY-MM-DD (UTC) to narrow to a single day. Empty "
             "means the whole `days` window.",
         ),
+        amount: float = Query(
+            None,
+            ge=0.0,
+            le=1_000_000.0,
+            description="Position notional every dollar figure assumes. MUST "
+            "be passed whenever the caller passed one to /api/track-record — "
+            "a list priced at one size under a summary priced at another is "
+            "two books on one screen.",
+        ),
         limit: int = Query(200, ge=1, le=200),
     ) -> TrackRecordSignalsResponse:
         """The individual closed signals behind a day, or behind the window.
@@ -2262,7 +2281,7 @@ def build_app(
         payload = _track_record.build_signal_list(
             days=days,
             date=date.strip(),
-            amount=float(_tr_amount),
+            amount=amount if amount is not None else float(_tr_amount),
             fee_pct=float(_tr_fee),
             limit=limit,
             enabled=enabled,

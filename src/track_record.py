@@ -403,16 +403,61 @@ def reset_cache() -> None:
 # ---------------------------------------------------------------------------
 
 
+def month_span(month: str) -> Optional[Tuple[datetime, datetime]]:
+    """The `[start, end)` a ``YYYY-MM`` names, in UTC. None if unparseable.
+
+    A **calendar** month, not thirty days. The app's calendar grid asks for one
+    of these so that a month on screen is the month a reader means by the word
+    — and, more importantly, so that a day missing from the answer means
+    *nothing closed* rather than *outside the window we happened to fetch*.
+    Those are different facts and the grid renders them differently.
+    """
+    try:
+        first = datetime.strptime(month.strip(), "%Y-%m").replace(tzinfo=timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    # Month lengths vary; step into the next month via day 28 + 4 days.
+    nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return first, nxt
+
+
+def earliest_close(rows: List[Dict[str, Any]]) -> Optional[datetime]:
+    """The oldest close in the record, or None if nothing is dateable.
+
+    Published so a month stepper can stop where the record does. Without it a
+    reader paging backwards walks into empty months forever and cannot tell
+    "we never traded then" from "you have gone past the beginning" — the same
+    blank-needs-a-cause problem one control over.
+    """
+    stamps = [r["closed_at"] for r in rows if r.get("closed_at") is not None]
+    return min(stamps) if stamps else None
+
+
 def build_track_record(
     *,
     days: int = 30,
+    month: str = "",
     amount: float = DEFAULT_AMOUNT_USDT,
     fee_pct: float = DEFAULT_FEE_PCT,
     path: Optional[str] = None,
     now: Optional[datetime] = None,
     enabled: bool = True,
 ) -> Dict[str, Any]:
-    """The delivered-signal record over the last ``days`` whole UTC days.
+    """The delivered-signal record over a window, or over one calendar month.
+
+    Two modes, and they answer different questions:
+
+    * **rolling** (default) — the last ``days`` whole UTC days. What the
+      summary, the bars and the running total are read over.
+    * **calendar month** (``month="YYYY-MM"``) — exactly that month. What the
+      calendar grid is read over, and the reason it can honestly draw a day on
+      which nothing closed: every day of the month was fetched, so an absent
+      day is a fact about the market rather than about our window.
+
+    The two are deliberately **independent controls** (owner, 2026-08-11).
+    Before this the calendar was a rolling grid over whatever the period chips
+    had selected, which made one control answer two questions and meant a
+    "month" on screen was never the month a reader meant by the word.
 
     ``enabled=False`` returns the same shape with an empty book, so a caller
     never has to distinguish "switched off" from "failed" by the absence of a
@@ -423,24 +468,24 @@ def build_track_record(
     amount = max(0.0, float(amount))
     fee_pct = max(0.0, float(fee_pct))
 
-    # Snap to midnight UTC. A preset that started at ``now - N days`` would
-    # leave the oldest bucket holding only the tail of that day while rendering
-    # identically to a complete one.
-    start = floor_day(now - timedelta(days=days))
+    span = month_span(month) if month else None
+    if month and span is None:
+        # Refuse rather than silently falling back to the rolling window: a
+        # caller that asked for a month and got 30 days would render the wrong
+        # period under a month's heading and never know.
+        out = _empty_payload(now, days, month, amount, fee_pct, enabled)
+        out["unavailable_reason"] = "bad_month"
+        return out
 
-    empty = {
-        "enabled": enabled,
-        "unavailable_reason": "",
-        "days": days,
-        "amount_usdt": amount,
-        "fee_pct": fee_pct,
-        "range_start": start.strftime("%Y-%m-%d"),
-        "generated_at": now.isoformat(),
-        "total_records": 0,
-        "undateable": 0,
-        "summary": summarize([], amount=amount, fee_pct=fee_pct),
-        "items": [],
-    }
+    if span is not None:
+        start, end = span
+    else:
+        # Snap to midnight UTC. A preset that started at ``now - N days`` would
+        # leave the oldest bucket holding only the tail of that day while
+        # rendering identically to a complete one.
+        start, end = floor_day(now - timedelta(days=days)), None
+
+    empty = _empty_payload(now, days, month, amount, fee_pct, enabled, start=start)
     if not enabled:
         empty["unavailable_reason"] = "disabled"
         return empty
@@ -452,14 +497,48 @@ def build_track_record(
 
     rows = [
         r for r in all_rows
-        if r.get("closed_at") is not None and r["closed_at"] >= start
+        if r.get("closed_at") is not None
+        and r["closed_at"] >= start
+        and (end is None or r["closed_at"] < end)
     ]
+    oldest = earliest_close(all_rows)
     payload = dict(empty)
     payload["total_records"] = len(all_rows)
     payload["undateable"] = sum(1 for r in all_rows if r.get("closed_at") is None)
+    payload["earliest_date"] = oldest.strftime("%Y-%m-%d") if oldest else ""
     payload["summary"] = summarize(rows, amount=amount, fee_pct=fee_pct)
     payload["items"] = bucket_days(rows, amount=amount, fee_pct=fee_pct, now=now)
     return payload
+
+
+def _empty_payload(
+    now: datetime,
+    days: int,
+    month: str,
+    amount: float,
+    fee_pct: float,
+    enabled: bool,
+    *,
+    start: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """The response skeleton, so every early return carries the same keys."""
+    if start is None:
+        start = floor_day(now - timedelta(days=days))
+    return {
+        "enabled": enabled,
+        "unavailable_reason": "",
+        "days": days,
+        "month": month,
+        "amount_usdt": amount,
+        "fee_pct": fee_pct,
+        "range_start": start.strftime("%Y-%m-%d"),
+        "generated_at": now.isoformat(),
+        "total_records": 0,
+        "undateable": 0,
+        "earliest_date": "",
+        "summary": summarize([], amount=amount, fee_pct=fee_pct),
+        "items": [],
+    }
 
 
 #: A render bound on the per-signal list, applied AFTER filtering, never inside
