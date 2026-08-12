@@ -1675,3 +1675,33 @@ python -m src.main
   whole TP ladder is already that shape and rests beside the SL on every live
   position. When choosing between two vendor behaviours, look for the one your
   own production book is already demonstrating.
+- **When you change a property, the test asserting the old one can keep passing
+  for an incidental reason.** The dark divert's safety property was *one branch*
+  — `if is_dark(sig): … return` — and `dark_promotion` made it two, because a
+  matching candidate now deliberately falls through to `signal_queue.put`. The
+  existing guard asserted *"the dark branch must return, not fall through"* by
+  searching the branch's source text for `return`, and the word was still there
+  in the **other** half. So the assertion that most directly protected paid
+  subscribers went green over a tree where its own sentence had become false.
+
+  This is not a seam — both halves were written by the same change, in the same
+  file, minutes apart. It is the **rot** case: an assertion outliving its
+  premise at the exact moment somebody is changing the premise, which is the one
+  moment nobody re-reads it, because the suite is green and the diff is the
+  thing under review. The tell is cheap and worth making a habit: **when a diff
+  changes an invariant, grep the suite for the invariant's old words and read
+  every hit as a reviewer, not as an author.**
+
+  Two corollaries. **Substring assertions rot silently and AST assertions do
+  not** — the replacement walks the tree and pins the property that actually
+  holds now (*the only path from a marked candidate to the enqueue runs through
+  a promotion decision, and every other path returns*), which cannot be
+  satisfied by a stray keyword. And **narrow an over-broad invariant rather than
+  deleting it**: the sibling guard forbade the router from mentioning
+  `dark_emission` at all, which forbids the delivery measurement and says
+  nothing about the danger — the danger is the router *branching* on dark state.
+  It now allows a write-only stamp from a named allow-list, asserted by AST to
+  be a bare statement rather than a condition or a return value, and
+  `signal_dispatch` / `push_notifications` stay absolutely forbidden. An
+  invariant that blocks correct work gets deleted by whoever needs the work;
+  one that states what it means survives.
