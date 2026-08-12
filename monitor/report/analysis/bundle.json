@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-11T02:40:30.558193+00:00",
-  "generated_at_ts": 1786416030.5581932,
+  "generated_at": "2026-08-12T03:10:20.546367+00:00",
+  "generated_at_ts": 1786504220.5463674,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "c39c59d894a356ccd3f8c1c0dd9d7c1efa4ece05",
+  "git_sha": "86cf02ab96560b24be38b695d1b164d95edb208c",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 10071,
-    "strategy_matrix_scored_cells": 3898,
+    "strategy_matrix_cells": 10239,
+    "strategy_matrix_scored_cells": 3955,
     "performance_setups": 14,
     "suppression_gates": 0
   },
@@ -74,6 +74,13 @@
         "verdict": "NEGATIVE"
       },
       {
+        "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
+        "context_key": "OVERLAP/MARKDOWN/NORMAL/BTC_NEUTRAL",
+        "edge_r": -5.741724899872601,
+        "n": 15,
+        "verdict": "NEGATIVE"
+      },
+      {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
         "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
         "edge_r": -5.579049463973741,
@@ -83,14 +90,7 @@
       {
         "strategy": "LIQUIDITY_SWEEP_REVERSAL@SAREXIT",
         "context_key": "LONDON/QUIET/NORMAL/BTC_NEUTRAL",
-        "edge_r": -4.631499957978933,
-        "n": 16,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
-        "context_key": "LONDON/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -4.229759824224054,
+        "edge_r": -4.300027327353031,
         "n": 17,
         "verdict": "NEGATIVE"
       }

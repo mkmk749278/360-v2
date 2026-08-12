@@ -1,12 +1,12 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 424,
-    "wins": 112,
-    "losses": 172,
+    "n": 432,
+    "wins": 114,
+    "losses": 178,
     "neutral": 140,
     "win_rate_pct": 26.4,
-    "avg_pnl_pct": 0.0184
+    "avg_pnl_pct": -0.0202
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
