@@ -139,14 +139,20 @@ _MAX_PATHS: int = int(os.getenv("DARK_EMISSION_MAX_PATHS", "32"))
 #: promotion, so dropping them would delete the evidence at the moment it
 #: starts being used.  Readers render the absent block as ``unstamped``, its
 #: own bucket, because a missing stamp is not a "no".
-LEDGER_SCHEMA = 2
+#:
+#: 3 (2026-08-13) — ``promotion_age_sec``: where in the pair's 6 h hold the
+#: candidate fired.  **Additive** for the same reason: no schema-2 field
+#: changes meaning, and a row without it is a row from before the stamp
+#: existed, which reads as ``unstamped`` rather than as "fired at second
+#: zero".  -1.0 means the pair was not a held mover at all.
+LEDGER_SCHEMA = 3
 
 #: Older schemas this build reads unchanged. Declared, not assumed: the bump
 #: above only ADDS fields, so the window survives it. A bump that redefines a
 #: field must NOT be listed here — old and new rows would then disagree about
 #: what a column is, and pooling them misdescribes both (`ledger_schema`, and
 #: the 371 SAR rows lost on 2026-08-09).
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1})
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1, 2})
 
 #: The promotion block, named in one place so the row builder, the CSV export
 #: and the "was this row written before the mechanism" test cannot drift.
@@ -652,6 +658,20 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         "context_key": str(getattr(sig, "mc_context_key", "") or ""),
         "valid_for_minutes": float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
         "pair_admission": str(getattr(sig, "pair_admission", "") or ""),
+        # Where in the pair's hold this fired.  `pair_admission` says a mover
+        # produced the row and is silent on whether we caught the ignition or
+        # arrived in hour five of a finished move — the owner's question
+        # (2026-08-13), and the split this lane is the right population for,
+        # since it carries the paths the delivered book barely reaches.
+        #
+        # `None`, not -1.0, for a row written before the stamp: absent and
+        # "not a held mover" are different facts and a reader that pools them
+        # reports core pairs as unstamped movers.
+        "promotion_age_sec": (
+            None
+            if getattr(sig, "promotion_age_sec", None) is None
+            else float(getattr(sig, "promotion_age_sec", -1.0))
+        ),
         # Lane-specific provenance (Phase 5). `LaneSignal` declares eight fields
         # under the sentence "carried so the page can split by what actually
         # differs between rows", and this serializer wrote a fixed key list that

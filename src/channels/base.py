@@ -349,6 +349,12 @@ class Signal:
     # time, and the promotion has evicted itself long before the signal
     # closes; there is no honest backfill, so pre-fix records stay "".
     pair_admission: str = ""
+    # Seconds between the pair's promotion and this signal — where in the hold
+    # we entered.  ``-1.0`` means the pair was not a held mover (a core pair,
+    # or a record written before this field existed); ``0.0`` is a real value
+    # meaning the signal fired at the top of the hold, so the two must not
+    # share a sentinel.  See scanner's stamp site for why there is no backfill.
+    promotion_age_sec: float = -1.0
     atr_percentile_at_entry: float = 50.0         # ATR percentile (0-100) at entry — trail-width input
     atr_value_at_entry: float = 0.0               # Absolute ATR(14) value at entry — converts percentile to Binance callbackRate
     entry_momentum_slope: float = 0.0             # EMA slope at entry (% diff)

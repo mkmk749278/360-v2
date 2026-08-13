@@ -1111,6 +1111,21 @@ MOVER_PROMOTION_TTL_SEC: float = _safe_float("MOVER_PROMOTION_TTL_SEC", "21600")
 #: SURGE_PROMOTION_MAX_PAIRS — with a 6 h hold the old shared cap of 5 would fill
 #: and starve fresh ignitions, so movers get their own (larger) budget.
 MOVER_PROMOTION_MAX_PAIRS: int = _safe_int("MOVER_PROMOTION_MAX_PAIRS", "30")
+
+# Dynamic mover retention (src/mover_retention.py).  The flat TTL above drops
+# every promoted pair at 6 h whatever it did; this scores each held pair on
+# OPPORTUNITY (is it still producing candidates) and LIVENESS (is the move
+# still running) and releases or extends accordingly.  Never on outcomes — a
+# dark row resolves hours later, and gating retention on profit is
+# `cohort_edge`'s absorbing state (drop it -> no candidates -> no evidence ->
+# never comes back).
+#
+# ENFORCE defaults OFF: the scorer measures from the moment it ships and
+# stamps the verdict it WOULD have reached, and the promotion loop keeps using
+# the flat TTL until the owner has read a window of would-be releases.  Two
+# flags, per CLAUDE.md § Project Phase — this changes which pairs are scanned,
+# so it changes which signals emit.
+MOVER_RETENTION_ENFORCE: bool = _safe_bool("MOVER_RETENTION_ENFORCE", "false")
 #: Re-seed a promoted mover's candles when its 1m data is older than this many
 #: seconds (2026-07-10).  Promoted movers sit outside the WS kline subscription
 #: set — their candles came ONLY from the one-time promotion seed, so minutes

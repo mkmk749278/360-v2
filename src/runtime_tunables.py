@@ -128,6 +128,7 @@ def _build_registry() -> Dict[str, Tunable]:
         NOISE_FLOOR_STOPS_ENABLED,
         DARK_EMISSION_ENABLED,
         DARK_PROMOTION_ENABLED,
+        MOVER_RETENTION_ENFORCE,
         PRESCORING_AUDIT_ENABLED,
         SETUP_TF_CORRECTION_LIVE,
         SHADOW_STRATEGIES_ENABLED,
@@ -1107,6 +1108,30 @@ def _build_registry() -> Dict[str, Tunable]:
             type="bool",
             default=DARK_EMISSION_ENABLED,
             category="Measurement",
+        ),
+        Tunable(
+            key="mover_retention_enforce",
+            label="Dynamic mover retention (act on the verdict)",
+            description=(
+                "A promoted mover is held for a flat 6h and dropped whatever "
+                "it did. With this ON the promotion loop instead releases a "
+                "pair once it has been scanned enough times to have shown us "
+                "something and produced no candidate, or once its trade rate "
+                "has sat at its own baseline long enough that the move is "
+                "over — and EXTENDS a pair past 6h while it is still "
+                "producing, up to a hard ceiling. Scored on opportunity and "
+                "liveness only, never on outcomes: a dark row resolves hours "
+                "later, and dropping a pair for bad outcomes stops it "
+                "producing candidates, so it could never earn its way back. "
+                "OFF still measures — the scorer stamps the verdict it would "
+                "have reached on every held pair, so a window of would-be "
+                "releases is readable before anything is acted on. Money "
+                "path: this changes which pairs are scanned, so it changes "
+                "which signals emit."
+            ),
+            type="bool",
+            default=MOVER_RETENTION_ENFORCE,
+            category="Signal gating",
         ),
         Tunable(
             key="dark_promotion_enabled",

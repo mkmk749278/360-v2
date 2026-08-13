@@ -177,6 +177,14 @@ class SignalRecord:
     # and older records keep "" rather than being handed a guess.
     pair_admission: str = ""
 
+    # Seconds between the pair's promotion and this signal.  ``pair_admission``
+    # says a mover produced the row; only this says whether we entered at
+    # minute two of the ignition or in hour five of a spent move — the
+    # difference the owner asked about, and one no other field on this record
+    # can reconstruct.  ``-1.0`` = not a held mover (core pair, or a record
+    # written before the field existed); ``0.0`` is a real reading.
+    promotion_age_sec: float = -1.0
+
 
 @dataclass
 class ChannelStats:
@@ -255,6 +263,7 @@ class PerformanceTracker:
         entry_regime: str = "",
         entry_regime_15m: str = "",
         pair_admission: str = "",
+        promotion_age_sec: float = -1.0,
     ) -> None:
         """Record the outcome of a completed signal."""
         # Default signal quality fields to the actual PnL values when not provided
@@ -305,6 +314,9 @@ class PerformanceTracker:
             entry_regime=str(entry_regime or ""),
             entry_regime_15m=str(entry_regime_15m or ""),
             pair_admission=str(pair_admission or ""),
+            promotion_age_sec=float(
+                -1.0 if promotion_age_sec is None else promotion_age_sec
+            ),
         )
         self._records.append(record)
         self._save()

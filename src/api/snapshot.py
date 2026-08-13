@@ -625,6 +625,7 @@ def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
         entry_regime=str(getattr(sig, "entry_regime", "") or ""),
         entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
         pair_admission=str(getattr(sig, "pair_admission", "") or ""),
+        promotion_age_sec=float(getattr(sig, "promotion_age_sec", -1.0) or -1.0),
         market_phase=str(getattr(sig, "market_phase", "") or ""),
     )
 
@@ -1656,9 +1657,25 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
         # this same process, so time.monotonic() is comparable). Surface the
         # remaining hold as minutes so the ops Pairs page reads "expires in N min".
         _mono = time.monotonic()
+        # The dynamic-retention verdict for each held pair, read off the same
+        # module the promotion loop scores with — never recomputed here.  A
+        # second scorer in the display layer would be a mirror, and the fix for
+        # a drifting mirror is not a second mirror.  `None` on every field means
+        # this build has no retention window for the pair, which is not the
+        # same as a pair scored and held: the page must be able to tell them
+        # apart, so the keys are present and empty rather than absent.
+        _ret_rows: Dict[str, Any] = {}
+        try:
+            from src import mover_retention as _mr
+
+            for _r in _mr.get_retention().report().get("pairs", []) or []:
+                _ret_rows[str(_r.get("symbol") or "")] = _r
+        except Exception:
+            _ret_rows = {}
         for sym, expiry in promoted.items():
             info = info_pairs.get(sym)
             rj = mover_reasons.get(sym) or {}
+            rt = _ret_rows.get(sym) or {}
             promoting.append({
                 "symbol": sym,
                 "minutes_left": round(max(0.0, (float(expiry or 0.0) - _mono) / 60.0), 1),
@@ -1667,6 +1684,20 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
                 "reject_reason": rj.get("reason"),
                 "reject_path": rj.get("path"),
                 "reject_age_sec": rj.get("age_sec"),
+                # Retention: what the pair has DONE with its slot, and the
+                # verdict that follows from it. `verdict` is what the promotion
+                # loop would act on; whether it does is `retention.enforcing`
+                # below, published once rather than repeated per row.
+                "retention_verdict": rt.get("verdict"),
+                "retention_reason": rt.get("reason"),
+                "retention_age_sec": rt.get("age_sec"),
+                "retention_scans": rt.get("scans"),
+                "retention_candidates": rt.get("candidates"),
+                "retention_reached_enqueue": rt.get("reached_enqueue"),
+                "retention_enqueued": rt.get("enqueued"),
+                "retention_dark": rt.get("dark"),
+                "retention_burst": rt.get("last_burst"),
+                "promotion_source": rt.get("source"),
             })
         promoting.sort(key=lambda r: -r["minutes_left"])
 
@@ -1685,12 +1716,25 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
         ignition["ws_connected"] = bool(getattr(ws_mover, "is_healthy", False))
         ignition["ws_streams"] = int(getattr(ws_mover, "stream_count", 0) or 0)
 
+    # The retention lane's own health, beside the rows it scores. Published
+    # whether or not anything was released: a block that appears only when it
+    # acts teaches the reader that its absence means "nothing to release",
+    # when it equally means the scorer stopped running.
+    retention: Dict[str, Any] = {}
+    try:
+        from src import mover_retention as _mr
+
+        retention = _mr.get_retention().report()
+    except Exception as exc:  # noqa: BLE001
+        retention = {"error": str(exc)}
+
     return {
         "regular": regular,
         "promoting": promoting,
         "regular_count": len(regular),
         "promoting_count": len(promoting),
         "ignition": ignition,
+        "retention": retention,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
