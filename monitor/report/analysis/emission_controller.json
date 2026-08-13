@@ -55,7 +55,7 @@
       },
       "MEAN_REVERT@FIXED": {
         "suppress_negative": null,
-        "min_samples": 20
+        "min_samples": 15
       },
       "LIQUIDITY_SWEEP_REVERSAL": {
         "suppress_negative": false,
@@ -298,9 +298,9 @@
         "HOLD"
       ],
       "WHALE_MOMENTUM|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "WHALE_MOMENTUM|min_samples": [
         "HOLD",
@@ -438,7 +438,7 @@
       "MEAN_REVERT|suppress_negative": 46,
       "SR_FLIP_RETEST@FIXED|min_samples": 126,
       "MEAN_REVERT@ATR|min_samples": 124,
-      "MEAN_REVERT@FIXED|min_samples": 124,
+      "MEAN_REVERT@FIXED|min_samples": 1031,
       "LIQUIDITY_SWEEP_REVERSAL|suppress_negative": 149,
       "MOVER_AVWAP_SCALP|min_samples": 276,
       "DIVERGENCE_CONTINUATION|suppress_negative": 210,
@@ -453,7 +453,7 @@
       "QUIET_COMPRESSION_BREAK|suppress_negative": 848,
       "MOVER_TREND_PULLBACK@TUNED|min_samples": 855
     },
-    "cycle": 1000
+    "cycle": 1046
   },
   "ledger": [
     {
@@ -1143,6 +1143,19 @@
       "ev_per_suppression_r": null,
       "n": 15,
       "routable": false
+    },
+    {
+      "strategy": "MEAN_REVERT@FIXED",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15,
+      "routable": false
     }
   ],
   "pending": [],
@@ -1187,7 +1200,7 @@
       "min_samples": 20
     },
     "MEAN_REVERT@FIXED": {
-      "min_samples": 20
+      "min_samples": 15
     },
     "LIQUIDITY_SWEEP_REVERSAL": {
       "suppress_negative": false
@@ -1260,7 +1273,7 @@
         "min_samples": 20
       },
       "MEAN_REVERT@FIXED": {
-        "min_samples": 20
+        "min_samples": 15
       },
       "MOVER_TREND_PULLBACK@ATR": {
         "min_samples": 25
