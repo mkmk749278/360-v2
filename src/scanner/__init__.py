@@ -2115,8 +2115,19 @@ class Scanner:
                 # it: the expiry answers "when does the flat TTL fire", and
                 # retention needs "how long have we held this", which is also
                 # what gets stamped onto every signal the pair produces.
+                # The SIGNED 24h move, captured here because this is the only
+                # point that still has it: `_ensure_mover_pair` stores
+                # `abs(change_pct)` on the PairInfo, so one line later a top
+                # gainer and a top loser are the same number forever.
+                _sig_chg: Optional[float] = None
+                if det is not None:
+                    try:
+                        _sig_chg = det.meta_change_pct(symbol)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        fail_open.record("scanner.mover_change_pct", exc)
                 mover_retention.get_retention().on_promoted(
-                    symbol, self._mover_promotion_source[symbol]
+                    symbol, self._mover_promotion_source[symbol],
+                    change_pct=_sig_chg,
                 )
 
         # Sample each held pair's liveness off the detector the ignition path
@@ -5033,10 +5044,25 @@ class Scanner:
         # first second of a hold — and a core pair that was never promoted
         # must not read as the freshest possible ignition.
         try:
-            _ret_age = mover_retention.get_retention().age_sec(getattr(sig, "symbol", ""))
+            _ret = mover_retention.get_retention()
+            _sym = getattr(sig, "symbol", "")
+            _ret_age = _ret.age_sec(_sym)
             sig.promotion_age_sec = -1.0 if _ret_age is None else float(_ret_age)
+            # WHICH KIND of mover admitted this pair — a top gainer or a top
+            # loser.  `pair_admission` says a mover produced the row and
+            # `promotion_age_sec` says where in the hold it fired; neither can
+            # say the pair was up 30% or down 30%, because the promotion path
+            # stores `abs(change_pct)`.  On the delivered book those are not
+            # the same trade (2026-08-13), and today the split is only
+            # obtainable by re-fetching candles and guessing at the entry time.
+            #
+            # None, not 0.0 or -1.0: "we could not read which kind" must stay
+            # distinguishable from "it moved 0%" and from "not a mover", and a
+            # core pair simply has no promotion to describe.
+            sig.promotion_change_pct = _ret.change_pct_at_promotion(_sym)
         except Exception as _page_exc:
             sig.promotion_age_sec = -1.0
+            sig.promotion_change_pct = None
             fail_open.record("scanner.promotion_age_stamp", _page_exc)
         # Pair-cohort (liquidity tier) for the edge matrix's Phase-5 cohort
         # dimension — stamped on every candidate so the dual-write feeders and

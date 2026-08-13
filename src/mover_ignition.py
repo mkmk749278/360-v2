@@ -184,6 +184,30 @@ class MoverIgnitionDetector:
             return None
         return max(0.0, (trades - old_trades) / window_dt) / baseline
 
+    def meta_change_pct(self, symbol: str) -> Optional[float]:
+        """The pair's **signed** 24h % change, as Binance last reported it.
+
+        The scanner promotes on ``abs(pct) >= MOVER_PROMOTION_MIN_PCT`` and
+        `_ensure_mover_pair` then stores ``abs(change_pct)`` on the PairInfo, so
+        by the time anything downstream sees a promoted mover the SIGN is gone —
+        a pair up 30% and a pair down 30% are indistinguishable. They are not the
+        same trade: measured on the delivered book (2026-08-13), buying a top
+        gainer ran +1.448%/trade over 110 trades while shorting a top loser ran
+        -0.497% over 39, a difference of +1.944% with a symbol-clustered 95% CI
+        of [+0.504, +3.333].
+
+        ``None`` rather than 0.0 when the stream has not carried the symbol:
+        "we do not know which kind of mover this was" and "it moved 0%" are
+        different facts, and only one of them can be filtered on.
+        """
+        m = self._meta.get(str(symbol or "").upper())
+        if m is None:
+            return None
+        try:
+            return float(m[0])
+        except (TypeError, ValueError):
+            return None
+
     def universe_movers(
         self, min_abs_pct: float, min_quote_vol: float,
     ) -> List[Tuple[str, float, float]]:

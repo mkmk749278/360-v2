@@ -355,6 +355,11 @@ class Signal:
     # meaning the signal fired at the top of the hold, so the two must not
     # share a sentinel.  See scanner's stamp site for why there is no backfill.
     promotion_age_sec: float = -1.0
+    # Which KIND of mover admitted the pair: signed 24h % change at promotion.
+    # `None` = not a held mover, or the detector could not report it. The
+    # promotion path stores `abs(change_pct)`, so this is the only carrier of
+    # the sign — and a top gainer and a top loser are different trades.
+    promotion_change_pct: Optional[float] = None
     atr_percentile_at_entry: float = 50.0         # ATR percentile (0-100) at entry — trail-width input
     atr_value_at_entry: float = 0.0               # Absolute ATR(14) value at entry — converts percentile to Binance callbackRate
     entry_momentum_slope: float = 0.0             # EMA slope at entry (% diff)

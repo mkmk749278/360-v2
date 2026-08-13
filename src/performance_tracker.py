@@ -185,6 +185,13 @@ class SignalRecord:
     # written before the field existed); ``0.0`` is a real reading.
     promotion_age_sec: float = -1.0
 
+    # Signed 24h % change of the pair at promotion — top gainer (positive) or
+    # top loser (negative). Knowable only at admission and discarded there by
+    # `abs(change_pct)` until 2026-08-13, so older records carry None rather
+    # than a guess. On the delivered book, buying a gainer and shorting a loser
+    # differed by +1.944%/trade, 95% CI [+0.504, +3.333].
+    promotion_change_pct: Optional[float] = None
+
 
 @dataclass
 class ChannelStats:
@@ -264,6 +271,7 @@ class PerformanceTracker:
         entry_regime_15m: str = "",
         pair_admission: str = "",
         promotion_age_sec: float = -1.0,
+        promotion_change_pct: Optional[float] = None,
     ) -> None:
         """Record the outcome of a completed signal."""
         # Default signal quality fields to the actual PnL values when not provided
@@ -316,6 +324,9 @@ class PerformanceTracker:
             pair_admission=str(pair_admission or ""),
             promotion_age_sec=float(
                 -1.0 if promotion_age_sec is None else promotion_age_sec
+            ),
+            promotion_change_pct=(
+                None if promotion_change_pct is None else float(promotion_change_pct)
             ),
         )
         self._records.append(record)

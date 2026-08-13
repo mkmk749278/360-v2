@@ -626,6 +626,7 @@ def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
         entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
         pair_admission=str(getattr(sig, "pair_admission", "") or ""),
         promotion_age_sec=float(getattr(sig, "promotion_age_sec", -1.0) or -1.0),
+        promotion_change_pct=getattr(sig, "promotion_change_pct", None),
         market_phase=str(getattr(sig, "market_phase", "") or ""),
     )
 
@@ -1698,6 +1699,12 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
                 "retention_dark": rt.get("dark"),
                 "retention_burst": rt.get("last_burst"),
                 "promotion_source": rt.get("source"),
+                # Top gainer or top loser — the distinction the promotion path
+                # discards (`abs(change_pct)`) and the one the delivered book
+                # says matters most. `gainer` is tri-state: None means no
+                # reading, never "loser".
+                "promotion_change_pct": rt.get("change_pct"),
+                "promotion_gainer": rt.get("gainer"),
             })
         promoting.sort(key=lambda r: -r["minutes_left"])
 
