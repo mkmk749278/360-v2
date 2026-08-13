@@ -1126,6 +1126,18 @@ MOVER_PROMOTION_MAX_PAIRS: int = _safe_int("MOVER_PROMOTION_MAX_PAIRS", "30")
 # flags, per CLAUDE.md § Project Phase — this changes which pairs are scanned,
 # so it changes which signals emit.
 MOVER_RETENTION_ENFORCE: bool = _safe_bool("MOVER_RETENTION_ENFORCE", "false")
+
+# ---- Path retirement (2026-08-13) --------------------------------------- #
+# Stop DELIVERING a (setup_class, side) that the delivered book measures as a
+# loser, while the dark lane keeps measuring it. Default ON: the owner signed
+# these off on measured evidence, so unlike most money-path flags here the
+# effect ships armed. Turning it off restores prior behaviour exactly.
+PATH_RETIREMENT_ENABLED: bool = _safe_bool("PATH_RETIREMENT_ENABLED", "true")
+
+# Comma-separated SETUP:SIDE. Empty retires nothing — a real value, not unset.
+RETIRED_PATHS: str = os.getenv(
+    "RETIRED_PATHS", "MOVER_TREND_PULLBACK:SHORT,VOLUME_SURGE_BREAKOUT:*"
+).strip()
 #: Re-seed a promoted mover's candles when its 1m data is older than this many
 #: seconds (2026-07-10).  Promoted movers sit outside the WS kline subscription
 #: set — their candles came ONLY from the one-time promotion seed, so minutes

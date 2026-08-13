@@ -129,6 +129,8 @@ def _build_registry() -> Dict[str, Tunable]:
         DARK_EMISSION_ENABLED,
         DARK_PROMOTION_ENABLED,
         MOVER_RETENTION_ENFORCE,
+    PATH_RETIREMENT_ENABLED,
+    RETIRED_PATHS,
         PRESCORING_AUDIT_ENABLED,
         SETUP_TF_CORRECTION_LIVE,
         SHADOW_STRATEGIES_ENABLED,
@@ -1131,6 +1133,45 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=MOVER_RETENTION_ENFORCE,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="path_retirement_enabled",
+            label="Path retirement — stop DELIVERING a losing (path, side)",
+            description=(
+                "Diverts a retired (setup_class, side) to the dark lane "
+                "instead of the live feed. Subscribers stop receiving it; the "
+                "measurement continues, so the decision can be re-read on "
+                "fresh evidence rather than frozen at the moment it was "
+                "taken. Deleting a path outright is what makes a verdict "
+                "permanent — a path that never emits can never earn its way "
+                "back, which is cohort_edge's absorbing state. OFF restores "
+                "today's behaviour exactly. Money path: this changes what "
+                "subscribers receive."
+            ),
+            type="bool",
+            default=PATH_RETIREMENT_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="retired_paths",
+            label="Path retirement — the retired (path, side) list",
+            description=(
+                "Comma-separated SETUP:SIDE, e.g. "
+                "'MOVER_TREND_PULLBACK:SHORT, VOLUME_SURGE_BREAKOUT:*'. "
+                "'*' or a bare setup name retires both directions. EMPTY "
+                "RETIRES NOTHING — that is a real value and the way to clear "
+                "the list from this form, not an unset. Default is what the "
+                "owner signed off on 2026-08-13 from the DELIVERED book: "
+                "MVRTP SHORT (n=86 over 46 symbols, -0.854%/trade, "
+                "symbol-clustered 95% CI [-1.585,-0.143] — the only bucket in "
+                "the book whose interval excludes zero, and not explained by "
+                "market direction, since every other path's shorts made "
+                "+0.739% in the same window); and VOLUME_SURGE_BREAKOUT "
+                "(0 wins in 11 across 11 distinct symbols, p=0.0096)."
+            ),
+            type="str",
+            default=RETIRED_PATHS,
             category="Signal gating",
         ),
         Tunable(

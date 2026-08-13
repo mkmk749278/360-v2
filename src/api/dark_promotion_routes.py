@@ -137,6 +137,17 @@ def register(app: FastAPI, *, owner_required: Callable) -> None:
         """
         snap = dark_promotion.snapshot()
         snap["vocabulary"] = _vocabulary(_ledger_rows())
+        # Path retirement rides the same payload deliberately: it is the same
+        # decision pointing the other way (live -> dark, where promotion is
+        # dark -> live), and an operator who can arm one without seeing the
+        # other cannot tell why a path produces nothing. Two endpoints would be
+        # two places for the next reader to forget about.
+        try:
+            from src import path_retirement
+
+            snap["path_retirement"] = path_retirement.snapshot()
+        except Exception as exc:  # noqa: BLE001
+            snap["path_retirement"] = {"error": str(exc)}
         return snap
 
     @app.post(

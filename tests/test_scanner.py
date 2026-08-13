@@ -3552,12 +3552,21 @@ class TestLongsRegimeGateInScanner:
     @pytest.mark.asyncio
     async def test_doctrine_exempt_long_not_blocked_into_down_15m(self):
         """A §3.4 doctrine-bypass setup (breakout/tape) long fires even when the
-        15m regime is TRENDING_DOWN — the breakout IS the regime change."""
+        15m regime is TRENDING_DOWN — the breakout IS the regime change.
+
+        Uses WHALE_MOMENTUM rather than VOLUME_SURGE_BREAKOUT, which is also
+        doctrine-exempt but is RETIRED from the live feed (path_retirement,
+        2026-08-13) and therefore diverted to the dark lane before the queue.
+        The subject here is the longs-regime gate, so the setup class only has
+        to be doctrine-exempt; picking a retired one made this assert the
+        retirement instead, which is a different test and is in
+        tests/test_path_retirement.py.
+        """
         scanner, signal_queue = self._scanner_and_queue()
         with _common_gate_patches(scanner, [
             patch("src.scanner.check_mtf_gate", return_value=(True, "")),
             patch.object(scanner, "_evaluate_setup",
-                         return_value=_setup_pass(SetupClass.VOLUME_SURGE_BREAKOUT)),
+                         return_value=_setup_pass(SetupClass.WHALE_MOMENTUM)),
             patch("src.scanner.detect_regime_from_arrays",
                   return_value=MarketRegime.TRENDING_DOWN.value),
         ]):
@@ -3565,5 +3574,5 @@ class TestLongsRegimeGateInScanner:
         signal_queue.put.assert_awaited_once()
         assert scanner._suppression_counters.get("mtf_longs_regime_block:360_SCALP", 0) == 0
         assert scanner._suppression_counters[
-            "mtf_longs_regime_doctrine_bypass:360_SCALP:VOLUME_SURGE_BREAKOUT"
+            "mtf_longs_regime_doctrine_bypass:360_SCALP:WHALE_MOMENTUM"
         ] == 1
