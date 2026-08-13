@@ -175,6 +175,7 @@ from src import dark_emission
 from src import dark_promotion
 from src import fail_open
 from src import mover_retention
+from src import path_retirement
 from src import pair_penalty as _pair_penalty
 from src.feedback_loop import FeedbackLoop
 from src.kill_zone import check_kill_zone_gate
@@ -5855,6 +5856,46 @@ class Scanner:
             stamp_pre_tp(sig)
         except Exception as exc:
             log.debug("pre-TP stamp failed for %s: %s", getattr(sig, "symbol", "?"), exc)
+
+        # ── Path retirement ───────────────────────────────────────────────
+        # A (setup_class, side) the DELIVERED book measures as a loser stops
+        # reaching subscribers and keeps being measured, by being marked dark
+        # here — the last point before the divergence below, and after every
+        # rewrite of the geometry, so the dark row records the stop the trade
+        # would actually have carried (#848's rule, "where the geometry
+        # becomes true is four rewrites later than you think").
+        #
+        # Marked rather than returned, deliberately.  A bare `return False`
+        # would stop delivery AND stop the measurement, which is exactly how a
+        # retirement becomes permanent: a path that never emits can never earn
+        # its way back (cohort_edge's absorbing state).  Diverting keeps the
+        # rows arriving, so re-arming is a decision on fresh evidence rather
+        # than on the window that retired it.
+        #
+        # An already-dark candidate is left alone: it was carried past a
+        # loosened gate, and that gate is the reason it never delivers.
+        # Overwriting `dark_gate` here would relabel the row and lose which
+        # gate actually caught it.
+        try:
+            if not dark_emission.is_dark(sig):
+                _retire = path_retirement.reason_for(
+                    getattr(sig, "setup_class", ""), getattr(sig, "direction", ""),
+                )
+                if _retire:
+                    dark_emission.mark(sig, _retire)
+                    self._suppression_counters[f"path_retired:{_retire}"] += 1
+                    # Stamped like every other live gate. A gate that cannot be
+                    # measured cannot earn its place — and this one has to keep
+                    # earning it, since the whole point is that it is reversible.
+                    self._stamp_suppressed(sig, _retire)
+                    # Whether the row is still MEASURED depends on the dark
+                    # lane, which is a different switch. Counted apart: "retired
+                    # and still measured" and "retired and now invisible"
+                    # support opposite readings of the same panel.
+                    if not dark_emission.enabled():
+                        self._suppression_counters["path_retired:unmeasured"] += 1
+        except Exception as exc:  # pragma: no cover - defensive
+            fail_open.record("scanner.path_retirement", exc)
 
         # ── THE divergence point for the dark lane ────────────────────────
         # A dark candidate has cleared every gate except the loosened one, and
