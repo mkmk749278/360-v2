@@ -13,6 +13,8 @@ from __future__ import annotations
 import ast
 import pathlib
 
+import pytest
+
 from src import dark_emission, path_retirement as pr
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -248,3 +250,88 @@ def test_the_tunables_are_registered_and_typed():
     assert keys["path_retirement_enabled"].type == "bool"
     assert keys["retired_paths"].type == "str"
     assert keys["retired_paths"].category == keys["path_retirement_enabled"].category
+
+
+# --------------------------------------------------------------------------- #
+# End to end through the real scanner: never queued, always measured
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_a_retired_candidate_never_reaches_the_queue_but_does_reach_the_ledger(
+    tmp_path, monkeypatch
+):
+    """The whole safety property, driven through `_scan_symbol`.
+
+    The AST guards above pin the SHAPE of the wiring; this pins the BEHAVIOUR,
+    and the two fail for different reasons. A candidate that cleared every gate
+    must be absent from `signal_queue.put` (no channel, no push, no app feed,
+    no order) and present in the dark ledger (still measured, so the retirement
+    stays reversible on fresh evidence).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from types import SimpleNamespace
+
+    from src.signal_quality import SetupClass
+    from tests.test_scanner import (  # noqa: PLC0415
+        _common_gate_patches, _make_scan_ready_scanner, _make_signal, _setup_pass,
+    )
+
+    channel = MagicMock()
+    channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+    channel.evaluate.return_value = _make_signal(channel="360_SCALP")
+    signal_queue = MagicMock()
+    signal_queue.put = AsyncMock(return_value=True)
+    scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+
+    ledger = dark_emission.DarkLedger(path=str(tmp_path / "dark.json"))
+    dark_emission.reset_ledger(ledger)
+    monkeypatch.setattr(dark_emission, "enabled", lambda: True)
+
+    with _common_gate_patches(scanner, [
+        patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        patch.object(scanner, "_evaluate_setup",
+                     return_value=_setup_pass(SetupClass.VOLUME_SURGE_BREAKOUT)),
+    ]):
+        await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+    signal_queue.put.assert_not_awaited()
+    rows = ledger.rows()
+    assert len(rows) == 1, "a retired candidate must still be measured"
+    assert rows[0]["dark_gate"] == "retired:VOLUME_SURGE_BREAKOUT:*"
+    assert any(k.startswith("path_retired:") for k in scanner._suppression_counters)
+    dark_emission.reset_ledger(None)
+
+
+@pytest.mark.asyncio
+async def test_the_same_candidate_IS_queued_once_the_switch_is_off(tmp_path, monkeypatch):
+    """Verifying the fix by reverting it.
+
+    If this passes with the gate disabled and the test above fails with it
+    enabled, the retirement is what changed the outcome — not some other gate
+    in a 9,000-line chain.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from types import SimpleNamespace
+
+    from src.signal_quality import SetupClass
+    from tests.test_scanner import (  # noqa: PLC0415
+        _common_gate_patches, _make_scan_ready_scanner, _make_signal, _setup_pass,
+    )
+
+    monkeypatch.setattr(pr, "enabled", lambda: False)
+
+    channel = MagicMock()
+    channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+    channel.evaluate.return_value = _make_signal(channel="360_SCALP")
+    signal_queue = MagicMock()
+    signal_queue.put = AsyncMock(return_value=True)
+    scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+
+    with _common_gate_patches(scanner, [
+        patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        patch.object(scanner, "_evaluate_setup",
+                     return_value=_setup_pass(SetupClass.VOLUME_SURGE_BREAKOUT)),
+    ]):
+        await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+    signal_queue.put.assert_awaited_once()
