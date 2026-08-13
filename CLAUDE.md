@@ -281,6 +281,7 @@ Telegram are both acceptable paging paths.
 | Mark price feed | `src/execution/mark_price_feed.py` |
 | Pre-TP dispatcher | `src/execution/pretp_dispatcher.py` |
 | Manual take consumer (server-side take) | `src/execution/manual_take.py` |
+| **Trail governor — the only module that moves a resting stop on a live position** (per-user `exit_mechanism` opt-in) | `src/execution/trail_governor.py` |
 | API server | `src/api/server.py` |
 | API isolated entry point | `src/api/main.py` |
 | Redis engine facade | `src/api/redis_engine.py` |
@@ -321,6 +322,10 @@ Telegram are both acceptable paging paths.
 | Standalone price-action lane — level swept + reclaimed, delta-confirmed (Phase 5, dark) | `src/price_action_lane.py` |
 | Retention by delivery, shared by every measurement ledger (Phase 6) | `src/delivery_retention.py` |
 | Data-intake X-ray — what we actually read from Binance (Phase 1) | `src/data_intake.py` |
+| Mover ignition — which pairs get promoted, and the `!ticker@arr` meta behind it | `src/mover_ignition.py` |
+| Mover retention — keep a promoted pair while it is still producing (HOLD/RELEASE/EXTEND/WARMUP) | `src/mover_retention.py` |
+| Path retirement — remove a `(setup, side)` from the live feed by **diverting** it, never deleting | `src/path_retirement.py` |
+| Dark → live promotion, under owner-set per-path conditions | `src/dark_promotion.py` |
 
 ---
 
@@ -1642,6 +1647,36 @@ python -m src.main
   protection, silent about a handover that will never happen. Keep the vendor's
   own words in a bounded ring **with the unbounded count beside it**, and let
   "no code" mean *the rejection did not come from the vendor* rather than zero.
+- **A store, a migration and a UI are not a wired path — the API model is, and
+  `exclude_unset` deletes what it was never told about.** `exit_mechanism` shipped
+  with a SQLite column, a migration and an ops control, and `AutoTradeSettings`
+  never declared the field — so `model_dump(exclude_unset=True)` dropped it on
+  **every** write and the setting was reachable by nothing. That is the banned
+  scaffold (*"a setting the engine stores but does not yet consume"*), shipped by
+  me, on the control that decides how a real position closes. The tell was not in
+  the tests, which passed: it was that **the setup guide could not be written
+  without inventing a step.** If documenting the feature requires a step the code
+  does not have, the feature is not wired — write the guide before calling it done.
+- **Which process holds the state is not a deployment detail.**
+  `/internal/diag/trail-governor` assembled its X-ray in the **API** container,
+  which in isolated mode cannot see the engine's in-process position index — so the
+  page read `INDEX COLD` in production while the governor was working fine. Both
+  sibling diags already used publish-then-read through Redis; this one was written
+  as if the engine served HTTP, which is the *other* mode. `API_PROCESS_ISOLATED`
+  changes what a module can observe, not merely where it runs — **before reading
+  in-process state in a handler, ask which container the handler is in.**
+- **A setting with two legal values must be unselectable-wrong, not merely
+  validated.** The governing timeframe was typed as free text; the owner set it
+  from ops and typed `5`, the store keys `"5m"`, and `set_values` validated floats
+  and ints and nothing else — so the governor went **permanently inert with the
+  switch reading ON**, refusing every position silently. Fixed at both ends, and
+  both halves are load-bearing: `Tunable.choices` renders a `<select>` so ops
+  cannot send a wrong value, and `REFUSE_BAD_TF` counts and names it at the sweep
+  so a value arriving by any other route is a visible refusal rather than a
+  silence. Note the half that a later session still had to pay for:
+  `runtime_tunables.get()` validates nothing against `choices`, so a value stored
+  *before* the fix kept being served — **the write path was refusing what the read
+  path kept handing out.**
 - **A setter that reads its value back still needs a READER, or the control can
   only ever show its first option.** `POST /api/admin/users/exit-mechanism`
   reads the stored value back rather than echoing the request — deliberately,

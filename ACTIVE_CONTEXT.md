@@ -4,6 +4,148 @@
 
 ---
 
+## 🟢 SESSION 124 2026-08-13 — measured against reality, and the first retirement off the delivered book
+
+Engine #927 · #928 · #929; ops #173 · #174 · #175. Owner opened on retention —
+*"we keep and leave pairs based on that pair is that give us opportunities and
+good setups we need to measure that in real time"* — then redirected the whole
+session: *"you are thinking is limiting to code only / but always you need to
+think reality first with that we need to compare our against reality"*, then
+*"not yet actually analyse large data as much as you can then decide"*.
+
+### #927 — dynamic mover retention
+
+`src/mover_retention.py` wired into the scanner: `note_scan` / `note_candidate` /
+`note_enqueued` / `note_dark` feed a per-pair window, and `sweep` returns
+HOLD · RELEASE · EXTEND · **WARMUP** each cycle. Floored at `MIN_HOLD_SEC` (1800)
+and capped at `MAX_HOLD_SEC` (43200), refusing to judge under
+`MIN_SCANS_TO_JUDGE` (20) — a pair that has not been looked at enough times is
+`warmup`, never a release, because "no candidates yet" and "no candidates ever"
+are different facts. `promotion_age_sec` stamps where in the hold a signal was
+taken.
+
+**A borrowed entry needs a hold, and two paths bypassed the release.** Two
+`_mover_promoted_pairs.pop()` sites dropped a symbol without telling retention,
+leaking its window. Fixed with explicit `on_released` calls **plus** a derived
+reconcile against `held_symbols()` — so a future fourth site cannot leak, which
+is the difference between fixing an instance and fixing the class.
+
+### The owner's redirection, and what reading the market actually found
+
+The instruction was to stop reasoning from code and compare against reality. What
+that produced is mostly a list of my own errors, caught by widening n:
+
+- From the last 10 signals I concluded **"we enter too late, require a deeper
+  pullback."** On 425 rows it is **backwards**: entry location correlates
+  *positively* with outcome (`pos_in_range` rho **+0.136**, p=0.004) and pullback
+  depth is noise with the **shallowest** bucket best (rho −0.067, p=0.17).
+- Stop distance looked like a clean monotonic predictor. **Inside `RANGING` it
+  vanishes and reverses** — it was a proxy for regime, not a lever.
+- I recommended a **QUIET-regime gate**. Checking before building: the delivered
+  book contains **zero** QUIET trades, and 76 of 85 QUIET dark rows were already
+  diverted by `setup_compat:regime_*`. The gate exists and is working. I did not
+  build it, and named the circularity instead.
+
+**Then the owner corrected the population, which invalidated the lot:** *"actually
+what you analysed before delivered book or Dark feed / go through delivered book
+now"*. Everything above had been measured on the **dark feed** — which is by
+definition the population our gates already suppressed, so using its badness to
+justify more suppression is circular. Re-run on the 412 delivered closed trades.
+
+### #928 — the first retirement, and it is a divert
+
+Delivered book, 30d: **+63.91% gross / +35.07% net over 412 trades** — and
+**BMTUSDT alone is +43.0%** from 5 trades in 21 hours. Remove that one symbol and
+the book is **−7.9%**. Symbol-clustered CI **[−0.296, +0.460]**, P(profitable)
+**66%** — *the book is not distinguishable from zero.* That is the headline, and
+it is the context every path number below sits in.
+
+| Retired | n | symbols | Net/trade | Evidence |
+|---|---|---|---|---|
+| `MOVER_TREND_PULLBACK` SHORT | 86 | 46 | **−0.854%** | CI **[−1.585, −0.143]** — the only bucket in the book excluding zero |
+| `VOLUME_SURGE_BREAKOUT` (both sides) | 11 | 11 | −17.9% total | **0 winners**; at the book's 34.5% win rate P = 0.0096 |
+
+The obvious confound was checked and does not hold: *"shorts lost because the
+market rose"* would hit every path, but **every other path's shorts made +0.739%
+over 53 trades** — difference −1.593%, CI [−2.689, −0.594], 100% of resamples.
+And MVRTP shorts lose on their own turf (−0.961% `TRENDING_DOWN`, −1.515%
+`RANGING`). The mechanism is legible: MVRTP takes direction from the MA stack, so
+on a crashed alt it shorts the *bounce*, entering at the 1st–8th percentile of the
+24h range — selling the low of a finished dump into the squeeze.
+
+**It diverts to the dark lane rather than deleting.** `cohort_edge`'s absorbing
+state, arriving as a routing decision: a path removed outright can never earn its
+way back, so a retired path keeps stamping and the decision stays re-readable.
+Owner asked *"what no short go to users?"* — checked: other paths' shorts are
+untouched and still deliver.
+
+### #929 — the sign was being thrown away
+
+Owner: *"there are two types of promoted pairs right, top longs and top shorts …
+top longs short might fail and vice versa"*. He is right that they are two
+populations, and **the engine could not tell them apart**: `universe_movers`
+admits on `abs(pct) >= min` and `_ensure_mover_pair` stores
+`volatility_24h=abs(change_pct)` one line later. Answering the question at all
+needed a public-mirror candle re-fetch plus a close-time approximation.
+
+| Pair 24h | Side | n | Win | Net/trade |
+|---|---|---|---|---|
+| Top gainer | LONG | 110 | 53% | **+1.448%** |
+| Top loser | SHORT | 39 | 21% | **−0.497%** |
+
+Difference **+1.944%**, symbol-clustered CI **[+0.504, +3.333]**; survives
+removing its best three symbols (+0.712% over 75). **The failure the question
+described barely exists** — 149 of 152 rows already trade *with* the pair's move,
+because the MA stack agrees with a 15%+ daily move; the asymmetry is *between the
+two aligned quadrants*. Caveat stated rather than buried: that 152-row subset
+totals +145.7% against the book's +35.1%, so the filters select hard and only the
+**contrast** is usable.
+
+`promotion_change_pct` now stamps signed at the promotion site — the last point
+that still has it — and rides onto every signal, the closed-signal record, the API
+schema, the dark ledger (schema 3 → 4, **additive**) and `/api/pairs`. Tri-state:
+`None` = the detector could not report it, never `0.0`, never a `gainer=False`
+that would render every unmeasurable pair as a top loser. **No backfill** — the
+promotion evicts itself long before most signals close.
+
+### Ops #173 · #174 · #175
+
+Retention panel on `/pairs` (NOT REPORTED · UNREADABLE · MEASURING ONLY ·
+ENFORCING, per-row verdict, em-dash for a missing burst ratio); path-retirement
+panel on `/control/promotions`; tri-state `top gainer +31.4%` / `top loser
+−27.9%` / `— kind unknown` per held pair, with `promotion_change_pct` in the
+`/track-record` and dark-feed CSVs.
+
+### Two test-shape repairs, same defect twice
+
+A schema test asserted `LEDGER_SCHEMA == 2`, then `== 3`, and broke on an
+**additive** bump both times — for a reason unrelated to what it protects, whose
+cheapest fix is to edit the literal, which is how a guard becomes a formality.
+Both replaced with the property: `ADDITIVE_FROM_SCHEMAS == frozenset(range(1, LEDGER_SCHEMA))`.
+
+And `test_doctrine_exempt_long_not_blocked_into_down_15m` failed **correctly** —
+it used `VOLUME_SURGE_BREAKOUT` as a convenience fixture and that path is now
+retired. Moved to `WHALE_MOMENTUM` (also §3.4 doctrine-exempt, not retired) with
+a docstring saying why, rather than re-pointing it silently.
+
+### Open
+
+- **The book is not distinguishable from zero, and one symbol carries it.** The
+  two retirements are the only buckets with evidence that clears its own CI;
+  neither makes the book profitable. Do not read #928 as a fix.
+- **Watch the retirement's dark rows.** They keep stamping — that is the whole
+  design — so the decision is re-readable in a week on fresh evidence. If MVRTP
+  SHORT recovers in the dark lane, the routing decision was wrong and is
+  reversible by one env value.
+- **`promotion_change_pct` reads blank on every existing row** and cannot be
+  backfilled. A window has to accumulate behind it before the gainer/loser split
+  is answerable from our own stamps rather than from a mirror re-fetch.
+- **The closed-signal record still carries no entry timestamp**, which is why
+  answering #929 needed a close-time approximation at all. That is the cheap
+  field that would have made this a query.
+
+---
+
 ## 🟢 SESSION 123 2026-08-12 — the dark feed gets a control panel
 
 Engine `360-v2#923` + ops `360ce-ops#171`, branch
@@ -285,6 +427,11 @@ Guards verified by reverting: the quantity tests fail against the old call.
 
 ## 🟢 SESSION 119 2026-08-10 — the governor could not hand over, and could not say why
 
+> **Two sessions ran on 2026-08-10 and both were numbered 119.** This is the
+> later one. The earlier one — where the governor shipped (#908/#909/#910, ops
+> #160–#163) — is recorded below as **SESSION 119a**; it was written up in PR
+> #911, which stayed open until 2026-08-13.
+
 Engine + ops `claude/trail-governor-sar-arming-029tfu`. Owner: *"look at trail
 governor SAR exit mechanism not Arming why"*, then — after fixing the timeframe —
 *"these are already set, but even after changing exit mechanism still showing
@@ -381,6 +528,120 @@ without the retry gate, 2 without the lookup field, 5 without the ops card.
   refuse. Left deliberately: falling back to the default would have armed a live
   money-path mechanism at a timeframe nobody chose. The governor refuses loudly
   (`bad_timeframe`) and ops badges the invalid value on Control.
+
+---
+
+## 🟢 SESSION 119a 2026-08-10 (earlier the same day) — the measurement became an order, and the control page got arranged
+
+> **Recorded late, on 2026-08-13, from PR #911** — which was opened 2026-08-10,
+> never merged, and sat open across four sessions while its base drifted 15
+> commits. Two sessions ran on 2026-08-10 and both were numbered 119; this is the
+> **earlier** one (the governor ships), and the SESSION 119 above it is the
+> **later** one (why it then never armed). Nothing here was on `main` until now,
+> which is why the module that places real stop orders was absent from
+> `ARCHITECTURE.md` and the Module Map for three days.
+
+Engine `claude/sar-atrb-chandler-signals-cwgbdk` (#908) then two same-day repairs
+(#909, #910); ops #160–#163. Owner: *"can we enable auto trading for this SAR
+Signals to test in real only for me not for users"*, then *"open PRs and merge
+after green and guide me how to setup"*, then *"actually arrange all the control
+panel for easy access"*.
+
+Owner's three decisions, taken via `AskUserQuestion`: **both mechanisms, staged**
+(SAR first, dark-feed paths later) · **uncapped — true SAR**, no cap at the
+designed SL · **both timeframes computed, the governing one switchable from ops**.
+
+### What shipped: `src/execution/trail_governor.py`
+
+Ten sessions of trailing work had measured where a stop *would* have been parked.
+This places it. Per-user opt-in (`exit_mechanism` = `default` | `sar` |
+`chandelier`), so the owner's account runs the mechanism and no subscriber is
+touched — the user-visible flag is the per-user column itself.
+
+- **Never naked is a property of CALL ORDER, not of retry success.** `_park`
+  places the new CONDITIONAL stop **then** cancels the superseded one. A
+  cancel-first ordering leaves a window where a gap costs the position.
+  BE-shift's cancel-then-place is the pattern deliberately *not* copied.
+- **Refuse, never adopt mid-flight.** `ladder_touched` (pre-TP fired, BE shifted,
+  a TP leg filled) is a refusal, not a takeover — the governor only ever governs
+  a position whose geometry is still the one it was dispatched with.
+- `decide()` is pure and separately tested; `step_position` / `sweep` do the I/O.
+- Fills land through the FSM as `TRAIL_STOP` (`coid_trail`, `_apply_trail_fill`),
+  so a governor exit is nameable apart from an SL hit in every downstream record.
+
+### Three defects, all shipped the same day, all found by reading rather than by CI
+
+1. **A column reachable by nothing** (#908, caught while writing the setup
+   guide). `exit_mechanism` had a store, a migration and a UI and **no API field**
+   — `AutoTradeSettings` never declared it, so `model_dump(exclude_unset=True)`
+   dropped it on every write. The banned scaffold, shipped by me, and the tell was
+   that the setup guide could not be written without inventing a step.
+2. **The process seam** (#909). `/internal/diag/trail-governor` built its X-ray in
+   the **API** container, which cannot see the engine's in-process position index —
+   so the page read `INDEX COLD` in production while the governor was fine. Both
+   sibling diags already used publish-then-read through Redis; this one was
+   written as if the engine served HTTP. **Isolated mode is not an implementation
+   detail of the deployment, it is a fact about which process holds the state.**
+3. **A two-valued setting typed as free text** (#910, owner-caught). The owner set
+   the timeframe from ops and typed `5`. The store keys `"5m"`/`"15m"`;
+   `set_values` validated floats and ints and nothing else, so the governor was
+   **permanently inert with the switch reading ON** — every position refused,
+   silently. Fixed at both ends: `Tunable.choices` makes it unselectable-wrong from
+   ops (`<select>`, not a text box), and `REFUSE_BAD_TF` names it at the sweep so a
+   value arriving any other way is a counted refusal rather than a silence.
+
+### The control panel (ops #161–#163)
+
+77 tunables sat between the safety switches and the mode toggle, so on a phone the
+kill switch and the positions table were several screens below a wall of knobs.
+
+- **#161** — section order (safety · mode · positions · tunables · danger · audit),
+  jump nav, collapsible categories, a filter, and a `changed` badge answering the
+  question the page could not: *what did I change?*
+- **#162** — the pills "all looked the same": every anchor was correct and
+  scrolled its target **behind two stacked sticky bars**. `--sticky-h` is
+  *measured* at runtime, because `header nav` wraps on a phone and a hardcoded
+  value would have been right on desktop and wrong on the device it was reported
+  from.
+- **#163** — the strip named five switches and omitted **the only one that moves a
+  real stop order**. The tile reads the governor's own diag rather than
+  `trail_governor_enabled`, because defect 3 above is precisely the case where the
+  two disagree — a tile sourced from the switch would have shown green all day.
+  Every tile now links to the control that sets it; the danger zone is framed
+  apart from five reversible toggles.
+
+### Open — re-checked 2026-08-13, three days on
+
+Each item below was written on 2026-08-10. Re-reading them today rather than
+pasting them forward, because an assertion outliving its premise is this repo's
+most-repeated defect and a stale Open list is exactly where one hides:
+
+- **Superseded — "nothing has been governed yet."** True when written and still
+  true through SESSION 120, which found the cause: Binance answers a second
+  `closePosition` stop in the same direction with **-4130**, so the handover was
+  impossible by construction for every position from the day it shipped. Read
+  SESSION 120's Open (*"watch for the first handover"*), not this line.
+- **Superseded — the governing timeframe.** SESSION 119 (later that day) found the
+  stored `5` still being served, because `runtime_tunables.get()` validates
+  nothing against `choices` — the write path refused a value the read path kept
+  handing out. One dropdown fixed the value; the read-path gap is recorded there.
+- **Still open — stage 2 is not built.** Opening the dark-feed paths to the
+  owner's account was the second half of "both, staged" and is deliberately not
+  started.
+- **Still open — read the risk columns before any PnL.** SAR cancels the designed
+  stop and parks one that has been up to 21% away (Session 117); the chandelier is
+  onside at entry far more often, so it replaces the stop from bar one on nearly
+  every arm. A governed loss is risk the trade was never sized for.
+- **Still open, and all three verified present today** — the `sar_live.html` label
+  defects, with line numbers re-pinned because they had drifted:
+  - the MUUUSDT SAR anecdote, now **line 515** (was ~442);
+  - *"Confirmed flip, market out"*, now **line 444** (was ~371);
+  - the raw governor enum, now **line ~150** — and it is sharper than first
+    written: `executing.mechanism` is the engine's own lowercased key, so the
+    banner prints **`chandelier`** at the reader while
+    `app/routes/sar_live.py:141` already holds the label
+    `"ATR-trail (Chandelier)"`. The label seam ops' own `CLAUDE.md` documents,
+    1,000 lines from its own fix.
 
 ---
 
