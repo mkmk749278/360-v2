@@ -255,8 +255,26 @@ per pair → 19 evaluators (src/channels/scalp.py, _evaluate_*)
          → chartist-eye    LevelBook · StructureTracker · VolumeProfile · chart_patterns
                            (scoring only — never invents a setup; bonuses bounded)
          → SignalScoringEngine  (src/signal_quality.py, src/confidence.py) → 0-100
+         → entry_quality   post-scoring gate (src/entry_quality.py) — LIVE, per-rule
+                           ops switches, fail-open, every rejection _stamp_suppressed
          → _enqueue_signal (universal SL floor 0.80%)
+              ├ structural_snap   level-aware SL/TP1 (measure ON · apply OFF)
+              ├ path_retirement   retired (setup, side) → divert, never delete
+              ├ dark_emission     dark divert — the row is measured, not delivered
+              └ dark_promotion    a matching dark row falls through to the queue
 ```
+
+**`_enqueue_signal` is the single choke point every path passes through, and four
+things decide a candidate's fate there.** Geometry is rewritten up to four times
+before it (noise-floor widener, `predictive.adjust_tp_sl`, the min-distance clamp,
+that clamp's proportional TP rescale), so *after* the clamp is the only place a
+measurement describes the stop the trade actually gets.
+
+`path_retirement` (`src/path_retirement.py`, #928) removes a `(setup_class, side)`
+from the live feed by **diverting it to the dark lane rather than dropping it** — a
+path deleted outright can never earn its way back, which is `cohort_edge`'s absorbing
+state arriving as a routing decision. `dark_promotion` (#923) is the same seam in the
+opposite direction, under owner-set per-path conditions.
 
 **Not every path runs on every pair.** Two allowlists compose — both must allow an
 evaluator for it to run, and the mover restriction always supersedes:
@@ -269,6 +287,19 @@ evaluator for it to run, and the mover restriction always supersedes:
 
 `MEAN_REVERT` is deliberately absent from both: a z-score needs a stable 20-bar mean,
 and fading an extension is the anti-thesis of a mover promotion.
+
+**Mover promotion is a claim on a map another module owns, and it is now bounded by
+behaviour rather than only by a clock.** `mover_ignition` admits a pair on
+`|24h change| ≥ MOVER_PROMOTION_MIN_PCT` plus a volume floor; `scanner._ensure_mover_pair`
+parks it in `pair_mgr.pairs` under an explicit `hold_symbol` claim.
+`mover_retention` (`src/mover_retention.py`, #927) then decides each sweep whether the
+pair is still working — HOLD · RELEASE · EXTEND · WARMUP, on candidate flow and burst
+ratio, floored at `MIN_HOLD_SEC` and capped at `MAX_HOLD_SEC`, refusing to judge under
+`MIN_SCANS_TO_JUDGE`. Two facts ride from the promotion onto every signal it produces:
+`promotion_age_sec` (where in the hold we entered) and `promotion_change_pct` (#929) —
+**signed**, because the engine admits top gainers and top losers on the same absolute
+threshold and stored `abs()`, so nothing downstream could tell a pair up 30% from one
+down 30%. `None` there means the detector could not report it, never `0.0`.
 
 - **Every evaluator owns its own SL/TP geometry (B7).** No shared universal formula.
 - **`SetupClass`** (`src/signal_quality.py`) is stringly coupled to `_MAX_SL_PCT_BY_SETUP`
@@ -330,9 +361,37 @@ banking and invalidation kills survive only as per-user opt-ins (B17).
 | `Reconciler` | `reconciler.py` | 60s diff; force-closes anything open past the age cap |
 | `TradeMonitor` | `src/trade_monitor.py` | 5s backstop |
 | Manual take | `manual_take.py` via `snapshot:cmd:take` | Server-side "take this signal" |
+| **Trail governor** | `execution/trail_governor.py` | Monitor sweep — **the only thing here that moves a resting stop order.** Per-user opt-in |
 
 **Order-type doctrine:** entry = MARKET; profit-taking = **reduce-only LIMIT** (maker
 fill, zero slippage, survives an engine blip); protection = MARKET reduce-only.
+
+**The trail governor — where ten sessions of measurement became an order.** Every
+trailing lane before it (`sar_live_shadow`, `atr_trail_live`) records where a stop
+*would* have been parked. `trail_governor` parks it, on a live position, and is gated
+twice: engine-wide `TRAIL_GOVERNOR_ENABLED`, and a **per-user** `exit_mechanism`
+(`default` | `sar` | `chandelier`) that is itself the user-visible flag — no subscriber
+is touched unless their own column says so. Four properties, each bought by a defect:
+
+- **Never-naked is a property of call ORDER, not of retry success.** `_park` places the
+  new conditional stop *then* cancels the superseded one. Cancel-first leaves a window
+  where a gap costs the position.
+- **The second resting order is `reduceOnly` + size, not `closePosition`.** Binance
+  refuses a second `closePosition` stop in the same direction (**-4130**), so the
+  original design could not hand over on any position from the day it shipped. The
+  safety argument is therefore about *acceptance*, not fills — and the evidence for the
+  replacement is the running system: the whole TP ladder is already that shape.
+- **Refuse, never adopt mid-flight.** `ladder_touched` (pre-TP fired, BE shifted, a TP
+  leg filled) is a refusal — the governor only governs geometry still as dispatched.
+- **A failure must advance the retry clock.** `trail_last_bar_ms` advanced only on a
+  successful park, so the `same_bar` guard never engaged after a rejection and the same
+  level went back to the exchange every tick (~24 rejected orders/min, indefinitely).
+
+Fills land through the FSM as `TRAIL_STOP` (`coid_trail`), so a governor exit is
+nameable apart from an SL hit in every downstream record. A governed position's stop
+can be **wider** than the one it was sized for — SAR's has been up to 21% away — so a
+governed loss is risk the trade was never sized for. Read the risk columns before any
+PnL. Diag: `/internal/diag/trail-governor` → ops `/signals/trail-governor`.
 
 **Safety envelope — never weakened:** symbol allowlist, per-user rate limit (10/min,
 50/hr), per-user position cap, global kill switch, global circuit breaker (>10
@@ -680,9 +739,9 @@ means the path needs an aged multi-TF level foundation and only sees core pairs.
 | 2 | TREND_PULLBACK_EMA | `_evaluate_trend_pullback` | core | | | live |
 | 3 | LIQUIDATION_REVERSAL | `_evaluate_liquidation_reversal` | support | Y | | live |
 | 4 | WHALE_MOMENTUM | `_evaluate_whale_momentum` | specialist | Y | | live |
-| 5 | VOLUME_SURGE_BREAKOUT | `_evaluate_volume_surge_breakout` | core | Y | M | live |
+| 5 | VOLUME_SURGE_BREAKOUT | `_evaluate_volume_surge_breakout` | core | Y | M | **retired from the live feed** 2026-08-13 (#928) — still evaluated, diverted to the dark lane. 0 winners in 11 delivered trades across 11 symbols |
 | 6 | BREAKDOWN_SHORT | `_evaluate_breakdown_short` | core | Y | M | live |
-| 7 | MOVER_TREND_PULLBACK | `_evaluate_mover_trend_pullback` | support | Y | M | live |
+| 7 | MOVER_TREND_PULLBACK | `_evaluate_mover_trend_pullback` | support | Y | M | live **LONG only** — SHORT retired 2026-08-13 (#928), diverted to the dark lane. Still ~59% of the enqueued book |
 | 8 | MOVER_AVWAP_SCALP | `_evaluate_mover_avwap_scalp` | support | Y | M | live |
 | 9 | OPENING_RANGE_BREAKOUT | `_evaluate_opening_range_breakout` | support | Y | | **disabled** — `SCALP_ORB_ENABLED=false`, pending a true-session-open rebuild |
 | 10 | SR_FLIP_RETEST | `_evaluate_sr_flip_retest` | core | | | live — shorts only by default (`SR_FLIP_LONG_ENABLED=false`) |
@@ -740,6 +799,9 @@ what the name suggests, or where the default *is* the doctrine:
 | `AUTO_TRADE_TIER_GATE_ENABLED` | **true** | Fail-closed: hands-off execution runs only for `auto` tier (B16) |
 | `ALLOCATOR_RECOMMEND_ENABLED` | **true** | Layer D recommends; nothing consumes it |
 | `CHANNEL_SCALP_DIVERGENCE_ENABLED` | **true** | The one auxiliary channel in limited-live |
+| `PATH_RETIREMENT_ENABLED` | **true** | Reads `RETIRED_PATHS`, which **ships non-empty** — so the default configuration removes two paths from the live feed. A flag whose name suggests a mechanism and whose default carries a *policy* |
+| `RETIRED_PATHS` | `MOVER_TREND_PULLBACK:SHORT,VOLUME_SURGE_BREAKOUT:*` | The policy itself, as data. `*` = both sides. **Empty retires nothing** and is a real value, not "unset" — the two are distinguished deliberately |
+| `DARK_PROMOTION_ENABLED` | **false** | Engine-wide master for dark→live promotion (#923); each per-path rule carries its own switch, and an armed rule with an empty allow-list matches **nothing** rather than everything |
 
 ### The 23 liveness probes
 
