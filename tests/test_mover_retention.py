@@ -543,8 +543,102 @@ def test_a_row_with_no_stamp_reads_absent_not_zero():
 def test_the_dark_ledger_schema_bump_is_declared_additive():
     """The bump adds a field and redefines nothing, so every older row keeps
     its full standing — dropping them would delete the evidence at the moment
-    it starts being used (the 371 SAR rows, 2026-08-09)."""
+    it starts being used (the 371 SAR rows, 2026-08-09).
+
+    Pins the PROPERTY, not the number. The first cut asserted
+    `LEDGER_SCHEMA == 3`, and the very next additive bump failed it for a
+    reason unrelated to what it protects — whose cheapest fix is to edit the
+    literal and move on, which is how a guard becomes a formality. Every bump
+    so far is additive, so every earlier schema must be readable; a bump that
+    REDEFINES a field is the one case where dropping old rows is right, and it
+    has to edit this test deliberately and say which field changed meaning.
+    """
     from src import dark_emission
 
-    assert dark_emission.LEDGER_SCHEMA == 3
-    assert {1, 2} <= dark_emission.ADDITIVE_FROM_SCHEMAS
+    assert dark_emission.ADDITIVE_FROM_SCHEMAS == frozenset(
+        range(1, dark_emission.LEDGER_SCHEMA)
+    ), (
+        "every schema before the current one is additive and must stay "
+        "readable; if a bump redefined a field, change this test and say which"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The promotion SIGN — top gainer vs top loser
+# --------------------------------------------------------------------------- #
+
+def test_the_signed_move_survives_promotion():
+    """`_ensure_mover_pair` stores `abs(change_pct)`, so this is the only
+    carrier of the sign. A top gainer and a top loser are the same number to
+    every other consumer, and on the delivered book they are not the same
+    trade."""
+    r = mr.get_retention()
+    r.on_promoted("UPUSDT", "MOVER_TOP24H", now=0.0, change_pct=+31.4)
+    r.on_promoted("DOWNUSDT", "MOVER_TOP24H", now=0.0, change_pct=-27.9)
+    assert r.change_pct_at_promotion("UPUSDT") == 31.4
+    assert r.change_pct_at_promotion("DOWNUSDT") == -27.9
+
+
+def test_unknown_is_None_and_never_zero():
+    """"We could not read which kind of mover this was" and "it moved 0%" are
+    different facts, and only one of them can be filtered on."""
+    r = mr.get_retention()
+    r.on_promoted("AAAUSDT", "MOVER_IGNITION", now=0.0)          # no reading
+    assert r.change_pct_at_promotion("AAAUSDT") is None
+    r.on_promoted("BBBUSDT", "MOVER_IGNITION", now=0.0, change_pct=0.0)
+    assert r.change_pct_at_promotion("BBBUSDT") == 0.0           # a real reading
+    assert r.change_pct_at_promotion("NEVERPROMOTED") is None
+
+
+def test_the_report_says_gainer_or_loser_and_abstains_when_unknown():
+    r = mr.get_retention()
+    r.on_promoted("UPUSDT", "MOVER_TOP24H", now=0.0, change_pct=+20.0)
+    r.on_promoted("DOWNUSDT", "MOVER_TOP24H", now=0.0, change_pct=-20.0)
+    r.on_promoted("QQQUSDT", "MOVER_TOP24H", now=0.0)
+    rows = {x["symbol"]: x for x in r.report(now=10.0)["pairs"]}
+    assert rows["UPUSDT"]["gainer"] is True
+    assert rows["DOWNUSDT"]["gainer"] is False
+    assert rows["QQQUSDT"]["gainer"] is None, (
+        "no reading must abstain — False would call every unmeasurable pair a loser"
+    )
+
+
+def test_re_promotion_keeps_the_ORIGINAL_move_too():
+    """The window is not reset on re-promotion (a re-igniting pair would become
+    immortal), so the move it was ADMITTED on is what stays recorded."""
+    r = mr.get_retention()
+    r.on_promoted("AAAUSDT", "MOVER_IGNITION", now=0.0, change_pct=+18.0)
+    r.on_promoted("AAAUSDT", "MOVER_IGNITION", now=5000.0, change_pct=-4.0)
+    assert r.change_pct_at_promotion("AAAUSDT") == 18.0
+
+
+def test_the_detector_reports_the_sign_and_None_when_it_cannot():
+    """Driven through the real detector — `meta_change_pct` is the only reader
+    of the sign, so a hand-written return shape would assert my assumption."""
+    det = _detector()
+    assert det.meta_change_pct("NOPEUSDT") is None
+    base = 1_700_000_000_000
+    for i in range(6):
+        det.ingest([{"s": "DOWNUSDT", "E": base + i * 5_000, "c": "1.0",
+                     "n": 100 * (i + 1), "q": "1000000", "P": "-27.5"}],
+                   now=float(i * 5))
+    assert det.meta_change_pct("DOWNUSDT") == -27.5, "the SIGN must survive"
+
+
+def test_the_scanner_passes_the_signed_move_to_on_promoted():
+    """Pinned in the tree: `on_promoted` must be called WITH `change_pct`.
+
+    Dropping the argument leaves every window reading None while the report
+    still renders — a full-looking column describing nothing, which is the
+    defect shape this repo keeps paying for.
+    """
+    tree = ast.parse(SCANNER.read_text())
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "on_promoted"):
+            if any(k.arg == "change_pct" for k in node.keywords):
+                return
+    raise AssertionError(
+        "the scanner calls on_promoted without change_pct — the sign is lost "
+        "at the only point that still has it"
+    )

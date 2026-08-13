@@ -163,6 +163,18 @@ class PairWindow:
     symbol: str
     source: str
     promoted_at: float
+    #: The pair's **signed** 24h % change at the moment it was promoted.
+    #:
+    #: NOT an outcome — it is a market fact about the pair at admission, known
+    #: before any trade exists, and it is the thing `volatility_24h=abs(...)`
+    #: throws away. A top gainer and a top loser are the same number to every
+    #: consumer downstream, and on the delivered book they are not the same
+    #: trade: buying a gainer ran +1.448%/trade over 110 trades, shorting a
+    #: loser -0.497% over 39 (2026-08-13).
+    #:
+    #: `None` = the detector could not report it. Not 0.0 — "unknown which
+    #: kind of mover" and "moved 0%" are different, and only one is filterable.
+    change_pct: Optional[float] = None
     scans: int = 0
     candidates: int = 0
     reached_enqueue: int = 0
@@ -193,6 +205,8 @@ class PairWindow:
         return {
             "symbol": self.symbol,
             "source": self.source,
+            "change_pct": self.change_pct,
+            "gainer": (None if self.change_pct is None else self.change_pct > 0),
             "promoted_at": self.promoted_at,
             "age_sec": self.age_sec(now),
             "scans": self.scans,
@@ -254,7 +268,13 @@ class MoverRetention:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def on_promoted(self, symbol: str, source: str, now: Optional[float] = None) -> None:
+    def on_promoted(
+        self,
+        symbol: str,
+        source: str,
+        now: Optional[float] = None,
+        change_pct: Optional[float] = None,
+    ) -> None:
         sym = str(symbol or "").upper()
         if not sym:
             return
@@ -265,7 +285,10 @@ class MoverRetention:
         # retention policy.
         if sym in self._windows:
             return
-        self._windows[sym] = PairWindow(symbol=sym, source=str(source or ""), promoted_at=ts)
+        self._windows[sym] = PairWindow(
+            symbol=sym, source=str(source or ""), promoted_at=ts,
+            change_pct=(None if change_pct is None else float(change_pct)),
+        )
         self._count(f"promoted:{source}")
 
     def on_released(self, symbol: str, reason: str) -> None:
@@ -285,6 +308,11 @@ class MoverRetention:
         each site.
         """
         return list(self._windows)
+
+    def change_pct_at_promotion(self, symbol: str) -> Optional[float]:
+        """The pair's signed 24h move when it was admitted, or None."""
+        w = self.window(symbol)
+        return None if w is None else w.change_pct
 
     def promoted_at(self, symbol: str) -> Optional[float]:
         w = self.window(symbol)

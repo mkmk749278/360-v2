@@ -199,6 +199,17 @@ class SignalDetail(BaseModel):
             "sentinel."
         ),
     )
+    promotion_change_pct: Optional[float] = Field(
+        None,
+        description=(
+            "Signed 24h % change of the pair when it was promoted — POSITIVE "
+            "for a top gainer, NEGATIVE for a top loser. The promotion path "
+            "stores abs(change_pct), so nothing else downstream carries the "
+            "sign. null means the pair was not a held mover, or the detector "
+            "could not report it; it is deliberately not 0.0, since 'moved 0%' "
+            "and 'we do not know which kind' are different facts."
+        ),
+    )
     market_phase: str = Field(
         "",
         description=(

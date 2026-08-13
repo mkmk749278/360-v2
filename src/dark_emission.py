@@ -145,14 +145,21 @@ _MAX_PATHS: int = int(os.getenv("DARK_EMISSION_MAX_PATHS", "32"))
 #: changes meaning, and a row without it is a row from before the stamp
 #: existed, which reads as ``unstamped`` rather than as "fired at second
 #: zero".  -1.0 means the pair was not a held mover at all.
-LEDGER_SCHEMA = 3
+#: 4 (2026-08-13) — ``promotion_change_pct``: the pair's SIGNED 24h move at
+#: promotion, i.e. whether a top gainer or a top loser admitted it. The
+#: promotion path stores ``abs(change_pct)``, so nothing else has ever carried
+#: the sign. **Additive**: no schema-3 field changes meaning, and a row without
+#: it is a row from before the stamp — which is every row that argued for the
+#: MVRTP-SHORT retirement, so dropping them would delete the evidence at the
+#: moment it starts being read.
+LEDGER_SCHEMA = 4
 
 #: Older schemas this build reads unchanged. Declared, not assumed: the bump
 #: above only ADDS fields, so the window survives it. A bump that redefines a
 #: field must NOT be listed here — old and new rows would then disagree about
 #: what a column is, and pooling them misdescribes both (`ledger_schema`, and
 #: the 371 SAR rows lost on 2026-08-09).
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1, 2})
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1, 2, 3})
 
 #: The promotion block, named in one place so the row builder, the CSV export
 #: and the "was this row written before the mechanism" test cannot drift.
@@ -667,6 +674,14 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         # `None`, not -1.0, for a row written before the stamp: absent and
         # "not a held mover" are different facts and a reader that pools them
         # reports core pairs as unstamped movers.
+        # Which KIND of mover: signed 24h move at promotion. `None` covers both
+        # "not a held mover" and "written before the stamp"; the two are told
+        # apart by `pair_admission`, which every row has.
+        "promotion_change_pct": (
+            None
+            if getattr(sig, "promotion_change_pct", None) is None
+            else float(getattr(sig, "promotion_change_pct"))
+        ),
         "promotion_age_sec": (
             None
             if getattr(sig, "promotion_age_sec", None) is None

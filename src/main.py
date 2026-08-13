@@ -815,6 +815,7 @@ class CryptoSignalEngine:
                     promotion_age_sec=float(
                         getattr(sig, "promotion_age_sec", -1.0) or -1.0
                     ),
+                    promotion_change_pct=getattr(sig, "promotion_change_pct", None),
                 )
         except Exception as exc:
             log.warning(f"perf_tracker record_outcome failed (expiry): {exc}")
