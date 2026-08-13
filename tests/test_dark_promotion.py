@@ -448,16 +448,34 @@ def test_delivery_stamp_on_an_unknown_id_is_a_no_op(ledger):
 # --------------------------------------------------------------------------- #
 
 
-def test_schema_two_declares_itself_additive_from_one():
+def test_every_earlier_schema_is_declared_additive():
     """The bump that added the promotion block must not destroy the window.
 
     Every row that argues FOR a promotion was written under schema 1. Dropping
     them on the first flush after deploy — which is what a bare `!=` loader
     does, and what cost this repo 371 SAR arms on 2026-08-09 — would delete the
     evidence at exactly the moment it starts being used.
+
+    This pins the PROPERTY, not the number. The first cut asserted
+    ``LEDGER_SCHEMA == 2``, which is an assertion about today rather than about
+    the invariant, and it failed on the next additive bump for a reason that
+    had nothing to do with what it protects — the reader's cheapest response
+    being to bump the literal and move on, which is how a guard becomes a
+    formality.
+
+    Every bump so far has been additive, so every earlier schema must be
+    listed. A bump that genuinely REDEFINES a field is the one case where
+    dropping old rows is right — old and new rows would then disagree about
+    what a column *is* — and it must edit this test deliberately, with the
+    reasoning written down, rather than being waved through.
     """
-    assert dark_emission.LEDGER_SCHEMA == 2
-    assert 1 in dark_emission.ADDITIVE_FROM_SCHEMAS
+    assert dark_emission.ADDITIVE_FROM_SCHEMAS == frozenset(
+        range(1, dark_emission.LEDGER_SCHEMA)
+    ), (
+        "every schema before the current one is additive and must be readable; "
+        "if a bump redefined a field, change this test and say which field and "
+        "why the old rows no longer mean what they say"
+    )
 
 
 def test_a_schema_one_ledger_still_loads_and_keeps_its_rows(tmp_path, monkeypatch):

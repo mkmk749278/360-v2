@@ -812,6 +812,9 @@ class CryptoSignalEngine:
                     entry_regime=str(getattr(sig, "entry_regime", "") or ""),
                     entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
                     pair_admission=str(getattr(sig, "pair_admission", "") or ""),
+                    promotion_age_sec=float(
+                        getattr(sig, "promotion_age_sec", -1.0) or -1.0
+                    ),
                 )
         except Exception as exc:
             log.warning(f"perf_tracker record_outcome failed (expiry): {exc}")
@@ -3042,6 +3045,72 @@ class CryptoSignalEngine:
             name="dark_promotion_rules",
             fn=_dark_promotion_rules,
             min_streak=6,          # 30 min — a deploy race must not page
+        ))
+
+        def _mover_retention() -> Tuple[bool, str]:
+            """Is the retention scorer actually scoring the pairs it holds?
+
+            The failure mode is the one this repo keeps paying for: a lane that
+            has gone blind reads exactly like a lane with nothing to do. Two
+            distinct blindnesses, named apart because the fixes differ:
+
+            * **no counters** — pairs are held and none has recorded a single
+              scan, so the scan-chain call sites are not firing and every
+              verdict is being reached on an empty window. That is a wiring
+              fault, and left alone it would release pairs for
+              ``no_candidates`` that we simply never counted — a scorer wrong
+              in the *destructive* direction while looking healthy.
+            * **no activity readings** — the ignition detector is not supplying
+              a burst ratio for any held pair, so the liveness half of the
+              verdict is inert. Not fatal (an unmeasurable pair is held, never
+              dropped), but it silently reduces the scorer to its opportunity
+              half, and a panel showing both would read as though both ran.
+
+            Zero held pairs is the quiet case and passes: a market with no
+            movers over the promotion floor is not a fault, and paging on it
+            teaches the owner to ignore the probe that matters.
+
+            Never raises — a ``PredicateProbe`` exception becomes a
+            ``fail_open.record``, and "nothing is promoted right now" is not a
+            swallowed failure.
+            """
+            try:
+                from src import mover_retention as _mr
+
+                rep = _mr.get_retention().report()
+                rows = rep.get("pairs") or []
+                held = len(rows)
+                mode = "enforcing" if rep.get("enforcing") else "measuring only"
+                if held == 0:
+                    return True, f"no pairs held ({mode})"
+                scanned = sum(1 for r in rows if int(r.get("scans") or 0) > 0)
+                with_burst = sum(1 for r in rows if r.get("last_burst") is not None)
+                detail = (
+                    f"{held} held, {scanned} with scan counts, "
+                    f"{with_burst} with an activity reading ({mode})"
+                )
+                if scanned == 0:
+                    return False, (
+                        f"{held} pair(s) held and NONE has recorded a scan — the "
+                        f"scan-chain counters are not reaching this module, so "
+                        f"every verdict is being reached on an empty window "
+                        f"({mode})"
+                    )
+                if with_burst == 0:
+                    return False, (
+                        f"{held} pair(s) held and NONE has an activity reading — "
+                        f"the liveness half of the verdict is inert and the "
+                        f"scorer is running on opportunity alone ({mode})"
+                    )
+                return True, detail
+            except Exception as exc:  # noqa: BLE001
+                return True, f"probe unavailable ({type(exc).__name__})"
+
+        fl.add_predicate(PredicateProbe(
+            name="mover_retention",
+            fn=_mover_retention,
+            min_streak=6,          # 30 min — a freshly-promoted pair has no
+                                   # counters yet, and that is not a fault
         ))
 
         def _entry_feature_inputs() -> Tuple[bool, str]:

@@ -153,6 +153,37 @@ class MoverIgnitionDetector:
         that isn't in the engine's top-75 ``pair_mgr`` universe."""
         return self._meta.get(symbol.upper())
 
+    def activity(self, symbol: str) -> Optional[float]:
+        """Current trade-rate burst for *symbol*, as a multiple of its own EWMA
+        baseline — or ``None`` when it cannot be measured.
+
+        The same arithmetic ``_ingest_one`` uses to decide ignition, exposed
+        without the firing thresholds so a consumer can ask the opposite
+        question: is this move still running, or has it settled back to the
+        pair's normal rate? ``mover_retention`` reads it to release a spent
+        pair's promotion slot — the "promote after the move, then fight it"
+        failure this detector was built for, caught on the way OUT.
+
+        ``None`` rather than 0.0 wherever the reading is unavailable — no
+        baseline yet, a reconnect that cleared the window, a symbol the stream
+        has not carried. A consumer must be able to tell "trading at baseline"
+        from "we cannot see it", because one means the move is over and the
+        other means our feed blinked, and dropping a pair mid-trend on the
+        second would be a fault wearing the first one's clothes.
+        """
+        st = self._state.get(str(symbol or "").upper())
+        if st is None or st.rate_ewma is None or len(st.samples) < 2:
+            return None
+        baseline = st.rate_ewma
+        if baseline <= 1e-9:
+            return None
+        old_ms, _old_price, old_trades, _old_qv = st.samples[0]
+        evt_ms, _price, trades, _qv = st.samples[-1]
+        window_dt = (evt_ms - old_ms) / 1000.0
+        if window_dt <= 0:
+            return None
+        return max(0.0, (trades - old_trades) / window_dt) / baseline
+
     def universe_movers(
         self, min_abs_pct: float, min_quote_vol: float,
     ) -> List[Tuple[str, float, float]]:

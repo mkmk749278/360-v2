@@ -524,6 +524,7 @@ class TradeMonitor:
                 entry_regime=str(getattr(sig, "entry_regime", "") or ""),
                 entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
                 pair_admission=str(getattr(sig, "pair_admission", "") or ""),
+                promotion_age_sec=float(getattr(sig, "promotion_age_sec", -1.0) or -1.0),
             )
         # Circuit breaker ALWAYS uses actual PnL (real exit price)
         if self._circuit_breaker is not None:

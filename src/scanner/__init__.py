@@ -174,6 +174,7 @@ from src.cross_asset import AssetState, check_cross_asset_gate
 from src import dark_emission
 from src import dark_promotion
 from src import fail_open
+from src import mover_retention
 from src import pair_penalty as _pair_penalty
 from src.feedback_loop import FeedbackLoop
 from src.kill_zone import check_kill_zone_gate
@@ -2036,6 +2037,7 @@ class Scanner:
                 if symbol in sorted_pairs_set:
                     self._mover_promoted_pairs.pop(symbol, None)
                     self._mover_promotion_source.pop(symbol, None)
+                    mover_retention.get_retention().on_released(symbol, "entered_scan")
                     continue
                 if symbol in self._mover_promoted_pairs:
                     continue
@@ -2067,6 +2069,7 @@ class Scanner:
             if symbol in sorted_pairs_set:
                 self._mover_promoted_pairs.pop(symbol, None)
                 self._mover_promotion_source.pop(symbol, None)
+                mover_retention.get_retention().on_released(symbol, "entered_scan")
                 continue
             if symbol in self._mover_promoted_pairs or symbol in seen:
                 continue
@@ -2106,18 +2109,105 @@ class Scanner:
                 self._mover_promotion_source[symbol] = (
                     "MOVER_IGNITION" if symbol in ignition_dirs else "MOVER_TOP24H"
                 )
+                # Open the retention window where the promotion becomes true.
+                # `promoted_at` is WALL CLOCK, not the monotonic expiry beside
+                # it: the expiry answers "when does the flat TTL fire", and
+                # retention needs "how long have we held this", which is also
+                # what gets stamped onto every signal the pair produces.
+                mover_retention.get_retention().on_promoted(
+                    symbol, self._mover_promotion_source[symbol]
+                )
+
+        # Sample each held pair's liveness off the detector the ignition path
+        # already feeds — the move's own pulse against its own EWMA baseline.
+        # ~30 dict lookups per cycle over state that is already in memory; no
+        # new read on any hot path.  `activity` returns None where it cannot
+        # measure, and retention treats that as "no reading", never as "spent".
+        _retention = mover_retention.get_retention()
+        # Reconcile retention's held set against the scanner's, DERIVED rather
+        # than remembered.  Three sites in this function drop a symbol from
+        # `_mover_promoted_pairs`, and a fourth added later would silently
+        # leave retention holding a window for a pair we no longer promote:
+        # its counters would keep advancing on core-pair scans and its verdict
+        # would describe nothing.  This is the requirement taken from the tree
+        # instead of written in a list — and `desynced` firing at all is a bug
+        # signal, which is why it is not pooled with the named releases.
+        for _stale in [s for s in _retention.held_symbols()
+                       if s not in self._mover_promoted_pairs]:
+            _retention.on_released(_stale, "desynced")
+        if det is not None:
+            for sym in list(self._mover_promoted_pairs.keys()):
+                try:
+                    _retention.note_activity(sym, det.activity(sym))
+                except Exception as exc:  # pragma: no cover - defensive
+                    fail_open.record("scanner.mover_retention_activity", exc)
+
+        # Score every held pair.  This runs whether or not it is enforced —
+        # measurement flag ON, effect flag OFF (§ Project Phase), so a window
+        # of would-be releases accumulates in ops before any pair is dropped
+        # on it.  `sweep` never raises; a scorer that throws must not be able
+        # to change which pairs are scanned.
+        _release_now: set = set()
+        _enforcing = mover_retention.enforce_enabled()
+        for _v in _retention.sweep():
+            if _v.releases:
+                self._suppression_counters[
+                    f"mover_retention:would_release:{_v.reason}"
+                ] += 1
+                if _enforcing:
+                    _release_now.add(_v.symbol)
+            elif _v.verdict == mover_retention.EXTEND:
+                self._suppression_counters["mover_retention:would_extend"] += 1
 
         # Evict pairs that entered the main scan, or whose promotion TTL elapsed.
         # A synthetically-admitted pair (one we added to pair_mgr to scan it) is
         # also removed from pair_mgr so the tracked universe doesn't grow unbounded.
+        #
+        # The flat TTL is still the floor of this decision and always will be
+        # while `MOVER_RETENTION_ENFORCE` is off — retention can then only be
+        # read, never acted on.  With it on, retention decides in BOTH
+        # directions: `_release_now` drops a pair early, and an EXTEND verdict
+        # suppresses the flat expiry so a pair still producing keeps its slot
+        # up to `MOVER_RETENTION_MAX_HOLD_SEC`.  A pair that entered the main
+        # scan set is evicted regardless — that is not a retention question,
+        # it is already being scanned.
         for sym in list(self._mover_promoted_pairs.keys()):
-            if sym in sorted_pairs_set or now_mono >= self._mover_promoted_pairs[sym]:
-                del self._mover_promoted_pairs[sym]
-                self._mover_promotion_source.pop(sym, None)
-                if sym in self._synthetic_mover_pairs:
-                    self.pair_mgr.release_symbol(sym)
-                    self.pair_mgr.pairs.pop(sym, None)
-                    self._synthetic_mover_pairs.discard(sym)
+            _entered_scan = sym in sorted_pairs_set
+            _flat_expired = now_mono >= self._mover_promoted_pairs[sym]
+            _reason = ""
+            if _entered_scan:
+                _reason = "entered_scan"
+            elif sym in _release_now:
+                _reason = "retention_release"
+            elif _flat_expired:
+                # An EXTEND verdict holds the pair past the flat TTL, but only
+                # while enforcement is on and only up to the ceiling — which
+                # `verdict()` enforces itself by returning RELEASE/`ttl` at
+                # MAX_HOLD_SEC, so the extension cannot run away.
+                _w = _retention.window(sym)
+                _extended = (
+                    _enforcing
+                    and _w is not None
+                    and _w.last_verdict == mover_retention.EXTEND
+                )
+                if _extended:
+                    # Push the flat expiry out by one cycle's worth of TTL so
+                    # the pair survives to the next sweep, which re-decides.
+                    # Re-deciding every cycle is the point: an extension is
+                    # never granted once for a fixed period.
+                    self._mover_promoted_pairs[sym] = now_mono + MOVER_PROMOTION_TTL_SEC
+                    self._suppression_counters["mover_retention:extended"] += 1
+                    continue
+                _reason = "flat_ttl"
+            if not _reason:
+                continue
+            del self._mover_promoted_pairs[sym]
+            self._mover_promotion_source.pop(sym, None)
+            _retention.on_released(sym, _reason)
+            if sym in self._synthetic_mover_pairs:
+                self.pair_mgr.release_symbol(sym)
+                self.pair_mgr.pairs.pop(sym, None)
+                self._synthetic_mover_pairs.discard(sym)
 
         # Cap concurrently-scanned movers, freshest first (largest expiry =
         # most-recently promoted) so new ignitions are never starved by stale holds.
@@ -4930,6 +5020,23 @@ class Scanner:
         # closed-signal record that lacks it cannot be repaired (#817's
         # rule, applied to admission instead of regime).
         sig.pair_admission = self._pair_admission_for(getattr(sig, "symbol", ""))
+        # WHERE IN THE HOLD this signal fired.  `pair_admission` says the pair
+        # was a promoted mover; it cannot say whether we entered at minute two
+        # of the ignition or in hour five of a move that finished long ago —
+        # which is the owner's question (2026-08-13) and is unanswerable from
+        # every field the record already carries.  Knowable exactly once: the
+        # promotion evicts itself after 6 h, typically before the signal
+        # closes, so there is no backfill and pre-fix rows keep -1.0.
+        #
+        # -1.0, not 0.0.  Zero is a real value here — a signal fired in the
+        # first second of a hold — and a core pair that was never promoted
+        # must not read as the freshest possible ignition.
+        try:
+            _ret_age = mover_retention.get_retention().age_sec(getattr(sig, "symbol", ""))
+            sig.promotion_age_sec = -1.0 if _ret_age is None else float(_ret_age)
+        except Exception as _page_exc:
+            sig.promotion_age_sec = -1.0
+            fail_open.record("scanner.promotion_age_stamp", _page_exc)
         # Pair-cohort (liquidity tier) for the edge matrix's Phase-5 cohort
         # dimension — stamped on every candidate so the dual-write feeders and
         # the cohort-aware emission policy can key on it.  Pure, fail-safe.
@@ -5388,6 +5495,11 @@ class Scanner:
 
     async def _enqueue_signal(self, sig: Any) -> bool:
         self._stamp_origin_setup_identity(sig, getattr(sig, "channel", "") or "UNKNOWN")
+        # Reached the choke point every path passes through — the strongest
+        # opportunity reading retention gets, because everything above it has
+        # already said yes.  Counted here rather than at the return, so a
+        # candidate the dark divert takes is still credited to the pair.
+        mover_retention.get_retention().note_reached_enqueue(getattr(sig, "symbol", ""))
         try:
             entry = float(getattr(sig, "entry", 0) or 0)
             sl    = float(getattr(sig, "stop_loss", 0) or 0)
@@ -5790,6 +5902,7 @@ class Scanner:
                 self._suppression_counters[
                     f"dark_emitted:{getattr(sig, 'setup_class', 'UNKNOWN')}"
                 ] += 1
+                mover_retention.get_retention().note_dark(getattr(sig, "symbol", ""))
                 # Open the SAR exit arm here, beside the row it belongs to, and
                 # for the same reason `observe_signal` is the only thing that
                 # reads a live signal: entry, SL, TP1, side and setup class are
@@ -5836,6 +5949,7 @@ class Scanner:
         _sc_final = getattr(sig, "setup_class", "UNKNOWN")
         if ok:
             self._suppression_counters[f"enqueue_stage:emitted:{_sc_final}"] += 1
+            mover_retention.get_retention().note_enqueued(getattr(sig, "symbol", ""))
             # Queued candidates are the other half of the stop-geometry A/B
             # sample (observe-only; stamps the pair + sig.geo_atr_stop).
             #
@@ -8827,6 +8941,12 @@ class Scanner:
 
     async def _scan_symbol(self, symbol: str, volume_24h: float) -> None:
         """Run all channel evaluations for one symbol."""
+        # Retention counts a scan HERE, before the context can refuse — a
+        # promoted mover whose candles stopped arriving is exactly the pair
+        # retention exists to release, and counting only successful contexts
+        # would make it invisible by never advancing its denominator.
+        # No-op for any symbol retention does not hold (i.e. every core pair).
+        mover_retention.get_retention().note_scan(symbol)
         ctx = await self._build_scan_context(symbol, volume_24h)
         if ctx is None:
             return
@@ -9065,6 +9185,13 @@ class Scanner:
                     _raw_setup = self._normalize_setup_class(getattr(_raw_sig, "setup_class", None))
                     self._increment_path_funnel("generated", chan_name, _raw_setup)
                     self._increment_path_funnel("scanner_preparation", chan_name, _raw_setup)
+                    # A raw candidate is the opportunity signal retention scores
+                    # on: an evaluator found a setup here.  Counted BEFORE the
+                    # gate chain, deliberately — retention asks "is this pair
+                    # still offering setups", and a pair whose candidates are all
+                    # rejected by our own gates is a gating question, not a
+                    # reason to stop looking at the pair.
+                    mover_retention.get_retention().note_candidate(symbol)
                     _funnel_meta: Dict[str, Any] = {}
                     # cross_verified is None for all scalp channels (cross-exchange
                     # verification is skipped for 360_SCALP — see _prepare_signal).
@@ -9137,6 +9264,7 @@ class Scanner:
                     continue
                 _raw_setup = self._normalize_setup_class(getattr(_raw_result, "setup_class", None))
                 self._increment_path_funnel("generated", chan_name, _raw_setup)
+                mover_retention.get_retention().note_candidate(symbol)
                 _funnel_meta: Dict[str, Any] = {}
                 sig, cross_verified = await self._prepare_signal(
                     symbol,

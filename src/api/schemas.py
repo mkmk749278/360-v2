@@ -187,6 +187,18 @@ class SignalDetail(BaseModel):
             "closes, so it cannot be recovered later."
         ),
     )
+    promotion_age_sec: float = Field(
+        -1.0,
+        description=(
+            "Seconds between the pair's promotion and this signal — where in "
+            "the hold we entered. pair_admission says a mover produced the "
+            "row; only this says whether it fired at minute two of the "
+            "ignition or in hour five of a spent move. -1.0 means the pair "
+            "was not a held mover (a core pair, or a signal stamped before "
+            "2026-08-13); 0.0 is a real reading, so the two do not share a "
+            "sentinel."
+        ),
+    )
     market_phase: str = Field(
         "",
         description=(
