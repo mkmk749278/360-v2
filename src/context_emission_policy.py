@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from src.strategy_edge import (
+    VERDICT_INSUFFICIENT,
     VERDICT_NEGATIVE,
     VERDICT_POSITIVE,
     VERDICT_STRONG,
@@ -91,6 +92,12 @@ class PolicyParams:
     # global value above). Loaded once per params build from the in-memory
     # controller store (O(1), no hot-path I/O); empty when the controller is off.
     per_strategy: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Warmup allowance — see ``_warmup_take`` and the INSUFFICIENT branch of
+    # ``evaluate_emission``.  Breaks the absorbing state where an unmeasured
+    # cell cannot emit, so never accumulates the samples that would measure it.
+    warmup_enabled: bool = True
+    warmup_target: int = 30
+    warmup_daily_cap: int = 12
 
     @staticmethod
     def from_config() -> "PolicyParams":
@@ -110,6 +117,9 @@ class PolicyParams:
             CONTEXT_EMISSION_POSITIVE_RELAX,
             CONTEXT_EMISSION_QUALITY_ANCHOR,
             CONTEXT_EMISSION_STRONG_RELAX,
+            CONTEXT_EMISSION_WARMUP_DAILY_CAP,
+            CONTEXT_EMISSION_WARMUP_ENABLED,
+            CONTEXT_EMISSION_WARMUP_TARGET,
             CONTEXT_EMISSION_SUPPRESS_NEGATIVE,
         )
 
@@ -150,6 +160,9 @@ class PolicyParams:
                 _rt("context_emission_gate_override_live", CONTEXT_EMISSION_GATE_OVERRIDE_LIVE)
             ),
             per_strategy=per_strategy,
+            warmup_enabled=bool(_rt("context_emission_warmup_enabled", CONTEXT_EMISSION_WARMUP_ENABLED)),
+            warmup_target=max(1, int(_rt("context_emission_warmup_target", CONTEXT_EMISSION_WARMUP_TARGET))),  # type: ignore[call-overload]
+            warmup_daily_cap=max(0, int(_rt("context_emission_warmup_daily_cap", CONTEXT_EMISSION_WARMUP_DAILY_CAP))),  # type: ignore[call-overload]
         )
 
     def resolve_suppress_negative(self, strategy: str) -> bool:
@@ -165,6 +178,40 @@ class PolicyParams:
         ov = self.per_strategy.get((strategy or "").upper()) or {}
         v = ov.get("min_samples")
         return self.min_samples if v is None else int(v)
+
+
+#: Warmup grants issued today, per strategy: ``{"day": "YYYY-MM-DD", "counts": {}}``.
+#: In-memory and O(1) — this is consulted on the scanner hot path, so it must add
+#: no I/O (Cost Discipline).  Losing it on restart is deliberate and safe: the
+#: cap re-arms, which can only ever *grant* more, and the grant is already
+#: bounded by ``warmup_target`` on the cell's own sample count.
+_WARMUP_GRANTS: Dict[str, Any] = {"day": "", "counts": {}}
+
+
+def _warmup_take(strategy: str, cap: int) -> bool:
+    """Consume one warmup grant for ``strategy`` today. False when capped.
+
+    The cap counts **floor relaxations granted**, not signals delivered — the
+    router drops most of what it dequeues, so grants over-count delivery.  That
+    is the conservative direction for a blast-radius bound (it caps sooner than
+    a delivery count would) and it is the number this module can actually
+    observe: "emitted means DELIVERED, and only the router knows that".
+    """
+    if cap <= 0:
+        return False
+    from datetime import datetime, timezone
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _WARMUP_GRANTS.get("day") != day:
+        _WARMUP_GRANTS["day"] = day
+        _WARMUP_GRANTS["counts"] = {}
+    key = (strategy or "").upper()
+    counts = _WARMUP_GRANTS["counts"]
+    used = int(counts.get(key, 0))
+    if used >= cap:
+        return False
+    counts[key] = used + 1
+    return True
 
 
 @dataclass(frozen=True)
@@ -320,7 +367,51 @@ def effective_floor(
             else f"{verdict.lower()}_relax {relaxed:.1f}pts n={n}",
         )
 
-    # FLAT / INSUFFICIENT / unknown → global floor, unchanged.
+    # ------------------------------------------------------------------ #
+    # Warmup: let an UNMEASURED cell deliver, so it can become a measured one.
+    #
+    # Owner, 2026-08-14: *"let them deliver first, don't wait for 20 to 30,
+    # after reaching desirable count then start sort out."*
+    #
+    # The absorbing state this breaks: ``strategy_edge`` returns INSUFFICIENT
+    # while ``edge is None``, and edge is None until the sample floor is met.
+    # So a starved path carries no verdict, never earns the relax, rarely
+    # clears the floor, rarely delivers — and therefore never accumulates the
+    # samples that would give it a verdict.  LSR sat at ~1 delivered row in 7
+    # days against MOVER_TREND_PULLBACK's 134 while reading +0.984%/row in the
+    # dark lane.  Same shape as ``cohort_edge`` (#816's sibling): a gate whose
+    # evidence only arrives from what it lets through can never release.
+    #
+    # Three bounds, and each one is load-bearing:
+    #   * **INSUFFICIENT only.**  FLAT is a *measured* neutral — it has a
+    #     verdict and the samples behind it, so it is not owed a warmup.  And
+    #     NEGATIVE returned above, so this can never resurrect a cell that was
+    #     measured bad: warmup is for the unmeasured, never for the disproven.
+    #   * **``warmup_target``** — the "desirable count".  Past it the cell is
+    #     on its own; the edge rules above take over and start sorting out.
+    #   * **``warmup_daily_cap``** — per strategy per day, because without it
+    #     this is an unbounded loosening of what subscribers receive, on a book
+    #     whose 30d result is not distinguishable from zero.
+    #
+    # A capped grant is its OWN reason string, never folded into ``neutral``:
+    # "the allowance is spent" and "this cell is not owed one" are different
+    # facts with different next moves.
+    if verdict == VERDICT_INSUFFICIENT and p.warmup_enabled and n < p.warmup_target:
+        if _warmup_take(strategy, p.warmup_daily_cap):
+            relaxed = min(p.positive_relax, max(0.0, base - anchor))
+            return EmissionDecision(
+                effective_floor=base - relaxed,
+                verdict=verdict,
+                edge_r=edge_r,
+                n=n,
+                matrix_strategy=lookup,
+                suppressed=False,
+                relaxed=relaxed,
+                reason=f"warmup_relax {relaxed:.1f}pts n={n}<{p.warmup_target}",
+            )
+        return _base(f"warmup_capped n={n}<{p.warmup_target}", verdict, lookup)
+
+    # FLAT / measured-but-neutral / unknown → global floor, unchanged.
     return _base(f"neutral n={n}", verdict, lookup)
 
 

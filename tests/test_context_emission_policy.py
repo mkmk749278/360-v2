@@ -7,6 +7,8 @@ control-arm alias for graduated paths, and the divergence classifier.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from src.context_emission_policy import (
@@ -109,12 +111,29 @@ def test_thin_strong_cell_does_not_relax() -> None:
 
 
 def test_cold_cell_uses_base_floor() -> None:
+    """A cold cell earns no EDGE-driven relaxation and is never suppressed.
+
+    Narrowed 2026-08-14: the warmup allowance deliberately gives an unmeasured
+    cell a relaxation so it can deliver and accumulate samples, so "cold => BASE"
+    is no longer true with warmup on.  The property this test is actually about
+    is the edge policy's own behaviour, which is unchanged — asserted here with
+    warmup off.  The allowance has its own file (tests/test_emission_warmup.py);
+    the pairing below pins that the ONLY thing moving the floor here is warmup.
+    """
     st = _store()
     _feed(st, "WHALE_MOMENTUM", CTX, wins=3, losses=2)  # n=5 < matrix floor
-    d = effective_floor("WHALE_MOMENTUM", CTX, BASE, store=st, params=P)
+    d = effective_floor(
+        "WHALE_MOMENTUM", CTX, BASE, store=st,
+        params=replace(P, warmup_enabled=False),
+    )
     assert d.verdict == "INSUFFICIENT_DATA"
     assert d.suppressed is False
     assert d.effective_floor == BASE
+
+    warm = effective_floor("WHALE_MOMENTUM", CTX, BASE, store=st, params=P)
+    assert warm.verdict == "INSUFFICIENT_DATA"
+    assert warm.suppressed is False
+    assert warm.effective_floor < BASE  # the allowance, and nothing else
 
 
 def test_missing_context_or_setup_is_base() -> None:

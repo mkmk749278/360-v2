@@ -1370,6 +1370,19 @@ CONTEXT_EMISSION_POSITIVE_RELAX: float = _safe_float(
 #: Relaxation requires at least this many samples in the cell (stricter than the
 #: edge-matrix floor of 15 — we relax the bar only on well-populated evidence).
 CONTEXT_EMISSION_MIN_SAMPLES: int = _safe_int("CONTEXT_EMISSION_MIN_SAMPLES", "30")
+
+# --- Warmup allowance -------------------------------------------------------
+# Let an UNMEASURED (INSUFFICIENT_DATA) cell clear the floor with the same
+# relaxation a POSITIVE one gets, so it can deliver and accumulate the samples
+# that would give it a verdict.  Without this a starved path is in an absorbing
+# state: no samples -> no verdict -> no relax -> no delivery -> no samples.
+# Owner-directed 2026-08-14 ("let them deliver first ... then start sort out").
+CONTEXT_EMISSION_WARMUP_ENABLED: bool = _safe_bool("CONTEXT_EMISSION_WARMUP_ENABLED", "true")
+# The "desirable count" — past this the cell is judged on its own edge.
+CONTEXT_EMISSION_WARMUP_TARGET: int = _safe_int("CONTEXT_EMISSION_WARMUP_TARGET", "30")
+# Blast radius: floor relaxations granted per strategy per UTC day.  0 disables
+# the allowance as surely as the flag does, and is a real value, not "unset".
+CONTEXT_EMISSION_WARMUP_DAILY_CAP: int = _safe_int("CONTEXT_EMISSION_WARMUP_DAILY_CAP", "12")
 #: Whether a NEGATIVE cell hard-suppresses the path (the RANGE_FADE-gate side).
 CONTEXT_EMISSION_SUPPRESS_NEGATIVE: bool = _safe_bool(
     "CONTEXT_EMISSION_SUPPRESS_NEGATIVE", "true"
