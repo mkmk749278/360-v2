@@ -1,6 +1,8 @@
 """Tests for the pair-cohort dimension (src/pair_cohort.py) and cohort-aware emission."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 from src.context_emission_policy import PolicyParams, effective_floor
 from src.pair_cohort import (
     COHORT_ALTCOIN,
@@ -73,5 +75,12 @@ def test_cohort_ignored_when_not_cohort_aware() -> None:
     # MAJOR-cohort STRONG, base cell absent — with cohort_aware OFF, the base
     # lookup finds nothing → no relaxation.
     _feed(st, "SR_FLIP_RETEST", cohort_ctx, wins=30, losses=0)
-    d = effective_floor("SR_FLIP_RETEST", CTX, BASE, cohort=COHORT_MAJOR, store=st, params=_P_BASE)
+    # Warmup off: this test is about which CELL is consulted, and the warmup
+    # allowance would relax the floor for the resulting unmeasured lookup —
+    # true, deliberate, and nothing to do with cohort awareness.
+    d = effective_floor(
+        "SR_FLIP_RETEST", CTX, BASE, cohort=COHORT_MAJOR, store=st,
+        params=replace(_P_BASE, warmup_enabled=False),
+    )
     assert d.effective_floor == BASE  # cohort cell not consulted
+    assert d.verdict != "STRONG"      # the cohort's STRONG never leaked in
