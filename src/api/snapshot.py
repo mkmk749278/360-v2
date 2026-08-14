@@ -1632,6 +1632,10 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
                 "tier": getattr(tier, "value", str(tier)) if tier is not None else "?",
                 "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
                 "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
+                # The signed sibling.  ``change_24h_pct`` is an ABSOLUTE move
+                # (it is ``volatility_24h``), which is right for ranking and
+                # wrong for a column headed "24h Δ%".  None = not reported.
+                "change_24h_signed_pct": getattr(info, "change_24h_signed_pct", None),
             })
         regular.sort(key=lambda r: (r["tier"], -r["volume_24h_usd"]))
 
@@ -1682,6 +1686,10 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
                 "minutes_left": round(max(0.0, (float(expiry or 0.0) - _mono) / 60.0), 1),
                 "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
                 "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
+                # The signed sibling.  ``change_24h_pct`` is an ABSOLUTE move
+                # (it is ``volatility_24h``), which is right for ranking and
+                # wrong for a column headed "24h Δ%".  None = not reported.
+                "change_24h_signed_pct": getattr(info, "change_24h_signed_pct", None),
                 "reject_reason": rj.get("reason"),
                 "reject_path": rj.get("path"),
                 "reject_age_sec": rj.get("age_sec"),
