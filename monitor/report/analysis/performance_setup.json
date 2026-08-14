@@ -1,12 +1,12 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 450,
-    "wins": 122,
-    "losses": 183,
-    "neutral": 145,
+    "n": 461,
+    "wins": 125,
+    "losses": 186,
+    "neutral": 150,
     "win_rate_pct": 27.1,
-    "avg_pnl_pct": 0.0461
+    "avg_pnl_pct": 0.0455
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
@@ -124,5 +124,14 @@
     "neutral": 0,
     "win_rate_pct": 100.0,
     "avg_pnl_pct": 12.7132
+  },
+  {
+    "setup": "MEAN_REVERT",
+    "n": 1,
+    "wins": 0,
+    "losses": 0,
+    "neutral": 1,
+    "win_rate_pct": 0.0,
+    "avg_pnl_pct": 0.0
   }
 ]

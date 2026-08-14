@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-13T03:14:44.536266+00:00",
-  "generated_at_ts": 1786590884.536266,
+  "generated_at": "2026-08-14T03:13:15.146315+00:00",
+  "generated_at_ts": 1786677195.1463149,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "eac8781bbeff20f1e9b89e7463ebf3c1c329e753",
+  "git_sha": "6aff117be16240da6b9145d79802d488325f6d30",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,9 +15,9 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 10423,
-    "strategy_matrix_scored_cells": 4053,
-    "performance_setups": 14,
+    "strategy_matrix_cells": 10532,
+    "strategy_matrix_scored_cells": 4099,
+    "performance_setups": 15,
     "suppression_gates": 0
   },
   "headlines": {
@@ -67,31 +67,31 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "SR_FLIP_RETEST@SAREXIT",
-        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
-        "edge_r": -5.579049463973741,
-        "n": 17,
+        "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
+        "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL",
+        "edge_r": -5.394231877505262,
+        "n": 38,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
-        "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -5.519209272184453,
-        "n": 37,
+        "strategy": "SR_FLIP_RETEST@SAREXIT",
+        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
+        "edge_r": -5.237111022427434,
+        "n": 18,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
+        "context_key": "OVERLAP/MARKUP/COMPRESSED/BTC_NEUTRAL",
+        "edge_r": -4.423085822593471,
+        "n": 18,
         "verdict": "NEGATIVE"
       },
       {
         "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
         "context_key": "OVERLAP/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -4.435021291922218,
-        "n": 19,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "LIQUIDITY_SWEEP_REVERSAL@SAREXIT",
-        "context_key": "LONDON/QUIET/NORMAL/BTC_NEUTRAL",
-        "edge_r": -4.09592335517334,
-        "n": 18,
+        "edge_r": -4.24289786242175,
+        "n": 20,
         "verdict": "NEGATIVE"
       }
     ],
