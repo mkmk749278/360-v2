@@ -1989,6 +1989,13 @@ class Scanner:
             volume_24h_usd=float(vol),
             tier=PairTier.TIER3,
             volatility_24h=abs(float(change_pct)),
+            # Keep the sign the line above discards.  ``volatility_24h`` must
+            # stay absolute (the mover threshold compares against it), but this
+            # is the moment the sign exists and nothing downstream could
+            # recover it — #929 stamped it onto the signal, and this puts it on
+            # the pair so the /pairs table stops rendering an absolute value in
+            # a column headed "24h Δ%" beside a signed one.
+            change_24h_signed_pct=float(change_pct),
         )
         self.pair_mgr.pairs[symbol] = info
         self._synthetic_mover_pairs.add(symbol)

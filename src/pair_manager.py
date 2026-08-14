@@ -139,6 +139,24 @@ _PAIR_BLACKLIST: frozenset = _STABLECOIN_BLACKLIST | _NON_CRYPTO_BLACKLIST
 _SYMBOL_META_RETRY_S: int = 6 * 3600
 
 
+def _signed_change_pct(ticker: Dict) -> Optional[float]:
+    """Return Binance's ``priceChangePercent`` **with its sign**, or ``None``.
+
+    Absence and zero are different facts — a ticker that did not report the
+    field is not a pair that moved 0.00% — so this refuses rather than
+    defaulting.  Its absolute value is what ``volatility_24h`` keeps, for the
+    rank score and the mover threshold; this keeps the half those two throw
+    away, which is the half every display consumer actually wants.
+    """
+    raw = ticker.get("priceChangePercent")
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def classify_pair_tier(symbol: str, volume_24h_usd: float = 0.0) -> PairProfile:
     """Return the PairProfile for a given symbol.
 
@@ -189,6 +207,16 @@ class PairInfo:
     candle_counts: Dict[str, int] = field(default_factory=dict)
     tier: PairTier = PairTier.TIER1
     volatility_24h: float = 0.0       # 24h price change % (absolute)
+    #: The same 24h move **with its sign**, or ``None`` where the source did not
+    #: report one.  ``volatility_24h`` is deliberately absolute — the rank score
+    #: normalises by it and the mover threshold compares ``>= MIN_PCT`` against
+    #: it, and both are magnitude questions.  But every *display* consumer wants
+    #: the sign, and taking ``abs()`` at the only place it exists means no
+    #: surface downstream can tell a pair up 30% from one down 30%: ops rendered
+    #: a signed promotion stamp beside this field's absolute value, both labelled
+    #: "24h Δ%", so one row read "top loser −15.3%" next to "15.3%".  Three
+    #: states, never two: ``None`` is "not reported", never 0.0.
+    change_24h_signed_pct: Optional[float] = None
     spread_avg: float = 0.0           # Average bid-ask spread %
     rank_score: float = 0.0           # Composite ranking score
 
@@ -416,6 +444,7 @@ class PairManager:
                     quote_asset="USDT",
                     volume_24h_usd=float(t.get("quoteVolume", 0)),
                     volatility_24h=abs(float(t.get("priceChangePercent", 0))),
+                    change_24h_signed_pct=_signed_change_pct(t),
                 ))
         except Exception as exc:
             log.error("fetch_top_futures_pairs error: %s", exc)
@@ -490,6 +519,7 @@ class PairManager:
                     quote_asset="USDT",
                     volume_24h_usd=float(t.get("quoteVolume", 0)),
                     volatility_24h=abs(float(t.get("priceChangePercent", 0))),
+                    change_24h_signed_pct=_signed_change_pct(t),
                 ))
         except Exception as exc:
             log.error("fetch_all_futures_pairs error: %s", exc)
