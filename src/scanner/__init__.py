@@ -8819,7 +8819,35 @@ class Scanner:
             from src import entry_features as _eqf
             from src import entry_quality as _eq
 
-            _eq_row = _eqf.get_ledger().row_for(str(getattr(sig, "signal_id", "") or ""))
+            _eq_sid = str(getattr(sig, "signal_id", "") or "")
+            # ── The final confidence, recorded where it becomes true ─────
+            # `entry_features.stamp` runs inside the evaluator and can only see
+            # `sig.confidence` as the evaluator left it — a partial running
+            # total. Every assignment that produces the score this chain gates
+            # on happens afterwards, in this function: the legacy base, the
+            # composite `setup_score.total`, decay, clamp, the scoring engine,
+            # the soft penalties, and the statistical filter — the last of them
+            # ~170 lines above this one. So the stamped column was a constant
+            # (8.0 on 161 of 161 live rows) and every confidence split ops has
+            # drawn was a split on that constant.
+            #
+            # This is the same defect the stamp's own docstring documents for
+            # `entry_regime` (#850), one line further down and never fixed.
+            # Annotated here rather than passed to the evaluator because the
+            # value does not exist there — it is not a plumbing problem, it is
+            # the fact becoming true later, which is what `annotate` is for.
+            #
+            # Placed after the confidence floor and after the last mutation, so
+            # a row carrying `confidence_final` carries the number the gate
+            # chain actually read. Candidates a gate above killed keep no final
+            # score: they have no outcome to join either, so an absent value is
+            # the honest state rather than a mid-chain snapshot that would read
+            # exactly like a finished one.
+            if _eq_sid:
+                _eqf.get_ledger().annotate(
+                    _eq_sid, {"confidence_final": float(sig.confidence)}
+                )
+            _eq_row = _eqf.get_ledger().row_for(_eq_sid)
             _eq_decision = _eq.decide(
                 _eq_row, str(getattr(sig, "setup_class", "") or "")
             )

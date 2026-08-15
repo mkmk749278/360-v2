@@ -420,14 +420,46 @@ class TestLedgerAnnotation:
         assert reloaded.annotate("s1", {"eq_enforced_by": "profile_reject"}) is True
 
 
-class TestSchemaIsNotBumpedForTheVerdict:
+class TestTheVerdictPopulationSurvivesASchemaBump:
+    """The property is that pre-gate rows keep their standing, not that the
+    schema number never moves.
+
+    This asserted ``ef.SCHEMA == 2`` until 2026-08-15, and the sentence it was
+    protecting — *"bumping the schema would drop the population this lane
+    finally has"* — stopped being the only way to lose that population the day
+    ``ledger_schema`` shipped. A bump declared **additive** keeps every old row;
+    only an undeclared one drops them. Pinning the literal therefore guarded the
+    real risk by forbidding a safe act, and it would have been "fixed" by
+    whoever next needed the bump — by editing the 2 to a 3, which is the one
+    change that tests nothing at all.
+
+    So it derives the requirement instead: whatever the current schema is, a row
+    written under the schema the entry-quality verdict shipped on must still be
+    readable today.
+    """
+
+    #: The schema the ``eq_*`` verdict keys were introduced under. A row stamped
+    #: then is the oldest one this lane needs to keep, and it is a fact about
+    #: history rather than a mirror of the constant — so it does not move.
+    VERDICT_ERA_SCHEMA = 2
+
     def test_a_row_stamped_before_the_gate_carries_no_verdict_rather_than_a_pass(self):
-        """Bumping the schema would drop the population this lane finally has;
-        a pre-gate row simply has no ``eq_*`` keys, and a reader must render
-        that as 'not evaluated'. A missing stamp is not a pass."""
         old_row = {"signal_id": "s1", "setup_class": "MOVER_TREND_PULLBACK"}
         assert "eq_enforced_by" not in old_row
-        assert ef.SCHEMA == 2
+
+    def test_the_pre_gate_population_is_still_loadable_today(self):
+        from src import ledger_schema
+
+        ok, reason = ledger_schema.accepts(
+            self.VERDICT_ERA_SCHEMA, ef.SCHEMA, ef.ADDITIVE_FROM_SCHEMAS
+        )
+        assert ok, (
+            f"entry_features schema {ef.SCHEMA} refuses rows written under "
+            f"schema {self.VERDICT_ERA_SCHEMA} ({reason}). If that bump was "
+            "additive, declare it in ADDITIVE_FROM_SCHEMAS; if it redefined a "
+            "field, the drop is correct and this constant is what needs moving "
+            "— but say which, because the two have opposite fixes."
+        )
 
 
 # --------------------------------------------------------------------------- #

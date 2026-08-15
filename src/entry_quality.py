@@ -280,6 +280,38 @@ RULES: Tuple[Rule, ...] = (
         ),
         live_default=False,
     ),
+    Rule(
+        key="cvd_aligned",
+        feature="cvd_slope_aligned",
+        compare=CMP_MIN,
+        setup_class="",
+        label="Order flow ran against the trade at entry",
+        rationale=(
+            "cvd_slope is computed into smc_data on every scan and no "
+            "evaluator reads it; MOVER_TREND_PULLBACK — ~59% of the enqueued "
+            "book — is a three-SMA pullback trigger with no notion of volume "
+            "at all. The comparison is against ZERO, which is the sign of the "
+            "feature and not a level fitted to a window: `_align` has already "
+            "put 'favours this trade' on the positive side for both "
+            "directions, so 'CVD was with the trade' and 'CVD was against it' "
+            "is the whole rule. That is the one threshold this lane can state "
+            "without a number.\n\n"
+            "SHADOW, and it must stay shadow until the dark lane has spoken. "
+            "The delivered book measures +1.018%/row on the 90 rows it keeps "
+            "against -0.118% on the 71 it drops, CI95 [+0.200, +1.823], full "
+            "coverage and no abstentions — but that is 161 rows, 156 of them "
+            "one path, from a page on which ~21 candidate cells were drawn, "
+            "and the best of 21 beats a coin flip by construction. The "
+            "campaign-unit average agrees in sign (+0.161% vs -0.343%) and is "
+            "six times smaller than the per-row one, which says part of the "
+            "gap is repeat entries into symbols that went on to work. "
+            "Promotion waits for the dark population (schema 5 carries the "
+            "features onto ~1,400 rows with outcomes), not for a better "
+            "number on this one."
+        ),
+        live_default=False,
+        threshold_default=0.0,
+    ),
 )
 
 RULES_BY_KEY: Dict[str, Rule] = {r.key: r for r in RULES}

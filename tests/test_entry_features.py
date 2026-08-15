@@ -907,3 +907,102 @@ class TestTheCvdSeriesIsNamed:
         feats = self._capture({})
         assert "cvd_source" not in feats["missing"]
         assert "cvd_source" not in ef.features_for("TREND_PULLBACK_EMA")
+
+
+# --------------------------------------------------------------------------- #
+# Confidence — the column that was a constant for two weeks
+# --------------------------------------------------------------------------- #
+
+
+class TestConfidenceIsRecordedWhereItBecomesTrue:
+    """`stamp` runs inside the evaluator; the composite score is written four
+    times *after* it returns.
+
+    So `sig.confidence` at stamp time is the evaluator's partial running total,
+    and the ledger recorded it under the bare name `confidence` from the day
+    this lane shipped. Measured on the live ledger 2026-08-15: **8.0 on 161 of
+    161 rows** — a constant, while the dark ledger's stamp of the same quantity
+    spans 60-100. Nothing crashed and no column was blank; every confidence
+    split ops had ever drawn was a split on that constant.
+
+    It is the exact defect `stamp`'s own docstring documents for `entry_regime`
+    (#850), sitting in the line directly beneath the paragraph describing it.
+    """
+
+    def test_the_stamp_does_not_claim_to_hold_the_final_score(self):
+        """The evaluator's value is recorded under a name that says what it is.
+
+        Fails against the pre-fix tree, which wrote this value as `confidence`
+        — a name a reader can only take to mean the score everything gates on.
+        """
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            sig = _Sig()
+            assert ef.stamp(sig, {"a": 1}) is True
+            row = led.row_for(sig.signal_id)
+            assert row is not None
+            assert "confidence" not in row, (
+                "the bare `confidence` key is the schema-<=2 spelling and means "
+                "the evaluator's partial total; writing it again would keep "
+                "handing readers a plausible number that is not the score"
+            )
+            assert row["confidence_at_eval"] == pytest.approx(
+                float(sig.confidence)
+            )
+        finally:
+            ef.reset_ledger(None)
+
+    def test_the_final_score_arrives_by_annotation_and_is_absent_until_it_does(self):
+        """A row the scanner never reached carries no final score at all.
+
+        Not a mid-chain snapshot, which would read exactly like a finished one —
+        a missing stamp is not a pass.
+        """
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        try:
+            sig = _Sig()
+            ef.stamp(sig, {"a": 1})
+            assert led.row_for(sig.signal_id).get("confidence_final") is None
+            assert led.annotate(sig.signal_id, {"confidence_final": 81.25}) is True
+            assert led.row_for(sig.signal_id)["confidence_final"] == 81.25
+        finally:
+            ef.reset_ledger(None)
+
+    def test_the_scanner_annotates_the_final_score_at_the_entry_quality_site(self):
+        """Pins the CALL SITE, not the method — defining a way to record the
+        score is not recording it, and this lane has paid for that distinction
+        under three different names.
+
+        Parses the scanner rather than running a scan: the value is only correct
+        because of *where* the call sits (after the last mutation and after the
+        confidence floor), and that is a property of the tree.
+        """
+        import ast
+        import pathlib
+
+        src = pathlib.Path("src/scanner/__init__.py").read_text()
+        tree = ast.parse(src)
+
+        annotates = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "annotate"
+            and any(
+                isinstance(kw, ast.Dict)
+                and any(
+                    isinstance(k, ast.Constant) and k.value == "confidence_final"
+                    for k in kw.keys
+                )
+                for kw in node.args
+            )
+        ]
+        assert annotates, (
+            "no scanner call annotates `confidence_final`. The evaluator cannot "
+            "supply it — the score does not exist yet when it stamps — so if "
+            "this call goes away the column silently becomes absent on every "
+            "row and every confidence split measures nothing again."
+        )

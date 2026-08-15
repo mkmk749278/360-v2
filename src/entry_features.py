@@ -218,15 +218,41 @@ log = get_logger("entry_features")
 #: extension, and ``tp1_r_multiple``. Bumping drops the schema-1 rows, which cost
 #: about an hour of MVRTP stamps — redefining a live measurement is only cheap
 #: while its population is nearly empty, and this was the last moment it was.
-SCHEMA = 2
+#: 3 (2026-08-15): split the confidence column in two, because the one this lane
+#: had recorded since it shipped was never the score anything gates on. `stamp`
+#: read `sig.confidence` inside the **evaluator**, and the scanner writes the
+#: real 0–100 composite afterwards (`scanner.__init__` sets it at the legacy
+#: base, at `setup_score.total`, again after decay and clamp, and once more from
+#: the scoring engine) — so every row carried the evaluator's partial running
+#: total. Measured on the live ledger: **8.0 on 161 of 161 rows**, a constant,
+#: while the dark ledger's own stamp of the same quantity spans 60–100. Nothing
+#: crashed and no column was empty; every confidence split this page has ever
+#: drawn was a split on a constant.
+#:
+#: That is the *exact* defect `stamp`'s own docstring below describes for
+#: `entry_regime` (#850) — recorded, fixed for one field, and left standing in
+#: the line directly beneath it. `confidence_at_eval` keeps the evaluator's
+#: view under a name that says what it is; `confidence_final` is annotated by
+#: the scanner where the value becomes true. The bare `confidence` key is no
+#: longer written by this build at all: pre-schema-3 rows keep theirs, and a
+#: reader that wants the real score finds nothing on them rather than a number
+#: that reads plausible and means something else. A missing stamp is not a pass.
+SCHEMA = 3
 
-#: Older schemas this build reads unchanged. EMPTY on purpose: no bump here has
-#: been declared additive, so every one drops its window — which is safe but is
-#: a *decision*, not an accident. Before bumping SCHEMA, ask whether the change
-#: only ADDS fields; if so add the old number here, or the first flush after
-#: deploy silently destroys the ledger (`ledger_schema`, and the 371 SAR rows
-#: lost on 2026-08-09).
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset()
+#: Older schemas this build reads unchanged.
+#:
+#: ``{2}`` since 2026-08-15: schema 3 only ADDS keys. No schema-2 field changes
+#: meaning — `confidence` on an old row means exactly what it always meant (the
+#: evaluator's partial value); it simply now has an honest name on new rows and
+#: is read by nothing. Those rows are still the entire outcome-joined evidence
+#: base for every other feature on the page, so dropping them would make the
+#: estimate smaller rather than cleaner ("filter, do not purge"). Readers bucket
+#: a row with no `confidence_final` as its own population.
+#:
+#: Before bumping SCHEMA, ask whether the change only ADDS fields; if so add the
+#: old number here, or the first flush after deploy silently destroys the ledger
+#: (`ledger_schema`, and the 371 SAR rows lost on 2026-08-09).
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({2})
 
 
 _DEFAULT_PATH: str = os.getenv("ENTRY_FEATURES_PATH", "data/entry_features_v1.json")
@@ -430,8 +456,15 @@ def reason_key(feature: str) -> str:
 #: instead of depending on where a line sits in a function.
 ROW_METADATA_KEYS: frozenset = frozenset({
     # Row identity / provenance, written by `stamp`.
-    "signal_id", "setup_class", "confidence", "entry_regime", "stamped_at",
+    "signal_id", "setup_class", "entry_regime", "stamped_at",
     "schema", "missing",
+    # Confidence, in three keys and deliberately not one. `confidence` is the
+    # legacy schema-≤2 column and is no longer written; `confidence_at_eval` is
+    # the evaluator's partial running total (kept because a disagreement with
+    # the final score is information about what the scanner did, not a
+    # conflict); `confidence_final` is the composite everything gates on, and
+    # is annotated by the scanner because that is where it becomes true.
+    "confidence", "confidence_at_eval", "confidence_final",
     # Descriptive context, not measurements of the setup.
     "symbol", "side", "entry_trigger", "tf_name", "entry_ref_name",
     "sl_dist_pct", "profile_would_reject",
@@ -1214,6 +1247,20 @@ def stamp(
     the evaluator's own view; where the two disagree, the scanner reclassified
     between evaluation and dispatch, and that is information rather than a
     conflict.
+
+    **Confidence has the identical shape and was left unfixed for two weeks.**
+    ``sig.confidence`` here is the evaluator's partial running total, not the
+    composite the gate chain scores on — the scanner overwrites it four times
+    after this returns. It is recorded as ``confidence_at_eval`` so the name
+    matches the thing, and the score a reader means by "confidence" arrives via
+    :meth:`_Ledger.annotate` from the scanner (``confidence_final``). Writing
+    both is not redundancy: their difference is exactly how much of a
+    candidate's score the evaluator contributed, which no artifact has recorded.
+
+    Note what is deliberately *not* done: the bare ``confidence`` key is not
+    re-pointed at the final score. Old rows carry the evaluator value under that
+    name, and silently changing what a column means would pool two populations
+    that disagree — the one thing a schema bump exists to prevent.
     """
     if not enabled():
         return False
@@ -1226,7 +1273,9 @@ def stamp(
             {
                 "signal_id": sid,
                 "setup_class": str(getattr(sig, "setup_class", "") or ""),
-                "confidence": _f(getattr(sig, "confidence", None)),
+                # NOT "confidence" — see the docstring. This is the evaluator's
+                # partial total; the scanner annotates `confidence_final`.
+                "confidence_at_eval": _f(getattr(sig, "confidence", None)),
                 "entry_regime": str(
                     regime or getattr(sig, "entry_regime", "") or ""
                 ),
