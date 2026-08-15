@@ -4,6 +4,111 @@
 
 ---
 
+## 🟢 SESSION 125 2026-08-15 — the confidence column was a constant, and the dark lane could not test a rule
+
+Engine #937; ops #179. Owner asked for a read of the dark feed and `/pairs`, then
+set the constraint: *"we don't need that much of volume / but don't keep any max
+capping / only improve quality things"*.
+
+### The constraint is right, and the data is what says so
+
+Nineteen candidate splits over the 1,344-row scored dark book, net of a 0.07%
+round trip, against a fixed baseline. **Not one CI excludes zero.** Three fail in
+a *direction* that kills the obvious levers outright:
+
+- **Repeat entries do not decay.** 1st −0.179% · 2nd–3rd −0.185% · **4th–8th
+  +0.106%** · 9th+ −0.093%; single-entry campaigns are the *worst* (−0.405% vs
+  −0.290%). A per-symbol evidence throttle — which I had recommended the previous
+  turn — would have cut the better half. Retracted.
+- **Tighter stops are monotonically worse.** <0.8%: −0.381% at 23.5% win; >3%:
+  **+0.141% row / +0.530% campaign**, the only positive bucket on either unit.
+- **Confidence does not rank outcomes.** 60–68 −0.31% · 68–72 −0.01% · 72–75
+  −0.44% · 75–78 +0.26% · 78–82 +0.23% · **82+ −0.26% on the largest bucket
+  (n=288)**. It zigzags.
+
+The book itself: **−19.82% gross over 1,344 rows, −113.90% net** — the fee is
+~5× the whole edge, and the sign rests on six campaigns (removing them: +12.05%).
+`LIQUIDITY_SWEEP_REVERSAL` is the only path positive after fees (+42.78% over 53
+rows, CI [+0.260, +1.394]) and is 100% SHORT, best of 14 paths drawn.
+
+### The confidence finding was not about the market
+
+`entry_features.stamp` runs inside the **evaluator** and read `sig.confidence`
+there; the scanner writes the composite four times afterwards. Live ledger:
+**8.0 on 160 of 161 rows, 0.0 on the last** — a constant, under the name of the
+number every gate scores on, while the dark ledger's stamp of the same quantity
+spans 60–100. Every confidence split ops has ever drawn was a split on it.
+
+It is `stamp`'s own docstring's `entry_regime` defect (#850), **in the line
+directly beneath the paragraph describing it** — fixed for one field, left
+standing for the next. The evaluator cannot supply the score, so this is not
+plumbing: `confidence_at_eval` keeps the evaluator's view under an honest name
+and the scanner annotates `confidence_final` after the last mutation. The bare
+`confidence` key is no longer written — re-pointing a column at a different
+quantity pools two populations that disagree.
+
+### The dark lane could not test a single entry-quality rule
+
+Every rule was ranked on the ~161-row outcome-joined book, because only a
+**delivered** signal has a closed-signal record to join — while the dark ledger
+holds ~1,400 rows carrying their own outcomes, and is the population a promotion
+argument may not read without. A later join cannot fix it: the feature ring is a
+`DeliveryRetainedRing`, so an undelivered row is *precisely* what it evicts
+first, and reading it afterwards reads a sample **selected by delivery**. The
+block is copied at the divert (dark schema 4→5, additive), nested so a feature
+name cannot collide with a dark-row column, with coverage counted per path
+(`ef_present` / `ef_pre_copy` / `ef_absent`-by-reason).
+
+### `cvd_aligned` — shadow, deliberately
+
+CVD is computed into `smc_data` every scan and no evaluator reads it; MVRTP
+(~59% of the enqueued book) is a three-SMA trigger with no notion of volume. The
+comparison is against **zero** — the feature's sign, not a fitted level.
+Delivered book: keep 90 (56%) at **+1.018%**, CI95 **[+0.200, +1.823]**, full
+coverage, survives leave-one-campaign-out; drop 71 at −0.118%. Held shadow
+anyway: 161 rows, 156 one path, ~21 cells drawn, and the campaign-unit average
+(+0.161% vs −0.343%) is **six times smaller** than the per-row one.
+
+### `/pairs` — the funnel, read
+
+8 promoted pairs: **3,809 scans → 270 candidates (7.1%) → 7 enqueued (2.6%)**,
+six of the seven from one pair. Mover-admitted rows lose ~28× per row what core
+does (`MOVER_IGNITION` −0.591%/row net vs `CORE` −0.021%). Separately the dark
+promotion mechanism reads **10 promoted → 0 delivered**, the router's second
+layer taking all of them (7 `correlation_lock`, 1 `same_direction_throttle`).
+
+### The schema-literal test, for the third time
+
+Session 124 fixed this shape twice (`LEDGER_SCHEMA == 2`, then `== 3`).
+`TestSchemaIsNotBumpedForTheVerdict` was the third: it pinned `ef.SCHEMA == 2` to
+protect *"bumping would drop the population"*, a premise that died when
+`ledger_schema` shipped. The cheapest fix is editing the literal, which tests
+nothing — replaced with the property, derived through `accepts()`.
+
+### Open — three findings that are the owner's decision, not code
+
+- **Recalibrate confidence.** It does not rank outcomes and the top bucket is the
+  largest and negative. Scoring model → sign-off. **Nothing can be calibrated
+  until a window accumulates behind `confidence_final`** — there is no honest
+  confidence data on any existing row.
+- **`session_quality` is enforcing and removes profitable rows** (+0.389% avg
+  against a +0.517% book). It raises the per-signal average by discarding
+  positive-EV signals — possibly the right trade given "we don't need volume",
+  but a choice. It also only enforces on ~⅓ of what it flags, the rest held by
+  the rolling budget cap, i.e. **selected by arrival order**.
+- **Stop width: wider is monotonically better** on this book. TP/SL shape.
+
+### Open — verification still owed
+
+Both deploys are green (engine `488920c`, ops `6ceb91b`) and both surfaces render
+the new columns, but **no row carried the new data at session end**: all 1,452
+dark rows are `ef_pre_copy`, and `confidence_final` needs a signal stamped after
+05:33 UTC to *close* before it joins. The one silent failure mode to check is
+every new dark row reading `ef_absent: not_in_feature_ledger` — that would mean
+the ring rotates candidates away before the divert and the copy does not work.
+
+---
+
 ## 🟢 SESSION 124 2026-08-13 — measured against reality, and the first retirement off the delivered book
 
 Engine #927 · #928 · #929; ops #173 · #174 · #175. Owner opened on retention —
