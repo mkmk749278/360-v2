@@ -1302,3 +1302,149 @@ def test_the_row_currency_stamp_follows_whichever_arm_is_still_walking():
     assert row["hold_last_bar_ms"] == pytest.approx((ts + 60.0) * 1000.0)
     # Graded on the newer of the two, so the still-running arm is not "stalled".
     assert row["stalled"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Entry features on the dark row (schema 5)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheDarkRowCarriesItsEntryFeatures:
+    """The dark lane holds ~1,400 rows with outcomes; the outcome-joined
+    entry-feature book holds ~161, because only a DELIVERED signal has a
+    closed-signal record to join.
+
+    So every candidate entry-quality rule was being ranked on a tenth of the
+    evidence, on the one population that is not the one a promotion argument may
+    read. Copying the block at the divert fixes that — and it must be a copy
+    rather than a later join, because the feature ring is a
+    ``DeliveryRetainedRing`` and an undelivered row is precisely what it evicts
+    first: reading it afterwards reads whatever survived, which is a sample
+    selected by delivery.
+    """
+
+    def _stamp(self, sid, feats):
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)
+        led.add({"signal_id": sid, "setup_class": "MEAN_REVERT", **feats})
+        return ef
+
+    def test_the_block_is_copied_onto_the_row(self):
+        ef = self._stamp(_Sig.signal_id, {"cvd_slope_aligned": 0.4, "level_dist_r": 1.2})
+        try:
+            row = de._row_from_signal(_Sig(), time.time())
+            assert row["entry_features"]["cvd_slope_aligned"] == 0.4
+            assert row["entry_features"]["level_dist_r"] == 1.2
+            assert row["entry_features_absent"] is None
+        finally:
+            ef.reset_ledger(None)
+
+    def test_a_fact_the_row_already_carries_is_not_copied_twice(self):
+        """Two spellings of one fact, maintained by two modules, is how they
+        drift — and a reader cannot tell which one a page meant."""
+        ef = self._stamp(_Sig.signal_id, {"cvd_slope_aligned": 0.4})
+        try:
+            row = de._row_from_signal(_Sig(), time.time())
+            for dup in ("signal_id", "setup_class", "symbol", "side", "confidence"):
+                assert dup not in row["entry_features"], (
+                    f"{dup} is already a column on the dark row"
+                )
+        finally:
+            ef.reset_ledger(None)
+
+    def test_an_absent_block_names_its_cause(self):
+        """'Blank needs a cause before it gets a caption', applied to a block.
+
+        Lane off, never stamped, and rotated-away are three states with three
+        different next moves, and they arrive as one ``None`` unless named.
+        """
+        from src import entry_features as ef
+
+        led = ef.EntryFeatureLedger(path="")
+        ef.reset_ledger(led)  # nothing stamped for this signal_id
+        try:
+            row = de._row_from_signal(_Sig(), time.time())
+            assert row["entry_features"] is None
+            assert row["entry_features_absent"] == "not_in_feature_ledger"
+        finally:
+            ef.reset_ledger(None)
+
+    def test_a_feature_ledger_that_raises_never_breaks_the_divert(self):
+        """The divert is the safety property. A measurement copy may fail; it
+        may not be the reason a candidate is not diverted."""
+        from src import entry_features as ef
+
+        class _Boom:
+            def row_for(self, _sid):
+                raise RuntimeError("ledger exploded")
+
+        ef.reset_ledger(_Boom())
+        try:
+            row = de._row_from_signal(_Sig(), time.time())
+            assert row["entry_features"] is None
+            assert row["entry_features_absent"] == "copy_failed"
+            assert row["entry"] == _Sig.entry  # the row is still well-formed
+        finally:
+            ef.reset_ledger(None)
+
+    def test_the_schema_bump_kept_the_window(self):
+        """Additive: every prior schema still loads, so the ~1,400 rows that
+        argue for any promotion survive the deploy that adds the block."""
+        from src import ledger_schema
+
+        for older in (1, 2, 3, 4):
+            ok, reason = ledger_schema.accepts(
+                older, de.LEDGER_SCHEMA, de.ADDITIVE_FROM_SCHEMAS
+            )
+            assert ok, f"schema {older} refused ({reason}) — the window is destroyed"
+
+
+class TestEntryFeatureCoverageIsCounted:
+    """A degraded copy must be counted, not merely fail open.
+
+    If the block stops arriving — the ring rotating a candidate away before the
+    divert would do it — every feature split silently narrows while continuing
+    to look like a split on the whole lane. That is this repo's own "when a
+    degraded mode ships, count it", and the reason `INSUFFICIENT` is broken out
+    by cause two fields above.
+    """
+
+    def _ledger(self, rows):
+        led = de.DarkLedger(path="")
+        for row in rows:
+            led.add(row)
+        return led
+
+    def _row(self, sid, **kw):
+        row = {
+            "signal_id": sid, "setup_class": "MEAN_REVERT",
+            "status": de.STATUS_TP1, "dark_gate": "g", "r_multiple": 1.0,
+        }
+        row.update(kw)
+        return row
+
+    def test_present_absent_and_pre_copy_are_three_buckets(self):
+        led = self._ledger([
+            self._row("a", entry_features={"cvd_slope_aligned": 0.1},
+                      entry_features_absent=None),
+            self._row("b", entry_features=None,
+                      entry_features_absent="not_in_feature_ledger"),
+            self._row("c", entry_features=None, entry_features_absent="lane_disabled"),
+            self._row("d"),  # written before the copy existed
+        ])
+        agg = de.summary(led)["MEAN_REVERT"]
+        assert agg["ef_present"] == 1
+        assert agg["ef_pre_copy"] == 1
+        assert agg["ef_absent"] == {
+            "not_in_feature_ledger": 1, "lane_disabled": 1,
+        }, "absent causes must not pool — they have different fixes"
+
+    def test_an_unnamed_absence_is_still_counted_under_a_name(self):
+        """A cause ops has never heard of is counted, never dropped — the
+        blank that gets no caption is the one nobody can act on."""
+        led = self._ledger([
+            self._row("a", entry_features=None, entry_features_absent=None),
+        ])
+        assert de.summary(led)["MEAN_REVERT"]["ef_absent"] == {"unnamed": 1}

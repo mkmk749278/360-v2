@@ -152,14 +152,33 @@ _MAX_PATHS: int = int(os.getenv("DARK_EMISSION_MAX_PATHS", "32"))
 #: it is a row from before the stamp — which is every row that argued for the
 #: MVRTP-SHORT retirement, so dropping them would delete the evidence at the
 #: moment it starts being read.
-LEDGER_SCHEMA = 4
+#: 5 (2026-08-15) — ``entry_features``: the entry-time feature block the
+#: evaluator already stamps, copied onto the dark row.  **Additive**: no
+#: schema-4 field changes meaning, and a row without it is a row from before
+#: the copy existed — ops buckets that as its own population rather than as a
+#: row whose features were all absent.
+#:
+#: Why copy rather than join.  `entry_features` stamps every candidate at
+#: evaluation and `signal_performance.json` supplies the outcomes — but only a
+#: DELIVERED signal has a closed-signal record, so the joined book is ~161 rows
+#: while this ledger holds ~1,400 with outcomes of their own.  Every quality
+#: rule ops can test was therefore being tested on a tenth of the evidence, and
+#: on the one population that is *not* the one a promotion argument reads.
+#:
+#: A join was the obvious alternative and does not work: the feature ring is a
+#: `DeliveryRetainedRing`, so an undelivered row is exactly what it evicts
+#: first.  Reading it later is reading whatever survived, which is a population
+#: selected by delivery — the bias the split exists to avoid.  Copying at the
+#: divert, while the row is certain to be there, is the same "record a fact
+#: where it becomes true" the confidence annotation above obeys.
+LEDGER_SCHEMA = 5
 
 #: Older schemas this build reads unchanged. Declared, not assumed: the bump
 #: above only ADDS fields, so the window survives it. A bump that redefines a
 #: field must NOT be listed here — old and new rows would then disagree about
 #: what a column is, and pooling them misdescribes both (`ledger_schema`, and
 #: the 371 SAR rows lost on 2026-08-09).
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1, 2, 3})
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1, 2, 3, 4})
 
 #: The promotion block, named in one place so the row builder, the CSV export
 #: and the "was this row written before the mechanism" test cannot drift.
@@ -629,7 +648,52 @@ def _lane_provenance(sig: Any) -> Dict[str, Any]:
     return out
 
 
+#: Keys the dark row already carries under its own names. Copying them inside
+#: the nested block would give a reader two spellings of one fact and no way to
+#: know which the page meant — and they would drift the first time one side
+#: changed. The features themselves are what this block is for.
+_EF_SKIP_KEYS: frozenset = frozenset({
+    "signal_id", "setup_class", "symbol", "side", "schema", "stamped_at",
+    "entry_regime", "confidence",
+})
+
+
+def _entry_feature_block(sig: Any) -> Tuple[Optional[dict], Optional[str]]:
+    """``(features, reason_it_is_absent)`` — exactly one of the two is set.
+
+    The reason half is the point. A dark row with no features can mean the lane
+    is switched off, that this candidate was never stamped, or that the ring
+    rotated the row away before the divert — three states with three different
+    next moves, arriving as one ``None`` unless they are named. That is this
+    repo's own "blank needs a cause before it gets a caption", applied to a
+    block rather than a field.
+
+    Fail-open and counted: a measurement copy must never be the reason a
+    candidate fails to be diverted, because the divert is the safety property.
+    """
+    try:
+        from src import entry_features as _ef
+
+        if not _ef.enabled():
+            return None, "lane_disabled"
+        sid = str(getattr(sig, "signal_id", "") or "")
+        if not sid:
+            return None, "no_signal_id"
+        row = _ef.get_ledger().row_for(sid)
+        if row is None:
+            # Stamped-and-rotated and never-stamped are not distinguishable
+            # from here, and inventing the difference would be worse than
+            # naming what is actually known: the ledger has no row.
+            return None, "not_in_feature_ledger"
+        block = {k: v for k, v in row.items() if k not in _EF_SKIP_KEYS}
+        return (block or None), (None if block else "empty_row")
+    except Exception as exc:  # noqa: BLE001 — never break the divert
+        fail_open.record("dark_emission.entry_feature_block", exc)
+        return None, "copy_failed"
+
+
 def _row_from_signal(sig: Any, now: float) -> dict:
+    _ef_block, _ef_absent = _entry_feature_block(sig)
     _direction = getattr(sig, "direction", None)
     row: Dict[str, Any] = {
         "schema": LEDGER_SCHEMA,
@@ -700,6 +764,13 @@ def _row_from_signal(sig: Any, now: float) -> dict:
         # other dark row is a real `Signal` and has none of these. An unstamped
         # level is not a zero one, and ops renders the difference.
         **_lane_provenance(sig),
+        # The entry-time feature block (schema 5). Nested rather than flattened
+        # so a feature can never collide with one of this row's own columns —
+        # the two vocabularies are maintained by different modules and a
+        # collision would be silent in exactly the way this lane keeps paying
+        # for. Ops flattens it under an `ef_` prefix for the CSV.
+        "entry_features": _ef_block,
+        "entry_features_absent": _ef_absent,
         "emitted_at": now,
         "status": STATUS_OPEN,
         "closed_at": None,
@@ -1580,8 +1651,24 @@ def summary(ledger: Optional[DarkLedger] = None) -> Dict[str, Any]:
             "tp1": 0, "sl": 0, "expired": 0, "insufficient": 0,
             "insufficient_partial_window": 0, "insufficient_no_walk": 0,
             "sum_r": 0.0, "n_r": 0, "gates": {},
+            # Entry-feature coverage (schema 5). A degraded copy must be
+            # COUNTED, or the split it exists to enable silently narrows and
+            # every rule reads as tested on the whole lane. `absent` is broken
+            # out by cause for the same reason `insufficient` is: "the lane is
+            # off", "never stamped" and "the ring rotated it away" have three
+            # different fixes, and a pooled blank sends the reader to the wrong
+            # one. `pre_copy` is a row written before the copy existed — owed
+            # nothing, ages out on its own, and never a fault.
+            "ef_present": 0, "ef_pre_copy": 0, "ef_absent": {},
         })
         agg["n"] += 1
+        if isinstance(row.get("entry_features"), dict):
+            agg["ef_present"] += 1
+        elif "entry_features" not in row:
+            agg["ef_pre_copy"] += 1
+        else:
+            why = str(row.get("entry_features_absent") or "unnamed")
+            agg["ef_absent"][why] = agg["ef_absent"].get(why, 0) + 1
         gate = str(row.get("dark_gate") or "")
         agg["gates"][gate] = agg["gates"].get(gate, 0) + 1
         status = row.get("status")
