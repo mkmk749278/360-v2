@@ -198,9 +198,9 @@
         "HOLD"
       ],
       "QUIET_COMPRESSION_BREAK|suppress_negative": [
-        "DROP",
-        "DROP",
-        "DROP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "QUIET_COMPRESSION_BREAK|min_samples": [
         "HOLD",
@@ -453,7 +453,7 @@
       "QUIET_COMPRESSION_BREAK|suppress_negative": 848,
       "MOVER_TREND_PULLBACK@TUNED|min_samples": 855
     },
-    "cycle": 1131
+    "cycle": 1175
   },
   "ledger": [
     {

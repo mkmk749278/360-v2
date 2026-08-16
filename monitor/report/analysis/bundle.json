@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-15T02:03:00.539394+00:00",
-  "generated_at_ts": 1786759380.539394,
+  "generated_at": "2026-08-16T02:13:24.894544+00:00",
+  "generated_at_ts": 1786846404.8945436,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "16face304ab45897fb2720183d87be717e6dc123",
+  "git_sha": "3e683a49319f02509077a3c7d499e5e3071f84d2",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 10715,
-    "strategy_matrix_scored_cells": 4177,
+    "strategy_matrix_cells": 10802,
+    "strategy_matrix_scored_cells": 4213,
     "performance_setups": 15,
     "suppression_gates": 0
   },
@@ -67,6 +67,13 @@
         "verdict": "NEGATIVE"
       },
       {
+        "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
+        "context_key": "OVERLAP/MARKDOWN/COMPRESSED/BTC_NEUTRAL",
+        "edge_r": -6.024295348233268,
+        "n": 16,
+        "verdict": "NEGATIVE"
+      },
+      {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
         "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
         "edge_r": -5.237111022427434,
@@ -76,15 +83,8 @@
       {
         "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
         "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -5.138635578281615,
-        "n": 40,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
-        "context_key": "OVERLAP/MARKUP/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": -4.423085822593471,
-        "n": 18,
+        "edge_r": -5.009246093062818,
+        "n": 41,
         "verdict": "NEGATIVE"
       },
       {
