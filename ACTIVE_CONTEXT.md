@@ -4,6 +4,96 @@
 
 ---
 
+## 🟢 SESSION 126 2026-08-17 — the promotion refused every candidate and could not say which condition did it
+
+Engine #939; ops #181. Owner: *"still no LSR or any dark feed signal that we
+enable is actually delivered to users, not came to live feed."*
+
+### There are two walls, and only one was instrumented
+
+Read on the current truth-report window, `signals_last100` and the truth
+snapshot:
+
+- The delivered book is **91 of the last 100 `MOVER_TREND_PULLBACK`**, and
+  **zero `LIQUIDITY_SWEEP_REVERSAL`**.
+- LSR is diverted **610 times** in the window, across three different gates:
+  `execution:overextended` 325, `execution:trigger_not_confirmed` 188,
+  `setup_compat:regime_STRONG_TREND` 97.
+- The liveness probe reads **"2 rule(s) armed, 0 promoted today"** — which
+  means master switch ON, both rules enabled, neither inert, dark lane ON.
+
+**Wall 1 — the rules refuse everything and nothing said why.** `decide` computes
+the full `unmet` list on every rejection, exactly as `dark_promotion`'s docstring
+promises, and every caller discards it: the scanner's refusal branch calls
+`dark_emission.publish(sig)` with no decision, the only counter is
+`unmet:{setup_class}` (one integer over five dimensions), and
+`PromotionDecision.to_row` runs only on a YES, where `promotion_unmet` is `[]` by
+construction and **no repo reads it**. Fifth instance of the docstring-asserting-
+a-property-it-does-not-have shape.
+
+**Wall 2 — already measured, unchanged, and the owner's call.** Session 125
+recorded 10 promoted → **0 delivered**: 7 `correlation_lock`, 1
+`same_direction_throttle`. That half is instrumented (`mark_router_dropped`) and
+renders today. Changing it is routing capacity — owner-sign-off — see Open.
+
+### What shipped
+
+- **Per-dimension refusal census** (`_refusals`), with `sole_blocker` kept apart
+  from the marginal count: a conjunction can fail on four conditions at once, and
+  only the sole-blocker number says *relax this and exactly this many promote*.
+  The cap is its own dimension — throttled and misconfigured must not pool.
+- **Bounded near-miss ring** carrying the values the **engine stamped** (regime,
+  session, side, confidence, gate) rather than the rule's, with its unbounded
+  denominator beside it. A `with_trend` rule against `RANGING` rows is obvious in
+  one sample and invisible in every total, since both trend conditions *abstain*
+  on a label naming no trend.
+- **`top_blocker`** — the probe now names the condition instead of printing a
+  bare zero, and distinguishes *no candidate reached the decision* from *every
+  candidate was refused*.
+- **The runtime half crosses the process boundary.** `decide` runs in the engine
+  container; the ops panel is served by the API one, which loads the registry off
+  the shared volume and has never evaluated a candidate — so `counters` was `{}`
+  and every rule's `promoted_today` was `0` there, permanently. The
+  trail-governor `INDEX COLD` defect, and worse: zero is also what a correctly
+  armed rule reads before it fires. `runtime_report` is split out, published to
+  Redis by the snapshot writer, and the handler prefers it.
+- **Ops** renders both panels, and adds the number the page never had: **the
+  joint count**. Every evidence table there is *marginal* and the rule is an
+  *intersection*, so the best-looking cell of each can combine into a rule
+  matching nothing while all those numbers still read well-evidenced.
+  `rule_unmet` is a deliberate mirror of `decide`'s conjunction — pinned by a
+  contract test that drives the **real engine module** over the same rows.
+
+All 13 new engine tests and the ops contract test fail against the pre-change
+trees (verified by revert).
+
+### Open — the owner's decisions, not code
+
+- **The router takes 100% of what promotion produces** (10/10 in Session 125,
+  7 on `correlation_lock`). The lock is protective and correct per symbol; the
+  question is that capacity is allocated **by arrival order**, and a rare
+  promoted path competes against a feed that is 91% one setup. Changing it is
+  paid-channel routing → sign-off. **Do not touch it before the census has run a
+  window** — wall 1 has to be cleared first or wall 2 cannot be measured.
+- **`session_name` is written by nobody.** `SignalRecord.session_name` defaults
+  to `""` and no producer passes it (`grep` finds writers only in
+  `kill_zone.py`, which is a different field). It is empty on 100/100 delivered
+  signals, and `performance_tracker` buckets by `r.session_name or "UNKNOWN"` at
+  two call sites — so every per-session rollup in the closed-signal record is one
+  UNKNOWN bucket. #817's class, unfixed here because it is a separate change with
+  its own blast radius. Note this is **not** the field promotion matches on
+  (`mc_session`), so it is not wall 1.
+
+### Verification owed next session
+
+Nothing can be concluded until a window accumulates behind the census. The
+first read is: open `/control/promotions`, and for each armed rule check whether
+the sole-blocker column names one condition. If it does, that is a one-field
+edit. If the census reads `idle` while the dark lane is producing LSR rows, the
+refusal is upstream of `decide` and the funnel is where to look.
+
+---
+
 ## 🟢 SESSION 125 2026-08-15 — the confidence column was a constant, and the dark lane could not test a rule
 
 Engine #937; ops #179. Owner asked for a read of the dark feed and `/pairs`, then
