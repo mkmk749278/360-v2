@@ -1740,3 +1740,58 @@ python -m src.main
   `signal_dispatch` / `push_notifications` stay absolutely forbidden. An
   invariant that blocks correct work gets deleted by whoever needs the work;
   one that states what it means survives.
+- **A refusal that computes its reason and discards it is a fault with a
+  docstring for an alibi.** `dark_promotion.decide` builds the full list of
+  unmet conditions on every rejection — the module's own docstring says why,
+  *"so the ops panel can say 'matched the gate and the session, failed the
+  regime' instead of leaving the owner to guess which half of his rule is
+  wrong"* — and **every caller threw it away**. The scanner's refusal branch
+  calls `dark_emission.publish(sig)` with no decision; the only counter was
+  `unmet:{setup_class}`, one integer over five dimensions; and
+  `PromotionDecision.to_row` is reached only when the answer is YES, where
+  `promotion_unmet` is `[]` by construction and no repo reads it. So the owner
+  armed two rules, 610 `LIQUIDITY_SWEEP_REVERSAL` candidates were diverted in one
+  truth-report window, zero were promoted, and the entire diagnostic available —
+  in the engine, in the truth report and on the ops page alike — was *"2 rule(s)
+  armed, 0 promoted today"*. The probe printing it called that the benign case:
+  *"the market has not offered a candidate matching it"*, a claim nobody could
+  check (2026-08-17).
+
+  That is `LANE_PROVENANCE_FIELDS` for the fifth time — **a docstring asserting
+  a property the code beneath it does not have, checkable in one command** — and
+  the tell is the same one: grep for the field's readers.
+
+  Three habits beyond the fix:
+
+  - **Count the SOLE blocker, not only the marginal one.** A rule is a
+    conjunction, so a candidate can fail four conditions and no single edit
+    changes anything; the marginal count cannot tell that from four candidates
+    each failing one. `sole_blocker` is the number that says *relax this and
+    exactly this many rows promote*, and it is the only one an operator can act
+    on. Keep the cap as its own dimension — a rule at its bound is working and
+    throttled, a rule that never matches is misconfigured, and the cap check is
+    last precisely so the two never pool.
+  - **A control built from MARGINAL evidence over a CONJUNCTIVE rule needs the
+    joint count, or its own honesty rules mislead.** Ops' promotions page offers
+    one table per dimension, sorted by evidence, cell count printed — every rule
+    this repo has, applied one dimension at a time. And the best-looking cell of
+    each can intersect at zero while all of those numbers still read
+    well-evidenced. Marginal tables cannot say that; only *"the rule as saved
+    selects M of N"* can.
+  - **Record the observed value, not just the verdict.** The census says a
+    dimension refused; the near-miss ring says the row was stamped `RANGING`
+    while the rule asked for `with_trend` — and both trend conditions *abstain*
+    on a label naming no trend, so the rule refuses rows that look eligible. One
+    sample carries that; no total does.
+
+  Corollary, and it is the sharpest form of *which process holds the state is
+  not a deployment detail*: `decide` runs in the **engine** container and the
+  ops control panel is served by the **API** one, which loads the registry off
+  the shared volume and has never evaluated a candidate. So `counters` was `{}`
+  and every rule's `promoted_today` was `0` on that page, permanently — the
+  trail-governor `INDEX COLD` defect, except that **zero is also what a
+  correctly armed rule reads before it fires**, so the wrong number was
+  indistinguishable from the right one and would only have started looking wrong
+  once the rule began working. Publish-then-read through Redis, like the three
+  sibling X-rays; `runtime_report` is split from `snapshot` so the file-backed
+  half stays correct in either process.

@@ -3036,8 +3036,27 @@ class CryptoSignalEngine:
                 promoted = sum(
                     _dp.promoted_today(r.setup_class) for r in armed
                 )
+                # Name the blocker rather than reporting a bare zero. "The
+                # market has not offered a candidate matching it" is the benign
+                # reading of `0 promoted`, and it is a claim nobody could check
+                # until the refusal census shipped: on 2026-08-17 two armed
+                # rules sat at zero against 610 diverted LSR candidates in one
+                # window, and the detail line said only "0 promoted today".
+                #
+                # `sole_blocker` is the actionable half — the condition that was
+                # the ONLY thing in the way, i.e. the single edit that unlocks
+                # that many rows. Reported apart from the marginal count,
+                # because a rule is a conjunction and the two differ whenever
+                # more than one condition is failing.
+                blocked = _dp.top_blocker(r.setup_class for r in armed)
+                if not blocked:
+                    return True, (
+                        f"{len(armed)} rule(s) armed, {promoted} promoted today "
+                        f"— no candidate has reached the decision yet"
+                    )
                 return True, (
-                    f"{len(armed)} rule(s) armed, {promoted} promoted today"
+                    f"{len(armed)} rule(s) armed, {promoted} promoted today; "
+                    f"{blocked}"
                 )
             except Exception as exc:  # noqa: BLE001
                 return True, f"probe unavailable ({type(exc).__name__})"

@@ -86,6 +86,7 @@ class SnapshotWriter:
         await self._write_data_intake()
         await self._write_trail_governor()
         await self._write_router_delivery()
+        await self._write_dark_promotion()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             await self._write_activity()
             await self._write_alerts()
@@ -161,6 +162,37 @@ class SnapshotWriter:
     def _build_trail_governor(self) -> dict:
         from src.execution.trail_governor import build_diag
         return build_diag()
+
+    async def _write_dark_promotion(self) -> None:
+        """Publish the dark→live promotion runtime block computed engine-side.
+
+        ``dark_promotion.decide`` runs at the scanner's divert site, so its
+        counters, the refusal census that says *which condition* is refusing,
+        and the daily cap's tally are in-process state of **this** container.
+        The ops control panel is served by the API container, whose own
+        snapshot loads the rules from the shared volume and reports every one
+        of those numbers as zero.
+
+        That is the sharpest form of the trail-governor defect: zero is also
+        what a correctly-armed rule reads before it fires, so the panel is
+        wrong in a way that looks exactly right — and only starts looking wrong
+        once the rule begins working, which is the moment the owner most needs
+        to believe it.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(
+                self._executor, self._build_dark_promotion
+            )
+            await self._set(
+                _store.KEY_DARK_PROMOTION, data, _store.TTL_DARK_PROMOTION
+            )
+        except Exception:
+            log.exception("snapshot_writer: failed to write dark_promotion")
+
+    def _build_dark_promotion(self) -> dict:
+        from src import dark_promotion
+        return dark_promotion.runtime_report()
 
     async def _write_data_intake(self) -> None:
         """Publish the data-intake X-ray computed engine-side.

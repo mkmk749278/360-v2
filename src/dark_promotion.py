@@ -338,6 +338,47 @@ _promoted_today: Dict[Tuple[str, str], int] = {}
 #: deploy is a young process, not a quiet market, and the ops panel says so.
 _counters: Dict[str, int] = {}
 
+#: ``{setup_class: {"total", "by_dimension", "sole_blocker"}}`` — which
+#: condition is actually refusing, cumulative since process start.
+#:
+#: This exists because the module's own docstring promised it and the code did
+#: not deliver it (2026-08-17). ``decide`` has always computed the full
+#: ``unmet`` list — *"so the ops panel can say 'matched the gate and the
+#: session, failed the regime' instead of leaving the owner to guess which half
+#: of his rule is wrong"* — and then every caller threw it away: the scanner's
+#: refusal branch calls ``dark_emission.publish(sig)`` with no decision, and
+#: the only counter was ``unmet:{setup_class}``, one integer over five
+#: dimensions. So the owner armed two rules against 610 diverted
+#: `LIQUIDITY_SWEEP_REVERSAL` candidates in one window, got zero promotions,
+#: and neither he nor this engine could say which condition was responsible.
+#: A docstring asserting a property the code beneath it does not have, checkable
+#: in one command — the shape this repo has now paid for under five names.
+_refusals: Dict[str, Dict[str, Any]] = {}
+
+#: Recent refusals, with the values that failed. The counters say how *much*;
+#: this says *what* — a rule wanting `with_trend` against rows stamped
+#: `RANGING` is obvious in one sample and invisible in any total.
+#:
+#: Bounded, and the bound is published beside it: a capped ring makes every
+#: verdict on it a sample, and the cap is invisible unless printed.
+NEAR_MISS_RING = int(os.getenv("DARK_PROMOTION_NEAR_MISS_RING", "60"))
+_near_misses: List[Dict[str, Any]] = []
+#: Unbounded, beside the bounded ring, so the newest few cannot read as the
+#: whole population.
+_near_miss_seen: int = 0
+
+#: Every dimension ``decide`` can refuse on, in the order a reader checks them.
+#: Derived from the ``DIM_*`` constants rather than retyped, so a dimension
+#: added to the rule cannot be silently absent from the census that explains it.
+REFUSAL_DIMENSIONS: Tuple[str, ...] = (
+    DIM_GATE,
+    DIM_REGIME,
+    DIM_SESSION,
+    DIM_DIRECTION,
+    DIM_CONFIDENCE,
+    DIM_CAP,
+)
+
 
 def _utc_day(now: Optional[float] = None) -> str:
     ts = time.time() if now is None else float(now)
@@ -346,6 +387,87 @@ def _utc_day(now: Optional[float] = None) -> str:
 
 def _count(key: str) -> None:
     _counters[key] = _counters.get(key, 0) + 1
+
+
+def _record_refusal(
+    sig: Any,
+    setup_class: str,
+    gate: str,
+    unmet: List[str],
+    matched: List[str],
+    detail: str,
+    now: Optional[float] = None,
+) -> None:
+    """Record which condition refused this candidate, and on what values.
+
+    Two numbers per dimension, and they answer different questions:
+
+    * ``by_dimension`` — how often this condition failed *at all*. A rule is a
+      conjunction, so several dimensions can fail on one candidate and these
+      deliberately sum to more than ``total``.
+    * ``sole_blocker`` — how often it was the **only** thing standing in the
+      way. That is the actionable number: relax this one condition and exactly
+      this many candidates promote. The marginal count cannot say that, and the
+      ops promotions panel offers its evidence marginally — one table per
+      dimension — while the rule it builds is a conjunction. A reader picking
+      the best-looking cell of each table can select an intersection that is
+      empty, and nothing on that page could tell him.
+
+    In-memory dict work on a scan-rate path: no I/O, no allocation beyond one
+    small dict per refusal (Cost Discipline).
+
+    Taken under the registry lock, and that is not belt-and-braces: ``decide``
+    runs on the scanner's event loop while :func:`runtime_report` is called from
+    the snapshot writer's **thread pool**, so an unguarded dict would eventually
+    raise *"dictionary changed size during iteration"* in the reader — and the
+    block would then silently stop publishing, which is the failure this whole
+    change exists to remove. The lock is already on this path (``decide`` →
+    ``get_rule`` → ``load`` takes it), so it costs nothing new.
+    """
+    global _near_miss_seen
+    sample = {
+        "ts": time.time() if now is None else float(now),
+        "symbol": str(getattr(sig, "symbol", "") or ""),
+        "setup_class": setup_class,
+        "side": str(
+            getattr(getattr(sig, "direction", None), "value", None)
+            or getattr(sig, "direction", "")
+            or ""
+        ),
+        "gate": gate,
+        # The observed values, not the rule's — the owner is comparing what he
+        # asked for against what the engine actually stamped, and only one of
+        # those two is already on his screen.
+        "regime": str(getattr(sig, "entry_regime", "") or ""),
+        "regime_15m": str(getattr(sig, "entry_regime_15m", "") or ""),
+        "session": str(getattr(sig, "mc_session", "") or ""),
+        "confidence": float(getattr(sig, "confidence", 0.0) or 0.0),
+        "unmet": list(unmet),
+        "matched": list(matched),
+        "detail": detail or "",
+    }
+    try:
+        with _lock:
+            cell = _refusals.setdefault(
+                setup_class,
+                {"total": 0, "by_dimension": {}, "sole_blocker": {}},
+            )
+            cell["total"] += 1
+            by_dim = cell["by_dimension"]
+            for dim in unmet:
+                by_dim[dim] = by_dim.get(dim, 0) + 1
+            if len(unmet) == 1:
+                sole = cell["sole_blocker"]
+                sole[unmet[0]] = sole.get(unmet[0], 0) + 1
+
+            _near_miss_seen += 1
+            _near_misses.append(sample)
+            if len(_near_misses) > max(1, NEAR_MISS_RING):
+                del _near_misses[:-max(1, NEAR_MISS_RING)]
+    except Exception as exc:  # pragma: no cover - defensive
+        # A census failing must never be the reason a candidate is mishandled,
+        # and it must never be silent either.
+        fail_open.record("dark_promotion.record_refusal", exc)
 
 
 def master_enabled() -> bool:
@@ -500,6 +622,7 @@ def delete_rule(setup_class: Any) -> bool:
 def reset_for_test(path: Optional[str] = None) -> None:
     """Drop all in-memory state. Tests only; never called by the engine."""
     global _rules, _generation, _loaded, _promoted_today, _counters, REGISTRY_PATH
+    global _near_miss_seen
     with _lock:
         if path is not None:
             REGISTRY_PATH = path
@@ -508,6 +631,12 @@ def reset_for_test(path: Optional[str] = None) -> None:
         _loaded = False
         _promoted_today = {}
         _counters = {}
+        # Cleared in place, not rebound: `reset_refusals_for_test` and every
+        # reader hold a reference to this dict, and rebinding would leave them
+        # looking at the old one.
+        _refusals.clear()
+        _near_misses.clear()
+        _near_miss_seen = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -566,6 +695,9 @@ def decide(sig: Any, gate: str, now: Optional[float] = None) -> PromotionDecisio
 
         if unmet:
             _count(f"unmet:{setup_class}")
+            _record_refusal(
+                sig, setup_class, gate, unmet, matched, dir_detail, now
+            )
             return PromotionDecision(
                 False, setup_class, gate, unmet, matched, rule, dir_detail
             )
@@ -579,9 +711,17 @@ def decide(sig: Any, gate: str, now: Optional[float] = None) -> PromotionDecisio
         used = _promoted_today.get((setup_class, day), 0)
         if rule.max_per_day and used >= rule.max_per_day:
             _count(f"capped:{setup_class}")
+            _cap_detail = f"{used}/{rule.max_per_day} promoted today"
+            # Counted in the census too, and as its own dimension. A rule
+            # running at its bound and a rule that never matches are opposite
+            # findings — the first is working and throttled, the second is
+            # misconfigured — and pooling them is what the cap check being last
+            # exists to prevent.
+            _record_refusal(
+                sig, setup_class, gate, [DIM_CAP], matched, _cap_detail, now
+            )
             return PromotionDecision(
-                False, setup_class, gate, [DIM_CAP], matched, rule,
-                f"{used}/{rule.max_per_day} promoted today",
+                False, setup_class, gate, [DIM_CAP], matched, rule, _cap_detail,
             )
         return PromotionDecision(
             True, setup_class, gate, [], matched, rule, dir_detail
@@ -637,10 +777,122 @@ def note_promoted(setup_class: Any, now: Optional[float] = None) -> None:
     _count(f"promoted:{_norm(setup_class)}")
 
 
+def runtime_report(now: Optional[float] = None) -> Dict[str, Any]:
+    """The half of the snapshot that only the process running ``decide`` knows.
+
+    Split out from :func:`snapshot` because **which process holds the state is
+    not a deployment detail**. In isolated mode the ops control panel is served
+    by the API container, which loads the registry file happily (shared volume)
+    and has never evaluated a single candidate — so every counter here reads
+    zero there, and ``promoted_today`` reads zero on every rule, forever. That
+    is the ``/internal/diag/trail-governor`` ``INDEX COLD`` defect exactly, and
+    it is worse on this page: zero is also what a correctly-armed rule reads
+    before it fires, so the wrong number is indistinguishable from the right
+    one and only becomes visibly wrong once the rule starts working.
+
+    The engine publishes this block to Redis and the API prefers it, the same
+    publish-then-read shape as the positions / data-intake / trail-governor
+    X-rays. ``source`` names which process produced it, because a panel that
+    cannot say whose counters it is showing is one deploy away from the same
+    bug.
+    """
+    day = _utc_day(now)
+    # Every read of process-local state happens under the lock: this runs on
+    # the snapshot writer's thread while `decide` writes from the scanner's
+    # event loop, and an unguarded iteration raises rather than returning a
+    # slightly-stale answer.
+    with _lock:
+        counters = dict(_counters)
+        promoted = {
+            setup: count
+            for (setup, d), count in _promoted_today.items()
+            if d == day
+        }
+        refusals = {
+            setup: {
+                "total": int(cell.get("total") or 0),
+                "by_dimension": dict(cell.get("by_dimension") or {}),
+                "sole_blocker": dict(cell.get("sole_blocker") or {}),
+            }
+            for setup, cell in _refusals.items()
+        }
+        near_misses = list(_near_misses)
+        seen = int(_near_miss_seen)
+    return {
+        "source": "engine",
+        "generated_at": time.time() if now is None else float(now),
+        "utc_day": day,
+        "counters": counters,
+        "promoted_today": promoted,
+        "refusals": refusals,
+        "refusal_dimensions": list(REFUSAL_DIMENSIONS),
+        "near_misses": near_misses,
+        # The ring's bound and the unbounded count it is a sample of. A capped
+        # buffer feeding a statistic must publish its denominator.
+        "near_miss_ring": int(NEAR_MISS_RING),
+        "near_miss_seen": seen,
+    }
+
+
+def reset_refusals_for_test() -> None:
+    """Clear only the refusal census. Tests only; never called by the engine."""
+    global _near_miss_seen
+    with _lock:
+        _refusals.clear()
+        _near_misses.clear()
+        _near_miss_seen = 0
+
+
+def top_blocker(setups: Iterable[Any]) -> str:
+    """One sentence naming what is refusing these setups' candidates.
+
+    For the liveness probe and any other single-line reader. Empty string when
+    nothing has been refused — *no candidate reached the decision* and *every
+    candidate was refused* are different states and must not share a caption.
+
+    Reports the most common **sole** blocker where there is one, because that
+    is the condition whose removal actually changes the outcome, and falls back
+    to the marginal leader when every refusal had several conditions failing at
+    once — a rule failing on four dimensions has no single edit that fixes it,
+    and saying so is the honest answer.
+    """
+    total = 0
+    sole: Dict[str, int] = {}
+    marginal: Dict[str, int] = {}
+    with _lock:
+        for setup in setups:
+            cell = _refusals.get(_norm(setup))
+            if not cell:
+                continue
+            total += int(cell.get("total") or 0)
+            for dim, n in (cell.get("sole_blocker") or {}).items():
+                sole[dim] = sole.get(dim, 0) + int(n)
+            for dim, n in (cell.get("by_dimension") or {}).items():
+                marginal[dim] = marginal.get(dim, 0) + int(n)
+    if not total:
+        return ""
+    if sole:
+        dim, n = max(sole.items(), key=lambda kv: (kv[1], kv[0]))
+        return (
+            f"{total} candidate(s) refused, {n} on `{dim}` alone "
+            f"(relaxing it would promote those)"
+        )
+    dim, n = max(marginal.items(), key=lambda kv: (kv[1], kv[0]))
+    return (
+        f"{total} candidate(s) refused, none on one condition alone; "
+        f"`{dim}` failed most often ({n})"
+    )
+
+
 def snapshot(now: Optional[float] = None) -> Dict[str, Any]:
-    """Everything the ops control panel renders. One writer, one reader."""
+    """Everything the ops control panel renders. One writer, one reader.
+
+    The ``runtime`` block is process-local — see :func:`runtime_report`. The
+    rules themselves are file-backed and therefore correct in either container.
+    """
     load()
     day = _utc_day(now)
+    runtime = runtime_report(now)
     rules = []
     for rule in all_rules():
         entry = rule.to_dict()
@@ -657,7 +909,36 @@ def snapshot(now: Optional[float] = None) -> Dict[str, Any]:
         "default_max_per_day": DEFAULT_MAX_PER_DAY,
         "counters": dict(_counters),
         "generation": _generation,
+        "runtime": runtime,
     }
+
+
+def apply_runtime(snap: Dict[str, Any], runtime: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Overlay an engine-published runtime block onto a locally-built snapshot.
+
+    Called by the API handler in isolated mode. Overwrites exactly the fields
+    that are process-local, and leaves the file-backed rule set alone —
+    including each rule's ``promoted_today``, which is the cap's counter and
+    lives with the process that charges it.
+
+    A ``None`` runtime leaves the snapshot untouched rather than blanking it:
+    *the engine has not published* and *nothing has been promoted* are
+    different states, and ``source`` on the surviving block says which process
+    the numbers came from.
+    """
+    if not isinstance(runtime, dict) or not runtime:
+        return snap
+    snap["runtime"] = runtime
+    if isinstance(runtime.get("counters"), dict):
+        snap["counters"] = dict(runtime["counters"])
+    promoted = runtime.get("promoted_today")
+    if isinstance(promoted, dict):
+        for entry in snap.get("rules") or []:
+            if isinstance(entry, dict):
+                entry["promoted_today"] = int(
+                    promoted.get(entry.get("setup_class"), 0) or 0
+                )
+    return snap
 
 
 def _dark_lane_enabled() -> bool:
