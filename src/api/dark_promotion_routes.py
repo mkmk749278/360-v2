@@ -155,10 +155,29 @@ def register(
         try:
             published = getattr(engine, "published_dark_promotion", None)
             if callable(published):
-                dark_promotion.apply_runtime(snap, published())
+                # A facade exists, so this IS the API container and the block
+                # `snapshot()` just built is this process's own zeros.
+                raw = published()
+                if raw:
+                    dark_promotion.apply_runtime(snap, raw)
+                else:
+                    # The engine has not published. Serving the local block here
+                    # would hand ops `source: "engine"` over all-zero counters,
+                    # which it reads as "the engine is reporting and has refused
+                    # nothing" — a benign caption for a state nobody observed,
+                    # and the exact defect this census exists to remove,
+                    # reintroduced by its own plumbing. Say unavailable instead.
+                    snap["runtime"] = {
+                        "source": None,
+                        "unavailable": (
+                            "the engine has not published a runtime block "
+                            "(engine down, or the Redis key expired)"
+                        ),
+                    }
+                    snap["counters"] = {}
         except Exception as exc:  # noqa: BLE001
             log.warning("dark promotion runtime block unavailable: {}", exc)
-            snap.setdefault("runtime", {})["error"] = str(exc)
+            snap["runtime"] = {"source": None, "unavailable": str(exc)}
         snap["vocabulary"] = _vocabulary(_ledger_rows())
         # Path retirement rides the same payload deliberately: it is the same
         # decision pointing the other way (live -> dark, where promotion is

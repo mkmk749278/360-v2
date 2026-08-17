@@ -894,3 +894,76 @@ def test_runtime_report_is_safe_against_the_writer_it_reads_from():
         reader.join(timeout=10)
 
     assert not errors, f"reader raced the writer: {errors[0]!r}"
+
+
+def test_an_unpublished_runtime_block_is_not_served_as_the_engines_own():
+    """The API container must not hand ops zeros under `source: "engine"`.
+
+    In isolated mode `snapshot()` builds a runtime block from THIS process,
+    which has never run `decide` — so every counter is zero and the refusal
+    census is empty. Ops reads `source` to decide between *not reported* and
+    *reporting, nothing refused*; serving the local block would give it the
+    second, i.e. "the engine is reporting and has refused nothing for this
+    path, so the rule is not what is stopping it" — a benign caption for a
+    state nobody observed, which is the defect this census exists to remove.
+
+    Fails against the first cut of this change, which called `apply_runtime`
+    unconditionally and left the local block in place on a `None`.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.api import dark_promotion_routes
+
+    dark_promotion.set_rule(_lsr_rule())
+
+    class _FacadeWithNothingPublished:
+        def published_dark_promotion(self):
+            return None
+
+    app = FastAPI()
+    dark_promotion_routes.register(
+        app, owner_required=lambda: None, engine=_FacadeWithNothingPublished()
+    )
+    with TestClient(app) as client:
+        body = client.get("/api/admin/dark-promotions").json()
+
+    assert body["runtime"]["source"] is None, (
+        "an unpublished block must not claim the engine as its source"
+    )
+    assert body["runtime"]["unavailable"], "and it must say why"
+    assert body["counters"] == {}
+
+
+def test_a_published_runtime_block_is_preferred_over_the_local_one():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.api import dark_promotion_routes
+
+    dark_promotion.set_rule(_lsr_rule())
+    engine_block = {
+        "source": "engine",
+        "counters": {"promoted:LIQUIDITY_SWEEP_REVERSAL": 4},
+        "promoted_today": {"LIQUIDITY_SWEEP_REVERSAL": 4},
+        "refusals": {"LIQUIDITY_SWEEP_REVERSAL": {
+            "total": 610, "by_dimension": {"gate": 513}, "sole_blocker": {},
+        }},
+        "near_misses": [],
+    }
+
+    class _Facade:
+        def published_dark_promotion(self):
+            return engine_block
+
+    app = FastAPI()
+    dark_promotion_routes.register(
+        app, owner_required=lambda: None, engine=_Facade()
+    )
+    with TestClient(app) as client:
+        body = client.get("/api/admin/dark-promotions").json()
+
+    assert body["runtime"]["refusals"]["LIQUIDITY_SWEEP_REVERSAL"]["total"] == 610
+    assert body["rules"][0]["promoted_today"] == 4, (
+        "the cap's tally belongs to the process that charges it"
+    )
