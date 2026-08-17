@@ -415,45 +415,55 @@ def _record_refusal(
 
     In-memory dict work on a scan-rate path: no I/O, no allocation beyond one
     small dict per refusal (Cost Discipline).
+
+    Taken under the registry lock, and that is not belt-and-braces: ``decide``
+    runs on the scanner's event loop while :func:`runtime_report` is called from
+    the snapshot writer's **thread pool**, so an unguarded dict would eventually
+    raise *"dictionary changed size during iteration"* in the reader — and the
+    block would then silently stop publishing, which is the failure this whole
+    change exists to remove. The lock is already on this path (``decide`` →
+    ``get_rule`` → ``load`` takes it), so it costs nothing new.
     """
     global _near_miss_seen
+    sample = {
+        "ts": time.time() if now is None else float(now),
+        "symbol": str(getattr(sig, "symbol", "") or ""),
+        "setup_class": setup_class,
+        "side": str(
+            getattr(getattr(sig, "direction", None), "value", None)
+            or getattr(sig, "direction", "")
+            or ""
+        ),
+        "gate": gate,
+        # The observed values, not the rule's — the owner is comparing what he
+        # asked for against what the engine actually stamped, and only one of
+        # those two is already on his screen.
+        "regime": str(getattr(sig, "entry_regime", "") or ""),
+        "regime_15m": str(getattr(sig, "entry_regime_15m", "") or ""),
+        "session": str(getattr(sig, "mc_session", "") or ""),
+        "confidence": float(getattr(sig, "confidence", 0.0) or 0.0),
+        "unmet": list(unmet),
+        "matched": list(matched),
+        "detail": detail or "",
+    }
     try:
-        cell = _refusals.setdefault(
-            setup_class,
-            {"total": 0, "by_dimension": {}, "sole_blocker": {}},
-        )
-        cell["total"] += 1
-        by_dim = cell["by_dimension"]
-        for dim in unmet:
-            by_dim[dim] = by_dim.get(dim, 0) + 1
-        if len(unmet) == 1:
-            sole = cell["sole_blocker"]
-            sole[unmet[0]] = sole.get(unmet[0], 0) + 1
+        with _lock:
+            cell = _refusals.setdefault(
+                setup_class,
+                {"total": 0, "by_dimension": {}, "sole_blocker": {}},
+            )
+            cell["total"] += 1
+            by_dim = cell["by_dimension"]
+            for dim in unmet:
+                by_dim[dim] = by_dim.get(dim, 0) + 1
+            if len(unmet) == 1:
+                sole = cell["sole_blocker"]
+                sole[unmet[0]] = sole.get(unmet[0], 0) + 1
 
-        _near_miss_seen += 1
-        _near_misses.append({
-            "ts": time.time() if now is None else float(now),
-            "symbol": str(getattr(sig, "symbol", "") or ""),
-            "setup_class": setup_class,
-            "side": str(
-                getattr(getattr(sig, "direction", None), "value", None)
-                or getattr(sig, "direction", "")
-                or ""
-            ),
-            "gate": gate,
-            # The observed values, not the rule's — the owner is comparing what
-            # he asked for against what the engine actually stamped, and only
-            # one of those two is already on his screen.
-            "regime": str(getattr(sig, "entry_regime", "") or ""),
-            "regime_15m": str(getattr(sig, "entry_regime_15m", "") or ""),
-            "session": str(getattr(sig, "mc_session", "") or ""),
-            "confidence": float(getattr(sig, "confidence", 0.0) or 0.0),
-            "unmet": list(unmet),
-            "matched": list(matched),
-            "detail": detail or "",
-        })
-        if len(_near_misses) > max(1, NEAR_MISS_RING):
-            del _near_misses[:-max(1, NEAR_MISS_RING)]
+            _near_miss_seen += 1
+            _near_misses.append(sample)
+            if len(_near_misses) > max(1, NEAR_MISS_RING):
+                del _near_misses[:-max(1, NEAR_MISS_RING)]
     except Exception as exc:  # pragma: no cover - defensive
         # A census failing must never be the reason a candidate is mishandled,
         # and it must never be silent either.
@@ -612,7 +622,7 @@ def delete_rule(setup_class: Any) -> bool:
 def reset_for_test(path: Optional[str] = None) -> None:
     """Drop all in-memory state. Tests only; never called by the engine."""
     global _rules, _generation, _loaded, _promoted_today, _counters, REGISTRY_PATH
-    global _refusals, _near_miss_seen
+    global _near_miss_seen
     with _lock:
         if path is not None:
             REGISTRY_PATH = path
@@ -621,7 +631,10 @@ def reset_for_test(path: Optional[str] = None) -> None:
         _loaded = False
         _promoted_today = {}
         _counters = {}
-        _refusals = {}
+        # Cleared in place, not rebound: `reset_refusals_for_test` and every
+        # reader hold a reference to this dict, and rebinding would leave them
+        # looking at the old one.
+        _refusals.clear()
         _near_misses.clear()
         _near_miss_seen = 0
 
@@ -784,31 +797,50 @@ def runtime_report(now: Optional[float] = None) -> Dict[str, Any]:
     bug.
     """
     day = _utc_day(now)
-    return {
-        "source": "engine",
-        "generated_at": time.time() if now is None else float(now),
-        "utc_day": day,
-        "counters": dict(_counters),
-        "promoted_today": {
+    # Every read of process-local state happens under the lock: this runs on
+    # the snapshot writer's thread while `decide` writes from the scanner's
+    # event loop, and an unguarded iteration raises rather than returning a
+    # slightly-stale answer.
+    with _lock:
+        counters = dict(_counters)
+        promoted = {
             setup: count
             for (setup, d), count in _promoted_today.items()
             if d == day
-        },
-        "refusals": {
+        }
+        refusals = {
             setup: {
                 "total": int(cell.get("total") or 0),
                 "by_dimension": dict(cell.get("by_dimension") or {}),
                 "sole_blocker": dict(cell.get("sole_blocker") or {}),
             }
             for setup, cell in _refusals.items()
-        },
+        }
+        near_misses = list(_near_misses)
+        seen = int(_near_miss_seen)
+    return {
+        "source": "engine",
+        "generated_at": time.time() if now is None else float(now),
+        "utc_day": day,
+        "counters": counters,
+        "promoted_today": promoted,
+        "refusals": refusals,
         "refusal_dimensions": list(REFUSAL_DIMENSIONS),
-        "near_misses": list(_near_misses),
+        "near_misses": near_misses,
         # The ring's bound and the unbounded count it is a sample of. A capped
         # buffer feeding a statistic must publish its denominator.
         "near_miss_ring": int(NEAR_MISS_RING),
-        "near_miss_seen": int(_near_miss_seen),
+        "near_miss_seen": seen,
     }
+
+
+def reset_refusals_for_test() -> None:
+    """Clear only the refusal census. Tests only; never called by the engine."""
+    global _near_miss_seen
+    with _lock:
+        _refusals.clear()
+        _near_misses.clear()
+        _near_miss_seen = 0
 
 
 def top_blocker(setups: Iterable[Any]) -> str:
@@ -827,15 +859,16 @@ def top_blocker(setups: Iterable[Any]) -> str:
     total = 0
     sole: Dict[str, int] = {}
     marginal: Dict[str, int] = {}
-    for setup in setups:
-        cell = _refusals.get(_norm(setup))
-        if not cell:
-            continue
-        total += int(cell.get("total") or 0)
-        for dim, n in (cell.get("sole_blocker") or {}).items():
-            sole[dim] = sole.get(dim, 0) + int(n)
-        for dim, n in (cell.get("by_dimension") or {}).items():
-            marginal[dim] = marginal.get(dim, 0) + int(n)
+    with _lock:
+        for setup in setups:
+            cell = _refusals.get(_norm(setup))
+            if not cell:
+                continue
+            total += int(cell.get("total") or 0)
+            for dim, n in (cell.get("sole_blocker") or {}).items():
+                sole[dim] = sole.get(dim, 0) + int(n)
+            for dim, n in (cell.get("by_dimension") or {}).items():
+                marginal[dim] = marginal.get(dim, 0) + int(n)
     if not total:
         return ""
     if sole:

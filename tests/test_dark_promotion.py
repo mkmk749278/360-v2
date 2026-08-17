@@ -836,3 +836,61 @@ def test_the_engine_publishes_the_runtime_block_every_cycle():
         "the runtime block is built and never published — the API container "
         "would keep reading its own zeros"
     )
+
+
+def test_runtime_report_is_safe_against_the_writer_it_reads_from():
+    """`decide` runs on the scanner's event loop; `runtime_report` is called
+    from the snapshot writer's THREAD POOL.
+
+    The reader iterates dicts the writer is inserting into, so an unguarded
+    implementation raises "dictionary changed size during iteration" — and the
+    only symptom in production would be the block quietly failing to publish,
+    which is precisely the silence this census exists to end.
+
+    Each candidate carries a DIFFERENT setup_class, because that is what makes
+    `_refusals` grow while it is being read. Pinning the race needs the
+    dictionary to resize mid-iteration; a single-key churn cannot fail however
+    long it runs, which is what the first cut of this test got wrong.
+    """
+    import threading
+
+    for i in range(200):
+        dark_promotion.set_rule(
+            _lsr_rule(setup_class=f"PATH_{i}", regimes=["TRENDING_UP"])
+        )
+
+    errors = []
+    stop = threading.Event()
+
+    def _read():
+        try:
+            while not stop.is_set():
+                report = dark_promotion.runtime_report()
+                for cell in report["refusals"].values():
+                    dict(cell["by_dimension"])
+                    dict(cell["sole_blocker"])
+                for sample in report["near_misses"]:
+                    list(sample["unmet"])
+                dark_promotion.top_blocker([f"PATH_{i}" for i in range(200)])
+        except Exception as exc:  # pragma: no cover - the failure being pinned
+            errors.append(exc)
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    try:
+        for round_ in range(20):
+            dark_promotion.reset_refusals_for_test()
+            for i in range(200):
+                dark_promotion.decide(
+                    _Sig(
+                        setup_class=f"PATH_{i}",
+                        regime="TRENDING_DOWN",
+                        symbol=f"R{i}USDT",
+                    ),
+                    "execution:overextended",
+                )
+    finally:
+        stop.set()
+        reader.join(timeout=10)
+
+    assert not errors, f"reader raced the writer: {errors[0]!r}"
