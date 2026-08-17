@@ -2650,8 +2650,15 @@ def build_app(
     # diverted, under which conditions.  Owner-gated like every other control
     # route; the engine-side enforcement lives in `src/dark_promotion.py` and
     # is read from memory at the divert site, never through here.
+    #
+    # `engine` is passed for the READ half only: `decide` runs in the engine
+    # container, so its counters and refusal census reach this process through
+    # the facade's published block, never from a local build (see
+    # `dark_promotion.runtime_report`).
     from . import dark_promotion_routes as _dark_promotion_routes
-    _dark_promotion_routes.register(app, owner_required=owner_required)
+    _dark_promotion_routes.register(
+        app, owner_required=owner_required, engine=engine,
+    )
 
     # ---- Binance connect flow (server-side execution, B18 + §3.9) ----
     # Registers POST /api/binance/connect.  Validates the user's

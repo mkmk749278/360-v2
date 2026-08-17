@@ -593,3 +593,246 @@ def test_router_stamps_both_halves_of_the_delivery_verdict():
     src = Path("src/signal_router.py").read_text(encoding="utf-8")
     assert "mark_delivered" in src, "the router never confirms a promoted delivery"
     assert "mark_router_dropped" in src, "the router never records a promoted drop"
+
+
+# --------------------------------------------------------------------------- #
+# The refusal census — which condition is actually saying no
+#
+# Added 2026-08-17, after the owner asked why no LSR row had ever reached a
+# subscriber.  Two armed rules, master switch on, dark lane on, neither inert,
+# 610 diverted LIQUIDITY_SWEEP_REVERSAL candidates in the truth-report window —
+# and `0 promoted today` was the entire diagnostic available, in the engine and
+# on the ops page alike.  `decide` had computed the full `unmet` list the whole
+# time, exactly as this module's docstring promised, and every caller discarded
+# it.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_refusal_names_its_dimension_rather_than_incrementing_one_total():
+    """The property the module docstring has always claimed.
+
+    Fails against the pre-2026-08-17 tree, where the only counter was
+    `unmet:{setup_class}` — one integer over five dimensions.
+    """
+    dark_promotion.set_rule(_lsr_rule(regimes=["TRENDING_UP"]))
+    dark_promotion.decide(_Sig(regime="TRENDING_DOWN"), "execution:overextended")
+
+    cell = dark_promotion.runtime_report()["refusals"]["LIQUIDITY_SWEEP_REVERSAL"]
+    assert cell["total"] == 1
+    assert cell["by_dimension"] == {dark_promotion.DIM_REGIME: 1}, (
+        "the census must name the dimension that refused, not just count refusals"
+    )
+
+
+def test_sole_blocker_is_counted_apart_from_the_marginal_count():
+    """A rule is a conjunction, so the two numbers answer different questions.
+
+    `by_dimension` says how often a condition failed at all and deliberately
+    sums past the refusal count; `sole_blocker` says how often it was the only
+    thing in the way — the number that says what one edit would unlock. The ops
+    panel offers its evidence one dimension at a time while the rule it builds
+    is an intersection, which is exactly how a well-evidenced-looking rule ends
+    up selecting nothing.
+    """
+    # `direction=any` so the only conditions in play are the two under test —
+    # a with_trend rule would ALSO refuse the TRENDING_UP/SHORT candidate below
+    # and there would be no sole blocker to observe. (That is not a hypothetical:
+    # the first cut of this test asserted one and was wrong.)
+    dark_promotion.set_rule(
+        _lsr_rule(
+            regimes=["TRENDING_UP"],
+            sessions=["LONDON"],
+            direction=dark_promotion.DIR_ANY,
+        )
+    )
+    # Fails regime AND session — no single edit fixes it.
+    dark_promotion.decide(
+        _Sig(regime="TRENDING_DOWN", session="NY"), "execution:overextended"
+    )
+    # Fails session only.
+    dark_promotion.decide(
+        _Sig(regime="TRENDING_UP", session="NY"), "execution:overextended"
+    )
+
+    cell = dark_promotion.runtime_report()["refusals"]["LIQUIDITY_SWEEP_REVERSAL"]
+    assert cell["total"] == 2
+    assert cell["by_dimension"][dark_promotion.DIM_SESSION] == 2
+    assert cell["by_dimension"][dark_promotion.DIM_REGIME] == 1
+    assert cell["sole_blocker"] == {dark_promotion.DIM_SESSION: 1}, (
+        "only the second candidate had a single condition standing in its way"
+    )
+
+
+def test_the_cap_is_a_refusal_dimension_and_never_pooled_with_a_miss():
+    """A rule at its bound is working and throttled; a rule that never matches
+    is misconfigured. The cap check is last precisely so the two stay apart."""
+    dark_promotion.set_rule(_lsr_rule(max_per_day=1))
+    assert dark_promotion.decide(_Sig(), "execution:overextended").promote
+    dark_promotion.note_promoted("LIQUIDITY_SWEEP_REVERSAL")
+    d = dark_promotion.decide(_Sig(), "execution:overextended")
+    assert not d.promote
+
+    cell = dark_promotion.runtime_report()["refusals"]["LIQUIDITY_SWEEP_REVERSAL"]
+    assert cell["sole_blocker"] == {dark_promotion.DIM_CAP: 1}
+    assert dark_promotion.DIM_REGIME not in cell["by_dimension"]
+
+
+def test_a_near_miss_records_the_observed_values_not_the_rule():
+    """The owner is comparing what he asked for against what the engine
+    stamped, and only one of those is already on his screen."""
+    dark_promotion.set_rule(_lsr_rule(direction=dark_promotion.DIR_WITH_TREND))
+    dark_promotion.decide(
+        _Sig(side="SHORT", regime="RANGING", session="ASIA", symbol="ZZZUSDT"),
+        "execution:overextended",
+    )
+    sample = dark_promotion.runtime_report()["near_misses"][-1]
+    assert sample["symbol"] == "ZZZUSDT"
+    assert sample["regime"] == "RANGING"
+    assert sample["session"] == "ASIA"
+    assert sample["side"] == "SHORT"
+    assert dark_promotion.DIM_DIRECTION in sample["unmet"]
+    assert "trend_unknown" in sample["detail"], (
+        "a with_trend rule against a range label abstains, and the row says so"
+    )
+
+
+def test_the_near_miss_ring_publishes_its_own_denominator():
+    """A capped buffer feeding a statistic must say what it is a sample of."""
+    dark_promotion.set_rule(_lsr_rule(regimes=["TRENDING_UP"]))
+    for i in range(dark_promotion.NEAR_MISS_RING + 7):
+        dark_promotion.decide(
+            _Sig(regime="TRENDING_DOWN", symbol=f"S{i}USDT"),
+            "execution:overextended",
+        )
+    report = dark_promotion.runtime_report()
+    assert len(report["near_misses"]) == dark_promotion.NEAR_MISS_RING
+    assert report["near_miss_seen"] == dark_promotion.NEAR_MISS_RING + 7, (
+        "the unbounded count must sit beside the ring, or the newest few read "
+        "as the whole population"
+    )
+
+
+def test_top_blocker_distinguishes_no_candidates_from_every_candidate_refused():
+    """Two states, one of which is benign, and they must not share a caption.
+
+    This is the sentence the liveness probe prints. Before the census it read
+    `0 promoted today` for both, and the probe's own docstring called that
+    'the market has not offered a candidate matching it' — a claim nobody
+    could check.
+    """
+    dark_promotion.set_rule(_lsr_rule(regimes=["TRENDING_UP"]))
+    assert dark_promotion.top_blocker(["LIQUIDITY_SWEEP_REVERSAL"]) == "", (
+        "nothing has been refused yet — that is not the same as being blocked"
+    )
+    dark_promotion.decide(_Sig(regime="TRENDING_DOWN"), "execution:overextended")
+    msg = dark_promotion.top_blocker(["LIQUIDITY_SWEEP_REVERSAL"])
+    assert dark_promotion.DIM_REGIME in msg and "1 candidate(s) refused" in msg
+
+
+def test_top_blocker_says_so_when_no_single_edit_would_help():
+    dark_promotion.set_rule(
+        _lsr_rule(
+            regimes=["TRENDING_UP"],
+            sessions=["LONDON"],
+            direction=dark_promotion.DIR_ANY,
+        )
+    )
+    dark_promotion.decide(
+        _Sig(regime="TRENDING_DOWN", session="NY"), "execution:overextended"
+    )
+    assert "none on one condition alone" in dark_promotion.top_blocker(
+        ["LIQUIDITY_SWEEP_REVERSAL"]
+    )
+
+
+def test_a_promotion_is_never_recorded_as_a_refusal():
+    dark_promotion.set_rule(_lsr_rule())
+    assert dark_promotion.decide(_Sig(), "execution:overextended").promote
+    assert dark_promotion.runtime_report()["refusals"] == {}
+
+
+def test_the_census_covers_every_dimension_decide_can_refuse_on():
+    """Derived from the DIM_* constants, so a dimension added to the rule
+    cannot be silently absent from the census that explains it."""
+    import re
+
+    src = Path("src/dark_promotion.py").read_text(encoding="utf-8")
+    declared = {
+        name for name in re.findall(r"^(DIM_[A-Z_]+) = ", src, re.MULTILINE)
+    }
+    # The three that are not conditions on a candidate: they describe the
+    # absence of a rule to evaluate, so there is nothing to attribute.
+    not_conditions = {"DIM_MASTER", "DIM_RULE", "DIM_NO_RULE"}
+    expected = {
+        getattr(dark_promotion, name) for name in declared - not_conditions
+    }
+    assert set(dark_promotion.REFUSAL_DIMENSIONS) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Which process holds the state
+# --------------------------------------------------------------------------- #
+
+
+def test_runtime_block_is_separable_so_the_api_container_can_be_overlaid():
+    """`decide` runs in the engine container; the ops panel is served by the
+    API one. A snapshot built there loads the rules correctly off the shared
+    volume and reports every runtime number as zero — which is also what a
+    correctly-armed rule reads before it fires, so the wrong answer and the
+    right one are the same number until the rule works.
+    """
+    dark_promotion.set_rule(_lsr_rule())
+    dark_promotion.note_promoted("LIQUIDITY_SWEEP_REVERSAL")
+
+    engine_runtime = dark_promotion.runtime_report()
+    assert engine_runtime["promoted_today"]["LIQUIDITY_SWEEP_REVERSAL"] == 1
+    assert engine_runtime["source"] == "engine"
+
+    # A second process: same registry file, no decisions ever evaluated.
+    dark_promotion.reset_for_test()
+    dark_promotion.set_rule(_lsr_rule())
+    cold = dark_promotion.snapshot()
+    assert cold["rules"][0]["promoted_today"] == 0
+
+    warm = dark_promotion.apply_runtime(cold, engine_runtime)
+    assert warm["rules"][0]["promoted_today"] == 1
+    assert warm["runtime"]["source"] == "engine"
+
+
+def test_a_missing_published_block_leaves_the_snapshot_alone():
+    """"The engine has not published" and "nothing has been promoted" are
+    different states, and blanking the snapshot would merge them."""
+    dark_promotion.set_rule(_lsr_rule())
+    snap = dark_promotion.snapshot()
+    assert dark_promotion.apply_runtime(snap, None)["runtime"]["source"] == "engine"
+    assert dark_promotion.apply_runtime(snap, {})["runtime"]["source"] == "engine"
+
+
+def test_the_api_route_prefers_the_engines_published_runtime_block():
+    """Pin the call site, not the method. The handler must consult the facade
+    — a local build in the API container is the `INDEX COLD` defect again.
+    """
+    src = Path("src/api/dark_promotion_routes.py").read_text(encoding="utf-8")
+    assert "published_dark_promotion" in src, (
+        "the read handler must consult the engine's published runtime block"
+    )
+    assert "apply_runtime" in src
+
+
+def test_the_engine_publishes_the_runtime_block_every_cycle():
+    """Defining a writer is not calling it — pin the caller."""
+    writer = Path("src/api/snapshot_writer.py").read_text(encoding="utf-8")
+    assert "_write_dark_promotion" in writer
+    tree = ast.parse(writer)
+    cycle = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_write_cycle"
+    )
+    called = {
+        n.func.attr for n in ast.walk(cycle)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert "_write_dark_promotion" in called, (
+        "the runtime block is built and never published — the API container "
+        "would keep reading its own zeros"
+    )

@@ -137,6 +137,7 @@ class RedisEngineFacade:
         self._data_intake: Optional[dict] = None
         self._router_delivery: Optional[dict] = None
         self._trail_governor: Optional[dict] = None
+        self._dark_promotion: Optional[dict] = None
         self._refreshed_at: float = 0.0
 
     # ------------------------------------------------------------------
@@ -169,6 +170,8 @@ class RedisEngineFacade:
             self._router_delivery = _store.decode(rd_raw)
             tg_raw = await self._redis.client.get(_store.KEY_TRAIL_GOVERNOR)
             self._trail_governor = _store.decode(tg_raw)
+            dp_raw = await self._redis.client.get(_store.KEY_DARK_PROMOTION)
+            self._dark_promotion = _store.decode(dp_raw)
         except Exception:
             log.exception("redis_engine: failed to refresh state from Redis")
 
@@ -202,6 +205,22 @@ class RedisEngineFacade:
         state from "the governor is governing nothing".
         """
         return self._trail_governor
+
+    def published_dark_promotion(self) -> Optional[dict]:
+        """The engine's dark→live promotion runtime block, or None when absent.
+
+        Present only on the facade, and there is no meaningful local fallback:
+        ``decide`` runs in the engine container at the divert site, so its
+        counters, its refusal census and the daily cap's tally are all
+        in-process state there. A snapshot built in *this* process loads the
+        rules correctly off the shared volume and reports every runtime number
+        as zero — which is also what a freshly-armed rule reads, so the wrong
+        answer and the right one are the same number until the rule fires.
+
+        ``None`` means the engine has not published, which is a different state
+        from "nothing has been promoted", and the ops panel says which.
+        """
+        return self._dark_promotion
 
     def published_data_intake(self) -> Optional[dict]:
         """The engine-computed data-intake X-ray published to Redis, or None.

@@ -108,8 +108,17 @@ def _vocabulary(ledger_rows: List[dict]) -> Dict[str, List[str]]:
     }
 
 
-def register(app: FastAPI, *, owner_required: Callable) -> None:
-    """Register the promotion-rule routes."""
+def register(
+    app: FastAPI, *, owner_required: Callable, engine: Any = None
+) -> None:
+    """Register the promotion-rule routes.
+
+    ``engine`` is the facade in isolated mode, and it is needed for exactly one
+    reason: the runtime half of the snapshot — the counters, the refusal census
+    and the daily cap's tally — is in-process state of the *engine* container.
+    Optional, so a single-process boot (where a local build is correct) and the
+    tests need not supply one.
+    """
 
     def _ledger_rows() -> List[dict]:
         try:
@@ -136,6 +145,20 @@ def register(app: FastAPI, *, owner_required: Callable) -> None:
         other cannot tell which half is missing.
         """
         snap = dark_promotion.snapshot()
+        # The runtime half comes from whichever process actually evaluated the
+        # candidates. In isolated mode that is never this one — a locally built
+        # block would report every counter as zero and every rule as having
+        # promoted nothing today, which is also what a correctly-armed rule
+        # reads before it fires. Prefer the engine's published block; fall back
+        # to the local one only when there is no facade (single-process), where
+        # it is the same process and therefore correct.
+        try:
+            published = getattr(engine, "published_dark_promotion", None)
+            if callable(published):
+                dark_promotion.apply_runtime(snap, published())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("dark promotion runtime block unavailable: {}", exc)
+            snap.setdefault("runtime", {})["error"] = str(exc)
         snap["vocabulary"] = _vocabulary(_ledger_rows())
         # Path retirement rides the same payload deliberately: it is the same
         # decision pointing the other way (live -> dark, where promotion is
