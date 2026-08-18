@@ -967,3 +967,108 @@ def test_a_published_runtime_block_is_preferred_over_the_local_one():
     assert body["rules"][0]["promoted_today"] == 4, (
         "the cap's tally belongs to the process that charges it"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The probe's sentence must not contradict the number beside it
+#
+# The first post-deploy read (2026-08-18) printed:
+#   "2 rule(s) armed, 1 promoted today — no candidate has reached the decision
+#    yet"
+# `top_blocker` is empty when NOTHING WAS REFUSED, which is a different fact
+# from nothing having reached the decision — and a promotion is a candidate
+# reaching the decision. The sentence contradicted its own number.
+# --------------------------------------------------------------------------- #
+
+
+def _probe_detail():
+    """Drive the REAL liveness predicate, lifted out of `main.py` by AST.
+
+    Not a re-implementation: importing `src.main` drags the whole engine in, so
+    the nested `_dark_promotion_rules` closure is compiled straight out of the
+    shipping source. A copy of the sentence written here would assert my own
+    assumption back at me, which is the failure mode that let the contradictory
+    copy ship in the first place.
+    """
+    import ast
+    from typing import Tuple as _Tuple
+
+    tree = ast.parse(Path("src/main.py").read_text(encoding="utf-8"))
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_dark_promotion_rules"
+    )
+    fn.col_offset = 0
+    module = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(module)
+    ns = {"Tuple": _Tuple}
+    exec(compile(module, "<probe>", "exec"), ns)
+    return ns["_dark_promotion_rules"]()
+
+
+def test_the_probe_never_says_nothing_reached_the_decision_beside_a_promotion():
+    dark_promotion.set_rule(_lsr_rule())
+    dark_promotion.note_promoted("LIQUIDITY_SWEEP_REVERSAL")
+
+    ok, detail = _probe_detail()
+    assert ok
+    assert "1 promoted today" in detail
+    assert "no candidate has reached the decision" not in detail, (
+        "a promotion IS a candidate reaching the decision — the sentence must "
+        "not contradict the number standing beside it"
+    )
+    assert "nothing refused" in detail
+
+
+def test_the_probe_still_says_so_when_genuinely_nothing_reached_the_decision():
+    dark_promotion.set_rule(_lsr_rule())
+    ok, detail = _probe_detail()
+    assert ok
+    assert "no candidate has reached the decision" in detail
+
+
+def test_the_probe_names_the_blocker_once_something_is_refused():
+    dark_promotion.set_rule(_lsr_rule(regimes=["TRENDING_UP"]))
+    dark_promotion.decide(_Sig(regime="TRENDING_DOWN"), "execution:overextended")
+    ok, detail = _probe_detail()
+    assert ok
+    assert dark_promotion.DIM_REGIME in detail
+    assert "no candidate has reached the decision" not in detail
+
+
+def test_an_erroring_candidate_is_counted_rather_than_reading_as_nothing_refused():
+    """Otherwise "nothing was refused" is true while every candidate errors,
+    and the probe's sentence names the benign cause for a fault."""
+    dark_promotion.set_rule(_lsr_rule())
+
+    class _Exploding:
+        setup_class = "LIQUIDITY_SWEEP_REVERSAL"
+
+        @property
+        def entry_regime(self):
+            raise RuntimeError("boom")
+
+    d = dark_promotion.decide(_Exploding(), "execution:overextended")
+    assert d.promote is False
+    assert d.unmet == [dark_promotion.DIM_ERROR]
+
+    cell = dark_promotion.runtime_report()["refusals"]["LIQUIDITY_SWEEP_REVERSAL"]
+    assert cell["total"] == 1
+    assert cell["sole_blocker"] == {dark_promotion.DIM_ERROR: 1}
+    assert dark_promotion.top_blocker(["LIQUIDITY_SWEEP_REVERSAL"]) != ""
+
+
+def test_the_census_survives_a_candidate_whose_own_attributes_raise():
+    """The counters are written before the sample, because the sample reads the
+    candidate and the candidate is the thing that is broken."""
+    dark_promotion.set_rule(_lsr_rule())
+
+    class _AllExploding:
+        setup_class = "LIQUIDITY_SWEEP_REVERSAL"
+
+        def __getattr__(self, name):
+            raise RuntimeError("boom")
+
+    dark_promotion.decide(_AllExploding(), "execution:overextended")
+    cell = dark_promotion.runtime_report()["refusals"]["LIQUIDITY_SWEEP_REVERSAL"]
+    assert cell["total"] == 1, "the count must land even when the sample cannot"
