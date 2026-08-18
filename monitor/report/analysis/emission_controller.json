@@ -288,9 +288,9 @@
         "HOLD"
       ],
       "VOLUME_SURGE_BREAKOUT|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "VOLUME_SURGE_BREAKOUT|min_samples": [
         "HOLD",
@@ -453,7 +453,7 @@
       "QUIET_COMPRESSION_BREAK|suppress_negative": 848,
       "MOVER_TREND_PULLBACK@TUNED|min_samples": 855
     },
-    "cycle": 1218
+    "cycle": 1262
   },
   "ledger": [
     {
