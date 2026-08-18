@@ -14,6 +14,49 @@ SL_LABELS = {"SL", "SL_HIT", "STOP_LOSS", "LOSS"}
 _POST_CORRECTION_TARGET_SETUPS = ("SR_FLIP_RETEST", "TREND_PULLBACK_EMA")
 
 
+#: How often this report is ACTUALLY published, and when lateness becomes a
+#: fault — stamped by the producer so no reader has to keep a copy of the cron.
+#:
+#: 2026-08-18: ops graded this report against a hard-coded **one hour** while it
+#: is published **once a day**, so `/truth` read STALE for ~23 hours out of every
+#: 24 and said "the engine has not published a newer report". Both halves were
+#: wrong: nothing was late, and the engine does not publish it at all — a
+#: scheduled GitHub Action (`.github/workflows/vps-monitor.yml`) collects from
+#: the engine and commits to `monitor-logs`. An alarming caption over a healthy
+#: subsystem is worse than a blank, because it sends the owner to debug
+#: something that works; this repo paid for that once already on
+#: `/invalidations` (2026-08-07) and this is the same mistake one surface over.
+PUBLISH_INTERVAL_SEC = 86_400
+
+#: GitHub's scheduler is best-effort and this cron is nominally 00:30 UTC.
+#: Measured start times over six consecutive days: 01:57, 01:58, 02:04, 02:06,
+#: 03:07, 03:09 — between 87 and 159 minutes late. The grace is set from that
+#: observed spread rather than invented, and it is deliberately generous: a
+#: false "overdue" on a daily artifact costs more than four hours of silence.
+PUBLISH_GRACE_SEC = 4 * 3600
+
+#: Where to look when it IS overdue. Not the engine — the workflow run.
+PUBLISHER = "github-actions:.github/workflows/vps-monitor.yml"
+PUBLISH_SCHEDULE = "cron 30 0 * * * (UTC) — daily"
+
+
+def _publication_contract() -> dict:
+    """The cadence this artifact is published on, travelling with the artifact.
+
+    A reader cannot grade freshness without knowing the cadence, and a reader
+    that keeps its own copy of the cadence drifts from it the first time the
+    schedule changes. One writer, one reader — the same rule the mechanism
+    manifest and the strategy catalog already follow.
+    """
+    return {
+        "interval_sec": PUBLISH_INTERVAL_SEC,
+        "grace_sec": PUBLISH_GRACE_SEC,
+        "stale_after_sec": PUBLISH_INTERVAL_SEC + PUBLISH_GRACE_SEC,
+        "publisher": PUBLISHER,
+        "schedule": PUBLISH_SCHEDULE,
+    }
+
+
 def _median(values: Iterable[Optional[float]]) -> Optional[float]:
     nums = [float(v) for v in values if isinstance(v, (int, float))]
     if not nums:
@@ -1573,6 +1616,7 @@ def build_snapshot(
 
     snapshot = {
         "generated_at": int(now_ts),
+        "publication": _publication_contract(),
         "channel": channel,
         "lookback_hours": lookback_hours,
         "filters": {

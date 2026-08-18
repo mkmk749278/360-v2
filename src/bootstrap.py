@@ -750,6 +750,11 @@ class Bootstrap:
                 # situation we're trying to escape.
                 from src.api.snapshot_writer import SnapshotWriter
                 _sw = SnapshotWriter(engine, engine._redis_client)
+                # Reachable from the feature-liveness registry. Without this the
+                # only signal that the writer has stalled is the keys vanishing
+                # — and by then the api container is serving nothing and a
+                # subscriber has already opened the app to "No signals yet".
+                engine._snapshot_writer = _sw
                 tasks.append(
                     asyncio.create_task(_sw.start(), name="snapshot_writer")
                 )
