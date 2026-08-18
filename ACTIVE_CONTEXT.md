@@ -4,6 +4,78 @@
 
 ---
 
+## 🟢 SESSION 128 2026-08-18 — the truth report was never late; the bound was wrong
+
+Engine + ops. Owner: *"fix the truth report"*.
+
+### It was not broken, and I called it broken twice before checking
+
+`/truth` read **STALE — 401 min past the 60-minute bound**, and its caption said
+*"the engine has not published a newer report"*. Both halves were wrong:
+
+- The report is published by a **scheduled GitHub Action**
+  (`.github/workflows/vps-monitor.yml`, `cron 30 0 * * *`) — **once a day**.
+  Its last six scheduled runs all succeeded; run 199 today started 01:58:42Z and
+  finished 02:05:10Z, which is exactly the 02:04 `generated_at` on screen.
+- Ops graded it against a hard-coded `TRUTH_STALE_SEC = 3600`. **An hour, on a
+  daily artifact** — so the page read red for ~23 hours out of every 24, by
+  construction, over a subsystem that was working.
+- And the engine does not publish it at all, so the sentence sent the reader to
+  the wrong container.
+
+This is `/invalidations` (2026-08-07, WRITER STALE) repeated one surface over:
+**an alarming caption over a healthy subsystem is worse than a blank**, because
+it sends the owner to debug something that works. I repeated it myself in two
+session reports before running the one query that settles it — the workflow's
+run history.
+
+### The fix: the cadence travels with the artifact
+
+`runtime_truth_report._publication_contract()` stamps `interval_sec`,
+`grace_sec`, `stale_after_sec`, `publisher` and `schedule` into every snapshot;
+ops reads that and badges **FALLBACK BOUND** on a report written before the
+stamp. A reader that keeps its own copy of a cadence drifts from it the first
+time the schedule changes — the same rule the mechanism manifest and the
+strategy catalog already follow.
+
+The grace is **4h**, set from measured scheduler delay rather than invented:
+GitHub delivered this nominally-00:30 cron at 01:57, 01:58, 02:04, 02:06, 03:07
+and 03:09 across six days — 87 to 159 minutes late.
+`tests/test_truth_publication_contract.py` derives the daily cadence **from the
+workflow's own cron expression**, so changing the schedule without changing the
+stamp fails CI.
+
+### Ops #185 — and a false positive found by looking again
+
+The owner also asked for a second read of the System tab, which caught a defect
+in the `restarted alone` badge shipped an hour earlier: `360scalp-v2-redis`, up
+**21 days**, was badged *"went down by itself"* purely because `autoheal` had
+been up **25**. The rule was "alone in its minute-bucket with any older
+stack-mate", which on a long-lived stack flags everything except the single
+oldest container. A test guarded the oldest; nothing guarded the second-oldest.
+
+Rewritten with no invented threshold: **the stack's largest start-cohort is the
+deploy**, and only containers *younger* than it are flagged. Containers older
+than the deploy cohort were simply not touched by it — that is history, not an
+event. Replayed against the real live stack, only the engine flags.
+
+### Still open — the engine restart itself
+
+The 06:35 restart is **not yet explained**. `RestartCount 0` rules out a
+crash-plus-policy restart, and `watchdog_audit.jsonl` was last written at that
+moment, so the supervisor acted — but the reason lives in that file and in
+`docker logs`, and the owner's capture was cut off by `head -200` at the 03:07
+boot. Two findings from what did arrive:
+
+- Every WS pool logs `BINANCE_*_WS_BASE uses a pre-2026-04-23 legacy path —
+  auto-correcting to /market/stream`. Worth a look given `@depth*` does **not**
+  deliver on that path (CLAUDE.md, 2026-08-05); the depth feed is currently
+  healthy, so this is a question rather than a finding.
+- Engine CPU has been measured at **124–208% against its 2.5-core cap** all
+  session, host load ~3.9 on 4 cores.
+
+---
+
 ## 🟢 SESSION 127 2026-08-18 — the alert named the wrong container, and the box had no X-ray
 
 Ops only (no engine change). Owner: *"add state of every container in ops panel
