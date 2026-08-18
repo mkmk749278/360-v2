@@ -34,6 +34,15 @@ _CYCLE_INTERVAL_S   = 15   # ≈ one scan cycle
 _ACTIVITY_INTERVAL_S = 30
 _AGENTS_INTERVAL_S   = 60
 
+#: A cycle slower than this has started eating its own margin. The feed-critical
+#: keys carry ``TTL_SIGNALS`` = 60s against a 15s interval — **four** cycles of
+#: slack, not the two ``snapshot_store``'s own docstring claims ("TTL is 2x that
+#: interval"; the values are 3-4x. Left alone here: more margin than advertised
+#: is the safe direction, and the number to trust is the constant, not the
+#: sentence). Four cycles is why this took ~45s of work per cycle to bite rather
+#: than ~15s. Counted, never fatal — see ``overrun_count``.
+_OVERRUN_BUDGET_S = _CYCLE_INTERVAL_S
+
 
 class SnapshotWriter:
     """Serialises engine state to Redis every scan cycle.
@@ -52,6 +61,15 @@ class SnapshotWriter:
         self._redis  = redis_client
         self._last_activity: float = 0.0
         self._last_agents: float   = 0.0
+        # Writer health, read by the `snapshot_writer` liveness probe. These are
+        # in-memory counters: no network, no cost, and they are the LEADING
+        # indicator. The lagging one is the keys vanishing, and by then the app
+        # has already shown a subscriber an empty feed.
+        self.cycle_count: int = 0
+        self.overrun_count: int = 0
+        self.last_cycle_sec: float = 0.0
+        self.worst_cycle_sec: float = 0.0
+        self.last_completed_at: float = 0.0
         # Dedicated 1-thread pool for Pydantic serialisation — keeps heavy
         # model-construction off the engine's main asyncio event loop.
         self._executor = _TPE(max_workers=1, thread_name_prefix="snapshot-writer")
@@ -61,17 +79,82 @@ class SnapshotWriter:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Long-running task: write snapshots on every scan cycle."""
+        """Long-running task: write snapshots on a FIXED period.
+
+        The loop used to be ``sleep(15); write_cycle()``, which makes the real
+        period ``15s + however long the write took`` — while every key it writes
+        carries a TTL of *twice the interval* on the stated contract that the
+        interval is 15s (``snapshot_store``: "Writer interval -> TTL is 2x that
+        interval so one missed write never evicts a warm cache").
+
+        That contract silently assumed the write itself is free. It is not: one
+        cycle serialises eight payloads, the first of which is 500 signals,
+        through a single-thread executor — on a box where the engine has been
+        measured at 124-208% of a 2.5-core cap. The real slack is four cycles
+        (``TTL_SIGNALS`` is 60s, not the 2x the store's docstring claims), so it
+        takes ~45s of work per cycle before the period reaches 60s — at which
+        point the keys reach their TTL and evict.
+
+        And the blast radius is not the dashboard. In isolated mode the api
+        container serves from these keys and nothing else, so an expired
+        ``snapshot:signals_all`` is a **subscriber** opening the Lumin app and
+        reading "No signals yet" (owner-reported 2026-08-18, alongside the
+        ``snapshot_key_missing`` page at 10:08 UTC). The rows came back when the
+        keys did — nothing was lost, and every user who looked in that window
+        saw an empty product.
+
+        So: sleep the REMAINDER of the interval, not the whole of it. A cycle
+        that overruns starts the next one immediately rather than adding its
+        cost to the period, and the overrun is counted so the liveness probe can
+        page on it *before* anything expires.
+        """
         log.info(
-            "SnapshotWriter started — writing to Redis every {}s",
+            "SnapshotWriter started — writing to Redis every {}s (fixed period)",
             _CYCLE_INTERVAL_S,
         )
         try:
             while True:
-                await asyncio.sleep(_CYCLE_INTERVAL_S)
+                started = time.monotonic()
                 await self._write_cycle()
+                elapsed = time.monotonic() - started
+
+                self.cycle_count += 1
+                self.last_cycle_sec = elapsed
+                self.worst_cycle_sec = max(self.worst_cycle_sec, elapsed)
+                self.last_completed_at = time.time()
+                if elapsed > _OVERRUN_BUDGET_S:
+                    self.overrun_count += 1
+                    log.warning(
+                        "snapshot_writer: cycle took {:.1f}s, over the {}s budget — "
+                        "keys carry a {}s TTL, so sustained overruns expire them "
+                        "and the app feed reads empty",
+                        elapsed, _OVERRUN_BUDGET_S, _store.TTL_SIGNALS,
+                    )
+                # Never negative: an overrunning cycle re-enters immediately
+                # instead of adding its own duration to the period.
+                await asyncio.sleep(max(0.0, _CYCLE_INTERVAL_S - elapsed))
         finally:
             self._executor.shutdown(wait=False)
+
+    def health(self) -> dict[str, Any]:
+        """Counters for the ``snapshot_writer`` liveness probe.
+
+        In-memory only, by the same rule every other probe here follows: a
+        probe that costs a network read cannot run on a per-cycle clock.
+        """
+        return {
+            "cycles": self.cycle_count,
+            "overruns": self.overrun_count,
+            "last_cycle_sec": round(self.last_cycle_sec, 2),
+            "worst_cycle_sec": round(self.worst_cycle_sec, 2),
+            "last_completed_at": self.last_completed_at,
+            "budget_sec": _OVERRUN_BUDGET_S,
+            # Read from the store rather than recomputed. The first cut derived
+            # it as ``2 * _CYCLE_INTERVAL_S`` from the store's own docstring and
+            # was wrong by half — the constants say 60s, the sentence says 2x.
+            # A number a reader can check beats a number a comment asserts.
+            "ttl_sec": _store.TTL_SIGNALS,
+        }
 
     # ------------------------------------------------------------------
     # Per-cycle orchestrator

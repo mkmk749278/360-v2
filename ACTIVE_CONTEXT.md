@@ -4,6 +4,59 @@
 
 ---
 
+## 🟢 SESSION 128b 2026-08-18 — the snapshot writer's period, and an empty app feed
+
+Owner, with screenshots: the Lumin app showed **"No signals yet"** and **"No
+market alerts yet"** while ops paged `snapshot_key_missing` at 10:08:14 UTC —
+*"that's causing that missing signals alerts history missing, after restore they
+came back."*
+
+**This is a subscriber-facing outage, not a dashboard one.** In isolated mode
+the api container serves from `snapshot:*` and nothing else, so an expired
+`snapshot:signals_all` is a paying user opening the product and finding it
+empty. Nothing was lost; everyone who looked in that window saw a blank feed.
+
+### The cause is one line
+
+`SnapshotWriter.start` was::
+
+    while True:
+        await asyncio.sleep(_CYCLE_INTERVAL_S)
+        await self._write_cycle()
+
+so the real period is **15s plus however long the write took**. One cycle
+serialises eight payloads — the first being 500 signals — through a
+single-thread executor, on a box measured at **124–208% of a 2.5-core cap** all
+session. The feed-critical keys hold four cycles of slack (`TTL_SIGNALS` 60s),
+so it takes ~45s of work per cycle before the period reaches 60s — and then the
+keys reach their TTL and evict themselves.
+
+Fixed by sleeping the **remainder** of the interval, so work is absorbed into
+the period rather than added to it, and an overrunning cycle re-enters
+immediately instead of compounding.
+
+### …and a docstring that was wrong by half, caught by a test asserting it
+
+`snapshot_store`'s header says *"Writer interval → TTL is 2× that interval"*.
+The constants are 3–4× (`TTL_SIGNALS` 60 against a 15s interval). I wrote the
+first test to assert the sentence and it failed. Left as-is — more margin than
+advertised is the safe direction — but the writer now reports `store.TTL_SIGNALS`
+rather than deriving `2 * _CYCLE_INTERVAL_S` from the prose, and the test pins
+the stated *minimum* rather than the observed multiple so widening one later
+does not fail CI.
+
+### The half that makes a recurrence visible
+
+New `snapshot_writer` feature-liveness probe (`min_streak=2`, ~10 min —
+deliberately shorter than the usual 6, because this is a live user-visible
+outage rather than a measurement lane drifting). It grades the one condition
+that actually empties the app — no completed cycle within the key TTL — and
+carries the overrun count in its detail so pressure is readable *before* it
+becomes an outage. Until now the only signal was the keys vanishing, which is
+already too late.
+
+---
+
 ## 🟢 SESSION 128 2026-08-18 — the truth report was never late; the bound was wrong
 
 Engine + ops. Owner: *"fix the truth report"*.

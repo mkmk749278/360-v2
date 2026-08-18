@@ -2612,6 +2612,61 @@ class CryptoSignalEngine:
             from src import sar_exit_shadow as _sar
             return float(_sar.get_sar_store().stamped_total)
 
+        def _snapshot_writer_health() -> Tuple[bool, str]:
+            """Has the snapshot writer completed a cycle inside the key TTL?
+
+            The failure this catches took the **Lumin app** dark, not a
+            dashboard: in isolated mode the api container serves from
+            ``snapshot:*`` and nothing else, so when those keys expire a paying
+            subscriber opens Signals and reads "No signals yet". Owner-reported
+            2026-08-18 alongside the ``snapshot_key_missing`` page at 10:08 UTC;
+            the rows returned the moment the keys did.
+
+            The old loop was ``sleep(15); write_cycle()``, so the real period was
+            15s **plus the work**, while the keys carry a TTL of twice the
+            interval on the stated assumption that the interval *is* 15s. Fixed
+            in ``SnapshotWriter.start`` (sleep the remainder); this probe is the
+            half that makes a recurrence visible rather than silent.
+
+            Graded on the one condition that actually empties the app — no
+            completed cycle within the TTL — rather than on a rate of slow
+            cycles, which would need a threshold invented from one window. The
+            overrun count rides in the detail so pressure is readable before it
+            becomes an outage.
+
+            Returns True when there is no writer (single-process mode) or when
+            none has completed yet: a feature that is not running is not a
+            failing one, and signalling that by raising would fill the
+            fail-open counter with non-failures.
+            """
+            writer = getattr(self, "_snapshot_writer", None)
+            if writer is None:
+                return True, "not running (API_PROCESS_ISOLATED=false)"
+            health = writer.health()
+            if not health["last_completed_at"]:
+                return True, "no cycle completed yet"
+            age = _time.time() - health["last_completed_at"]
+            detail = (
+                f"last cycle {age:.0f}s ago ({health['last_cycle_sec']}s to run, "
+                f"worst {health['worst_cycle_sec']}s), {health['overruns']} overrun(s) "
+                f"of {health['cycles']} cycles, TTL {health['ttl_sec']}s"
+            )
+            if age > health["ttl_sec"]:
+                return False, (
+                    f"{detail} — the snapshot keys are past their TTL, so the api "
+                    f"container is serving nothing and the app feed reads empty"
+                )
+            return True, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="snapshot_writer",
+            fn=_snapshot_writer_health,
+            # 2 cycles = ~10 min. Deliberately shorter than the 6 most probes
+            # use: this one is a live subscriber-visible outage, not a
+            # measurement lane drifting.
+            min_streak=2,
+        ))
+
         # Exit-method A/B: same event stream as the geometry pairs, so the same
         # subtraction catches the same failure — suppression events flowing
         # while zero SAR pairs land means the stamp broke.  This is the probe
