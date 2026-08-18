@@ -43,6 +43,22 @@ an hour. That is the whole argument for shipping the instrument beside the fix.
 a user-visible outage while the cost is attributed and cut. The next session
 has the number it needs to aim at.
 
+### The timing wrapper broke two derived guards, and CI caught it in minutes
+
+The first cut wrapped each write as
+`await self._timed("signals", self._write_signals)` — which turns every
+dispatch from a **call** into an **argument**. `test_dark_promotion` and
+`test_signal_router` both parse `_write_cycle`'s AST and assert each payload
+writer appears as a *call*, because *"defining a writer is not calling it"* is
+a seam this repo has paid for under several names. Red build, immediately.
+
+**The response was not to teach both guards a second shape.** `_timing` is a
+context manager instead, so `with self._timing(...): await self._write_x()`
+leaves the call exactly where those guards look for it — and they go on
+protecting every payload added later without anyone remembering to update them.
+An invariant that survives a refactor unchanged is worth more than one that has
+to be renegotiated with it.
+
 ### Verification owed next session
 
 - Read `snapshot_writer`'s `slowest ...` on `/system` or Pulse. If `signals`

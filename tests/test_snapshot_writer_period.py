@@ -239,14 +239,41 @@ class TestPerPayloadTiming:
         # Slowest first: the reader's next question is always "slow where".
         assert next(iter(times)) == "signals"
 
-    async def test_a_failing_payload_still_records_its_cost(self, monkeypatch):
+    async def test_a_failing_payload_still_records_its_cost(self):
         """Timed in a `finally`: the write that BLEW UP is exactly the one whose
         cost you want, and a raise must not take the measurement with it."""
         writer = SnapshotWriter(engine=object(), redis_client=_Redis())
-
-        async def _boom():
-            raise RuntimeError("nope")
-
         with pytest.raises(RuntimeError):
-            await writer._timed("signals", _boom)
+            with writer._timing("signals"):
+                raise RuntimeError("nope")
         assert "signals" in writer.write_times
+
+    def test_the_timing_wrapper_keeps_every_write_a_DIRECT_CALL(self):
+        """The shape two other test files pin, and the reason `_timing` is a
+        context manager rather than a wrapper.
+
+        The first cut was `await self._timed("signals", self._write_signals)`,
+        which turns each dispatch from a call into an argument — and
+        `test_dark_promotion` / `test_signal_router` parse this function's AST
+        asserting each payload writer appears as a *call*, because "defining a
+        writer is not calling it" is a seam this repo has paid for under
+        several names. CI caught it within minutes.
+
+        Keeping the call shape means those guards go on protecting every
+        payload added later, with nobody remembering to update them.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        src = textwrap.dedent(inspect.getsource(SnapshotWriter._write_cycle))
+        called = {
+            n.func.attr for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+        for payload in ("_write_signals", "_write_tickers", "_write_engine_state",
+                        "_write_positions_diag", "_write_data_intake",
+                        "_write_trail_governor", "_write_router_delivery",
+                        "_write_dark_promotion", "_write_activity",
+                        "_write_alerts", "_write_agents"):
+            assert payload in called, payload
