@@ -4,6 +4,78 @@
 
 ---
 
+## 🟢 SESSION 127 2026-08-18 — the alert named the wrong container, and the box had no X-ray
+
+Ops only (no engine change). Owner: *"add state of every container in ops panel
+… this is happening repeatedly and we don't know engine is live or not since
+there is [no] reply from engine for dashboard command. Add everything which need
+to know about system, it liveness container health etc."*
+
+### Two symptoms, one event, and the alert pointed at the wrong box
+
+The page he was getting, repeatedly, each followed by a recovery:
+
+> HIGH — `redis_unreachable`. Could not read `snapshot:tickers` idletime from
+> the engine redis container … Probe said: `no_output · rc=0 · exited 0 and
+> printed nothing`.
+
+Every word after the fingerprint was true and the fingerprint was wrong.
+`docker exec` exited **0**, which it cannot do against a stopped container
+(that is `exec_error`), and `redis-cli` exits non-zero when it cannot reach the
+server. **rc=0 is positive evidence redis answered** — and `redis-cli` prints a
+nil bulk reply as nothing at all when stdout is not a TTY. The key was missing,
+not the container.
+
+**And a missing key is an engine fault.** Every `snapshot:*` key carries a TTL
+of twice its write interval (`src/api/snapshot_store.py`: `snapshot:tickers`
+written every ~15s, `TTL_TICKERS = 60`). Miss four cycles and the key evicts
+itself. In isolated mode the api container reads those keys and nothing else —
+**so the same stall that expired the key is what made the dashboard stop
+answering.** The owner had both halves and no surface joined them.
+
+### What shipped (ops #183)
+
+- `RedisStalenessDetector` splits `no_output`+rc=0 into **`snapshot_key_missing`**
+  — still HIGH, because the engine has stopped publishing and every
+  engine-backed page is going empty, but naming the engine container. Every
+  other cause keeps `redis_unreachable`. The 2026-07-27 property (a probe
+  failure never reads as all-clear) is unchanged and its test now asserts both
+  halves.
+- **New top-level `System` tab, guest-readable**: `/system` (every container in
+  both stacks — state, health, **restart count**, last healthcheck output, CPU,
+  memory, plus host load and disk), `/system/liveness` (the eight hops from
+  engine process to page, each naming the repo that owns its fix),
+  `/system/redis` (reachability and key census, measured apart, TTL per key).
+- The monitoring agent publishes its own heartbeat (`agent:cycle`), carrying
+  `cycle_ok` separately from freshness. A dead pager sends no message, so on
+  `/alerts` "nothing is wrong" and "nothing is watching" had rendered
+  identically.
+
+### The number to read first, and why no engine change shipped
+
+**`RestartCount` on `360scalp-v2-engine`.** The engine carries `autoheal=true`
+and a healthcheck testing scanner-heartbeat freshness, so a wedged scan loop
+restarts the container — and every restart expires every snapshot key. A *loop*
+of restarts is invisible in every other number on the box: uptime reads small
+and healthy, status reads `Up`. Neither repo rendered the count anywhere.
+
+The stall's cause is **not yet diagnosed**, deliberately. A finding and a fix
+are separate deliverables, and the evidence needed to pick the fix — restart
+count, healthcheck output, whether the keys expire on a boot or mid-run — is
+exactly what did not exist until this change. Read `/system` across a firing,
+then decide.
+
+### Verification owed next session
+
+- Whether `RestartCount` on the engine is climbing between page loads. If it is,
+  this is an autoheal loop and the healthcheck output on `/system` says why.
+- Whether `snapshot_key_missing` fires alone (writer stalling) or beside a
+  restart (boot expiry). Different faults, and the alert can now tell them apart.
+- The truth report was **STALE — 295 min old against a 60-minute bound** when
+  read at 07:00 UTC. Not investigated this session.
+
+---
+
 ## 🟢 SESSION 126 2026-08-17 — the promotion refused every candidate and could not say which condition did it
 
 Engine #939; ops #181. Owner: *"still no LSR or any dark feed signal that we
