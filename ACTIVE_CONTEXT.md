@@ -4,6 +4,59 @@
 
 ---
 
+## 🔴 SESSION 128c 2026-08-18 — the probe measured it, and the fix was nowhere near enough
+
+Minutes after #957 deployed, its own new probe reported:
+
+```
+snapshot_writer  ok  last cycle 42s ago (75.17s to run, worst 188.37s),
+                     5 overrun(s) of 7 cycles, TTL 60s
+```
+
+And `/system/redis` at the same moment: **7 of 11 keys MISSING**, including
+`snapshot:signals_all` — so the Lumin app was showing a paying subscriber "No
+signals yet" *while this was being read*.
+
+**A cycle costs 75s typically and 188s at worst, against a 60s TTL.** Removing
+the period drift (#957) was necessary and nowhere near sufficient: the work
+alone is 5–12× the interval, so no scheduling change can keep a 60s key alive.
+My estimate in #957 was "~45s of work before it bites"; the real number is
+75–188s, and the probe is what turned the hypothesis into a measurement inside
+an hour. That is the whole argument for shipping the instrument beside the fix.
+
+### What shipped
+
+- **TTLs sized against the measured period, not the intended interval**
+  (60s → 900s), with the ordering stated explicitly: the `snapshot_writer`
+  probe detects a stall in ~10 min, so **the TTL must outlive that** or the app
+  blanks before anything says so. At 60s the keys expired nine minutes before
+  the page could report it — the last line of defence was firing first.
+  A stale key serving ten-minute-old signals is strictly better than no key at
+  all; signals live for hours and readers grade their own freshness.
+- **Per-payload timing.** The total said 75s and could not say *where*. "The
+  500-signal serialisation is obviously the expensive one" is a hypothesis
+  about behaviour, not a measurement of it, and this repo has paid repeatedly
+  for shipping the first as the second. `write_times` is stamped per payload,
+  slowest first, and the probe's detail carries the top three.
+
+**Raising the TTL does not make the writer fast.** It stops a slow writer being
+a user-visible outage while the cost is attributed and cut. The next session
+has the number it needs to aim at.
+
+### Verification owed next session
+
+- Read `snapshot_writer`'s `slowest ...` on `/system` or Pulse. If `signals`
+  dominates, the candidates are the `limit=500` payload and the single-thread
+  executor. If the cost is spread across the eight, the cadences want splitting
+  — the five diagnostic payloads do not need a 15s clock.
+- **The engine restarted alone again**, 23 minutes after the #957 deploy
+  (engine 11m vs api/signing/watchdog 34m on `/system`). Still unexplained, and
+  `watchdog_audit.jsonl` still holds the reason. A writer monopolising the
+  executor at 163% CPU starving the scanner heartbeat remains the most likely
+  single cause of both symptoms — **hypothesis, not measurement.**
+
+---
+
 ## 🟢 SESSION 128b 2026-08-18 — the snapshot writer's period, and an empty app feed
 
 Owner, with screenshots: the Lumin app showed **"No signals yet"** and **"No

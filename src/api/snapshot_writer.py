@@ -70,6 +70,8 @@ class SnapshotWriter:
         self.last_cycle_sec: float = 0.0
         self.worst_cycle_sec: float = 0.0
         self.last_completed_at: float = 0.0
+        #: Per-payload cost of the last cycle, so the 75s total can be attributed.
+        self.write_times: dict[str, float] = {}
         # Dedicated 1-thread pool for Pydantic serialisation — keeps heavy
         # model-construction off the engine's main asyncio event loop.
         self._executor = _TPE(max_workers=1, thread_name_prefix="snapshot-writer")
@@ -154,28 +156,48 @@ class SnapshotWriter:
             # was wrong by half — the constants say 60s, the sentence says 2x.
             # A number a reader can check beats a number a comment asserts.
             "ttl_sec": _store.TTL_SIGNALS,
+            # Slowest first — the reader's next question after "the cycle is
+            # slow" is always "slow where".
+            "write_times": dict(sorted(
+                self.write_times.items(), key=lambda kv: kv[1], reverse=True
+            )),
         }
 
     # ------------------------------------------------------------------
     # Per-cycle orchestrator
     # ------------------------------------------------------------------
 
+    async def _timed(self, name: str, coro_fn: Any) -> None:
+        """Run one payload write and record what it cost.
+
+        The cycle total said 75s and could not say *which* of eight payloads
+        spent it. "The 500-signal serialisation is obviously the expensive one"
+        is a hypothesis about behaviour, not a measurement of it — and this repo
+        has paid repeatedly for shipping the first as if it were the second. So
+        the next change to the writer's cost gets aimed rather than guessed.
+        """
+        started = time.monotonic()
+        try:
+            await coro_fn()
+        finally:
+            self.write_times[name] = round(time.monotonic() - started, 2)
+
     async def _write_cycle(self) -> None:
         now = time.monotonic()
-        await self._write_signals()
-        await self._write_tickers()
-        await self._write_engine_state()
-        await self._write_positions_diag()
-        await self._write_data_intake()
-        await self._write_trail_governor()
-        await self._write_router_delivery()
-        await self._write_dark_promotion()
+        await self._timed("signals", self._write_signals)
+        await self._timed("tickers", self._write_tickers)
+        await self._timed("engine_state", self._write_engine_state)
+        await self._timed("positions_diag", self._write_positions_diag)
+        await self._timed("data_intake", self._write_data_intake)
+        await self._timed("trail_governor", self._write_trail_governor)
+        await self._timed("router_delivery", self._write_router_delivery)
+        await self._timed("dark_promotion", self._write_dark_promotion)
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
-            await self._write_activity()
-            await self._write_alerts()
+            await self._timed("activity", self._write_activity)
+            await self._timed("alerts", self._write_alerts)
             self._last_activity = now
         if now - self._last_agents >= _AGENTS_INTERVAL_S:
-            await self._write_agents()
+            await self._timed("agents", self._write_agents)
             self._last_agents = now
         # Check for a pending mode-change command from the API container.
         await self._apply_pending_mode_cmd()

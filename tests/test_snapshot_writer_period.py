@@ -31,8 +31,24 @@ from src.api import snapshot_store as store
 from src.api.snapshot_writer import _CYCLE_INTERVAL_S, SnapshotWriter
 
 
+class _RedisClient:
+    """Minimal stand-in for the command-consumer path.
+
+    ``_write_cycle`` ends by draining three command keys off
+    ``self._redis.client``; a fake without it makes the timing tests fail on a
+    collaborator they are not testing.
+    """
+
+    async def get(self, *a, **k):
+        return None
+
+    async def delete(self, *a, **k):
+        return 0
+
+
 class _Redis:
     available = True
+    client = _RedisClient()
 
     async def set(self, *a, **k):
         return True
@@ -146,3 +162,91 @@ class TestHealthCounters:
         health = _writer(work_sec=0).health()
         assert health["last_completed_at"] == 0
         assert health["cycles"] == 0
+
+
+class TestTheTTLCoversTheMeasuredPeriod:
+    """Sized against what the writer actually costs, not what it intends to.
+
+    Measured on the box 2026-08-18, minutes after the period fix shipped:
+    **75.17s per cycle, 188.37s worst, 5 of 7 cycles over budget** — against a
+    60s TTL. Seven of eleven keys were absent at that moment, including
+    ``snapshot:signals_all``, so the Lumin app was showing a paying subscriber
+    "No signals yet" while this was being read.
+
+    Removing the drift was necessary and nowhere near sufficient: the work
+    alone is 5-12x the interval, so no scheduling change can keep a 60s key
+    alive. Raising the TTL does not make the writer fast — it stops a slow
+    writer being a user-visible outage while the cost is measured and cut.
+    """
+
+    #: The worst cycle observed in production on the day this was written. The
+    #: bound has to clear it, or the keys expire on an ordinary bad cycle.
+    WORST_OBSERVED_CYCLE_SEC = 188.37
+
+    #: How long the `snapshot_writer` liveness probe takes to report a stall:
+    #: min_streak=2 against the 5-minute audit loop.
+    PROBE_DETECTION_SEC = 10 * 60
+
+    def test_the_ttl_outlives_the_probes_detection_time(self):
+        """The ordering that matters, and it was backwards.
+
+        At 60s the keys expired *nine minutes before* anything said so — the
+        app went blank first and the page said second. The TTL is the LAST line
+        of defence, not the first.
+        """
+        for name, ttl in (("signals", store.TTL_SIGNALS),
+                          ("tickers", store.TTL_TICKERS),
+                          ("engine_state", store.TTL_ENGINE_STATE),
+                          ("positions_diag", store.TTL_POSITIONS_DIAG)):
+            assert ttl > self.PROBE_DETECTION_SEC, name
+
+    def test_the_ttl_clears_the_worst_observed_cycle(self):
+        assert store.TTL_SIGNALS > self.WORST_OBSERVED_CYCLE_SEC * 2
+
+
+class TestPerPayloadTiming:
+    async def test_every_payload_reports_its_own_cost(self, monkeypatch):
+        """"The 500-signal serialisation is obviously the expensive one" is a
+        hypothesis about behaviour, not a measurement of it. The cycle total
+        said 75s and could not say where.
+
+        Drives ``_write_cycle`` directly rather than the loop. The first cut
+        drove ``start()`` and read the counters after cancelling it — which
+        cancels mid-cycle, so ``_timed``'s ``finally`` recorded a *partial*
+        elapsed for whichever payload was in flight and the assertion compared
+        two zeroes. The property under test is per-payload attribution, not the
+        loop; testing it through the loop tested the cancellation instead.
+        """
+        writer = SnapshotWriter(engine=object(), redis_client=_Redis())
+
+        async def _fast():
+            await asyncio.sleep(0.001)
+
+        async def _slow():
+            await asyncio.sleep(0.03)
+
+        for name in ("_write_tickers", "_write_engine_state", "_write_positions_diag",
+                     "_write_data_intake", "_write_trail_governor",
+                     "_write_router_delivery", "_write_dark_promotion",
+                     "_write_activity", "_write_alerts", "_write_agents"):
+            monkeypatch.setattr(writer, name, _fast)
+        monkeypatch.setattr(writer, "_write_signals", _slow)
+
+        await writer._write_cycle()
+        times = writer.health()["write_times"]
+        assert times["signals"] >= 0.03
+        assert times["signals"] > times["tickers"]
+        # Slowest first: the reader's next question is always "slow where".
+        assert next(iter(times)) == "signals"
+
+    async def test_a_failing_payload_still_records_its_cost(self, monkeypatch):
+        """Timed in a `finally`: the write that BLEW UP is exactly the one whose
+        cost you want, and a raise must not take the measurement with it."""
+        writer = SnapshotWriter(engine=object(), redis_client=_Redis())
+
+        async def _boom():
+            raise RuntimeError("nope")
+
+        with pytest.raises(RuntimeError):
+            await writer._timed("signals", _boom)
+        assert "signals" in writer.write_times

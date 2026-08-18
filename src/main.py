@@ -2646,10 +2646,16 @@ class CryptoSignalEngine:
             if not health["last_completed_at"]:
                 return True, "no cycle completed yet"
             age = _time.time() - health["last_completed_at"]
+            # Slowest three payloads, so "the cycle is slow" is immediately
+            # followed by "slow where" without opening another surface.
+            slowest = ", ".join(
+                f"{k}={v}s" for k, v in list(health.get("write_times", {}).items())[:3]
+            )
             detail = (
                 f"last cycle {age:.0f}s ago ({health['last_cycle_sec']}s to run, "
                 f"worst {health['worst_cycle_sec']}s), {health['overruns']} overrun(s) "
                 f"of {health['cycles']} cycles, TTL {health['ttl_sec']}s"
+                + (f"; slowest {slowest}" if slowest else "")
             )
             if age > health["ttl_sec"]:
                 return False, (
