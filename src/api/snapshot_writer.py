@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor as _TPE
 from datetime import datetime, timezone
 from typing import Any
@@ -70,6 +71,8 @@ class SnapshotWriter:
         self.last_cycle_sec: float = 0.0
         self.worst_cycle_sec: float = 0.0
         self.last_completed_at: float = 0.0
+        #: Per-payload cost of the last cycle, so the 75s total can be attributed.
+        self.write_times: dict[str, float] = {}
         # Dedicated 1-thread pool for Pydantic serialisation — keeps heavy
         # model-construction off the engine's main asyncio event loop.
         self._executor = _TPE(max_workers=1, thread_name_prefix="snapshot-writer")
@@ -154,28 +157,79 @@ class SnapshotWriter:
             # was wrong by half — the constants say 60s, the sentence says 2x.
             # A number a reader can check beats a number a comment asserts.
             "ttl_sec": _store.TTL_SIGNALS,
+            # Slowest first — the reader's next question after "the cycle is
+            # slow" is always "slow where".
+            "write_times": dict(sorted(
+                self.write_times.items(), key=lambda kv: kv[1], reverse=True
+            )),
         }
 
     # ------------------------------------------------------------------
     # Per-cycle orchestrator
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _timing(self, name: str):
+        """Record what one payload write cost, without changing how it is called.
+
+        The cycle total said 75s and could not say *which* of eight payloads
+        spent it. "The 500-signal serialisation is obviously the expensive one"
+        is a hypothesis about behaviour, not a measurement of it — and this repo
+        has paid repeatedly for shipping the first as if it were the second. So
+        the next change to the writer's cost gets aimed rather than guessed.
+
+        **A context manager rather than a wrapper, and that is the whole point.**
+        The first cut was ``await self._timed("signals", self._write_signals)``,
+        which turns every dispatch from a *call* into an *argument* — and two
+        derived guards (``test_dark_promotion``, ``test_signal_router``) parse
+        this function's AST and assert each payload writer appears as a call,
+        because "defining a writer is not calling it" is a seam this repo has
+        paid for under several names. CI caught it immediately, which is the
+        guards working.
+
+        The right response was not to teach both guards a second shape. It was
+        to keep the shape they pin: ``with self._timing(...): await
+        self._write_x()`` leaves the call exactly where it was, so those guards
+        go on protecting every payload added later without anyone remembering
+        to update them. An invariant that survives a refactor unchanged is worth
+        more than one that has to be renegotiated with it.
+
+        Timed in a ``finally``: the write that raised is exactly the one whose
+        cost you want.
+        """
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.write_times[name] = round(time.monotonic() - started, 2)
+
     async def _write_cycle(self) -> None:
         now = time.monotonic()
-        await self._write_signals()
-        await self._write_tickers()
-        await self._write_engine_state()
-        await self._write_positions_diag()
-        await self._write_data_intake()
-        await self._write_trail_governor()
-        await self._write_router_delivery()
-        await self._write_dark_promotion()
+        with self._timing("signals"):
+            await self._write_signals()
+        with self._timing("tickers"):
+            await self._write_tickers()
+        with self._timing("engine_state"):
+            await self._write_engine_state()
+        with self._timing("positions_diag"):
+            await self._write_positions_diag()
+        with self._timing("data_intake"):
+            await self._write_data_intake()
+        with self._timing("trail_governor"):
+            await self._write_trail_governor()
+        with self._timing("router_delivery"):
+            await self._write_router_delivery()
+        with self._timing("dark_promotion"):
+            await self._write_dark_promotion()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
-            await self._write_activity()
-            await self._write_alerts()
+            with self._timing("activity"):
+                await self._write_activity()
+            with self._timing("alerts"):
+                await self._write_alerts()
             self._last_activity = now
         if now - self._last_agents >= _AGENTS_INTERVAL_S:
-            await self._write_agents()
+            with self._timing("agents"):
+                await self._write_agents()
             self._last_agents = now
         # Check for a pending mode-change command from the API container.
         await self._apply_pending_mode_cmd()

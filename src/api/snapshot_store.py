@@ -7,8 +7,29 @@ touching engine memory, eliminating the shared-event-loop bottleneck that caused
 
 Key lifetime contract
 ─────────────────────
-* Writer interval → TTL is 2× that interval so one missed write never evicts
-  a warm cache — the API serves the last good snapshot rather than 503-ing.
+* TTL is sized against the writer's **measured period**, not its intended
+  interval, and it is the LAST line of defence rather than the first.
+
+  It was sized against the interval until 2026-08-18, on the sentence "TTL is
+  2x that interval" — which was wrong twice over. The constants were 3-4x, not
+  2x; and more importantly the writer's period is not the interval, because the
+  work is not free. Measured on the box the day this was written:
+  **75s per cycle typical, 188s worst, 5 of 7 cycles over budget** — against a
+  60s TTL. The keys could not survive, so ``snapshot:signals_all`` was absent
+  most of the time and a paying subscriber opening the Lumin app read
+  **"No signals yet"**. The api container serves from these keys and nothing
+  else; an expired key is not a stale page, it is an empty product.
+
+  The ordering that matters: the ``snapshot_writer`` liveness probe detects a
+  stalled writer in ~10 minutes. **The TTL must outlive that**, or the app goes
+  blank before anyone is told it is going blank. A stale key serving
+  ten-minute-old signals is strictly better than no key at all — signals live
+  for hours, and the readers grade their own freshness.
+
+  Raising the TTL does NOT make the writer fast; it stops a slow writer being a
+  user-visible outage while the cost is measured and cut. ``SnapshotWriter``
+  now times each payload individually so the next change is aimed rather than
+  guessed.
 * All values are plain JSON strings (``json.dumps``) so they stay
   human-inspectable via ``redis-cli GET snapshot:signals_all | python3 -m json.tool``.
 """
@@ -57,18 +78,24 @@ KEY_TAKE_RESULT_PREFIX = "snapshot:take_result:"  # + request_id → JSON outcom
 TTL_TAKE_RESULT = 120   # result outlives the API's ~8s poll window comfortably
 TAKE_CMD_STALE_S = 60   # engine rejects queue entries older than this
 
-# ── TTLs (seconds) — 2× the write interval ────────────────────────────────
-TTL_SIGNALS      = 60
-TTL_ACTIVITY     = 120
-TTL_AGENTS       = 180
-TTL_TICKERS      = 60
-TTL_ENGINE_STATE = 60
-TTL_POSITIONS_DIAG = 60
-TTL_DATA_INTAKE  = 60
-TTL_ROUTER_DELIVERY = 60
-TTL_TRAIL_GOVERNOR  = 60
-TTL_DARK_PROMOTION  = 60
-TTL_ALERTS       = 120
+# ── TTLs (seconds) ────────────────────────────────────────────────────────
+# Sized to outlive the ~10-minute detection time of the `snapshot_writer`
+# liveness probe, against a measured worst cycle of 188s. See the key-lifetime
+# contract above: these are a safety valve for a DEAD writer, not a freshness
+# mechanism for a slow one, and at 60s they were neither.
+_TTL_FEED = 900   # 15 min — the probe pages at ~10, so the app never blanks first
+
+TTL_SIGNALS      = _TTL_FEED
+TTL_ACTIVITY     = _TTL_FEED
+TTL_AGENTS       = _TTL_FEED
+TTL_TICKERS      = _TTL_FEED
+TTL_ENGINE_STATE = _TTL_FEED
+TTL_POSITIONS_DIAG = _TTL_FEED
+TTL_DATA_INTAKE  = _TTL_FEED
+TTL_ROUTER_DELIVERY = _TTL_FEED
+TTL_TRAIL_GOVERNOR  = _TTL_FEED
+TTL_DARK_PROMOTION  = _TTL_FEED
+TTL_ALERTS       = _TTL_FEED
 TTL_CMD          = 60  # command expires if engine is down; client must retry
 
 
