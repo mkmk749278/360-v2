@@ -3050,9 +3050,22 @@ class CryptoSignalEngine:
                 # more than one condition is failing.
                 blocked = _dp.top_blocker(r.setup_class for r in armed)
                 if not blocked:
+                    # `top_blocker` is empty when NOTHING WAS REFUSED, which is
+                    # not the same as nothing having reached the decision — and
+                    # the first cut said the second, so the first post-deploy
+                    # read printed "1 promoted today — no candidate has reached
+                    # the decision yet" (2026-08-18). A promotion IS a candidate
+                    # reaching the decision; the sentence contradicted the
+                    # number standing beside it. Say what was observed.
+                    if promoted:
+                        return True, (
+                            f"{len(armed)} rule(s) armed, {promoted} promoted "
+                            f"today, nothing refused"
+                        )
                     return True, (
-                        f"{len(armed)} rule(s) armed, {promoted} promoted today "
-                        f"— no candidate has reached the decision yet"
+                        f"{len(armed)} rule(s) armed, nothing promoted and "
+                        f"nothing refused — no candidate has reached the "
+                        f"decision yet"
                     )
                 return True, (
                     f"{len(armed)} rule(s) armed, {promoted} promoted today; "

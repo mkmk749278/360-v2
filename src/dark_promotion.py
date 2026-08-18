@@ -138,6 +138,11 @@ DIM_CAP = "daily_cap"
 DIM_MASTER = "master_switch"
 DIM_RULE = "rule_enabled"
 DIM_NO_RULE = "no_rule"
+#: `decide` raised on this candidate and answered "stay dark". Its own
+#: dimension, and counted, because otherwise "nothing was refused" can be true
+#: while every candidate is erroring — and the probe's sentence built on that
+#: silence would name a benign cause for a fault (2026-08-18).
+DIM_ERROR = "error"
 
 #: Where the registry is persisted. On the engine's data volume, which ops
 #: mounts read-only — but ops reads the rules through the API rather than off
@@ -377,6 +382,7 @@ REFUSAL_DIMENSIONS: Tuple[str, ...] = (
     DIM_DIRECTION,
     DIM_CONFIDENCE,
     DIM_CAP,
+    DIM_ERROR,
 )
 
 
@@ -425,27 +431,9 @@ def _record_refusal(
     ``get_rule`` → ``load`` takes it), so it costs nothing new.
     """
     global _near_miss_seen
-    sample = {
-        "ts": time.time() if now is None else float(now),
-        "symbol": str(getattr(sig, "symbol", "") or ""),
-        "setup_class": setup_class,
-        "side": str(
-            getattr(getattr(sig, "direction", None), "value", None)
-            or getattr(sig, "direction", "")
-            or ""
-        ),
-        "gate": gate,
-        # The observed values, not the rule's — the owner is comparing what he
-        # asked for against what the engine actually stamped, and only one of
-        # those two is already on his screen.
-        "regime": str(getattr(sig, "entry_regime", "") or ""),
-        "regime_15m": str(getattr(sig, "entry_regime_15m", "") or ""),
-        "session": str(getattr(sig, "mc_session", "") or ""),
-        "confidence": float(getattr(sig, "confidence", 0.0) or 0.0),
-        "unmet": list(unmet),
-        "matched": list(matched),
-        "detail": detail or "",
-    }
+    # Counters first, and they touch nothing on `sig`. A candidate whose own
+    # attributes raise is exactly the DIM_ERROR case, so building the sample
+    # must not be able to lose the count that says it happened.
     try:
         with _lock:
             cell = _refusals.setdefault(
@@ -459,15 +447,41 @@ def _record_refusal(
             if len(unmet) == 1:
                 sole = cell["sole_blocker"]
                 sole[unmet[0]] = sole.get(unmet[0], 0) + 1
-
             _near_miss_seen += 1
+    except Exception as exc:  # pragma: no cover - defensive
+        fail_open.record("dark_promotion.record_refusal", exc)
+        return
+
+    # The sample is best-effort: it reads the candidate, which is the thing
+    # that may be broken.
+    try:
+        sample = {
+            "ts": time.time() if now is None else float(now),
+            "symbol": str(getattr(sig, "symbol", "") or ""),
+            "setup_class": setup_class,
+            "side": str(
+                getattr(getattr(sig, "direction", None), "value", None)
+                or getattr(sig, "direction", "")
+                or ""
+            ),
+            "gate": gate,
+            # The observed values, not the rule's — the owner is comparing what
+            # he asked for against what the engine actually stamped, and only
+            # one of those two is already on his screen.
+            "regime": str(getattr(sig, "entry_regime", "") or ""),
+            "regime_15m": str(getattr(sig, "entry_regime_15m", "") or ""),
+            "session": str(getattr(sig, "mc_session", "") or ""),
+            "confidence": float(getattr(sig, "confidence", 0.0) or 0.0),
+            "unmet": list(unmet),
+            "matched": list(matched),
+            "detail": detail or "",
+        }
+        with _lock:
             _near_misses.append(sample)
             if len(_near_misses) > max(1, NEAR_MISS_RING):
                 del _near_misses[:-max(1, NEAR_MISS_RING)]
     except Exception as exc:  # pragma: no cover - defensive
-        # A census failing must never be the reason a candidate is mishandled,
-        # and it must never be silent either.
-        fail_open.record("dark_promotion.record_refusal", exc)
+        fail_open.record("dark_promotion.record_refusal_sample", exc)
 
 
 def master_enabled() -> bool:
@@ -728,7 +742,13 @@ def decide(sig: Any, gate: str, now: Optional[float] = None) -> PromotionDecisio
         )
     except Exception as exc:
         fail_open.record("dark_promotion.decide", exc)
-        return PromotionDecision(False, setup_class, gate, ["error"])
+        # Counted like any other refusal. Without this, a candidate erroring on
+        # every evaluation reads as "nothing was refused" — and the probe would
+        # then report the benign cause for a fault.
+        _record_refusal(
+            sig, setup_class, gate, [DIM_ERROR], [], f"{type(exc).__name__}", now
+        )
+        return PromotionDecision(False, setup_class, gate, [DIM_ERROR])
 
 
 def _direction_ok(condition: str, side: str, sig: Any) -> Tuple[bool, str]:
