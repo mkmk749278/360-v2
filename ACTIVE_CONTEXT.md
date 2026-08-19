@@ -4,6 +4,86 @@
 
 ---
 
+## 🟡 SESSION 129 2026-08-19 — the restart loop, and two questions no surface could answer
+
+Owner, from a guest session: *"that redis snapshot not yet resolved and system
+restart many times why … also that engine cpu 221% used is our vps not enough
+or what"*, then *"fix all, make system stabilize"*, then — after running the
+verification himself — *"can we interact vps from ops, then you can actually
+look at from vps"*.
+
+### The chain, end to end
+
+Scan-cycle wall-time → scanner heartbeat file staleness → `healthcheck.py`
+(120s max age × 3 retries) → **autoheal manual restart** → every `snapshot:*`
+key past its TTL → empty dashboard *and* empty Lumin feed. Docker's
+`RestartCount` reads **0** throughout, because autoheal issues a manual
+restart and the restart *policy* is what that counter tracks.
+
+Measured 82.4s median / 402.5s worst against a 15s target. Shipped in
+#961/#962: the edge store off the money path (~2s event-loop freeze × 2 per
+closed signal), the indicator cache keyed on content rather than bar count
+(a capped bucket served frozen indicators forever), the indicators vectorised
+(512ms → 58.1ms per symbol, **bit-identical**, 33 comparisons against pre-change
+bodies copied verbatim from `fa9ed0a`), and the executor sized from the cgroup
+quota rather than `os.cpu_count()`.
+
+Post-deploy: median 15.8s, worst steady-state 46.5s, writer overruns 63/113 → 0/19.
+
+### What #964 adds, and why
+
+Both are questions the owner asked that **no surface could answer**:
+
+- **Where a slow cycle went.** `_stage_timing` accumulated per stage on every
+  cycle and went to a log line and nowhere else — and on the owner's box that
+  grep returned *nothing at all* while the deadline warnings beside it came
+  through the same log. Now two kept snapshots (worst cycle, most recent slow
+  one) published through `cycle_health()`. The sums accumulate across
+  concurrent workers so they exceed the cycle duration: the **ratio** locates
+  the cost, and ops says so rather than rendering a partition.
+- **Is the VPS big enough.** 221% of a 250% quota is a process at its ceiling;
+  221% of an uncapped 4-core box is a busy machine with room. Same number,
+  opposite next move. `/internal/diag/host-resources` grades against the quota
+  and carries the config the **running process** is using, because a deploy
+  that silently did not take is otherwise indistinguishable from a fix that did
+  not work. **Sampled in the engine container and published** — the API
+  container would have measured its own near-idle cgroup and labelled it the
+  engine, which is the trail-governor `INDEX COLD` defect on the one number
+  that started the session.
+
+### Still open — say so rather than close it
+
+The owner's own run showed **85 snapshot-writer overruns and 4 steady-state
+deadline breaches in ~2h**, worse than the post-deploy sample quoted at him
+earlier and **not yet explained**. The stage breakdown is the instrument for
+it and needs a real window before it can say anything. A finding and a fix are
+separate deliverables.
+
+### Three corrections owed and paid
+
+- **Cache-cap exposure was overstated.** The owner's data: 11% of 1m buckets at
+  the cap, 6% of 1h, 2% of 5m, 1% of 15m — across ~600 cached symbols, most
+  outside the ~79-pair scan set. Real bug, small share of the live book.
+- **A verification script that cries wolf is worse than none.** Three of the
+  four failures it reported were the script's own: it looked for
+  `tests/test_indicator_vectorisation.py` inside an image whose `.dockerignore`
+  excludes `tests/` (line 18) and printed *"bit-equality FAILED — revert; do
+  not loosen the tolerance"* — **an alarming false alarm telling the owner to
+  revert a correct change**, which is the worse direction of the
+  `/invalidations` lesson. It counted autoheal log lines *mentioning* the
+  engine as restarts, printing "5 restarts" beside "1 boot in 6h" — two numbers
+  that cannot both be true, shipped anyway. And it read scan timing from a log
+  line instead of the counters built for it. v2 reads the engine's own
+  published `snapshot:engine_state`, and was dry-run before being sent.
+- **`_CycleRecorder` fell behind the real declaration twice.** Fixed by making
+  the declaration borrowable (`_init_cycle_timing` /
+  `_init_indicator_cache_counters`) rather than by typing four more attributes
+  into a hand-kept list. The contract test's `_Scanner` had the same shape and
+  hand-wrote `over_kill: 2` — a number no scanner ever produced — so it pinned
+  the author's arithmetic one hop short of the reader.
+
+---
+
 ## 🔴 SESSION 128c 2026-08-18 — the probe measured it, and the fix was nowhere near enough
 
 Minutes after #957 deployed, its own new probe reported:
