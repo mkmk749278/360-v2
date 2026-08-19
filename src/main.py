@@ -879,6 +879,20 @@ class CryptoSignalEngine:
             t.get_name() for t in asyncio.all_tasks() if not t.done()
         )
 
+    def get_loop_health(self) -> Dict[str, Any]:
+        """Scan-cycle / writer / edge-store counters for this process.
+
+        Mirrors :meth:`RedisEngineFacade.get_loop_health` so
+        ``/internal/diag/loop-health`` is mode-agnostic — the one that matters
+        in production is the facade's, because in isolated mode the API
+        container serving that route cannot see any of these objects. Which
+        process holds the state is not a deployment detail; the trail-governor
+        X-ray read INDEX COLD for exactly this reason.
+        """
+        from src.api.snapshot_writer import _loop_health
+
+        return _loop_health(self)
+
     def _build_paper_order_manager(self):
         """Construct the paper-mode order manager.
 
