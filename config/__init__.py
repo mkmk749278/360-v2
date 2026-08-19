@@ -1887,6 +1887,22 @@ STRATEGY_EDGE_FLUSH_SEC: int = _safe_int("STRATEGY_EDGE_FLUSH_SEC", "30")
 #: the probe fires while there is still room to act.
 SCAN_CYCLE_WARN_SEC: float = _safe_float("SCAN_CYCLE_WARN_SEC", "60")
 
+#: Seconds after boot during which a long scan cycle is warm-up, not a fault.
+#:
+#: Mirrors ``healthcheck.py::_HEARTBEAT_GRACE_PERIOD_SECONDS``, and a test pins
+#: them equal. The healthcheck itself already makes this distinction — it will
+#: not fail a stale heartbeat that has never beaten since boot while the process
+#: is inside its grace — because a boot re-seeds 75 pairs over REST and rebuilds
+#: every indicator cache cold. Measured 2026-08-19, first three cycles after a
+#: deploy: 74.5s, 131.2s, 72.8s, then a steady state of 8-47s.
+#:
+#: Counting those against the steady-state verdict is what made the
+#: ``scan_cycle`` probe read violating for the whole life of a healthy boot —
+#: red that can never be anything but red, which this repo has already paid for
+#: on the agent container's healthcheck. They are counted, named, and kept out
+#: of the verdict.
+SCAN_CYCLE_BOOT_GRACE_SEC: float = _safe_float("SCAN_CYCLE_BOOT_GRACE_SEC", "480")
+
 #: The deadline the warning above is measured against — kept here so the probe
 #: and the ops surface both read one number rather than re-typing 120.
 #: Mirrors ``healthcheck.py::_HEARTBEAT_MAX_AGE_SECONDS``; a test pins them
