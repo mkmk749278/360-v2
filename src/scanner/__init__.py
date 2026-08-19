@@ -329,7 +329,31 @@ _CHANNEL_PRODUCT_ROLES: Dict[str, str] = {
 }
 
 # Maximum number of symbols scanned concurrently
-_MAX_CONCURRENT_SCANS: int = 20
+def _safe_int_env(name: str, default: int) -> int:
+    """Read a positive int from the environment, or keep the default.
+
+    A local helper rather than `config._safe_int` because this constant is
+    resolved at module import, before `config` is necessarily importable from
+    every entry point that touches the scanner. Refuses a non-positive value:
+    zero concurrent scans is not a tuning choice, it is a stopped scanner.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        val = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+#: Symbols scanned concurrently. Each one *awaits* the compute executor, so
+#: this is the multiplier on queued indicator wait — and with the pool smaller
+#: than this number the surplus is pure queueing, which is what the stage timer
+#: reports as `indicators` wall-time. Env-overridable because on 2026-08-19 it
+#: was the one plausible lever on a live restart loop that could not be pulled
+#: without a deploy.
+_MAX_CONCURRENT_SCANS: int = _safe_int_env("MAX_CONCURRENT_SCANS", 20)
 
 # Higher-TF keys whose closed-candle counts fingerprint the SMC result cache.
 # Excludes 1m: the in-progress partial candle's last_close changes every tick,
@@ -2349,6 +2373,17 @@ class Scanner:
         )
         while True:
             t0 = time.monotonic()
+            # The cycle currently IN FLIGHT. Every other counter here records a
+            # cycle at COMPLETION, which is a blind spot exactly where it hurts:
+            # `healthcheck.py` kills the container on heartbeat-file age, the
+            # heartbeat is touched once per completed cycle, and a cycle hung
+            # past the deadline therefore never appears in `last_sec`,
+            # `worst_sec` or `over_kill` at all. On 2026-08-19 the ops card read
+            # "0 past the deadline, last cycle 20.76s" while autoheal was
+            # restarting this container on a failing streak of 3. A measurement
+            # that can only see finished work cannot see the work that is
+            # killing you.
+            self._cycle_started_at = time.time()
             self._scan_cycle_count += 1
 
             _governance_snapshot = self._channel_governance_snapshot()
@@ -2951,6 +2986,10 @@ class Scanner:
         self.last_slow_cycle_sec: float = 0.0
         self.last_slow_cycle_at: float = 0.0
         self.last_cycle_at: float = 0.0
+        #: Wall-clock start of the cycle currently running, or 0.0 before the
+        #: first one. Reported as an AGE so a hung cycle is visible while it is
+        #: still hanging rather than only after it finishes — if it ever does.
+        self._cycle_started_at: float = 0.0
         #: Process start, for the boot-grace split. Monotonic so a clock step
         #: cannot turn a running engine back into a booting one.
         self._scanner_started_at: float = time.monotonic()
@@ -3057,7 +3096,19 @@ class Scanner:
             "warn_sec": SCAN_CYCLE_WARN_SEC,
             "kill_sec": SCAN_CYCLE_KILL_SEC,
             "last_cycle_at": self.last_cycle_at,
+            # The two numbers `healthcheck.py` actually decides on. Both are
+            # ages of an IN-PROGRESS state, so they are computed here — in the
+            # engine — rather than by a reader on its own clock.
+            "in_flight_sec": (
+                round(max(0.0, time.time() - self._cycle_started_at), 2)
+                if self._cycle_started_at else None
+            ),
+            "heartbeat_age_sec": (
+                round(max(0.0, time.time() - self.last_cycle_at), 2)
+                if self.last_cycle_at else None
+            ),
             "executor_workers": SCAN_EXECUTOR_WORKERS,
+            "max_concurrent_scans": _MAX_CONCURRENT_SCANS,
         }
 
     def _touch_heartbeat(self) -> None:
