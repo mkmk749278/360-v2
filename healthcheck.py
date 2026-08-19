@@ -9,12 +9,19 @@ can't fix — e.g. a Binance **REST IP-ban** that blocks the boot-time historica
 seed. In that case every restart re-runs the seed (still banned), the scanner
 never produces a heartbeat, we go unhealthy again ~10 min later, and autoheal
 loops forever — each loop re-restoring signals as entry-0 shells and re-extending
-the ban with fresh banned REST calls. So we let autoheal restart a genuine
-mid-run hang **once**, but stop reporting unhealthy when a restart is
-demonstrably not curing it (the scanner has not produced a single fresh
-heartbeat since this boot, well past the grace period). The process stays up and
-serving on the WebSocket feed; vps-liveness + the feature-liveness watchdog still
-page a human for the underlying outage.
+the ban with fresh banned REST calls. So autoheal gets a BOUNDED number of
+restarts, and past that we stop reporting unhealthy when a restart is
+demonstrably not curing it. The process stays up and serving on the WebSocket
+feed; vps-liveness + the feature-liveness watchdog still page a human for the
+underlying outage.
+
+That sentence used to read "we let autoheal restart a genuine mid-run hang
+**once**", and the code did not do it: the bound covered only the
+never-beat-since-boot branch, while a scanner that beat during warm-up and then
+went stale fell through to an UNBOUNDED fail. Both branches are bounded now, on
+one shared counter — a boot that never reaches a healthy steady state is the
+same condition whichever way it fails, and only a genuinely fresh beat clears
+it (2026-08-19, the day that loop ran).
 """
 import json
 import os
@@ -22,8 +29,21 @@ import sys
 import time
 from typing import Optional, Tuple
 
-# Maximum age (seconds) of the heartbeat file before the scanner is
-# considered stale.  Must be longer than a worst-case scan cycle.
+# Maximum age (seconds) of the heartbeat file before the scanner is considered
+# stale — i.e. how long the scan loop may go without FINISHING A SYMBOL.
+#
+# This comment used to read "must be longer than a worst-case scan cycle", and
+# the value did not satisfy it: the heartbeat was written once per completed
+# cycle, and cycles were measured at 82.4s median / 402.5s worst against this
+# 120s bound (2026-08-19). A constant asserting a property it does not have is
+# the defect this repo has now paid for under several names — and here it cost a
+# day of restart loop, because every slow cycle read as a wedge.
+#
+# The scanner now beats on PROGRESS (`Scanner._touch_heartbeat_progress`,
+# throttled to ~1/5s), so this bound is once again what it claims to be: a
+# wedge detector. A cycle slower than 120s keeps beating; a loop that has
+# stopped advancing does not. Raising this number is therefore no longer the
+# lever for a slow cycle — it would only make a real wedge take longer to catch.
 _HEARTBEAT_MAX_AGE_SECONDS = 120.0
 _HEARTBEAT_PATH = os.path.join(os.path.dirname(__file__), "data", "scanner_heartbeat")
 # Grace period: give the engine time to complete its first scan cycle before
@@ -260,8 +280,51 @@ def _scanner_heartbeat_fresh(engine_pid: Optional[int]) -> bool:
                         file=sys.stderr,
                     )
                     return False
-            # Beat this boot then went stale (genuine mid-run hang), or the
-            # guard is disabled / uptime unknown → fail so autoheal restarts.
+            # Beat this boot then went stale (mid-run hang), or the guard is
+            # disabled / uptime unknown → fail so autoheal restarts.
+            #
+            # Bounded the same way as the never-beat case, and for the same
+            # reason (2026-08-19): the bound above covered only "never beat
+            # since boot", so a scanner that beat during warm-up and then went
+            # stale could be restarted forever. That is exactly what ran all of
+            # 2026-08-19 — restart -> cold indicator caches + a full REST
+            # re-seed -> the next cycle slower than the one that tripped the
+            # deadline -> restart, every ~15 minutes, each loop expiring every
+            # `snapshot:*` key and emptying the dashboard and the app feed.
+            # A restart that has demonstrably not cured the condition across
+            # this many boots is not medicine, and the argument for stopping is
+            # the one the never-beat branch already makes: the process is alive
+            # and serving on the WS feed, every open position's SL/TP rests on
+            # Binance, and vps-liveness + feature-liveness still page a human.
+            #
+            # The counter is shared with the never-beat path on purpose — it
+            # counts boots that failed to reach a healthy steady state, however
+            # they failed — and `_reset_restart_guard` clears it on the first
+            # genuinely fresh beat, so a one-off hang still gets its restart.
+            if _restart_loop_guard_enabled() and uptime != _UNKNOWN_UPTIME_SECONDS:
+                boot_marker = int(time.time() - uptime)
+                prev_boot, count = _read_restart_guard()
+                if boot_marker != prev_boot:
+                    count += 1
+                    _write_restart_guard(boot_marker, count)
+                if count >= _max_restart_attempts():
+                    print(
+                        f"Heartbeat stale on {count} consecutive boot(s) "
+                        f"(age={age:.1f}s > max={_HEARTBEAT_MAX_AGE_SECONDS:.0f}s, "
+                        f"uptime ~{uptime:.0f}s) — restarting is not curing it and "
+                        f"each restart re-seeds every pair cold; reporting DEGRADED "
+                        f"(not unhealthy) to break the autoheal loop. Process alive "
+                        f"on WS. Path: {_HEARTBEAT_PATH}",
+                        file=sys.stderr,
+                    )
+                    return True
+                print(
+                    f"Heartbeat is stale: age={age:.1f}s > max={_HEARTBEAT_MAX_AGE_SECONDS:.0f}s "
+                    f"(engine uptime ~{uptime:.0f}s) — failing so autoheal restarts "
+                    f"(attempt {count}/{_max_restart_attempts()}). Path: {_HEARTBEAT_PATH}",
+                    file=sys.stderr,
+                )
+                return False
             print(
                 f"Heartbeat is stale: age={age:.1f}s > max={_HEARTBEAT_MAX_AGE_SECONDS:.0f}s "
                 f"(engine uptime ~{uptime:.0f}s). Path: {_HEARTBEAT_PATH}",

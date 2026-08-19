@@ -62,6 +62,10 @@ data/invalidation_records.json
 data/signal_history.json
 data/signal_performance.json
 src/data/scanner_heartbeat
+# Sibling runtime artifact of the heartbeat: the autoheal restart counter.
+# Shipped 2026-07-24 and never ignored, so a test reaching that branch left a
+# file `git add -A` would commit (2026-08-19).
+data/healthcheck_restart_guard
 data/scanner_heartbeat
 data/paper_pnl_state.json
 data/active_router_state.json

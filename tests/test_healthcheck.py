@@ -92,8 +92,11 @@ def test_guard_can_be_disabled_for_strict_legacy(tmp_path, monkeypatch) -> None:
 
 
 def test_stale_after_beating_this_boot_fails(tmp_path, monkeypatch) -> None:
-    # Beat this boot (age<uptime) then went stale → genuine mid-run hang → fail,
-    # so autoheal restarts once to try to clear it.
+    # Beat this boot (age<uptime) then went stale → mid-run hang → fail, so
+    # autoheal gets its restart attempt. Passes on the FIRST attempt only: this
+    # branch is bounded by the same counter as the never-beat one (2026-08-19),
+    # which is what `test_stale_after_beating_breaks_loop_after_threshold`
+    # below pins. Before that it failed forever, which is the loop it caused.
     p = str(tmp_path / "scanner_heartbeat")
     _write_beat(p, 200)
     monkeypatch.setattr(healthcheck, "_HEARTBEAT_PATH", p)
@@ -133,3 +136,76 @@ def test_restart_loop_guard_env_parsing(monkeypatch) -> None:
     assert healthcheck._restart_loop_guard_enabled() is False
     monkeypatch.setenv("HEALTHCHECK_RESTART_LOOP_GUARD", "true")
     assert healthcheck._restart_loop_guard_enabled() is True
+
+
+def test_stale_after_beating_breaks_loop_after_threshold(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    """A mid-run hang that survives N restarts stops reporting unhealthy.
+
+    The 2026-08-19 loop: the scanner beat during warm-up, went stale when a scan
+    cycle ran past 120s, autoheal restarted, the restart re-seeded every pair
+    over REST and rebuilt the indicator caches cold, and the next cycle was
+    slower still — every ~15 minutes, each restart expiring every `snapshot:*`
+    key and emptying the dashboard and the app feed. The bound existed and
+    covered only the never-beat-since-boot branch.
+
+    Fails against the pre-fix tree, where this branch returned False forever.
+    """
+    p = str(tmp_path / "scanner_heartbeat")
+    _write_beat(p, 200)
+    monkeypatch.setattr(healthcheck, "_HEARTBEAT_PATH", p)
+    monkeypatch.setattr(healthcheck, "_engine_uptime_seconds", lambda pid: 5000.0)
+
+    # Each boot is a distinct process start, so the counter advances once per boot.
+    seen = []
+    for boot in range(1, 5):
+        monkeypatch.setattr(
+            healthcheck, "_engine_uptime_seconds", lambda pid, b=boot: 5000.0 + b,
+        )
+        seen.append(healthcheck._scanner_heartbeat_fresh(123))
+
+    # Default max attempts is 3: fail, fail, then DEGRADED-but-healthy.
+    assert seen[:2] == [False, False]
+    assert seen[2] is True and seen[3] is True
+    assert "not curing it" in capsys.readouterr().err
+
+
+def test_stale_after_beating_resets_on_a_fresh_beat(tmp_path, monkeypatch) -> None:
+    """A one-off hang still gets its restarts once the scanner recovers.
+
+    The bound must not be a one-way door: without this, three unrelated hangs
+    over the container's whole life would permanently disarm autoheal for a
+    genuine wedge later.
+    """
+    p = str(tmp_path / "scanner_heartbeat")
+    monkeypatch.setattr(healthcheck, "_HEARTBEAT_PATH", p)
+
+    _write_beat(p, 200)
+    monkeypatch.setattr(healthcheck, "_engine_uptime_seconds", lambda pid: 5000.0)
+    assert healthcheck._scanner_heartbeat_fresh(123) is False
+    assert healthcheck._read_restart_guard()[1] == 1
+
+    _write_beat(p, 5)
+    assert healthcheck._scanner_heartbeat_fresh(123) is True
+    assert healthcheck._read_restart_guard()[1] == 0
+
+
+def test_stale_after_beating_respects_the_strict_legacy_switch(
+    tmp_path, monkeypatch,
+) -> None:
+    """`HEALTHCHECK_RESTART_LOOP_GUARD=false` restores unbounded restarts.
+
+    The off-switch is the whole reversibility argument for bounding this branch,
+    so it is asserted on the branch that was just bounded, not only on the one
+    that already was.
+    """
+    p = str(tmp_path / "scanner_heartbeat")
+    _write_beat(p, 200)
+    monkeypatch.setattr(healthcheck, "_HEARTBEAT_PATH", p)
+    monkeypatch.setenv("HEALTHCHECK_RESTART_LOOP_GUARD", "false")
+    for boot in range(1, 6):
+        monkeypatch.setattr(
+            healthcheck, "_engine_uptime_seconds", lambda pid, b=boot: 5000.0 + b,
+        )
+        assert healthcheck._scanner_heartbeat_fresh(123) is False

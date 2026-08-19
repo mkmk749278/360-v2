@@ -212,3 +212,26 @@ def numpy_seeded_store():
         return store
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _isolate_healthcheck_restart_guard(tmp_path, monkeypatch):
+    """No test may write the restart-guard file into the repo's ``data/``.
+
+    `healthcheck._write_restart_guard` persists to ``data/healthcheck_restart_guard``,
+    which is a RUNTIME artifact and was never gitignored — so a test that reached
+    that branch left a file `git add -A` would commit, and on 2026-08-19 one did.
+    That is the `.tmp`-in-the-repo-root defect (#839-#845) in a second file:
+    a path that means "production state" being exercised by the suite.
+
+    Isolated here rather than in the two test files that happen to hit it today,
+    because the set of tests that reach the branch changes whenever the branch
+    does — bounding the mid-run-stale path added a writer to a test that had
+    never been one, silently. `tests/test_healthcheck.py` keeps its own
+    narrower fixture; the two are compatible (both point at tmp).
+    """
+    import healthcheck as _hc
+
+    monkeypatch.setattr(
+        _hc, "_RESTART_GUARD_STATE_PATH", str(tmp_path / "healthcheck_restart_guard"),
+    )

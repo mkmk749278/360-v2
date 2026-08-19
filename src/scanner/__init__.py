@@ -355,6 +355,29 @@ def _safe_int_env(name: str, default: int) -> int:
 #: without a deploy.
 _MAX_CONCURRENT_SCANS: int = _safe_int_env("MAX_CONCURRENT_SCANS", 20)
 
+#: Beat the scanner heartbeat on PROGRESS (a symbol finished) rather than only
+#: on cycle COMPLETION. The heartbeat file gates `healthcheck.py`, which gates
+#: the docker HEALTHCHECK, which gates the autoheal sidecar — so while the only
+#: writer was the end of the cycle, "heartbeat age" and "cycle wall-time" were
+#: the same number and a cycle slower than 120s WAS a restart, however healthily
+#: the loop was advancing through it. That is a category error: autoheal exists
+#: to clear a WEDGE (the loop stopped), and a slow cycle is not a wedge. Worse,
+#: the cure feeds the disease — every restart re-seeds ~79 pairs over REST and
+#: rebuilds the indicator caches cold, so the next cycle is slower than the one
+#: that tripped the deadline (measured 82.4s median / 402.5s worst on
+#: 2026-08-19, against a 120s bound). With a progress beat, a stale heartbeat
+#: means what the healthcheck's own docstring always claimed it meant: no
+#: symbol has finished scanning in two minutes.
+#: Off-switch restores the old end-of-cycle-only behaviour.
+SCANNER_PROGRESS_HEARTBEAT: bool = os.getenv(
+    "SCANNER_PROGRESS_HEARTBEAT", "true",
+).strip().lower() not in {"0", "false", "no", "off"}
+
+#: Minimum gap between progress beats. A local ~20-byte write is cheap, but a
+#: bounded write rate keeps this off the "uncached hot-path I/O" list whatever
+#: the pair count grows to. Well under the 120s the healthcheck allows.
+_HEARTBEAT_PROGRESS_MIN_INTERVAL_SEC: float = 5.0
+
 # Higher-TF keys whose closed-candle counts fingerprint the SMC result cache.
 # Excludes 1m: the in-progress partial candle's last_close changes every tick,
 # while structural sweeps/FVGs/orderblocks are determined by completed 5m+
@@ -1962,6 +1985,12 @@ class Scanner:
         except Exception as exc:
             log.warning("mover seed failed for {}: {}", symbol, exc)
             return False
+        finally:
+            # Same argument as the mover re-seed sweep: this is in-cycle,
+            # REST-bound, and runs before any symbol is scanned, so a slow
+            # exchange here can hold the whole cycle with nothing having
+            # finished. Advancing through a promotion candidate is progress.
+            self._touch_heartbeat_progress()
 
         sym_candles = self.data_store.candles.get(symbol, {})
         c5 = sym_candles.get("5m", {})
@@ -2361,6 +2390,14 @@ class Scanner:
                 log.debug("mover candle refresh: re-seeded {}", sym)
             except Exception as exc:
                 log.warning("mover candle refresh failed for {}: {}", sym, exc)
+            finally:
+                # This runs BEFORE the per-symbol scans and is REST-bound, so a
+                # slow exchange here can hold the cycle for minutes with no
+                # symbol having finished scanning yet. A beat is owed wherever
+                # the loop demonstrably advances through a unit of work —
+                # otherwise the wedge detector fires on a re-seed sweep that is
+                # working, which is the very confusion this change removes.
+                self._touch_heartbeat_progress()
 
         await asyncio.gather(*[_reseed(s) for s in to_refresh])
 
@@ -2986,6 +3023,15 @@ class Scanner:
         self.last_slow_cycle_sec: float = 0.0
         self.last_slow_cycle_at: float = 0.0
         self.last_cycle_at: float = 0.0
+        #: Throttle + census for the progress heartbeat
+        #: (``SCANNER_PROGRESS_HEARTBEAT``). Declared HERE rather than in
+        #: ``__init__`` for this docstring's own reason: ``cycle_health`` reads
+        #: the census, and a borrowed reader must borrow the declaration with
+        #: it. Monotonic clock, because a wall-clock step backwards would
+        #: suppress every further beat until real time caught up — manufacturing
+        #: the exact stale heartbeat this mechanism exists to prevent.
+        self._last_heartbeat_write_mono: float = -1e9
+        self._heartbeat_progress_writes: int = 0
         #: Wall-clock start of the cycle currently running, or 0.0 before the
         #: first one. Reported as an AGE so a hung cycle is visible while it is
         #: still hanging rather than only after it finishes — if it ever does.
@@ -3011,8 +3057,14 @@ class Scanner:
         ``healthcheck.py`` fails when that file is older than
         ``_HEARTBEAT_MAX_AGE_SECONDS`` (120s); three consecutive failures at a
         30s interval flip the container unhealthy and the autoheal sidecar
-        restarts it.  So cycle wall-time *is* heartbeat age, and a cycle past
-        the deadline is a restart in progress.
+        restarts it.  Until 2026-08-19 the cycle end was that file's only
+        writer, so cycle wall-time *was* heartbeat age and a cycle past the
+        deadline was a restart in progress — the loop that emptied the feed
+        every ~15 minutes.  ``_touch_heartbeat_progress`` now beats on a
+        finished SYMBOL, so the two are separate quantities: this one is how
+        long the work takes, the heartbeat is whether the work is advancing.
+        A slow cycle is still a problem worth this counter; it is no longer a
+        restart.
 
         It was computed every cycle and read by nothing (2026-08-19):
         ``telemetry.scan_latency_ms`` reached a log line and a Telegram command
@@ -3117,10 +3169,20 @@ class Scanner:
                 k: round(v, 2)
                 for k, v in sorted(self._stage_timing.items(), key=lambda kv: -kv[1])
             } if self._cycle_started_at else {},
-            "heartbeat_age_sec": (
+            # The age of the file `healthcheck.py` actually stats. Until
+            # 2026-08-19 this key was computed from `last_cycle_at` — the age of
+            # the last COMPLETED cycle — which was the same number only while
+            # the cycle end was the heartbeat's only writer. With a progress
+            # beat it is not, and a key named for the heartbeat that reports
+            # something else is how ops grades a hang it cannot see. Both are
+            # published, under the name each one is.
+            "heartbeat_age_sec": self._heartbeat_file_age_sec(),
+            "cycle_completed_age_sec": (
                 round(max(0.0, time.time() - self.last_cycle_at), 2)
                 if self.last_cycle_at else None
             ),
+            "progress_heartbeat_enabled": SCANNER_PROGRESS_HEARTBEAT,
+            "heartbeat_progress_writes": self._heartbeat_progress_writes,
             "executor_workers": SCAN_EXECUTOR_WORKERS,
             "max_concurrent_scans": _MAX_CONCURRENT_SCANS,
         }
@@ -3134,6 +3196,44 @@ class Scanner:
                 fh.write(str(time.time()))
         except OSError:
             pass  # Best-effort; don't crash the scan loop
+        else:
+            self._last_heartbeat_write_mono = time.monotonic()
+
+    def _touch_heartbeat_progress(self) -> None:
+        """Beat the heartbeat because a symbol finished, throttled.
+
+        The distinction this method exists for: the end-of-cycle beat says *a
+        cycle completed*, this one says *the loop is advancing*. Only the second
+        is what an autoheal restart can cure, and only the second is what
+        `healthcheck.py` claims to be measuring.
+
+        Deliberately NOT a bare ``_touch_heartbeat()`` per symbol: the throttle
+        bounds the write rate at ~12/min regardless of pair count, and the
+        counter is published so a reader can tell a heartbeat kept fresh by
+        progress from one kept fresh by cycles completing — a lane that beats
+        only at cycle end is a scanner whose symbols are not finishing, which is
+        a different fault with a different fix.
+        """
+        if not SCANNER_PROGRESS_HEARTBEAT:
+            return
+        now = time.monotonic()
+        if now - self._last_heartbeat_write_mono < _HEARTBEAT_PROGRESS_MIN_INTERVAL_SEC:
+            return
+        self._touch_heartbeat()
+        self._heartbeat_progress_writes += 1
+
+    def _heartbeat_file_age_sec(self) -> Optional[float]:
+        """Age of the heartbeat file itself, in seconds — ``None`` if unreadable.
+
+        Read from the same ``mtime`` `healthcheck.py` stats, not from an
+        in-process timestamp: the file lives on the data volume and survives a
+        restart, so a value derived in-process would disagree with the one that
+        decides whether this container lives.
+        """
+        try:
+            return round(max(0.0, time.time() - os.path.getmtime(self._HEARTBEAT_PATH)), 2)
+        except OSError:
+            return None
 
     def _write_breaker_status(self) -> None:
         """Publish a small circuit-breaker snapshot to the data volume so the
@@ -3324,9 +3424,20 @@ class Scanner:
         return result
 
     async def _scan_symbol_bounded(self, sem: asyncio.Semaphore, symbol: str, volume_24h: float) -> None:
-        """Acquire *sem* then delegate to :meth:`_scan_symbol`."""
+        """Acquire *sem* then delegate to :meth:`_scan_symbol`.
+
+        Beats the heartbeat on the way out, so the file records that the scan
+        loop is ADVANCING rather than that a cycle finished inside the
+        healthcheck's window. The beat is in a ``finally``: a symbol that raised
+        still proves the loop is running — ``asyncio.gather`` collects the
+        exception and the cycle carries on — and a scanner that only counted
+        clean symbols as progress would restart the container over one bad pair.
+        """
         async with sem:
-            await self._scan_symbol(symbol, volume_24h)
+            try:
+                await self._scan_symbol(symbol, volume_24h)
+            finally:
+                self._touch_heartbeat_progress()
 
     def _load_candles(self, symbol: str) -> Dict[str, dict]:
         """Load candles — delegated to DataFetcher."""

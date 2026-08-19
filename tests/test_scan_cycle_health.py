@@ -14,7 +14,11 @@ point: none crashed and none left an empty screen.
 """
 from __future__ import annotations
 
+import asyncio as _asyncio
+import os as _os
 import time as _time
+
+import healthcheck
 
 import pytest
 
@@ -131,6 +135,9 @@ class _CycleRecorder:
     _record_cycle_time = Scanner._record_cycle_time
     _uptime_sec = Scanner._uptime_sec
     cycle_health = Scanner.cycle_health
+    _touch_heartbeat = Scanner._touch_heartbeat
+    _touch_heartbeat_progress = Scanner._touch_heartbeat_progress
+    _heartbeat_file_age_sec = Scanner._heartbeat_file_age_sec
 
     def __init__(self) -> None:
         # Borrow the DECLARATION too, not only the readers. Typing the counter
@@ -146,6 +153,13 @@ class _CycleRecorder:
         # test says otherwise: the boot split must not silently swallow the
         # breaches the older tests are asserting on.
         self._scanner_started_at = _time.monotonic() - 10_000.0
+        # Borrowed reader, borrowed declaration — `cycle_health` now stats the
+        # heartbeat file. Pointed at a path that does not exist so the default
+        # is the hermetic one; `_Beater` below overrides it with a real temp
+        # file. The class attribute on Scanner is the repo's `data/` path, and
+        # a test reading that would pass or fail on whether someone had run the
+        # engine locally.
+        self._HEARTBEAT_PATH = "/nonexistent/scanner_heartbeat"
 
 
 def test_cycle_health_splits_pressure_from_a_earned_restart():
@@ -548,8 +562,19 @@ def test_an_in_flight_cycle_is_visible_before_it_completes():
     )
 
 
-def test_heartbeat_age_is_reported_because_it_is_what_kills_the_container():
-    """`healthcheck.py` grades this and nothing else; the page must show it."""
+def test_the_completed_cycle_age_is_reported_beside_the_beat():
+    """`healthcheck.py` grades the heartbeat FILE; the page must show it.
+
+    This test asserted the same property against `heartbeat_age_sec` until
+    2026-08-19, when the beat stopped being written only at the end of a cycle.
+    The assertion would still have passed — the key was computed from
+    `last_cycle_at` and nothing had told it otherwise — which is precisely the
+    rot case: an assertion outliving its premise at the moment somebody changes
+    the premise. The completed-cycle age is still worth reporting (a cycle that
+    has not finished in ten minutes is real news); it is simply no longer the
+    quantity that decides whether the container lives, and it is now named for
+    what it is.
+    """
     import time as _t
 
     from config import SCAN_CYCLE_KILL_SEC
@@ -559,9 +584,9 @@ def test_heartbeat_age_is_reported_because_it_is_what_kills_the_container():
     rec.last_cycle_at = _t.time() - (SCAN_CYCLE_KILL_SEC + 40)
 
     h = rec.cycle_health()
-    assert h["heartbeat_age_sec"] > SCAN_CYCLE_KILL_SEC, (
-        "past the deadline the healthcheck enforces, while every completed-cycle "
-        "counter still reads clean"
+    assert h["cycle_completed_age_sec"] > SCAN_CYCLE_KILL_SEC
+    assert h["heartbeat_age_sec"] is None, (
+        "no beat file here, and an unreadable beat must never read as fresh"
     )
 
 
@@ -633,3 +658,110 @@ def test_the_in_flight_cycle_reports_the_stage_it_is_stuck_in():
 def test_in_flight_stages_are_empty_before_any_cycle_starts():
     rec = _CycleRecorder()
     assert rec.cycle_health()["in_flight_stages"] == {}
+
+
+# ---------------------------------------------------------------------------
+# 4. The heartbeat: progress, not completion
+# ---------------------------------------------------------------------------
+#
+# The 2026-08-19 restart loop. `healthcheck.py` fails when the heartbeat file
+# is older than 120s, three failures flip the container unhealthy and autoheal
+# restarts it — and the file's only writer was the END of a scan cycle. So
+# "heartbeat age" and "cycle wall-time" were one number, and a cycle slower
+# than the deadline WAS a restart however healthily the loop was advancing.
+# The restart then re-seeded every pair over REST and rebuilt the indicator
+# caches cold, making the next cycle slower than the one that tripped it.
+
+
+class _Beater(_CycleRecorder):
+    """The heartbeat half of Scanner, over a temp path. Real methods, again."""
+
+    _scan_symbol_bounded = Scanner._scan_symbol_bounded
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self._HEARTBEAT_PATH = path
+        self.scanned: list = []
+        self.raise_on: set = set()
+
+    async def _scan_symbol(self, symbol: str, volume_24h: float) -> None:
+        self.scanned.append(symbol)
+        if symbol in self.raise_on:
+            raise RuntimeError("evaluator blew up")
+
+
+def _age(path: str) -> float:
+    return _time.time() - _os.path.getmtime(path)
+
+
+async def test_a_finished_symbol_beats_the_heartbeat(tmp_path):
+    """A slow cycle keeps beating, because the beat means progress."""
+    p = str(tmp_path / "scanner_heartbeat")
+    b = _Beater(p)
+    await b._scan_symbol_bounded(_asyncio.Semaphore(1), "BTCUSDT", 1.0)
+
+    assert b.scanned == ["BTCUSDT"]
+    assert _os.path.isfile(p), "no beat: a slow cycle is a restart again"
+    assert b._heartbeat_progress_writes == 1
+
+
+async def test_a_raising_symbol_still_counts_as_progress(tmp_path):
+    """`gather` collects the exception and the cycle carries on — so the loop
+    IS advancing, and a scanner that only counted clean symbols would restart
+    the container over one bad pair."""
+    p = str(tmp_path / "scanner_heartbeat")
+    b = _Beater(p)
+    b.raise_on = {"BADUSDT"}
+    with pytest.raises(RuntimeError):
+        await b._scan_symbol_bounded(_asyncio.Semaphore(1), "BADUSDT", 1.0)
+    assert b._heartbeat_progress_writes == 1
+
+
+async def test_the_beat_is_throttled_not_per_symbol(tmp_path):
+    """Bounded write rate regardless of pair count — and well under the 120s
+    the healthcheck allows, so the throttle can never itself cause a restart."""
+    from src.scanner import _HEARTBEAT_PROGRESS_MIN_INTERVAL_SEC
+
+    p = str(tmp_path / "scanner_heartbeat")
+    b = _Beater(p)
+    sem = _asyncio.Semaphore(1)
+    for i in range(50):
+        await b._scan_symbol_bounded(sem, f"SYM{i}USDT", 1.0)
+    assert b._heartbeat_progress_writes == 1
+    assert _HEARTBEAT_PROGRESS_MIN_INTERVAL_SEC < healthcheck._HEARTBEAT_MAX_AGE_SECONDS
+
+
+async def test_the_progress_beat_has_an_off_switch(tmp_path, monkeypatch):
+    p = str(tmp_path / "scanner_heartbeat")
+    b = _Beater(p)
+    monkeypatch.setattr("src.scanner.SCANNER_PROGRESS_HEARTBEAT", False)
+    await b._scan_symbol_bounded(_asyncio.Semaphore(1), "BTCUSDT", 1.0)
+    assert b._heartbeat_progress_writes == 0
+    assert not _os.path.isfile(p)
+
+
+def test_heartbeat_age_reports_the_file_the_healthcheck_stats(tmp_path):
+    """The key named for the heartbeat must report the heartbeat.
+
+    It was computed from `last_cycle_at` — the age of the last COMPLETED cycle —
+    which was the same number only while the cycle end was the only writer. Ops
+    grades `/system/liveness` "hanging" off this key, so with a progress beat in
+    place a key still reporting completion would keep calling a healthy slow
+    cycle a hang. Both are published, under the name each one is.
+    """
+    p = str(tmp_path / "scanner_heartbeat")
+    b = _Beater(p)
+    b._touch_heartbeat()
+    b.last_cycle_at = _time.time() - 500.0
+
+    h = b.cycle_health()
+    assert h["heartbeat_age_sec"] < 5, "reported the cycle age, not the beat"
+    assert h["cycle_completed_age_sec"] == pytest.approx(500.0, abs=5)
+    assert h["progress_heartbeat_enabled"] is True
+
+
+def test_heartbeat_age_is_none_when_the_file_is_unreadable(tmp_path):
+    """Absent is not fresh. A missing file must not read as age 0 — that is the
+    one direction in which this key can hide a real wedge."""
+    b = _Beater(str(tmp_path / "never_written"))
+    assert b.cycle_health()["heartbeat_age_sec"] is None
