@@ -346,6 +346,17 @@ class RedisEngineFacade:
         block = self._state.get("loop_health")
         return dict(block) if isinstance(block, dict) else {}
 
+    def get_host_resources(self) -> dict:
+        """The engine container's own resource reading, as it published it.
+
+        Never measured here. This process is the API container: its cgroup is a
+        different cgroup, and sampling it would answer a question about the
+        wrong container while looking exactly like an answer about the right
+        one — which is the failure mode that makes it worth a docstring.
+        """
+        block = self._state.get("host_resources")
+        return dict(block) if isinstance(block, dict) else {}
+
     def get_auto_execution_status(self) -> dict:
         return dict(self._state.get("auto_execution_status", {
             "mode": self._current_auto_mode,

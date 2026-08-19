@@ -893,6 +893,18 @@ class CryptoSignalEngine:
 
         return _loop_health(self)
 
+    def get_host_resources(self) -> Dict[str, Any]:
+        """This process's own CPU / memory / disk headroom.
+
+        Mirrors :meth:`RedisEngineFacade.get_host_resources`, and in
+        single-process mode this IS the engine container, so sampling here is
+        correct. In isolated mode the facade's version wins for the reason its
+        docstring gives: the API container's cgroup is not this one.
+        """
+        from src.api.snapshot_writer import _host_resources
+
+        return _host_resources()
+
     def _build_paper_order_manager(self):
         """Construct the paper-mode order manager.
 

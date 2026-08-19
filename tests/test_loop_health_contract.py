@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import time as _time
 
+import pytest
+
 
 from src.api import snapshot_writer as sw
 from src.scanner import Scanner
@@ -160,3 +162,104 @@ def test_the_facade_reads_the_same_key_the_writer_wrote():
 
     facade._state = {}
     assert facade.get_loop_health() == {}, "absent must be empty, never zeros"
+
+
+# ---------------------------------------------------------------------------
+# Host resources — the same chain, and the same trap one container over.
+# ---------------------------------------------------------------------------
+
+def test_host_resources_ride_the_same_published_block():
+    """Measured in the ENGINE container, or it measures the wrong container.
+
+    In isolated mode the API process serves `/internal/diag/host-resources`.
+    If that handler sampled its own cgroup it would report a near-idle HTTP
+    server as the engine's CPU load — a full-looking answer about the wrong
+    process, which is the trail-governor INDEX COLD defect on the one number
+    the owner asked about first.
+    """
+    writer = sw.SnapshotWriter(_Engine(), redis_client=None)
+    state = writer._build_engine_state(["scanner", "trade_monitor"])
+    assert "host_resources" in state, (
+        "ops reads engine_state['host_resources']; moving it empties the page"
+    )
+    block = state["host_resources"]
+    assert "cpu" in block and "effective_config" in block
+    # Survives the encoder the writer uses for Redis.
+    assert json.loads(json.dumps(block))["cpu"]["quota_cores"] is not None
+
+
+def test_the_facade_never_samples_its_own_cgroup():
+    """It returns what was published, and {} when nothing was."""
+    from src.api.redis_engine import RedisEngineFacade
+
+    facade = RedisEngineFacade.__new__(RedisEngineFacade)
+    facade._state = {"host_resources": {"cpu": {"cores_used": 3.9}}}
+    assert facade.get_host_resources()["cpu"]["cores_used"] == 3.9
+
+    facade._state = {}
+    assert facade.get_host_resources() == {}, "absent must be empty, never zeros"
+
+
+def test_the_effective_config_is_the_running_module_not_a_literal():
+    """A deploy that did not take must be distinguishable from a bad fix.
+
+    These are read out of the module the scanner is using, so they move when
+    the process's config moves. Asserting them against `config` rather than
+    against numbers pins that they are not a second hand-typed copy.
+    """
+    import config
+
+    cfg = sw._host_resources()["effective_config"]
+    assert cfg["scan_executor_workers"] == config.SCAN_EXECUTOR_WORKERS
+    assert cfg["scan_cycle_kill_sec"] == config.SCAN_CYCLE_KILL_SEC
+    assert cfg["indicator_cache_content_key"] == bool(config.INDICATOR_CACHE_CONTENT_KEY)
+
+
+def test_an_unreadable_cgroup_is_named_never_zeroed():
+    """A 0.0% CPU reading over a pinned engine is worse than a blank."""
+    import src.host_resources as hr
+
+    hr._last_cpu = None
+    original = hr._cpu_seconds_used
+    try:
+        hr._cpu_seconds_used = lambda: (None, "no_cgroup_cpu_accounting")
+        cpu = hr.sample()["cpu"]
+        assert cpu["cores_used"] is None, "unknown must not render as idle"
+        assert cpu["pct_of_quota"] is None
+        assert cpu["reason"], "and it must say why"
+    finally:
+        hr._cpu_seconds_used = original
+        hr._last_cpu = None
+
+
+def test_the_first_sample_refuses_a_rate_rather_than_inventing_one():
+    """A rate needs two readings. The first one says so instead of printing 0."""
+    import src.host_resources as hr
+
+    hr._last_cpu = None
+    first = hr.sample()["cpu"]
+    if first["source"] == "no_cgroup_cpu_accounting":
+        pytest.skip("no cgroup CPU accounting in this environment")
+    assert first["cores_used"] is None
+    assert "first sample" in first["reason"]
+    second = hr.sample()["cpu"]
+    assert second["cores_used"] is not None, "the second reading measures"
+    hr._last_cpu = None
+
+
+def test_a_counter_that_went_backwards_is_refused_not_published():
+    """A replaced container resets the counter; a negative delta is not load."""
+    import src.host_resources as hr
+
+    hr._last_cpu = None
+    original = hr._cpu_seconds_used
+    try:
+        hr._cpu_seconds_used = lambda: (500.0, "cgroup_v2")
+        hr.sample()
+        hr._cpu_seconds_used = lambda: (1.0, "cgroup_v2")   # container replaced
+        cpu = hr.sample()["cpu"]
+        assert cpu["cores_used"] is None
+        assert "reset" in cpu["reason"]
+    finally:
+        hr._cpu_seconds_used = original
+        hr._last_cpu = None
