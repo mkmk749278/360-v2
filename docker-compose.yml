@@ -102,13 +102,27 @@ services:
     # so RAM stays out of the way as the scan set grows (the RAM-derived
     # ceiling moves past 600 pairs), not because it was under pressure.
     #
-    # Budget check against the 4-core host: engine 2.5 + api 0.5 + signing
-    # 0.5 + autoheal 0.1 + watchdog 0.2 = 3.8 of 4. These are ceilings, not
-    # reservations, and measured total usage is ~1 core. The signing service
-    # keeps its own separate 0.5-core cap, so the order path can never be
-    # starved by a busy scanner — the only part of this that touches safety.
+    # Budget check against the 4-core host: engine 3.2 + api 0.5 + signing
+    # 0.5 + autoheal 0.1 + watchdog 0.2 = 4.5 of 4. These are ceilings, not
+    # reservations. The signing service keeps its own separate 0.5-core cap, so
+    # the order path can never be starved by a busy scanner — the only part of
+    # this that touches safety.
+    #
+    # Raised 2.5 -> 3.2 on 2026-08-19. Measured on the live box: the engine sat
+    # at 182-263% of its 2.5-core cap (bursting to 394%) while the HOST load
+    # averaged 2.3-3.2 of 4 — i.e. ~1.4 cores were idle *behind the cap*, and
+    # scan cycles were running 38-402s against a 15s target. That is capacity
+    # already paid for and not used.
+    #
+    # It is a mitigation, not the fix, and the number is deliberately modest.
+    # The engine is one Python process: indicator compute and JSON persistence
+    # hold the GIL, so past ~1 core of that work extra cores buy nothing. The
+    # cure for the cycle time is in the code (deferred edge-store writes,
+    # vectorised indicators); this just stops the cgroup throttling the loop
+    # while the box has room. SCAN_EXECUTOR_WORKERS reads this quota directly
+    # via config.cpu_budget(), so raising it here raises the thread pool too.
     mem_limit: 3g
-    cpus: "2.5"
+    cpus: "3.2"
     logging:
       driver: json-file
       options:

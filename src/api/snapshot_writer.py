@@ -45,6 +45,50 @@ _AGENTS_INTERVAL_S   = 60
 _OVERRUN_BUDGET_S = _CYCLE_INTERVAL_S
 
 
+def _loop_health(engine: Any) -> dict[str, Any]:
+    """Engine-loop health for ``snapshot:engine_state``.
+
+    Three producers, each keyed under its own name and each independently
+    absent when its subsystem has not started.  ``None`` means *this engine did
+    not report it* — an older build, or a subsystem not running — and is never
+    collapsed to a zero, because a zero here reads as a healthy loop and would
+    be the reassuring answer on exactly the surface built to stop that.
+
+    Pure reads of in-memory counters; no network, no disk, and it runs inside
+    the snapshot writer's executor thread rather than on the loop.
+    """
+    out: dict[str, Any] = {
+        "scan_cycle": None,
+        "indicator_cache": None,
+        "snapshot_writer": None,
+        "strategy_edge": None,
+    }
+    scanner = getattr(engine, "_scanner", None)
+    if scanner is not None and hasattr(scanner, "cycle_health"):
+        try:
+            out["scan_cycle"] = scanner.cycle_health()
+        except Exception:
+            pass
+    if scanner is not None and hasattr(scanner, "indicator_cache_health"):
+        try:
+            out["indicator_cache"] = scanner.indicator_cache_health()
+        except Exception:
+            pass
+    writer = getattr(engine, "_snapshot_writer", None)
+    if writer is not None and hasattr(writer, "health"):
+        try:
+            out["snapshot_writer"] = writer.health()
+        except Exception:
+            pass
+    try:
+        from src.strategy_edge import get_strategy_edge_store
+
+        out["strategy_edge"] = get_strategy_edge_store().flush_health()
+    except Exception:
+        pass
+    return out
+
+
 class SnapshotWriter:
     """Serialises engine state to Redis every scan cycle.
 
@@ -547,6 +591,15 @@ class SnapshotWriter:
             "active_signal_dispatch": active_signal_dispatch,
             "auto_execution_status": auto_status,
             "background_tasks": list(task_names),
+            # Engine-loop health, published so ops can render the numbers that
+            # decide whether this container survives (2026-08-19).  Scan-cycle
+            # wall-time is heartbeat age — the scanner touches its heartbeat
+            # once per cycle and healthcheck.py kills the container when that
+            # file goes stale — and it had lived only in a log line.  The
+            # snapshot writer's own counters ride alongside because a slow
+            # writer and a slow scan loop have the same cause and different
+            # fixes, and a reader comparing them needs both on one payload.
+            "loop_health": _loop_health(engine),
             # Pairs X-ray (regular universe + live mover-promoted) so the ops
             # Pairs page reflects the engine container's in-memory scanner
             # state even from the isolated API container.

@@ -3464,7 +3464,17 @@ class TestScanContextCaching:
 
     @pytest.mark.asyncio
     async def test_indicator_cache_keyed_per_timeframe(self):
-        """Cache structure is symbol → {tf: (len, ind)}; entry per timeframe."""
+        """Cache structure is symbol → {tf: (fingerprint, ind)}, one per timeframe.
+
+        The fingerprint was the bare candle COUNT until 2026-08-19, and this
+        assertion said so. That premise died with the fix: a count stops
+        changing at ``_MAX_CANDLES_PER_BUCKET`` while bars keep arriving, so a
+        full bucket's indicators froze. The per-timeframe *structure* is what
+        this test was really protecting and it is unchanged, so the assertion
+        is narrowed to the key's identity rather than its old shape — the
+        fingerprint's own behaviour is pinned in
+        ``tests/test_scan_cycle_health.py``.
+        """
         scanner = self._make_scanner_with_executor_tracking()
         candles = _make_candles_dict()
         scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
@@ -3472,9 +3482,9 @@ class TestScanContextCaching:
         await scanner._build_scan_context("BTCUSDT", 1e9)
         cache = scanner._indicator_cache["BTCUSDT"]
         assert set(cache.keys()) == {"1m", "5m", "15m", "1h"}
-        # Each entry is (candle_count, indicator_dict).
-        n_len, ind = cache["5m"]
-        assert n_len == len(candles["5m"]["close"])
+        fingerprint, ind = cache["5m"]
+        assert fingerprint == Scanner._series_fingerprint(candles["5m"])
+        assert fingerprint[0] == len(candles["5m"]["close"])
         assert ind == {"rsi_last": 50.0}
 
 

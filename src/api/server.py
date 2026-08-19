@@ -2035,6 +2035,37 @@ def build_app(
             )
         return {"tasks": names, "count": len(names)}
 
+    @app.get(
+        "/internal/diag/loop-health",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def diag_loop_health() -> Dict[str, Any]:
+        """Scan-cycle wall-time, snapshot-writer timing, edge-store flush state.
+
+        The numbers that decide whether the engine container survives, and
+        until 2026-08-19 none of them left the process. ``scan_latency_ms`` was
+        computed every cycle and reached a log line and a Telegram command —
+        so a scan loop running at 38-402s against a 15s target, tripping
+        healthcheck.py's 120s deadline and getting the container restarted by
+        autoheal, was invisible to ops, to the truth report and to the
+        monitoring agent alike.
+
+        Mode-agnostic by the same construction as ``/internal/diag/tasks``: in
+        isolated mode ``engine`` is the ``RedisEngineFacade`` and this reads
+        the block the engine container published into ``engine_state``, because
+        the API container cannot see the scanner at all.
+
+        An absent block returns ``{}`` and the reader must render *not
+        reported*. Zeros here would read as a healthy loop.
+        """
+        getter = getattr(engine, "get_loop_health", None)
+        block = getter() if callable(getter) else {}
+        return {
+            "loop_health": block if isinstance(block, dict) else {},
+            "reported": bool(block),
+        }
+
     # ---- Activity ----
 
     @app.get(

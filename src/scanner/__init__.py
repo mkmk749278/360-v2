@@ -118,6 +118,9 @@ from config import (
     SURGE_PROMOTION_VOLUME_MULTIPLIER,
     TIER2_SCAN_EVERY_N_CYCLES,
     SCAN_EXECUTOR_WORKERS,
+    INDICATOR_CACHE_CONTENT_KEY,
+    SCAN_CYCLE_KILL_SEC,
+    SCAN_CYCLE_WARN_SEC,
     SCAN_STAGE_TIMING_ENABLED,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
@@ -332,6 +335,15 @@ _MAX_CONCURRENT_SCANS: int = 20
 # while structural sweeps/FVGs/orderblocks are determined by completed 5m+
 # candles and remain stable across ~20 consecutive 15s scan cycles.
 _SMC_CACHE_TFS: tuple = ("4h", "1h", "15m", "5m")
+
+#: The candle store's own bucket cap, imported rather than re-typed.
+#:
+#: This number is why the count-only cache key was a bug: every write path in
+#: `historical_data` trims to it, so a full bucket's length is constant
+#: forever.  A second copy here would be one more thing to go stale — the
+#: defect this file has paid for under several names — so it is derived from
+#: the module that enforces it.
+from src.historical_data import _MAX_CANDLES_PER_BUCKET as _CANDLE_BUCKET_CAP
 
 # Protective mode thresholds — trigger when market is too volatile to trade
 _PROTECTIVE_MODE_VOLATILE_THRESHOLD: int = 10   # volatile_unsuitable count across all channels
@@ -1381,16 +1393,40 @@ class Scanner:
         # Running these synchronous operations in threads keeps the event loop
         # free so HTTP request handlers are never blocked by scan work.
         #
-        # Thread count: governed by SCAN_EXECUTOR_WORKERS (env-overridable,
-        # default 2× cpu_count). Capped at _MAX_CONCURRENT_SCANS.  With the
+        # Thread count: governed by SCAN_EXECUTOR_WORKERS (env-overridable),
+        # defaulted off the container's **cgroup CPU quota** rather than the
+        # host's core count — see `config.cpu_budget`.  It was 2× os.cpu_count()
+        # = 8 against a 2.5-core quota, and indicator compute is GIL-bound, so
+        # the extra threads bought context switches and no throughput while the
+        # event loop waited longer for its turn (2026-08-19).  With the
         # SMC+indicator caches warm, most cycles submit few executor tasks
         # (only pairs whose candle counts changed), so the default is sufficient.
-        # Raise via .env if profiling shows sustained executor queue depth.
+        # Raise via .env only if profiling shows sustained executor queue depth
+        # *and* the quota has room.
         from concurrent.futures import ThreadPoolExecutor as _TPE
         self._scan_executor = _TPE(
             max_workers=SCAN_EXECUTOR_WORKERS,
             thread_name_prefix="scanner-compute",
         )
+
+        # Indicator/SMC cache-key health (2026-08-19).  The key used to be the
+        # bar COUNT, which stops changing at the 1,000-bar bucket cap — so
+        # these count how much of the book was in that state.
+        self.indicator_cache_capped_hits: int = 0
+        self.indicator_cache_stale_avoided: int = 0
+        self.indicator_cache_undatable: int = 0
+        self.indicator_cache_undatable_at_cap: int = 0
+
+        # Scan-cycle timing, read by the `scan_cycle` liveness probe and
+        # published into snapshot:engine_state.  The heartbeat file is touched
+        # once per cycle and healthcheck.py kills the container when it goes
+        # stale, so these are the numbers that decide whether the engine lives.
+        self.cycle_count: int = 0
+        self.last_cycle_sec: float = 0.0
+        self.worst_cycle_sec: float = 0.0
+        self.cycles_over_warn: int = 0
+        self.cycles_over_kill: int = 0
+        self.last_cycle_at: float = 0.0
 
         # Tiered scanning counters
         self._scan_cycle_count: int = 0
@@ -2560,6 +2596,7 @@ class Scanner:
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             self.telemetry.set_scan_latency(elapsed_ms)
+            self._record_cycle_time(elapsed_ms / 1000.0)
 
             # Per-stage timing diagnostic: sums are wall-time accumulated across
             # all concurrent symbol scans this cycle, so they can exceed the
@@ -2801,6 +2838,135 @@ class Scanner:
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         "data", "circuit_breaker_status.json",
     )
+
+    @staticmethod
+    def _series_fingerprint(cd: dict) -> Tuple[int, Any]:
+        """Identify a candle series by ``(bar count, newest bar's open_time)``.
+
+        The count alone was the cache key until 2026-08-19, and it is silent by
+        construction once a bucket reaches ``_MAX_CANDLES_PER_BUCKET``: every
+        write path trims to the cap, so the length stops changing while bars
+        keep arriving.  Everything keyed on it — the per-timeframe indicator
+        cache and the SMC cache — then becomes a permanent hit serving values
+        frozen at the moment the bucket filled.  ``open_time`` moves on every
+        appended bar and on an in-place revision of the newest one, so it is
+        the thing that actually says "this series changed".
+
+        **Three cases, and the third is chosen rather than inherited.**  A
+        bucket with no usable timestamps cannot be dated, and what to do about
+        that depends entirely on whether it is at the cap:
+
+        * *datable* → ``(n, open_time)``.  Exact.
+        * *undatable, below the cap* → ``(n, None)``.  Count-only, which is the
+          pre-2026-08-19 key and is perfectly sound here: the length still
+          advances every time a bar lands, which is what that key relied on.
+        * *undatable, AT the cap* → ``(n, <unique object>)``, which can never
+          equal a stored key, so the cache misses every cycle and the values
+          are always fresh.
+
+        The last one deserves its own sentence because the obvious spellings
+        are both wrong.  ``None`` there restores exactly the frozen-indicator
+        bug.  ``float("nan")`` happens to force a miss — ``nan != nan`` — but
+        by accident of IEEE-754 rather than by decision, and a reader
+        simplifying it to a shared NaN constant would silently reintroduce the
+        freeze, because a tuple compares its elements by identity first.  The
+        sentinel says what is meant: *this series cannot prove it changed and
+        cannot prove it didn't, so recompute*.  These values size live SL/TP
+        geometry; paying for a recompute is the cheap side of that trade.
+        """
+        closes = cd.get("close", [])
+        n = len(closes)
+        if not INDICATOR_CACHE_CONTENT_KEY:
+            # Kill switch, off by default. Restores the pre-2026-08-19
+            # count-only key without a code change — see the config docstring
+            # for why this is a revert path and not a dark flag.
+            return (n, None)
+        times = cd.get("open_time", [])
+        if len(times) == n and n > 0:
+            try:
+                newest = float(times[-1])
+                if newest == newest:  # not NaN
+                    return (n, newest)
+            except (TypeError, ValueError):
+                pass
+        if n >= _CANDLE_BUCKET_CAP:
+            return (n, object())
+        return (n, None)
+
+    def indicator_cache_health(self) -> Dict[str, Any]:
+        """Counters for the ``indicator_cache_key`` liveness probe.
+
+        Read ``stale_avoided`` first: it is the number of times the old
+        count-only key would have served indicators computed on different
+        bars, i.e. the size of the defect this fix removed.  ``capped_hits`` is
+        its denominator — how much of the book sits at the bucket cap, where
+        the old key was structurally unable to invalidate.
+
+        ``undatable_at_cap`` is a different state and never pooled with either:
+        a capped bucket whose bars carry no timestamps cannot prove it changed,
+        so it is recomputed every cycle.  That is correct but expensive, and
+        its fix is a bucket re-seed rather than anything in this cache.
+        """
+        return {
+            "capped_hits": self.indicator_cache_capped_hits,
+            "stale_avoided": self.indicator_cache_stale_avoided,
+            "undatable": self.indicator_cache_undatable,
+            "undatable_at_cap": self.indicator_cache_undatable_at_cap,
+            "bucket_cap": _CANDLE_BUCKET_CAP,
+        }
+
+    def _record_cycle_time(self, seconds: float) -> None:
+        """Accumulate scan-cycle wall-time for the ``scan_cycle`` probe.
+
+        This is the number that decides whether the container lives.  The
+        heartbeat file is touched **once, at the end of a cycle**, and
+        ``healthcheck.py`` fails when that file is older than
+        ``_HEARTBEAT_MAX_AGE_SECONDS`` (120s); three consecutive failures at a
+        30s interval flip the container unhealthy and the autoheal sidecar
+        restarts it.  So cycle wall-time *is* heartbeat age, and a cycle past
+        the deadline is a restart in progress.
+
+        It was computed every cycle and read by nothing (2026-08-19):
+        ``telemetry.scan_latency_ms`` reached a log line and a Telegram command
+        and appeared on no snapshot, no truth-report section and no ops page.
+        Measured cycles of 38-402s against a 15s target were therefore
+        invisible on every surface, which is why the restarts they caused had
+        no explanation.  In-memory counters only — no network, no disk.
+        """
+        self.cycle_count += 1
+        self.last_cycle_sec = seconds
+        self.worst_cycle_sec = max(self.worst_cycle_sec, seconds)
+        self.last_cycle_at = time.time()
+        # Two thresholds, never one.  ``over_warn`` is pressure and ``over_kill``
+        # is a restart that has already been earned; pooling them would let a
+        # book of merely-slow cycles hide the ones that actually killed the
+        # container, and the operator's next move differs for each.
+        if seconds > SCAN_CYCLE_WARN_SEC:
+            self.cycles_over_warn += 1
+        if seconds > SCAN_CYCLE_KILL_SEC:
+            self.cycles_over_kill += 1
+            log.warning(
+                "scan cycle took {:.1f}s, past the {}s healthcheck deadline — "
+                "sustained across 3 checks this restarts the container",
+                seconds, SCAN_CYCLE_KILL_SEC,
+            )
+
+    def cycle_health(self) -> Dict[str, Any]:
+        """Scan-cycle timing for the ``scan_cycle`` probe and the snapshot.
+
+        Pure read of in-memory counters, safe from any thread.
+        """
+        return {
+            "cycles": self.cycle_count,
+            "last_sec": round(self.last_cycle_sec, 2),
+            "worst_sec": round(self.worst_cycle_sec, 2),
+            "over_warn": self.cycles_over_warn,
+            "over_kill": self.cycles_over_kill,
+            "warn_sec": SCAN_CYCLE_WARN_SEC,
+            "kill_sec": SCAN_CYCLE_KILL_SEC,
+            "last_cycle_at": self.last_cycle_at,
+            "executor_workers": SCAN_EXECUTOR_WORKERS,
+        }
 
     def _touch_heartbeat(self) -> None:
         """Update the heartbeat file timestamp so the healthcheck can verify
@@ -3189,8 +3355,24 @@ class Scanner:
         # invalidated indicators for ALL timeframes every cycle — so 5m/15m/1h/
         # 4h/1d/1w were recomputed needlessly even though their bars hadn't
         # closed.  Cache each timeframe independently keyed on that timeframe's
-        # own candle count.  1m recomputes every cycle (scalping needs the live
-        # bar); the higher timeframes hit ~95% of cycles.
+        # own bars.  1m recomputes every cycle (scalping needs the live bar);
+        # the higher timeframes hit ~95% of cycles.
+        #
+        # The key was the candle COUNT alone, and that is a bug with a
+        # deadline on it (2026-08-19).  `_MAX_CANDLES_PER_BUCKET` is 1,000 and
+        # every write path trims to it, so once a bucket fills, `len(close)`
+        # never changes again — the key stops moving while the data keeps
+        # arriving, the cache becomes a permanent hit, and that timeframe's
+        # indicators freeze at whatever they were when the bucket capped.
+        # Production had already reached the cap on 1m, 15m and 1h; 5m was at
+        # 888 of 1,000.  It is #811's frozen-15m-ATR failure from the opposite
+        # direction, and `data_freshness` is structurally blind to it because
+        # that guard keys on how recently a kline ARRIVED.
+        #
+        # The key is now (count, newest bar's open_time).  Where a bucket
+        # carries no timestamps the count is all there is, so the fallback is
+        # kept and COUNTED rather than silently trusted — an undatable bucket
+        # at the cap is exactly the state that was wrong before.
         # ------------------------------------------------------------------
         loop = asyncio.get_running_loop()
         ticks, self._tick_source = resolve_recent_ticks(self.data_store, symbol)
@@ -3199,20 +3381,46 @@ class Scanner:
         _tfs_to_compute: Dict[str, dict] = {}
         indicators: Dict[str, dict] = {}
         for _tf, _cd in candles.items():
-            _n = len(_cd.get("close", []))
+            _fp = self._series_fingerprint(_cd)
             _hit = _sym_ind_cache.get(_tf)
-            if _hit is not None and _hit[0] == _n:
+            if not isinstance(_fp[1], float):
+                # `None` (below the cap, count-only key) or the forced-miss
+                # sentinel (at the cap).  Both mean the bars carry no usable
+                # timestamps; only the second is a fault, and it is named apart
+                # because its fix is a bucket re-seed, not a cache change.
+                self.indicator_cache_undatable += 1
+                if _fp[0] >= _CANDLE_BUCKET_CAP:
+                    self.indicator_cache_undatable_at_cap += 1
+            if _hit is not None and _hit[0] == _fp:
                 indicators[_tf] = _hit[1]
+                # A hit on a bucket at the cap.  NOT "a hit that used to be
+                # stale" — under the new key this one is a genuine hit, the
+                # series really did not change.  What it measures is the size
+                # of the population where the OLD key was structurally unable
+                # to invalidate at all, which is the denominator the
+                # `stale_avoided` count below needs to be read against.
+                if _fp[0] >= _CANDLE_BUCKET_CAP:
+                    self.indicator_cache_capped_hits += 1
             else:
                 _tfs_to_compute[_tf] = _cd
+                if _hit is not None and _hit[0][0] == _fp[0]:
+                    # Same bar COUNT, different newest bar. This is the exact
+                    # case the old key could not see: it would have returned a
+                    # hit and served indicators computed on different bars.
+                    # Every increment here is one frozen value that no longer
+                    # reaches scoring.
+                    self.indicator_cache_stale_avoided += 1
 
         # SMC cache: structural sweeps / FVGs / orderblocks are deterministic on
         # completed candles.  Fingerprint on closed 5m+ candle counts only — the
         # in-progress 1m partial candle is excluded because its last_close changes
         # every tick while the structures are unchanged.  Cache stays warm for the
         # ~5 cycles between 5m candle closes (~80-95% hit rate).
+        # Same defect, same fix: a length-only fingerprint over capped buckets
+        # never changes, so SMC structures would freeze exactly as the
+        # indicators did.
         _smc_fp = tuple(
-            len(candles.get(tf, {}).get("close", []))
+            self._series_fingerprint(candles.get(tf, {}))
             for tf in _SMC_CACHE_TFS
         )
         _cached_smc = self._smc_cache.get(symbol)
@@ -3227,7 +3435,9 @@ class Scanner:
                 _tfs_to_compute,
             )
             for _tf, _ind in _fresh.items():
-                _sym_ind_cache[_tf] = (len(_tfs_to_compute[_tf].get("close", [])), _ind)
+                _sym_ind_cache[_tf] = (
+                    self._series_fingerprint(_tfs_to_compute[_tf]), _ind
+                )
                 indicators[_tf] = _ind
         self._stage_timing["indicators"] += time.monotonic() - _t_ind
 

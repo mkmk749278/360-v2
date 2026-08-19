@@ -331,6 +331,21 @@ class RedisEngineFacade:
         tasks = self._state.get("background_tasks")
         return list(tasks) if isinstance(tasks, list) else []
 
+    def get_loop_health(self) -> dict:
+        """Engine-loop health, read from the snapshot the engine published.
+
+        Same reason as the task census above: in isolated mode the API process
+        cannot see the engine container's scanner, snapshot writer or edge
+        store, so those counters travel through ``engine_state``.
+
+        Returns ``{}`` when the engine has not published the block — an older
+        build, or a key past its TTL. The caller must render that as *not
+        reported* rather than as zeros: a zero here reads as a healthy loop,
+        which is the reassuring answer on exactly the surface built to stop it.
+        """
+        block = self._state.get("loop_health")
+        return dict(block) if isinstance(block, dict) else {}
+
     def get_auto_execution_status(self) -> dict:
         return dict(self._state.get("auto_execution_status", {
             "mode": self._current_auto_mode,

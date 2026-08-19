@@ -23,6 +23,7 @@ from typing import Any, Dict, Deque, List, Optional, Set, Tuple, Union
 
 from config import (
     PAIR_FETCH_INTERVAL_HOURS,
+    STRATEGY_EDGE_FLUSH_SEC,
     TOP50_FUTURES_ONLY,
 )
 from src.ai_engine import get_ai_insight
@@ -878,6 +879,20 @@ class CryptoSignalEngine:
             t.get_name() for t in asyncio.all_tasks() if not t.done()
         )
 
+    def get_loop_health(self) -> Dict[str, Any]:
+        """Scan-cycle / writer / edge-store counters for this process.
+
+        Mirrors :meth:`RedisEngineFacade.get_loop_health` so
+        ``/internal/diag/loop-health`` is mode-agnostic — the one that matters
+        in production is the facade's, because in isolated mode the API
+        container serving that route cannot see any of these objects. Which
+        process holds the state is not a deployment detail; the trail-governor
+        X-ray read INDEX COLD for exactly this reason.
+        """
+        from src.api.snapshot_writer import _loop_health
+
+        return _loop_health(self)
+
     def _build_paper_order_manager(self):
         """Construct the paper-mode order manager.
 
@@ -1713,6 +1728,50 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.error("Snapshot save error: %s", exc)
 
+    async def _strategy_edge_flush_loop(self) -> None:
+        """Persist the Layer-C edge matrix off the event loop.
+
+        The store is 40.8 MB / 11,261 cells in production and ``json.dump`` of
+        it costs ~2s of GIL-held CPU, so **where** that write happens decides
+        whether the engine stays healthy.  Until 2026-08-19 it happened inside
+        ``trade_monitor._record_outcome`` — a synchronous method called from
+        ``async def _evaluate_signal``, i.e. on the event loop — twice per
+        closed signal.  Measured scan cycles reached 402s against a 120s
+        healthcheck deadline and autoheal restarted the engine.
+
+        Three properties, each load-bearing:
+
+        * **``to_thread``, always.**  Even a flush that finds work must not run
+          on the loop thread; the whole point is that this write is slow.
+        * **``flush_if_dirty``, not ``save``.**  Most ticks have nothing to
+          write, and a clean tick has to cost a bool read rather than a full
+          serialise — otherwise the loop trades one stall for a scheduled one.
+        * **Bounded loss, stated.**  A crash between a record and the next
+          flush loses at most ``STRATEGY_EDGE_FLUSH_SEC`` of outcomes.  At the
+          default 30s that is a strictly better trade than the restarts the
+          synchronous write was causing, and the maintenance loop's own
+          ``flush_if_dirty`` calls still land every batch.
+        """
+        from src import fail_open
+        from src.strategy_edge import get_strategy_edge_store
+
+        log.info(
+            "Strategy-edge flusher started — deferred writes persisted every %ss",
+            STRATEGY_EDGE_FLUSH_SEC,
+        )
+        while True:
+            await asyncio.sleep(STRATEGY_EDGE_FLUSH_SEC)
+            try:
+                wrote = await asyncio.to_thread(
+                    get_strategy_edge_store().flush_if_dirty
+                )
+                if wrote:
+                    log.debug("strategy_edge: deferred write persisted")
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                fail_open.record("main.strategy_edge_flush", exc)
+
     async def _invalidation_audit_loop(self) -> None:
         """Periodically classify pending invalidation kills as PROTECTIVE /
         PREMATURE / NEUTRAL based on post-kill price action.
@@ -2098,7 +2157,11 @@ class CryptoSignalEngine:
                             fetch_ohlc_since=fetch_ohlc_since,
                             on_classified=_feed_edge,
                         )
-                        get_strategy_edge_store().save()
+                        # flush_if_dirty, not save(): three batches run inside one
+                        # maintenance cycle and each used to pay a full ~40 MB dump
+                        # even when its own batch classified nothing.  A clean store
+                        # now costs a bool read.
+                        get_strategy_edge_store().flush_if_dirty()
                         return counters
 
                     # Off the event loop: classification copies candle lists
@@ -2318,7 +2381,11 @@ class CryptoSignalEngine:
                             fetch_ohlc_since=fetch_ohlc_since,
                             on_classified=_feed_geometry_edge,
                         )
-                        get_strategy_edge_store().save()
+                        # flush_if_dirty, not save(): three batches run inside one
+                        # maintenance cycle and each used to pay a full ~40 MB dump
+                        # even when its own batch classified nothing.  A clean store
+                        # now costs a bool read.
+                        get_strategy_edge_store().flush_if_dirty()
                         return counters
 
                     gab_counters = await asyncio.to_thread(_classify_geometry_batch)
@@ -2382,7 +2449,11 @@ class CryptoSignalEngine:
                             on_classified=_feed_sar_edge,
                             trail_classifier=_sar.classify_sar_record,
                         )
-                        get_strategy_edge_store().save()
+                        # flush_if_dirty, not save(): three batches run inside one
+                        # maintenance cycle and each used to pay a full ~40 MB dump
+                        # even when its own batch classified nothing.  A clean store
+                        # now costs a bool read.
+                        get_strategy_edge_store().flush_if_dirty()
                         return counters
 
                     sar_counters = await asyncio.to_thread(_classify_sar_batch)
@@ -2670,6 +2741,106 @@ class CryptoSignalEngine:
             # 2 cycles = ~10 min. Deliberately shorter than the 6 most probes
             # use: this one is a live subscriber-visible outage, not a
             # measurement lane drifting.
+            min_streak=2,
+        ))
+
+        def _scan_cycle_health() -> Tuple[bool, str]:
+            """Scan-cycle wall-time against the healthcheck deadline.
+
+            The one number that decides whether this container keeps running,
+            and until 2026-08-19 it appeared on **no** surface:
+            ``telemetry.scan_latency_ms`` was computed every cycle and read by
+            a log line and a Telegram command.  So a scan loop running at
+            38-402s against a 15s target — restarting the engine through
+            autoheal, expiring every ``snapshot:*`` key, and blanking the Lumin
+            app's feed — was invisible to ops, to the truth report and to the
+            monitoring agent alike.
+
+            Graded on the LEADING edge, not the terminal one.  ``over_kill`` is
+            a cycle that has already earned a restart; by the time a probe fires
+            on that the container is going down.  The sustained-pressure check
+            is the actionable one, and it fires while the cycle still has room.
+
+            The rate is measured over the whole boot, deliberately: a restart
+            resets it, so a probe that keeps reporting pressure across restarts
+            is describing a condition the restarts are not curing — which is
+            exactly the loop this is here to catch.
+            """
+            scanner = getattr(self, "_scanner", None)
+            if scanner is None or not hasattr(scanner, "cycle_health"):
+                return True, "scanner not started"
+            h = scanner.cycle_health()
+            if not h["cycles"]:
+                return True, "no cycle completed yet"
+            detail = (
+                f"last {h['last_sec']}s, worst {h['worst_sec']}s over {h['cycles']} "
+                f"cycles; {h['over_warn']} over {h['warn_sec']:.0f}s, "
+                f"{h['over_kill']} over the {h['kill_sec']:.0f}s healthcheck "
+                f"deadline; {h['executor_workers']} executor workers"
+            )
+            if h["over_kill"]:
+                return False, (
+                    f"{detail} — a cycle past the deadline leaves the scanner "
+                    f"heartbeat stale, and three consecutive failed healthchecks "
+                    f"restart this container"
+                )
+            # A single slow cycle is weather; a book of them is the condition.
+            if h["cycles"] >= 10 and h["over_warn"] / h["cycles"] > 0.5:
+                return False, (
+                    f"{detail} — over half of all cycles are past the warn bound, "
+                    f"so the deadline is one busy market away"
+                )
+            return True, detail
+
+        def _indicator_cache_key() -> Tuple[bool, str]:
+            """Can the indicator/SMC caches still tell that a series changed?
+
+            Both were keyed on the candle COUNT, and `_MAX_CANDLES_PER_BUCKET`
+            is 1,000 — so once a bucket filled, the key stopped moving while
+            the bars kept arriving, and those indicators froze at whatever they
+            were when the bucket capped.  Production had already reached the cap
+            on 1m, 15m and 1h.  `data_freshness` cannot see this: it grades how
+            recently a kline ARRIVED, and they were arriving perfectly.
+
+            The key now carries the newest bar's `open_time`.  A bucket that
+            carries no timestamps AND sits at the cap can prove neither that it
+            changed nor that it did not, so it is recomputed every cycle — safe,
+            but it is a real cost and a real fault, and it is the one condition
+            here that pages.
+            """
+            scanner = getattr(self, "_scanner", None)
+            if scanner is None or not hasattr(scanner, "indicator_cache_health"):
+                return True, "scanner not started"
+            h = scanner.indicator_cache_health()
+            looked = h["capped_hits"] + h["stale_avoided"] + h["undatable"]
+            if not looked:
+                return True, "no capped bucket seen yet"
+            detail = (
+                f"{h['stale_avoided']} frozen value(s) avoided; "
+                f"{h['capped_hits']} hit(s) on buckets at the {h['bucket_cap']}-bar "
+                f"cap; {h['undatable']} undatable "
+                f"({h['undatable_at_cap']} of them at the cap)"
+            )
+            if h["undatable_at_cap"]:
+                return False, (
+                    f"{detail} — a capped bucket with no bar timestamps cannot be "
+                    f"invalidated on content, so it is recomputed every cycle; "
+                    f"re-seed the bucket rather than changing the cache"
+                )
+            return True, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="indicator_cache_key",
+            fn=_indicator_cache_key,
+            min_streak=6,
+        ))
+
+        fl.add_predicate(PredicateProbe(
+            name="scan_cycle",
+            fn=_scan_cycle_health,
+            # Same reasoning as snapshot_writer's: this is not a measurement
+            # lane drifting, it is the container's own survival, and the
+            # liveness cycle is 5 min so 2 is already 10 minutes of warning.
             min_streak=2,
         ))
 
