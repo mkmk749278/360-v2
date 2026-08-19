@@ -17,22 +17,51 @@ function returns something shaped like it.
 from __future__ import annotations
 
 import json
+import time as _time
+
+import pytest
 
 
 from src.api import snapshot_writer as sw
+from src.scanner import Scanner
 
 
 class _Scanner:
-    def cycle_health(self):
-        return {
-            "cycles": 12, "last_sec": 41.0, "worst_sec": 402.5,
-            "over_warn": 7, "over_kill": 2, "warn_sec": 60.0,
-            "kill_sec": 120.0, "last_cycle_at": 1.0, "executor_workers": 2,
-        }
+    """The REAL readers over the REAL declarations, driven by real cycles.
 
-    def indicator_cache_health(self):
-        return {"capped_hits": 3, "stale_avoided": 1, "undatable": 0,
-                "undatable_at_cap": 0, "bucket_cap": 1000}
+    The first cut of this stub returned a hand-written dict for both health
+    calls — a mock asserting my own assumption back at me, one hop short of the
+    reader, which is precisely how `zone_distance_atr` shipped uncomputable for
+    its whole life on two tests that passed. A stub that hand-writes its
+    collaborator's return shape cannot notice a field the collaborator gained,
+    so the contract it claims to pin quietly stops covering the newest half of
+    the payload — which is always the half nobody has read yet.
+
+    Borrowing the declarations (`_init_*`) as well as the readers means a
+    counter added to the scanner tomorrow travels through this contract without
+    anyone editing this file.
+    """
+
+    _init_cycle_timing = Scanner._init_cycle_timing
+    _init_indicator_cache_counters = Scanner._init_indicator_cache_counters
+    _record_cycle_time = Scanner._record_cycle_time
+    _uptime_sec = Scanner._uptime_sec
+    cycle_health = Scanner.cycle_health
+    indicator_cache_health = Scanner.indicator_cache_health
+
+    def __init__(self):
+        self._init_cycle_timing()
+        self._init_indicator_cache_counters()
+        # Steady state, so the cycles below land in the graded buckets rather
+        # than in the boot-warm-up ones that are deliberately kept out of them.
+        self._scanner_started_at = _time.monotonic() - 10_000.0
+        self.indicator_cache_capped_hits = 3
+        self.indicator_cache_stale_avoided = 1
+        # A real slow cycle with a real breakdown, recorded through the real
+        # recorder — the stage split has to survive the whole chain, and it is
+        # the one thing on the page that says WHERE a 402s cycle went.
+        self._record_cycle_time(41.0, {"smc_detect": 20.0})
+        self._record_cycle_time(402.5, {"smc_detect": 380.1, "indicators": 91.4})
 
 
 class _Writer:
@@ -93,9 +122,28 @@ def test_the_block_lands_under_loop_health_in_the_real_engine_state_payload():
     assert "loop_health" in state, (
         "ops reads engine_state['loop_health']; moving it silently empties the page"
     )
-    assert state["loop_health"]["scan_cycle"]["over_kill"] == 2
-    # Round-trips through the same encoder the writer uses for Redis.
-    assert json.loads(json.dumps(state["loop_health"]))["snapshot_writer"]["cycles"] == 113
+    # Assert against what the REAL scanner computed, never against a literal.
+    # The first cut of this file hand-wrote `over_kill: 2` in a stub and then
+    # asserted the 2 back — a number no scanner had ever produced, pinning the
+    # author's arithmetic instead of the transport.
+    expected = _Engine._scanner.cycle_health()
+    assert state["loop_health"]["scan_cycle"] == expected, "nothing may be dropped in transit"
+    assert expected["over_kill"] == 1, "one cycle past the deadline was recorded"
+
+    # The stage breakdown specifically: it is the only thing on the page that
+    # answers WHERE a 402s cycle went, and until 2026-08-19 it went to a log
+    # line and nowhere else. On the owner's VPS that grep returned nothing at
+    # all while the deadline warnings beside it came through.
+    stages = state["loop_health"]["scan_cycle"]["worst_stages"]
+    assert stages == {"smc_detect": 380.1, "indicators": 91.4}
+    assert list(stages) == ["smc_detect", "indicators"], "worst stage leads"
+
+    # Round-trips through the same encoder the writer uses for Redis — a dict
+    # of floats keyed by str survives it, and asserting so is cheap: `open_time`
+    # was added to the candle store and dropped by its serializer for weeks.
+    round_tripped = json.loads(json.dumps(state["loop_health"]))
+    assert round_tripped["snapshot_writer"]["cycles"] == 113
+    assert round_tripped["scan_cycle"]["worst_stages"] == stages
 
 
 def test_the_facade_reads_the_same_key_the_writer_wrote():
@@ -114,3 +162,104 @@ def test_the_facade_reads_the_same_key_the_writer_wrote():
 
     facade._state = {}
     assert facade.get_loop_health() == {}, "absent must be empty, never zeros"
+
+
+# ---------------------------------------------------------------------------
+# Host resources — the same chain, and the same trap one container over.
+# ---------------------------------------------------------------------------
+
+def test_host_resources_ride_the_same_published_block():
+    """Measured in the ENGINE container, or it measures the wrong container.
+
+    In isolated mode the API process serves `/internal/diag/host-resources`.
+    If that handler sampled its own cgroup it would report a near-idle HTTP
+    server as the engine's CPU load — a full-looking answer about the wrong
+    process, which is the trail-governor INDEX COLD defect on the one number
+    the owner asked about first.
+    """
+    writer = sw.SnapshotWriter(_Engine(), redis_client=None)
+    state = writer._build_engine_state(["scanner", "trade_monitor"])
+    assert "host_resources" in state, (
+        "ops reads engine_state['host_resources']; moving it empties the page"
+    )
+    block = state["host_resources"]
+    assert "cpu" in block and "effective_config" in block
+    # Survives the encoder the writer uses for Redis.
+    assert json.loads(json.dumps(block))["cpu"]["quota_cores"] is not None
+
+
+def test_the_facade_never_samples_its_own_cgroup():
+    """It returns what was published, and {} when nothing was."""
+    from src.api.redis_engine import RedisEngineFacade
+
+    facade = RedisEngineFacade.__new__(RedisEngineFacade)
+    facade._state = {"host_resources": {"cpu": {"cores_used": 3.9}}}
+    assert facade.get_host_resources()["cpu"]["cores_used"] == 3.9
+
+    facade._state = {}
+    assert facade.get_host_resources() == {}, "absent must be empty, never zeros"
+
+
+def test_the_effective_config_is_the_running_module_not_a_literal():
+    """A deploy that did not take must be distinguishable from a bad fix.
+
+    These are read out of the module the scanner is using, so they move when
+    the process's config moves. Asserting them against `config` rather than
+    against numbers pins that they are not a second hand-typed copy.
+    """
+    import config
+
+    cfg = sw._host_resources()["effective_config"]
+    assert cfg["scan_executor_workers"] == config.SCAN_EXECUTOR_WORKERS
+    assert cfg["scan_cycle_kill_sec"] == config.SCAN_CYCLE_KILL_SEC
+    assert cfg["indicator_cache_content_key"] == bool(config.INDICATOR_CACHE_CONTENT_KEY)
+
+
+def test_an_unreadable_cgroup_is_named_never_zeroed():
+    """A 0.0% CPU reading over a pinned engine is worse than a blank."""
+    import src.host_resources as hr
+
+    hr._last_cpu = None
+    original = hr._cpu_seconds_used
+    try:
+        hr._cpu_seconds_used = lambda: (None, "no_cgroup_cpu_accounting")
+        cpu = hr.sample()["cpu"]
+        assert cpu["cores_used"] is None, "unknown must not render as idle"
+        assert cpu["pct_of_quota"] is None
+        assert cpu["reason"], "and it must say why"
+    finally:
+        hr._cpu_seconds_used = original
+        hr._last_cpu = None
+
+
+def test_the_first_sample_refuses_a_rate_rather_than_inventing_one():
+    """A rate needs two readings. The first one says so instead of printing 0."""
+    import src.host_resources as hr
+
+    hr._last_cpu = None
+    first = hr.sample()["cpu"]
+    if first["source"] == "no_cgroup_cpu_accounting":
+        pytest.skip("no cgroup CPU accounting in this environment")
+    assert first["cores_used"] is None
+    assert "first sample" in first["reason"]
+    second = hr.sample()["cpu"]
+    assert second["cores_used"] is not None, "the second reading measures"
+    hr._last_cpu = None
+
+
+def test_a_counter_that_went_backwards_is_refused_not_published():
+    """A replaced container resets the counter; a negative delta is not load."""
+    import src.host_resources as hr
+
+    hr._last_cpu = None
+    original = hr._cpu_seconds_used
+    try:
+        hr._cpu_seconds_used = lambda: (500.0, "cgroup_v2")
+        hr.sample()
+        hr._cpu_seconds_used = lambda: (1.0, "cgroup_v2")   # container replaced
+        cpu = hr.sample()["cpu"]
+        assert cpu["cores_used"] is None
+        assert "reset" in cpu["reason"]
+    finally:
+        hr._cpu_seconds_used = original
+        hr._last_cpu = None

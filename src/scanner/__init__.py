@@ -1413,26 +1413,13 @@ class Scanner:
         # Indicator/SMC cache-key health (2026-08-19).  The key used to be the
         # bar COUNT, which stops changing at the 1,000-bar bucket cap — so
         # these count how much of the book was in that state.
-        self.indicator_cache_capped_hits: int = 0
-        self.indicator_cache_stale_avoided: int = 0
-        self.indicator_cache_undatable: int = 0
-        self.indicator_cache_undatable_at_cap: int = 0
+        self._init_indicator_cache_counters()
 
         # Scan-cycle timing, read by the `scan_cycle` liveness probe and
         # published into snapshot:engine_state.  The heartbeat file is touched
         # once per cycle and healthcheck.py kills the container when it goes
         # stale, so these are the numbers that decide whether the engine lives.
-        self.cycle_count: int = 0
-        self.last_cycle_sec: float = 0.0
-        self.worst_cycle_sec: float = 0.0
-        self.cycles_over_warn: int = 0
-        self.cycles_over_kill: int = 0
-        self.cycles_over_warn_boot: int = 0
-        self.cycles_over_kill_boot: int = 0
-        self.last_cycle_at: float = 0.0
-        #: Process start, for the boot-grace split. Monotonic so a clock step
-        #: cannot turn a running engine back into a booting one.
-        self._scanner_started_at: float = time.monotonic()
+        self._init_cycle_timing()
 
         # Tiered scanning counters
         self._scan_cycle_count: int = 0
@@ -2602,7 +2589,7 @@ class Scanner:
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             self.telemetry.set_scan_latency(elapsed_ms)
-            self._record_cycle_time(elapsed_ms / 1000.0)
+            self._record_cycle_time(elapsed_ms / 1000.0, dict(self._stage_timing))
 
             # Per-stage timing diagnostic: sums are wall-time accumulated across
             # all concurrent symbol scans this cycle, so they can exceed the
@@ -2921,6 +2908,53 @@ class Scanner:
             "bucket_cap": _CANDLE_BUCKET_CAP,
         }
 
+    def _init_indicator_cache_counters(self) -> None:
+        """Declare the indicator-cache counters, in one place.
+
+        Same rule as ``_init_cycle_timing``: ``indicator_cache_health`` is
+        borrowed by the cross-process contract test, so a counter declared
+        inline in ``__init__`` becomes a hand-kept second list in that test's
+        stub — which is how a stub silently keeps asserting yesterday's shape.
+        """
+        self.indicator_cache_capped_hits: int = 0
+        self.indicator_cache_stale_avoided: int = 0
+        self.indicator_cache_undatable: int = 0
+        self.indicator_cache_undatable_at_cap: int = 0
+
+    def _init_cycle_timing(self) -> None:
+        """Declare every scan-cycle timing counter, in one place.
+
+        One writer for the counter SET. These are read by ``cycle_health``,
+        which is borrowed wholesale by ``tests/test_scan_cycle_health`` — so an
+        attribute declared inline in ``__init__`` and used by that reader is a
+        hand-kept second list in the test's own constructor, and it has already
+        broken twice (``_uptime_sec`` and the boot-split counters, then the
+        stage breakdown). A test that borrows the reader now borrows the
+        declaration with it and cannot fall behind it.
+        """
+        self.cycle_count: int = 0
+        self.last_cycle_sec: float = 0.0
+        self.worst_cycle_sec: float = 0.0
+        self.cycles_over_warn: int = 0
+        self.cycles_over_kill: int = 0
+        self.cycles_over_warn_boot: int = 0
+        self.cycles_over_kill_boot: int = 0
+        #: Per-stage breakdown captured AT the worst cycle, and at the most
+        #: recent slow one. The breakdown already existed — it was logged and
+        #: nowhere else, so answering "where did a 156s cycle go" meant grepping
+        #: a periodic INFO line out of a json-file log capped at 30 MB. On the
+        #: owner's box on 2026-08-19 that returned nothing at all while the
+        #: deadline warnings beside it came through, so the question had no
+        #: answer on any surface. Keeping the dict costs one copy per new worst.
+        self.worst_cycle_stages: Dict[str, float] = {}
+        self.last_slow_cycle_stages: Dict[str, float] = {}
+        self.last_slow_cycle_sec: float = 0.0
+        self.last_slow_cycle_at: float = 0.0
+        self.last_cycle_at: float = 0.0
+        #: Process start, for the boot-grace split. Monotonic so a clock step
+        #: cannot turn a running engine back into a booting one.
+        self._scanner_started_at: float = time.monotonic()
+
     def _uptime_sec(self) -> float:
         """Seconds since this scanner was constructed — i.e. since boot.
 
@@ -2930,7 +2964,7 @@ class Scanner:
         """
         return max(0.0, time.monotonic() - self._scanner_started_at)
 
-    def _record_cycle_time(self, seconds: float) -> None:
+    def _record_cycle_time(self, seconds: float, stages: Optional[Dict[str, float]] = None) -> None:
         """Accumulate scan-cycle wall-time for the ``scan_cycle`` probe.
 
         This is the number that decides whether the container lives.  The
@@ -2950,8 +2984,18 @@ class Scanner:
         """
         self.cycle_count += 1
         self.last_cycle_sec = seconds
+        _new_worst = seconds > self.worst_cycle_sec
         self.worst_cycle_sec = max(self.worst_cycle_sec, seconds)
         self.last_cycle_at = time.time()
+        if stages:
+            _snap = {k: round(v, 2) for k, v in
+                     sorted(stages.items(), key=lambda kv: -kv[1])}
+            if _new_worst:
+                self.worst_cycle_stages = _snap
+            if seconds > SCAN_CYCLE_WARN_SEC:
+                self.last_slow_cycle_stages = _snap
+                self.last_slow_cycle_sec = seconds
+                self.last_slow_cycle_at = time.time()
         # Two thresholds, never one.  ``over_warn`` is pressure and ``over_kill``
         # is a restart that has already been earned; pooling them would let a
         # book of merely-slow cycles hide the ones that actually killed the
@@ -3002,6 +3046,14 @@ class Scanner:
             "over_warn_boot": self.cycles_over_warn_boot,
             "over_kill_boot": self.cycles_over_kill_boot,
             "boot_grace_sec": SCAN_CYCLE_BOOT_GRACE_SEC,
+            # Where a slow cycle actually went. Sums are wall-time accumulated
+            # across concurrent symbol scans, so they can exceed the cycle's own
+            # duration — the RATIO between stages is what locates the cost, and
+            # the page says so rather than presenting them as a partition.
+            "worst_stages": dict(self.worst_cycle_stages),
+            "last_slow_stages": dict(self.last_slow_cycle_stages),
+            "last_slow_sec": round(self.last_slow_cycle_sec, 2),
+            "last_slow_at": self.last_slow_cycle_at,
             "warn_sec": SCAN_CYCLE_WARN_SEC,
             "kill_sec": SCAN_CYCLE_KILL_SEC,
             "last_cycle_at": self.last_cycle_at,

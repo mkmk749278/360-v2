@@ -2066,6 +2066,37 @@ def build_app(
             "reported": bool(block),
         }
 
+    @app.get(
+        "/internal/diag/host-resources",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def diag_host_resources() -> Dict[str, Any]:
+        """Is the VPS big enough, and is the deployed config the running one.
+
+        The owner's opening question of the 2026-08-19 stability session was
+        *"engine cpu 221% used is our vps not enough or what"*, and nothing in
+        this system could answer it: CPU against **quota** decides whether the
+        scan loop can ever meet its deadline, and the quota was visible only
+        over SSH. 221% of a 250% cap is a pinned process; 221% of an unlimited
+        4-core box is a busy one with room. Same number, opposite next move.
+
+        Beside it, the config the **running process** is using. A deploy that
+        silently did not take is otherwise indistinguishable from a fix that
+        did not work, and reading those values with a `docker exec` one-shot
+        answers a different question — that prints what the image was built
+        with, which this repo has already believed once and been wrong about.
+
+        Mode-agnostic like its siblings, and in isolated mode the reading comes
+        from the block the **engine** container published. The API container
+        must never sample its own cgroup here: it would be measuring a
+        near-idle HTTP process and labelling it the engine.
+        """
+        getter = getattr(engine, "get_host_resources", None)
+        block = getter() if callable(getter) else {}
+        block = block if isinstance(block, dict) else {}
+        return {"host_resources": block, "reported": bool(block) and "error" not in block}
+
     # ---- Activity ----
 
     @app.get(

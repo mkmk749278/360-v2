@@ -45,6 +45,21 @@ _AGENTS_INTERVAL_S   = 60
 _OVERRUN_BUDGET_S = _CYCLE_INTERVAL_S
 
 
+def _host_resources() -> dict[str, Any]:
+    """CPU / memory / disk headroom and the config the process is really using.
+
+    Fail-open with a named reason: a snapshot that cannot be written because a
+    ``/sys`` read raised would take the dashboard and the app feed down to
+    answer a diagnostic question, which is the wrong trade in both directions.
+    """
+    try:
+        from src.host_resources import sample
+
+        return sample()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def _loop_health(engine: Any) -> dict[str, Any]:
     """Engine-loop health for ``snapshot:engine_state``.
 
@@ -600,6 +615,12 @@ class SnapshotWriter:
             # writer and a slow scan loop have the same cause and different
             # fixes, and a reader comparing them needs both on one payload.
             "loop_health": _loop_health(engine),
+            # What the BOX is giving this process. Measured here, in the engine
+            # container, precisely because the API container that serves the
+            # diag would otherwise measure its own near-idle cgroup and report
+            # it as the engine's load — the trail-governor INDEX COLD defect,
+            # on the number the owner asked about first.
+            "host_resources": _host_resources(),
             # Pairs X-ray (regular universe + live mover-promoted) so the ops
             # Pairs page reflects the engine container's in-memory scanner
             # state even from the isolated API container.

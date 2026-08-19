@@ -127,19 +127,18 @@ class _CycleRecorder:
     over whatever the scanner actually does.
     """
 
+    _init_cycle_timing = Scanner._init_cycle_timing
     _record_cycle_time = Scanner._record_cycle_time
     _uptime_sec = Scanner._uptime_sec
     cycle_health = Scanner.cycle_health
 
     def __init__(self) -> None:
-        self.cycle_count = 0
-        self.last_cycle_sec = 0.0
-        self.worst_cycle_sec = 0.0
-        self.cycles_over_warn = 0
-        self.cycles_over_kill = 0
-        self.cycles_over_warn_boot = 0
-        self.cycles_over_kill_boot = 0
-        self.last_cycle_at = 0.0
+        # Borrow the DECLARATION too, not only the readers. Typing the counter
+        # set out here is a hand-kept second list, and it fell behind the real
+        # one twice — once on the boot-grace split, once on the stage
+        # breakdown — each time as an AttributeError inside a borrowed method
+        # rather than as a statement about what changed.
+        self._init_cycle_timing()
         # Far enough in the past that every cycle is steady-state unless a
         # test says otherwise: the boot split must not silently swallow the
         # breaches the older tests are asserting on.
@@ -434,3 +433,48 @@ def test_scanner_uptime_is_monotonic_not_wall_clock():
     }
     assert "monotonic" in names, "uptime must come from time.monotonic()"
     assert "time" not in names or "monotonic" in names
+
+
+def test_a_slow_cycle_keeps_its_stage_breakdown():
+    """"Where did a 156s cycle go" must be answerable without reading a log.
+
+    The breakdown already existed and was logged and nowhere else. On the
+    owner's box on 2026-08-19 the grep for it returned NOTHING while the
+    deadline warnings beside it came through, so the one question that aims the
+    next fix had no answer on any surface. Keeping the dict costs a copy.
+    """
+    from config import SCAN_CYCLE_WARN_SEC
+
+    rec = _CycleRecorder()
+    rec._record_cycle_time(5.0, {"smc": 1.0, "indicators": 0.5})
+    h = rec.cycle_health()
+    assert h["worst_stages"] == {"smc": 1.0, "indicators": 0.5}
+    assert h["last_slow_stages"] == {}, "a healthy cycle is not a slow one"
+
+    rec._record_cycle_time(SCAN_CYCLE_WARN_SEC + 40, {"smc": 41.0, "predictive": 3.0})
+    h = rec.cycle_health()
+    assert h["worst_stages"] == {"smc": 41.0, "predictive": 3.0}
+    assert h["last_slow_stages"] == {"smc": 41.0, "predictive": 3.0}
+    assert h["last_slow_sec"] == pytest.approx(SCAN_CYCLE_WARN_SEC + 40)
+
+    # A later FAST cycle must not overwrite the worst breakdown — that is the
+    # one a reader needs, and it is gone the moment it is replaced by weather.
+    rec._record_cycle_time(4.0, {"smc": 0.9})
+    assert rec.cycle_health()["worst_stages"] == {"smc": 41.0, "predictive": 3.0}
+
+
+def test_stages_are_ordered_worst_first():
+    """The RATIO locates the cost, so the expensive stage leads."""
+    rec = _CycleRecorder()
+    rec._record_cycle_time(90.0, {"cheap": 0.2, "expensive": 55.0, "mid": 4.0})
+    assert list(rec.cycle_health()["worst_stages"]) == ["expensive", "mid", "cheap"]
+
+
+def test_a_cycle_with_no_stage_data_does_not_wipe_what_is_there():
+    """An empty dict is "nothing recorded", not "nothing happened"."""
+    rec = _CycleRecorder()
+    rec._record_cycle_time(90.0, {"smc": 40.0})
+    rec._record_cycle_time(200.0, {})          # no stages captured
+    h = rec.cycle_health()
+    assert h["worst_sec"] == pytest.approx(200.0), "the timing still counts"
+    assert h["worst_stages"] == {"smc": 40.0}, "the last known breakdown survives"
