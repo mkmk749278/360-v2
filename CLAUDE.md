@@ -1890,3 +1890,26 @@ python -m src.main
   core. Corollary worth keeping: **a stage timer that wraps an `await` measures
   waiting, not work**, so its ratio to the cycle is a concurrency reading and
   never a CPU one.
+
+- **Three hypotheses, three refutations, one day — and the pattern was in my
+  reading, not in the system.** Chasing an autoheal restart loop on 2026-08-19 I
+  formed and shipped reasoning on: executor starvation (real misconfiguration,
+  not the cause), mover accumulation (pairs sat at 78–79), and a new pair's
+  inline REST seed (a spike arrived with the pair count flat one sample later).
+  Each was formed from two or three samples and each died on the next one. Two
+  separate "it is fixed" claims died the same way.
+
+  The habit that would have prevented all five: **before naming a mechanism,
+  write down the observation that would refute it, then wait for that
+  observation.** It costs one sampling interval and it is the difference between
+  a hypothesis and a story. When I finally did state a refutation condition in
+  advance ("if a spike arrives with the pair count flat, this is dead"), the
+  refuting sample arrived within the hour and cost nothing — because the claim
+  had been made falsifiable *before* it was made confidently.
+
+  Corollary on instruments, learned the same evening: **an instrument that
+  travels on a starved channel cannot measure the starvation.** `in_flight_sec`
+  and `in_flight_stages` ride the snapshot the writer publishes, and the writer
+  shares the loop the hang starves — so they capture the early part of a hang
+  and can freeze before its peak. State that limit where the number is read; a
+  reader who does not know it will take a frozen value for a settled one.
