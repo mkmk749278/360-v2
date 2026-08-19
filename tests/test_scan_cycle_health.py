@@ -139,6 +139,9 @@ class _CycleRecorder:
         # breakdown — each time as an AttributeError inside a borrowed method
         # rather than as a statement about what changed.
         self._init_cycle_timing()
+        # The scanner's live per-stage accumulator. Borrowed as a plain
+        # dict because `cycle_health` only ever reads it.
+        self._stage_timing: dict = {}
         # Far enough in the past that every cycle is steady-state unless a
         # test says otherwise: the boot split must not silently swallow the
         # breaches the older tests are asserting on.
@@ -597,3 +600,36 @@ def test_the_concurrency_limit_is_env_overridable_and_refuses_nonsense():
             assert _safe_int_env("_TEST_CONC", 20) == 20, bad
     finally:
         os.environ.pop("_TEST_CONC", None)
+
+
+def test_the_in_flight_cycle_reports_the_stage_it_is_stuck_in():
+    """The one breakdown a hung cycle can produce.
+
+    `worst_stages` is captured at COMPLETION, so a cycle that never completes
+    never contributes to it — the hung cycle is exactly the one whose stages are
+    invisible. `_stage_timing` accumulates as the cycle runs and is cleared at
+    its start, so mid-hang it names the stage that is stuck.
+
+    Measured 2026-08-19: a hang published `in_flight_sec: 186.05` while the
+    snapshot writer kept publishing, so the loop was not blocked — the scan was
+    awaiting something that does not return. These sums say which await.
+    """
+    import time as _t
+
+    rec = _CycleRecorder()
+    rec._cycle_started_at = _t.time() - 186.0
+    rec._stage_timing = {"smc": 3.1, "indicators": 181.4, "predictive": 0.2}
+
+    h = rec.cycle_health()
+    assert h["in_flight_sec"] >= 185.0
+    assert list(h["in_flight_stages"])[0] == "indicators", "worst stage leads"
+    assert h["in_flight_stages"]["indicators"] == 181.4
+    assert h["worst_stages"] == {}, (
+        "the hung cycle contributes nothing to the completed-cycle breakdown — "
+        "which is the entire reason the in-flight one has to exist"
+    )
+
+
+def test_in_flight_stages_are_empty_before_any_cycle_starts():
+    rec = _CycleRecorder()
+    assert rec.cycle_health()["in_flight_stages"] == {}

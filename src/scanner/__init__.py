@@ -3103,6 +3103,20 @@ class Scanner:
                 round(max(0.0, time.time() - self._cycle_started_at), 2)
                 if self._cycle_started_at else None
             ),
+            # Partial stage sums for the cycle STILL RUNNING. `_stage_timing`
+            # accumulates as the cycle proceeds and is cleared at its start, so
+            # during a hang this names the stage that is stuck — the one thing
+            # the worst-cycle breakdown structurally cannot report, because a
+            # hung cycle never completes and therefore never records anything.
+            #
+            # Measured 2026-08-19: a hang published `in_flight_sec: 186.05` while
+            # the snapshot writer kept running, so the event loop was NOT
+            # blocked — the scan was awaiting something that does not return.
+            # Which await, is exactly what these partial sums answer.
+            "in_flight_stages": {
+                k: round(v, 2)
+                for k, v in sorted(self._stage_timing.items(), key=lambda kv: -kv[1])
+            } if self._cycle_started_at else {},
             "heartbeat_age_sec": (
                 round(max(0.0, time.time() - self.last_cycle_at), 2)
                 if self.last_cycle_at else None
