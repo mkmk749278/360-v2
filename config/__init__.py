@@ -1794,13 +1794,104 @@ TIER3_VOLUME_SURGE_MULTIPLIER: float = _safe_float("TIER3_VOLUME_SURGE_MULTIPLIE
 # locate the dominant cost when scan latency exceeds the ~15s target. Default
 # on; set false to silence once the bottleneck is identified.
 SCAN_STAGE_TIMING_ENABLED: bool = _safe_bool("SCAN_STAGE_TIMING_ENABLED", "true")
-# Worker-thread count for the scan executor. Default 2× cpu_count, capped at
-# 20. Raise via .env once the SMC/indicator caches reduce baseline CPU load and
-# more thread throughput is needed for cold-start pairs.
+
+
+def cpu_budget() -> float:
+    """CPU cores this **process** may actually use, not what the host has.
+
+    ``os.cpu_count()`` reports the host's cores and knows nothing about the
+    cgroup the container runs in.  On the production box that is 4 against a
+    ``cpus: "2.5"`` quota, so every default derived from it over-subscribes by
+    60% before a single thread is created — and the threads it creates all
+    contend for one GIL, so the over-subscription buys switching cost and no
+    throughput (measured 2026-08-19: scan cycles at 38-402s against a 15s
+    target while the engine sat pinned at its quota).
+
+    Reads the cgroup quota directly, v2 first then v1, and falls back to
+    ``os.cpu_count()`` only when neither is readable — a bare-metal or
+    dev-machine run, where the host count *is* the answer.  ``max`` is not a
+    clamp here: a quota below one core still means one thread can run.
+    """
+    host = float(os.cpu_count() or 4)
+    # cgroup v2: "<quota> <period>", or "max <period>" when unlimited.
+    try:
+        with open("/sys/fs/cgroup/cpu.max", "r", encoding="utf-8") as fh:
+            quota_s, period_s = fh.read().split()[:2]
+        if quota_s != "max":
+            period = float(period_s)
+            if period > 0:
+                return max(1.0, min(host, float(quota_s) / period))
+        return host
+    except (OSError, ValueError, IndexError):
+        pass
+    # cgroup v1: two files, quota of -1 means unlimited.
+    try:
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r", encoding="utf-8") as fh:
+            quota = float(fh.read().strip())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r", encoding="utf-8") as fh:
+            period = float(fh.read().strip())
+        if quota > 0 and period > 0:
+            return max(1.0, min(host, quota / period))
+    except (OSError, ValueError):
+        pass
+    return host
+
+
+#: Worker-thread count for the scan executor.
+#:
+#: Was ``2 × os.cpu_count()`` = 8 on the production box, against a 2.5-core
+#: cgroup quota.  Indicator compute is pure-Python scalar loops and therefore
+#: GIL-bound, so eight runnable threads on 2.5 cores cannot go faster than
+#: ~2.5 — they simply hand the interpreter more context switches and make the
+#: event loop wait longer for its turn.  Sized off the *quota* now, with a
+#: floor of 2 so a single-core box still overlaps I/O with compute.
 SCAN_EXECUTOR_WORKERS: int = _safe_int(
     "SCAN_EXECUTOR_WORKERS",
-    str(min((os.cpu_count() or 4) * 2, 20)),
+    str(max(2, min(int(cpu_budget()), 20))),
 )
+
+#: Whether the indicator / SMC caches key on the newest bar's timestamp as well
+#: as the bar count.
+#:
+#: **This is a kill switch, not a dark flag, and the distinction is deliberate.**
+#: The count-only key stopped invalidating once a candle bucket reached
+#: ``_MAX_CANDLES_PER_BUCKET``, so a full bucket's indicators froze at whatever
+#: they were when it capped — 1m, 15m and 1h had all reached the cap in
+#: production on 2026-08-19. Serving frozen indicators to the scoring chain is a
+#: correctness fault, not a candidate improvement, so the fix ships ON: shipping
+#: it dark would mean knowingly continuing to score on stale values.
+#:
+#: What it is NOT is verified in production. The effect could not be measured
+#: from outside the box (the delivered book is ~76% mover paths, and promoted
+#: movers are re-seeded, which is the one population where the freeze cannot
+#: show). So the old behaviour stays one env var away, without a code change:
+#: set ``INDICATOR_CACHE_CONTENT_KEY=false`` and redeploy to restore it.
+INDICATOR_CACHE_CONTENT_KEY: bool = _safe_bool("INDICATOR_CACHE_CONTENT_KEY", "true")
+
+#: Seconds between deferred writes of the Layer-C edge matrix.
+#:
+#: ``strategy_edge_store.json`` is ~40 MB and ``json.dump`` of it costs ~2s of
+#: GIL-held CPU.  Writers mark the store dirty; ``_strategy_edge_flush_loop``
+#: persists it from a worker thread on this period.  Bounds worst-case data
+#: loss to one period — see the loop's docstring for why that trade is right.
+STRATEGY_EDGE_FLUSH_SEC: int = _safe_int("STRATEGY_EDGE_FLUSH_SEC", "30")
+
+#: Seconds a scan cycle may take before the ``scan_cycle`` liveness probe
+#: reports it as pressure rather than health.
+#:
+#: The hard bound is not this number — it is ``healthcheck.py``'s
+#: ``_HEARTBEAT_MAX_AGE_SECONDS`` (120s), sustained across ``retries: 3`` at a
+#: 30s interval, at which point autoheal restarts the container.  The scanner
+#: touches its heartbeat only at the *end* of a cycle, so cycle wall-time is
+#: exactly the quantity that deadline measures.  This is set at half of it so
+#: the probe fires while there is still room to act.
+SCAN_CYCLE_WARN_SEC: float = _safe_float("SCAN_CYCLE_WARN_SEC", "60")
+
+#: The deadline the warning above is measured against — kept here so the probe
+#: and the ops surface both read one number rather than re-typing 120.
+#: Mirrors ``healthcheck.py::_HEARTBEAT_MAX_AGE_SECONDS``; a test pins them
+#: equal, because two copies of a deadline is how one of them goes stale.
+SCAN_CYCLE_KILL_SEC: float = _safe_float("SCAN_CYCLE_KILL_SEC", "120")
 
 # ---------------------------------------------------------------------------
 # Tiered scanning configuration
