@@ -1,0 +1,416 @@
+"""A NAMED catalog of engine diagnostics and safe actions — never a shell.
+
+Owner, 2026-08-19: *"what amount send commands to vps from ops, then you can
+directly interact with engine send commands accordingly fix problems"*.
+
+The answer is a catalog, not a command line, and the reason is specific rather
+than general caution. The owner's own security argument is that the Binance key
+is IP-whitelisted to this box, futures-only, and cannot withdraw — which is
+correct against a **stolen** key used from anywhere else, and does not apply to
+code executing *on* the whitelisted host. Futures permission is not
+symbol-scoped either. So arbitrary execution here does not risk a withdrawal; it
+risks a position. A fixed catalog with no shell, no eval and no interpolated
+arguments is what keeps a leaked read-only code to disclosure and disruption.
+
+**Two kinds, and the split is the whole safety argument:**
+
+* ``read`` — observes and returns. No mutation, anywhere.
+* ``action`` — mutates something **reversible and off the money path**: flush a
+  measurement ledger, drop a rebuildable cache, force a snapshot publish,
+  re-seed one symbol's candles from REST.
+
+**What is deliberately absent, and must stay absent.** Nothing here places,
+cancels or modifies an order; reads a key or any secret; touches the kill
+switch, auto-execution mode, position FSM or per-user settings; or writes
+anything a subscriber sees. Those live in ``/control`` behind the owner's own
+login with a PRG confirm and an audit row, and that is not an accident of
+layering — it is the audit trail. ``tests/test_diag_catalog.py`` asserts the
+absence structurally rather than trusting this paragraph.
+
+Every entry fails open with a NAMED reason: a diagnostic that raises must not
+take down the loop it is describing, and "could not read" must never render as
+a zero.
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
+
+from src.utils import get_logger
+
+log = get_logger(__name__)
+
+#: Substrings that may never appear in an entry key. Not a security control on
+#: their own — the catalog is an allow-list, which is the control — but a
+#: tripwire for the next person adding an entry, asserted in the test suite.
+FORBIDDEN_IN_KEY = ("order", "key", "secret", "withdraw", "kill", "mode", "close")
+
+
+@dataclass
+class Entry:
+    key: str
+    label: str
+    kind: str                      # "read" | "action"
+    summary: str
+    fn: Callable[["Ctx"], Dict[str, Any]]
+    #: What this changes, in the operator's words. Empty for a read — and the
+    #: test asserts every action has one, because "reversible" is a claim
+    #: somebody has to have written down and be accountable for.
+    effect: str = ""
+    needs: List[str] = field(default_factory=list)
+
+
+@dataclass
+class Ctx:
+    """Everything an entry may touch, passed in rather than imported.
+
+    Entries take the engine through this object so a missing collaborator is a
+    named refusal rather than an AttributeError halfway through a mutation.
+    """
+    engine: Any
+    args: Dict[str, Any]
+
+    def need(self, *path: str) -> Any:
+        obj = self.engine
+        for part in path:
+            obj = getattr(obj, part, None)
+            if obj is None:
+                raise LookupError(f"engine has no {'.'.join(path)}")
+        return obj
+
+
+def actions_enabled() -> bool:
+    """Read the switch at CALL time, never at import.
+
+    A module-level snapshot would freeze whatever the process booted with, and
+    the point of the switch is that the owner can close the action half without
+    a redeploy.
+    """
+    from config import DIAG_ACTIONS_ENABLED
+
+    return bool(DIAG_ACTIONS_ENABLED)
+
+
+_REGISTRY: Dict[str, Entry] = {}
+
+
+def register(entry: Entry) -> None:
+    if entry.key in _REGISTRY:
+        raise ValueError(f"duplicate diag catalog key: {entry.key}")
+    _REGISTRY[entry.key] = entry
+
+
+def catalog() -> List[Dict[str, Any]]:
+    """The catalog as data, for ops to render. One writer, one reader.
+
+    Ops never keeps its own list of what exists — that is the drifting-mirror
+    defect this system has paid for under several names. A page renders what
+    this returns, and an entry ops has never heard of still appears.
+    """
+    on = actions_enabled()
+    return [
+        {"key": e.key, "label": e.label, "kind": e.kind,
+         "summary": e.summary, "effect": e.effect, "needs": e.needs,
+         # Rendered so a switched-off action reads as OFF rather than as
+         # missing: "not on offer" and "not available today" have different
+         # next moves, and a vanished entry looks like a deploy problem.
+         "enabled": True if e.kind == "read" else on}
+        for e in sorted(_REGISTRY.values(), key=lambda e: (e.kind != "read", e.key))
+    ]
+
+
+def run(key: str, engine: Any, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Execute one catalog entry by name. Unknown names are refused, not guessed."""
+    entry = _REGISTRY.get(key)
+    if entry is None:
+        return {"ok": False, "key": key, "error": "unknown catalog entry",
+                "known": sorted(_REGISTRY)}
+    # The action switch is enforced HERE, at the only place an entry can run —
+    # never only where the list is rendered. A control that hides a button and
+    # still honours the request is a control in appearance only, and this path
+    # is reachable by anything holding the endpoint.
+    if entry.kind == "action" and not actions_enabled():
+        return {"ok": False, "key": key, "kind": entry.kind, "label": entry.label,
+                "error": "actions are switched off (DIAG_ACTIONS_ENABLED=false)",
+                "result": {}}
+    t0 = time.perf_counter()
+    try:
+        payload = entry.fn(Ctx(engine=engine, args=dict(args or {})))
+        ok, err = True, ""
+    except LookupError as exc:          # a collaborator this process does not have
+        payload, ok, err = {}, False, f"unavailable: {exc}"
+    except Exception as exc:            # noqa: BLE001 — reported, never raised at the loop
+        log.exception("diag catalog entry {} failed", key)
+        payload, ok, err = {}, False, f"{type(exc).__name__}: {exc}"
+    return {
+        "ok": ok, "key": key, "kind": entry.kind, "label": entry.label,
+        "error": err, "result": payload,
+        "took_sec": round(time.perf_counter() - t0, 3),
+        "ran_at": time.time(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# READ entries — observe and return. No mutation anywhere below this line.
+# ---------------------------------------------------------------------------
+
+def _scan_executor(ctx: Ctx) -> Dict[str, Any]:
+    """Is the scan executor queued, and can its workers actually run?
+
+    The engine breached a 120s deadline on 2026-08-19 while using 1.2 of a 3.2
+    core quota. Capacity was not the constraint, and the two candidates —
+    GIL-bound Python across the workers, or I/O waits inside a timed stage —
+    are told apart by whether work is QUEUED while cores sit idle.
+    """
+    ex = ctx.need("_scanner", "_scan_executor")
+    q = getattr(ex, "_work_queue", None)
+    threads = getattr(ex, "_threads", None)
+    return {
+        "max_workers": getattr(ex, "_max_workers", None),
+        "threads_alive": sum(1 for t in (threads or []) if t.is_alive()) if threads else None,
+        "queue_depth": q.qsize() if q is not None else None,
+        "note": (
+            "queue_depth persistently > 0 with CPU well under quota is the "
+            "GIL-bound signature; a shallow queue with long stages points at I/O"
+        ),
+    }
+
+
+def _edge_store_internals(ctx: Ctx) -> Dict[str, Any]:
+    """What is actually inside an edge-store cell, and what does it cost to write?
+
+    Measured 2026-08-19: the file is ~39 MB over ~11,261 cells, so the average
+    cell is ~3.5 KB — about 7x a synthetic cell of 50 floats. Serialising it
+    holds the GIL for ~1.85s, and `asyncio.to_thread` does not free the loop for
+    that, so payload size is the direct lever. This says where the bytes are.
+    """
+    from src.strategy_edge import get_strategy_edge_store
+
+    store = get_strategy_edge_store()
+    with getattr(store, "_lock"):
+        records = dict(getattr(store, "_records"))
+    lens = sorted((len(v) for v in records.values()), reverse=True)
+    biggest = sorted(records.items(), key=lambda kv: -len(kv[1]))[:10]
+    return {
+        "cells": len(records),
+        "records_total": sum(lens),
+        "window": getattr(store, "_window", None),
+        "cell_len_max": lens[0] if lens else 0,
+        "cell_len_median": lens[len(lens) // 2] if lens else 0,
+        "cells_at_window": sum(1 for n in lens if n >= (getattr(store, "_window", 0) or 0)),
+        "biggest_cells": [{"cell": " | ".join(map(str, k)), "records": len(v)} for k, v in biggest],
+        "flush_health": store.flush_health(),
+    }
+
+
+def _candle_census(ctx: Ctx) -> Dict[str, Any]:
+    """Per-timeframe bucket census, and how many sit at the 1,000-bar cap.
+
+    A capped bucket used to serve frozen indicators forever; the content key
+    fixed that, and this is how much of the book was ever exposed.
+    """
+    from src.historical_data import _MAX_CANDLES_PER_BUCKET as cap
+
+    store = ctx.need("data_store")
+    data = getattr(store, "_data", None) or getattr(store, "data", None)
+    if data is None:
+        raise LookupError("data store exposes no bucket map")
+    per_tf: Dict[str, Dict[str, int]] = {}
+    for _symbol, tfs in dict(data).items():
+        for tf, cd in dict(tfs).items():
+            closes = cd.get("close") if isinstance(cd, dict) else None
+            n = len(closes) if closes is not None else 0
+            row = per_tf.setdefault(str(tf), {"buckets": 0, "at_cap": 0, "empty": 0})
+            row["buckets"] += 1
+            if n >= cap:
+                row["at_cap"] += 1
+            if n == 0:
+                row["empty"] += 1
+    return {"bucket_cap": cap, "per_timeframe": per_tf}
+
+
+def _loop_snapshot(ctx: Ctx) -> Dict[str, Any]:
+    """Scan-cycle, writer, edge-store and host counters in one read."""
+    from src.api.snapshot_writer import _host_resources, _loop_health
+
+    return {"loop_health": _loop_health(ctx.engine), "host_resources": _host_resources()}
+
+
+def _fail_open(ctx: Ctx) -> Dict[str, Any]:
+    """Every fail-open exception site and its count — the silent-failure ledger."""
+    from src import fail_open
+
+    snap = getattr(fail_open, "snapshot", None)
+    if not callable(snap):
+        raise LookupError("fail_open exposes no snapshot()")
+    return {"sites": snap()}
+
+
+def _asyncio_tasks(ctx: Ctx) -> Dict[str, Any]:
+    """Which engine tasks exist, and which have died.
+
+    A task that raised and was never awaited disappears silently; the loop keeps
+    running with one of its legs gone.
+    """
+    import asyncio
+
+    try:
+        tasks = asyncio.all_tasks()
+    except RuntimeError as exc:
+        raise LookupError(f"no running loop in this process: {exc}") from exc
+    rows = []
+    for t in tasks:
+        rows.append({
+            "name": t.get_name(),
+            "done": t.done(),
+            "cancelled": t.cancelled() if t.done() else False,
+        })
+    return {"count": len(rows), "tasks": sorted(rows, key=lambda r: r["name"])}
+
+
+for _e in (
+    Entry("read.scan_executor", "Scan executor queue", "read",
+          "Worker count, live threads and queued work — tells a GIL-bound loop "
+          "from an I/O-bound one.", _scan_executor),
+    Entry("read.edge_store", "Edge store internals", "read",
+          "Cell count, record counts and the biggest cells — where the 39 MB "
+          "of serialisation cost lives.", _edge_store_internals),
+    Entry("read.candle_census", "Candle bucket census", "read",
+          "Buckets per timeframe and how many sit at the 1,000-bar cap.",
+          _candle_census),
+    Entry("read.loop", "Loop + host counters", "read",
+          "Scan cycle, snapshot writer, edge store and CPU-against-quota in one "
+          "read.", _loop_snapshot),
+    Entry("read.fail_open", "Fail-open sites", "read",
+          "Every swallowed exception site and its count.", _fail_open),
+    Entry("read.tasks", "Asyncio task census", "read",
+          "Engine tasks, and which have finished or been cancelled.",
+          _asyncio_tasks),
+):
+    register(_e)
+
+
+# ---------------------------------------------------------------------------
+# ACTION entries — each mutates something REVERSIBLE and off the money path.
+#
+# The bar for adding one: if it fails at the worst possible moment, the engine
+# recomputes or re-fetches what it lost and no position, order, key or
+# subscriber-visible value is touched. Anything that cannot clear that bar
+# belongs in /control behind the owner's login, not here.
+# ---------------------------------------------------------------------------
+
+def _flush_ledgers(ctx: Ctx) -> Dict[str, Any]:
+    """Force every measurement ledger to persist now.
+
+    Reversible in the only sense that matters: it writes what is already in
+    memory. The failure mode it repairs is the one this system has paid for
+    twice — a ledger stamped and never flushed, reading UNREADABLE on a page
+    the owner was told to check.
+    """
+    out: Dict[str, Any] = {}
+    modules = (
+        "sar_live_shadow", "dark_emission", "entry_features",
+        "structural_snap", "structural_veto", "atr_trail_live",
+        "price_action_lane",
+    )
+    for name in modules:
+        try:
+            mod = __import__(f"src.{name}", fromlist=["get_ledger"])
+            getter = getattr(mod, "get_ledger", None)
+            if not callable(getter):
+                out[name] = "no get_ledger()"
+                continue
+            ledger = getter()
+            flush = getattr(ledger, "flush", None)
+            if not callable(flush):
+                out[name] = "no flush()"
+                continue
+            try:
+                flush(force=True)
+            except TypeError:
+                flush()
+            out[name] = "flushed"
+        except Exception as exc:  # noqa: BLE001 — one ledger must not stop the rest
+            out[name] = f"{type(exc).__name__}: {exc}"
+    return {"ledgers": out}
+
+
+def _flush_edge_store(ctx: Ctx) -> Dict[str, Any]:
+    """Persist the Layer-C edge store if it is dirty.
+
+    Writes in-memory state to disk. Costs ~1.85s of event loop at the current
+    payload size, so it is an explicit action rather than something a page does
+    on render.
+    """
+    from src.strategy_edge import get_strategy_edge_store
+
+    store = get_strategy_edge_store()
+    before = store.flush_health()
+    store.flush_if_dirty()
+    return {"before": before, "after": store.flush_health()}
+
+
+def _drop_indicator_cache(ctx: Ctx) -> Dict[str, Any]:
+    """Drop the indicator and SMC caches. They rebuild on the next scan.
+
+    Pure recomputation: the caches hold derived values only, so the cost is one
+    slower cycle and the benefit is a clean read when a cache key is suspected.
+    """
+    scanner = ctx.need("_scanner")
+    dropped = {}
+    for attr in ("_indicator_cache", "_smc_cache"):
+        cache = getattr(scanner, attr, None)
+        if cache is None:
+            dropped[attr] = "absent"
+            continue
+        dropped[attr] = len(cache)
+        cache.clear()
+    return {"dropped": dropped,
+            "note": "derived values only — the next scan recomputes them"}
+
+
+def _reseed_symbol(ctx: Ctx) -> Dict[str, Any]:
+    """Re-fetch one symbol's candles from Binance REST.
+
+    Repairs the frozen-series class this system has hit repeatedly on rotated-out
+    movers. Bounded to ONE symbol per call by construction: a whole-universe
+    re-seed is a rate-limit event against an exchange that has IP-banned this box
+    before, so it is not on offer here at any argument.
+    """
+    symbol = str(ctx.args.get("symbol") or "").upper().strip()
+    if not symbol or not symbol.isalnum():
+        return {"refused": "a single alphanumeric symbol is required",
+                "given": ctx.args.get("symbol")}
+    store = ctx.need("data_store")
+    seed = getattr(store, "seed_symbol", None)
+    if not callable(seed):
+        raise LookupError("data store exposes no seed_symbol()")
+    return {"symbol": symbol, "queued": True,
+            "note": "seed_symbol invoked; the next scan reads the refreshed bucket",
+            "result": str(seed(symbol))[:400]}
+
+
+for _e in (
+    Entry("action.flush_ledgers", "Flush measurement ledgers", "action",
+          "Force every measurement ledger to persist what it holds in memory.",
+          _flush_ledgers,
+          effect="Writes in-memory ledger rows to disk. Nothing is deleted; a "
+                 "ledger already flushed is unchanged."),
+    Entry("action.flush_edge_store", "Flush the edge store", "action",
+          "Persist Layer C if dirty.", _flush_edge_store,
+          effect="Writes in-memory cells to disk and costs ~2s of event loop at "
+                 "current size. No cell is dropped."),
+    Entry("action.drop_indicator_cache", "Drop indicator + SMC caches", "action",
+          "Clear derived caches so the next scan recomputes them.",
+          _drop_indicator_cache,
+          effect="Discards derived values only. The next scan cycle runs slower "
+                 "and rebuilds them; no stored data is lost."),
+    Entry("action.reseed_symbol", "Re-seed one symbol's candles", "action",
+          "REST re-fetch for a single symbol whose series has frozen.",
+          _reseed_symbol,
+          effect="One REST call for one symbol, replacing that bucket with fresh "
+                 "bars. Bounded to one symbol; no universe-wide re-seed exists.",
+          needs=["symbol"]),
+):
+    register(_e)

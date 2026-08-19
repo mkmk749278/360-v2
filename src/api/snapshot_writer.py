@@ -295,6 +295,10 @@ class SnapshotWriter:
         # Check for a pending full-signal-reset command from the API container.
         await self._apply_pending_reset_cmd()
         await self._apply_pending_sar_clear_cmd()
+        # Diagnostic-catalog requests from ops. Drained here because this
+        # loop runs IN the engine container, which is the only process that
+        # can see the scanner, the stores and the executor.
+        await self._apply_pending_diag_cmds()
 
     # ------------------------------------------------------------------
     # Individual writers
@@ -650,6 +654,69 @@ class SnapshotWriter:
             log.info("snapshot_writer: mode command result: {}", msg)
         except Exception:
             log.exception("snapshot_writer: failed to apply mode command")
+
+    # ------------------------------------------------------------------
+    # Diagnostic-catalog channel
+    # ------------------------------------------------------------------
+
+    #: Bounded per cycle so a flood of queued requests cannot starve the writes
+    #: this loop exists to make. The queue keeps its tail for the next pass.
+    _DIAG_MAX_PER_CYCLE = 4
+
+    async def _apply_pending_diag_cmds(self) -> None:
+        """Drain queued diagnostic requests, run them, publish each result.
+
+        The API container cannot see the scanner, the data store or the executor
+        in isolated mode — the trail-governor ``INDEX COLD`` defect — so a
+        diagnostic assembled there would describe the wrong process. It queues a
+        catalog KEY here instead and this loop, inside the engine container,
+        runs it.
+
+        What may run is decided entirely by ``src/diag_catalog.py``: an unknown
+        key is refused there, and no entry can reach an order, a secret or the
+        kill switch (asserted structurally in ``tests/test_diag_catalog.py``).
+        This function chooses nothing.
+        """
+        if not self._redis.available:
+            return
+        import json as _json
+
+        from src import diag_catalog
+
+        for _ in range(self._DIAG_MAX_PER_CYCLE):
+            try:
+                raw = await self._redis.client.rpop(_store.KEY_CMD_DIAG)
+            except Exception:
+                log.exception("snapshot_writer: diag queue read failed")
+                return
+            if raw is None:
+                return
+            try:
+                env = _json.loads(raw)
+                req_id = str(env.get("request_id") or "")
+                key = str(env.get("key") or "")
+                args = env.get("args") if isinstance(env.get("args"), dict) else {}
+                queued_at = float(env.get("ts") or 0.0)
+            except Exception:
+                log.warning("snapshot_writer: unparseable diag envelope, dropped")
+                continue
+            if not req_id:
+                continue
+            # A stale envelope is one the caller stopped waiting for — running it
+            # spends engine time on an answer nobody will read, and for an action
+            # it applies a change whose requester is long gone.
+            if queued_at and (time.time() - queued_at) > _store.DIAG_CMD_STALE_S:
+                out = {"ok": False, "key": key, "error": "stale request — not run"}
+            else:
+                out = diag_catalog.run(key, self._engine, args)
+            try:
+                await self._redis.client.set(
+                    _store.KEY_DIAG_RESULT_PREFIX + req_id,
+                    _json.dumps(out, default=str),
+                    ex=_store.TTL_DIAG_RESULT,
+                )
+            except Exception:
+                log.exception("snapshot_writer: could not publish diag result")
 
     # ------------------------------------------------------------------
     # Full-signal-reset command
