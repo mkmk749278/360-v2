@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-18T02:04:53.590664+00:00",
-  "generated_at_ts": 1787018693.5906637,
+  "generated_at": "2026-08-19T02:10:14.273960+00:00",
+  "generated_at_ts": 1787105414.2739596,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "5bdcd24f78fdbcfbecb9d70157aef32730c88693",
+  "git_sha": "fa9ed0a7c28f02e688f714c54d90dcbbe9428ef7",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 11197,
-    "strategy_matrix_scored_cells": 4302,
+    "strategy_matrix_cells": 11261,
+    "strategy_matrix_scored_cells": 4338,
     "performance_setups": 15,
     "suppression_gates": 0
   },

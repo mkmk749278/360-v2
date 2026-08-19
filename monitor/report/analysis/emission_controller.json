@@ -7,7 +7,7 @@
       },
       "MOVER_TREND_PULLBACK@ATR": {
         "suppress_negative": null,
-        "min_samples": 25
+        "min_samples": 15
       },
       "QUIET_COMPRESSION_BREAK@ATR": {
         "suppress_negative": null,
@@ -288,9 +288,9 @@
         "HOLD"
       ],
       "VOLUME_SURGE_BREAKOUT|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "VOLUME_SURGE_BREAKOUT|min_samples": [
         "HOLD",
@@ -426,7 +426,7 @@
     },
     "last_change_cycle": {
       "FUNDING_EXTREME_SIGNAL|min_samples": 7,
-      "MOVER_TREND_PULLBACK@ATR|min_samples": 4,
+      "MOVER_TREND_PULLBACK@ATR|min_samples": 1275,
       "QUIET_COMPRESSION_BREAK@ATR|min_samples": 14,
       "QUIET_COMPRESSION_BREAK@FIXED|min_samples": 14,
       "RANGE_FADE|min_samples": 9,
@@ -453,7 +453,7 @@
       "QUIET_COMPRESSION_BREAK|suppress_negative": 848,
       "MOVER_TREND_PULLBACK@TUNED|min_samples": 855
     },
-    "cycle": 1262
+    "cycle": 1308
   },
   "ledger": [
     {
@@ -1156,6 +1156,32 @@
       "ev_per_suppression_r": null,
       "n": 15,
       "routable": false
+    },
+    {
+      "strategy": "MOVER_TREND_PULLBACK@ATR",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=19)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 19,
+      "routable": false
+    },
+    {
+      "strategy": "MOVER_TREND_PULLBACK@ATR",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=19)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 19,
+      "routable": false
     }
   ],
   "pending": [],
@@ -1164,7 +1190,7 @@
       "min_samples": 20
     },
     "MOVER_TREND_PULLBACK@ATR": {
-      "min_samples": 25
+      "min_samples": 15
     },
     "QUIET_COMPRESSION_BREAK@ATR": {
       "min_samples": 15
@@ -1276,7 +1302,7 @@
         "min_samples": 15
       },
       "MOVER_TREND_PULLBACK@ATR": {
-        "min_samples": 25
+        "min_samples": 15
       },
       "MOVER_TREND_PULLBACK@SAREXIT": {
         "min_samples": 25
