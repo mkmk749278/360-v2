@@ -4,7 +4,7 @@
 
 ---
 
-## 🟡 SESSION 129 2026-08-19 — the restart loop, and driving the engine from ops
+## 🔴 SESSION 129 2026-08-19 — the engine restart loop is OPEN; the tooling to find it is not
 
 Owner, from a guest session: *"that redis snapshot not yet resolved and system
 restart many times why … also that engine cpu 221% used is our vps not enough
@@ -59,6 +59,59 @@ deadline breaches in ~2h**, worse than the post-deploy sample quoted at him
 earlier and **not yet explained**. The stage breakdown is the instrument for
 it and needs a real window before it can say anything. A finding and a fix are
 separate deliverables.
+
+### 🔴 OPEN: the restart loop is NOT fixed — start here next session
+
+Still running at session end, ~15 minute period, every restart emptying the
+`snapshot:*` keys and the app feed. **Read this section before forming a
+theory**: three hypotheses died on data today and two "it is fixed" claims were
+premature, all from reading a mechanism off two or three samples.
+
+**The measured shape** (one boot, sampled from ops):
+
+| cycle | duration | pairs |
+|---|---|---|
+| 7 | 15.85s | 78 |
+| 10 | 21.64s | 78 |
+| 11 | **162.83s** | 79 (+1) |
+| 12 | **90.13s** | 79 (flat) |
+
+Then the deadline trips three checks and autoheal kills it. Cycles do not spike
+once and recover — they go **elevated and stay elevated** until the restart.
+
+**Ruled out on real data, not reasoning:**
+
+- **CPU capacity.** 1.2–1.35 of a 3.2-core quota throughout. The VPS was never
+  the constraint.
+- **Executor size.** I had cut it 8 -> 3 (#961, reverted #967); restoring it
+  changed nothing.
+- **A Binance REST ban** — the hypothesis `healthcheck.py`'s own docstring names
+  for exactly this signature. Futures weight 1018/2200, **46.3%**.
+- **A deadlock.** The hung cycle *completes*, at 187.14s.
+- **Mover accumulation.** Pairs sat at 78–79 the whole time; one extra symbol
+  cannot cost 140s.
+- **A new pair's inline REST seed.** Cycle 11 spiked with +1 pair and looked
+  decisive — then cycle 12 spiked at 90s with the count **flat**. Dead.
+
+**What is established and points somewhere:** the scan cycle **starves the event
+loop**. `snapshot:engine_state` sat 132s unwritten (TTL 768/900) while the engine
+read healthy and the writer's own interval is ~15s. Starving the loop while two
+cores idle is not "waiting on a slow dependency" — it is work on the loop that
+should be off it, or a synchronous call inside a coroutine.
+
+**Start with:** `in_flight_stages` on a real hang (`/system/liveness`, shipped
+#969/#193 — it did not exist this morning). Caveat worth knowing before trusting
+it: it travels on the snapshot the starved writer stops publishing, so it
+captures the *early* part of a hang and can freeze before the peak.
+
+**Two decisions left with the owner, deliberately:**
+
+- `MAX_CONCURRENT_SCANS=10` (now env-overridable, #968) — 20 concurrent scans
+  each awaiting an 8-thread pool on a 3.2-core quota is real over-subscription.
+- The healthcheck kills at **120s** while cycles legitimately reach **187s**.
+  Autoheal restarting four times an hour is currently doing more
+  subscriber-visible harm than the slow cycle. Widening a safety bound to
+  silence an alarm is owner-sign-off territory, not a judgement call.
 
 ### The console — driving the engine from ops without a shell (#965 / ops #190-191)
 
