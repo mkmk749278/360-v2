@@ -119,6 +119,7 @@ from config import (
     TIER2_SCAN_EVERY_N_CYCLES,
     SCAN_EXECUTOR_WORKERS,
     INDICATOR_CACHE_CONTENT_KEY,
+    SCAN_CYCLE_BOOT_GRACE_SEC,
     SCAN_CYCLE_KILL_SEC,
     SCAN_CYCLE_WARN_SEC,
     SCAN_STAGE_TIMING_ENABLED,
@@ -1426,7 +1427,12 @@ class Scanner:
         self.worst_cycle_sec: float = 0.0
         self.cycles_over_warn: int = 0
         self.cycles_over_kill: int = 0
+        self.cycles_over_warn_boot: int = 0
+        self.cycles_over_kill_boot: int = 0
         self.last_cycle_at: float = 0.0
+        #: Process start, for the boot-grace split. Monotonic so a clock step
+        #: cannot turn a running engine back into a booting one.
+        self._scanner_started_at: float = time.monotonic()
 
         # Tiered scanning counters
         self._scan_cycle_count: int = 0
@@ -2915,6 +2921,15 @@ class Scanner:
             "bucket_cap": _CANDLE_BUCKET_CAP,
         }
 
+    def _uptime_sec(self) -> float:
+        """Seconds since this scanner was constructed — i.e. since boot.
+
+        Monotonic by construction: a wall-clock source could step backwards and
+        make a long-running engine look like it were booting, which would move
+        a steady-state deadline breach into the bucket that does not page.
+        """
+        return max(0.0, time.monotonic() - self._scanner_started_at)
+
     def _record_cycle_time(self, seconds: float) -> None:
         """Accumulate scan-cycle wall-time for the ``scan_cycle`` probe.
 
@@ -2941,15 +2956,34 @@ class Scanner:
         # is a restart that has already been earned; pooling them would let a
         # book of merely-slow cycles hide the ones that actually killed the
         # container, and the operator's next move differs for each.
+        # Boot is its own population. A cold start re-seeds 75 pairs over REST
+        # and rebuilds every indicator cache, so its first cycles legitimately
+        # run long — measured 74.5s / 131.2s / 72.8s after a deploy, against a
+        # steady state of 8-47s. `healthcheck.py` already knows this and holds
+        # its own grace for it, so counting those cycles into the steady-state
+        # verdict made the probe read violating for the whole life of a healthy
+        # boot. Red that can never be anything but red is a dead instrument.
+        _booting = self._uptime_sec() < SCAN_CYCLE_BOOT_GRACE_SEC
         if seconds > SCAN_CYCLE_WARN_SEC:
-            self.cycles_over_warn += 1
+            if _booting:
+                self.cycles_over_warn_boot += 1
+            else:
+                self.cycles_over_warn += 1
         if seconds > SCAN_CYCLE_KILL_SEC:
-            self.cycles_over_kill += 1
-            log.warning(
-                "scan cycle took {:.1f}s, past the {}s healthcheck deadline — "
-                "sustained across 3 checks this restarts the container",
-                seconds, SCAN_CYCLE_KILL_SEC,
-            )
+            if _booting:
+                self.cycles_over_kill_boot += 1
+                log.info(
+                    "scan cycle took {:.1f}s during boot warm-up (uptime {:.0f}s "
+                    "< {}s grace) — counted apart from a steady-state breach",
+                    seconds, self._uptime_sec(), SCAN_CYCLE_BOOT_GRACE_SEC,
+                )
+            else:
+                self.cycles_over_kill += 1
+                log.warning(
+                    "scan cycle took {:.1f}s, past the {}s healthcheck deadline — "
+                    "sustained across 3 checks this restarts the container",
+                    seconds, SCAN_CYCLE_KILL_SEC,
+                )
 
     def cycle_health(self) -> Dict[str, Any]:
         """Scan-cycle timing for the ``scan_cycle`` probe and the snapshot.
@@ -2962,6 +2996,12 @@ class Scanner:
             "worst_sec": round(self.worst_cycle_sec, 2),
             "over_warn": self.cycles_over_warn,
             "over_kill": self.cycles_over_kill,
+            # Boot warm-up breaches, reported and never folded into the two
+            # above: they are real cycles and a real cost, and they are not a
+            # steady-state fault.
+            "over_warn_boot": self.cycles_over_warn_boot,
+            "over_kill_boot": self.cycles_over_kill_boot,
+            "boot_grace_sec": SCAN_CYCLE_BOOT_GRACE_SEC,
             "warn_sec": SCAN_CYCLE_WARN_SEC,
             "kill_sec": SCAN_CYCLE_KILL_SEC,
             "last_cycle_at": self.last_cycle_at,

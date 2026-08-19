@@ -2765,6 +2765,16 @@ class CryptoSignalEngine:
             resets it, so a probe that keeps reporting pressure across restarts
             is describing a condition the restarts are not curing — which is
             exactly the loop this is here to catch.
+
+            **Boot warm-up is excluded from the verdict and reported beside
+            it.** A cold start re-seeds 75 pairs over REST and rebuilds every
+            indicator cache, so its first cycles legitimately run long (74.5s /
+            131.2s / 72.8s measured after a deploy, against a steady state of
+            8-47s), and ``healthcheck.py`` holds its own grace for exactly that.
+            Counting them made this probe read violating for the whole life of a
+            perfectly healthy boot — red that can never be anything but red,
+            which is a dead instrument rather than a false alarm, and this repo
+            has already paid for one of those on the agent container.
             """
             scanner = getattr(self, "_scanner", None)
             if scanner is None or not hasattr(scanner, "cycle_health"):
@@ -2772,11 +2782,17 @@ class CryptoSignalEngine:
             h = scanner.cycle_health()
             if not h["cycles"]:
                 return True, "no cycle completed yet"
+            _boot_note = ""
+            if h.get("over_kill_boot") or h.get("over_warn_boot"):
+                _boot_note = (
+                    f" (plus {h.get('over_warn_boot', 0)}/{h.get('over_kill_boot', 0)} "
+                    f"during boot warm-up, not counted)"
+                )
             detail = (
                 f"last {h['last_sec']}s, worst {h['worst_sec']}s over {h['cycles']} "
                 f"cycles; {h['over_warn']} over {h['warn_sec']:.0f}s, "
                 f"{h['over_kill']} over the {h['kill_sec']:.0f}s healthcheck "
-                f"deadline; {h['executor_workers']} executor workers"
+                f"deadline{_boot_note}; {h['executor_workers']} executor workers"
             )
             if h["over_kill"]:
                 return False, (

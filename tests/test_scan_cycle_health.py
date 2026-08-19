@@ -14,6 +14,8 @@ point: none crashed and none left an empty screen.
 """
 from __future__ import annotations
 
+import time as _time
+
 import pytest
 
 from src.historical_data import _MAX_CANDLES_PER_BUCKET
@@ -118,9 +120,15 @@ def test_fingerprint_of_an_empty_bucket():
 # ---------------------------------------------------------------------------
 
 class _CycleRecorder:
-    """The timing half of Scanner, exercised without booting the engine."""
+    """The timing half of Scanner, exercised without booting the engine.
+
+    Borrows the REAL methods rather than reimplementing them — a
+    reimplementation would assert my own arithmetic back at me and go green
+    over whatever the scanner actually does.
+    """
 
     _record_cycle_time = Scanner._record_cycle_time
+    _uptime_sec = Scanner._uptime_sec
     cycle_health = Scanner.cycle_health
 
     def __init__(self) -> None:
@@ -129,7 +137,13 @@ class _CycleRecorder:
         self.worst_cycle_sec = 0.0
         self.cycles_over_warn = 0
         self.cycles_over_kill = 0
+        self.cycles_over_warn_boot = 0
+        self.cycles_over_kill_boot = 0
         self.last_cycle_at = 0.0
+        # Far enough in the past that every cycle is steady-state unless a
+        # test says otherwise: the boot split must not silently swallow the
+        # breaches the older tests are asserting on.
+        self._scanner_started_at = _time.monotonic() - 10_000.0
 
 
 def test_cycle_health_splits_pressure_from_a_earned_restart():
@@ -351,3 +365,72 @@ def test_the_content_key_defaults_on():
     from config import INDICATOR_CACHE_CONTENT_KEY
 
     assert INDICATOR_CACHE_CONTENT_KEY is True
+
+
+def test_boot_warmup_breaches_are_counted_apart_from_steady_state_ones():
+    """A cold start legitimately runs long, and the healthcheck knows it.
+
+    Measured after a real deploy: 74.5s / 131.2s / 72.8s for the first three
+    cycles (75 pairs re-seeded over REST, every indicator cache cold), then a
+    steady state of 8-47s. Folding those into the verdict made the probe read
+    violating for the whole life of a healthy boot — red that can never be
+    anything but red, which this repo has already paid for once on the agent
+    container's healthcheck.
+    """
+    from config import SCAN_CYCLE_BOOT_GRACE_SEC, SCAN_CYCLE_KILL_SEC
+
+    rec = _CycleRecorder()
+
+    # Inside the grace: a breach is warm-up. Driven by moving the recorder's
+    # start time, so the REAL _uptime_sec decides — a stubbed uptime would test
+    # the stub.
+    rec._scanner_started_at = _time.monotonic() - (SCAN_CYCLE_BOOT_GRACE_SEC - 60)
+    rec._record_cycle_time(SCAN_CYCLE_KILL_SEC + 11)
+
+    # Outside it: the same cycle length is a fault.
+    rec._scanner_started_at = _time.monotonic() - (SCAN_CYCLE_BOOT_GRACE_SEC + 60)
+    rec._record_cycle_time(SCAN_CYCLE_KILL_SEC + 11)
+
+    h = rec.cycle_health()
+    assert h["over_kill"] == 1, "the steady-state breach must page"
+    assert h["over_kill_boot"] == 1, "the boot breach must be recorded"
+    assert h["cycles"] == 2, "both are real cycles and both are counted"
+    assert h["worst_sec"] == pytest.approx(SCAN_CYCLE_KILL_SEC + 11), (
+        "worst_sec spans everything — excluding boot from the VERDICT is not "
+        "excluding it from the record"
+    )
+
+
+def test_the_boot_grace_matches_the_healthcheck_that_enforces_it():
+    """Derived from the file that runs in the container, not from a comment."""
+    import re
+    from pathlib import Path
+
+    from config import SCAN_CYCLE_BOOT_GRACE_SEC
+
+    src = (Path(__file__).resolve().parents[1] / "healthcheck.py").read_text()
+    m = re.search(r"_HEARTBEAT_GRACE_PERIOD_SECONDS\s*=\s*([0-9.]+)", src)
+    assert m, "healthcheck.py no longer declares _HEARTBEAT_GRACE_PERIOD_SECONDS"
+    assert float(m.group(1)) == SCAN_CYCLE_BOOT_GRACE_SEC
+
+
+def test_scanner_uptime_is_monotonic_not_wall_clock():
+    """A clock step must not turn a running engine back into a booting one.
+
+    That would move a steady-state deadline breach into the bucket that does
+    not page — the one direction this split must never fail in.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from src.scanner import Scanner
+
+    # dedent: getsource on a method keeps its class indentation, which ast rejects.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(Scanner._uptime_sec)))
+    names = {
+        n.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute)
+    }
+    assert "monotonic" in names, "uptime must come from time.monotonic()"
+    assert "time" not in names or "monotonic" in names
