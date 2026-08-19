@@ -26,7 +26,8 @@ closed signal), the indicator cache keyed on content rather than bar count
 (a capped bucket served frozen indicators forever), the indicators vectorised
 (512ms → 58.1ms per symbol, **bit-identical**, 33 comparisons against pre-change
 bodies copied verbatim from `fa9ed0a`), and the executor sized from the cgroup
-quota rather than `os.cpu_count()`.
+quota rather than `os.cpu_count()` — **and that last one was a regression;
+see below**.
 
 Post-deploy: median 15.8s, worst steady-state 46.5s, writer overruns 63/113 → 0/19.
 
@@ -101,6 +102,45 @@ this is a catalog and not a shell.
   blank failure. Third defect of the day found by reading a deployed page.
 - **Not concluded:** `read.scan_executor` showed `queue_depth: 0` — one sample in
   a quiet moment. The GIL-vs-I/O question needs samples during a *slow* cycle.
+
+### The restart loop came back at 13:03, and it was mine (#967)
+
+I told the owner at ~11:40 that the restart loop had stopped. That came from a
+**51-minute window with no restarts**, which is not evidence — this file's own
+"wait for a fresh window" rule says so — and the engine restarted twice in 60
+minutes at 13:03.
+
+**Cause: the executor sizing above.** #961 took it from
+`min((os.cpu_count() or 4) * 2, 20)` = **8 workers** to
+`max(2, min(int(cpu_budget()), 20))` = **3**, arguing that threads contending
+for one GIL buy switching cost and no throughput. Right for pure Python, and
+wrong **because of the change that shipped in the same PR**: the indicators were
+vectorised into numpy, and **numpy releases the GIL**. The pool that runs exactly
+that work shrank 2.7x at the moment its work became parallelisable.
+
+The evidence came from the console shipped hours later, which is the argument for
+having built it: `_MAX_CONCURRENT_SCANS` is **20** and each scan *awaits*
+`run_in_executor`, so the `indicators` stage timer spans a **wait** — 461.7s of
+it inside a 91.15s cycle (~5x concurrency of queued waiting) while the container
+used **1.2 of 3.2 allotted cores**. Queueing with two cores idle is thread
+starvation; a GIL ceiling pins one core.
+
+Reverted in #967 to the value production ran on for months, rather than inventing
+a third number under time pressure. `cpu_budget()` is untouched and still correct
+for reporting the quota on `/system`. **Not claimed: that this ends the restart
+loop** — that needs a fresh window, and the stage breakdown is now the instrument
+for reading it.
+
+Two lessons, and the first is the one that cost the day:
+
+- **"It stopped" needs a window proportional to the thing's period.** An
+  autoheal loop that fires every ~30-60 minutes cannot be declared fixed from 51
+  quiet minutes. State the window beside the claim, or do not make the claim.
+- **Two changes in one PR can each be right and jointly wrong.** Vectorising the
+  indicators and sizing the executor were both defensible in isolation; together
+  one invalidated the other's premise. **When a PR changes both a workload and
+  the resources for it, state the interaction explicitly** — nothing in either
+  half's own reasoning surfaces it.
 
 ### Three corrections owed and paid
 

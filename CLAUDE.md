@@ -1863,3 +1863,30 @@ python -m src.main
   the suite never exercises — `F821`, invisible to a green run. **The linter is
   not a formality on a codebase with handlers this thin on coverage**; run it
   before believing a passing suite.
+
+- **Two changes in one PR can each be right and jointly wrong — and "it
+  stopped" needs a window proportional to the thing's period.** #961 vectorised
+  the indicators into numpy *and* resized the scan executor from the cgroup
+  quota (8 -> 3 workers) on the reasoning that "threads contending for one GIL
+  buy switching cost and no throughput". Each half is defensible alone. Together
+  the second invalidates the first's premise: **numpy releases the GIL**, so the
+  pool running exactly that work shrank 2.7x at the moment its work became
+  parallelisable. Nothing in either half's own reasoning surfaces the
+  interaction — **when a PR changes both a workload and the resources for it,
+  state the interaction explicitly.**
+
+  I then declared the restart loop fixed off a **51-minute window with no
+  restarts**, and it returned within two hours. An autoheal loop that fires
+  every ~30-60 minutes cannot be declared fixed from 51 quiet minutes; this file
+  already says to wait for a fresh window before judging a change, and the
+  window has to be proportional to the *period of the thing being judged*.
+  **State the window beside the claim, or do not make the claim.**
+
+  The evidence that found it is the argument for the diagnostic console:
+  `_MAX_CONCURRENT_SCANS` is 20 and each scan *awaits* `run_in_executor`, so the
+  `indicators` stage timer **spans a wait** — 461.7s inside a 91.15s cycle,
+  ~5x concurrency of queued waiting, against **1.2 of 3.2 allotted cores**.
+  Queueing with two cores idle is thread starvation; a GIL ceiling pins one
+  core. Corollary worth keeping: **a stage timer that wraps an `await` measures
+  waiting, not work**, so its ratio to the cycle is a concurrency reading and
+  never a CPU one.
