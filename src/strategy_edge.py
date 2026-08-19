@@ -12,8 +12,18 @@ Wilson-bounded expectancy discipline — the same proven pattern — but is keye
 ``MarketContext.context_key()`` (session / phase / volatility / rotation).
 
 Cost Discipline: ``record()`` is called on **outcome resolution** (dozens/day, off the
-scan hot path), and only then is the JSON persisted — never on the per-scan loop.  The
-in-memory read (``edge_r`` / ``matrix``) the allocator uses is O(1) dict + small deque.
+scan hot path).  The in-memory read (``edge_r`` / ``matrix``) the allocator uses is O(1)
+dict + small deque.
+
+**Persistence is deferred, and that is load-bearing** (2026-08-19).  This store reached
+40.8 MB / 11,261 cells in production, and ``json.dump`` of it measures ~2 s of GIL-held
+CPU.  ``trade_monitor._record_outcome`` is a *synchronous* method called from
+``async def _evaluate_signal``, so it ran on the engine's event loop and did that dump
+**twice** per closed signal (base cell + cohort cell) — freezing the scanner, the
+snapshot writer, the mark-price feed and the position FSM for the duration.  Measured
+scan cycles reached 402 s against a 120 s healthcheck deadline, and autoheal restarted
+the engine.  Writers now mark the store ``_dirty`` and a background flusher persists it
+off the loop; see ``flush_if_dirty``.
 
 Everything fails toward "insufficient data" (``None`` edge), so a cold or thin cell
 never fabricates an edge — the allocator treats unknown cells as un-promotable.
@@ -23,10 +33,11 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Deque, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, Optional, Tuple
 
 from src.stat_filter import wilson_lower_bound
 from src.utils import get_logger
@@ -134,6 +145,22 @@ class StrategyEdgeStore:
         #: a record is evicted nothing downstream can tell it ever existed.
         self._evicted: Dict[Tuple[str, str], int] = defaultdict(int)
         self.recorded_total: int = 0
+        #: Set by every ``record``, cleared by every successful ``_save``.
+        #:
+        #: ``persist=False`` used to mean "somebody else will save me", and the
+        #: only somebody was an explicit ``save()`` at the end of a batch.  A
+        #: deferred writer with no batch behind it — the money path, after
+        #: 2026-08-19 — had no way to say "I changed something" without paying
+        #: for a full dump on its own thread.  This flag is that channel, and
+        #: ``flush_if_dirty`` is what a background flusher calls: a clean store
+        #: costs one bool read, never a 40 MB serialise.
+        self._dirty: bool = False
+        #: Deferred-write telemetry, read by the ``strategy_edge_flush`` probe.
+        self.saves_total: int = 0
+        self.skipped_clean_flushes: int = 0
+        self.last_save_sec: float = 0.0
+        self.worst_save_sec: float = 0.0
+        self.last_saved_at: float = 0.0
         # Empty persist_path disables disk I/O entirely (tests).
         self._persist_path: str = (
             persist_path
@@ -185,6 +212,9 @@ class StrategyEdgeStore:
             # Monotonic since-boot counter for the feature-liveness probes
             # (per-cell deques evict, so a raw record count can go backwards).
             self.recorded_total += 1
+            # Unconditional: a deferred writer must be able to say "there is
+            # something to save" without saving it.  See ``_dirty``.
+            self._dirty = True
         if persist:
             self._save()
 
@@ -192,6 +222,41 @@ class StrategyEdgeStore:
         """Persist the store once — the batch counterpart of ``record(...,
         persist=False)``."""
         self._save()
+
+    def flush_if_dirty(self) -> bool:
+        """Persist only if something has been recorded since the last save.
+
+        Returns True when a write happened.  This is what the engine's
+        background flusher calls every ``STRATEGY_EDGE_FLUSH_SEC``: the store is
+        clean most ticks, and a clean tick must cost a bool read rather than a
+        serialise of the whole matrix.
+        """
+        with self._lock:
+            if not self._dirty:
+                self.skipped_clean_flushes += 1
+                return False
+        self._save()
+        return True
+
+    def flush_health(self) -> Dict[str, Any]:
+        """Counters for the ``strategy_edge_flush`` liveness probe.
+
+        In-memory only — a probe that costs a disk read cannot run on a
+        per-cycle clock.
+        """
+        with self._lock:
+            dirty = self._dirty
+            cells = len(self._records)
+        return {
+            "dirty": dirty,
+            "cells": cells,
+            "saves": self.saves_total,
+            "clean_skips": self.skipped_clean_flushes,
+            "last_save_sec": round(self.last_save_sec, 2),
+            "worst_save_sec": round(self.worst_save_sec, 2),
+            "last_saved_at": self.last_saved_at,
+            "recorded_total": self.recorded_total,
+        }
 
     # ---- read (O(1), what the allocator uses) ------------------------------
 
@@ -378,6 +443,7 @@ class StrategyEdgeStore:
     def _save(self) -> None:
         if not self._persist_path:
             return
+        _t0 = time.monotonic()
         try:
             with self._lock:
                 payload = {
@@ -414,6 +480,16 @@ class StrategyEdgeStore:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
             os.replace(tmp, self._persist_path)
+            # Cleared only on a write that actually landed: a failed save must
+            # leave the store dirty so the next flush retries it, or a transient
+            # disk error silently drops every outcome recorded before it.
+            with self._lock:
+                self._dirty = False
+            _elapsed = time.monotonic() - _t0
+            self.saves_total += 1
+            self.last_save_sec = _elapsed
+            self.worst_save_sec = max(self.worst_save_sec, _elapsed)
+            self.last_saved_at = time.time()
         except Exception:
             # Persistence is best-effort; the in-memory store stays correct.
             pass

@@ -652,6 +652,23 @@ class TradeMonitor:
                     float(getattr(sig, "best_tp_pnl_pct", 0.0) or 0.0),
                     float(signal_quality_pnl),
                 )
+                # persist=False is load-bearing, not an optimisation
+                # (2026-08-19).  ``_record_outcome`` is a *synchronous* method
+                # called from ``async def _evaluate_signal``, so everything in
+                # it runs on the engine's event loop.  The edge store reached
+                # 40.8 MB / 11,261 cells in production and ``json.dump`` of it
+                # measures ~2s of GIL-held CPU — paid TWICE here (base cell +
+                # cohort cell), freezing the scanner, the snapshot writer, the
+                # mark-price feed and the position FSM for the duration.  Scan
+                # cycles reached 402s against a 120s healthcheck deadline and
+                # autoheal restarted the engine.
+                #
+                # ``record`` still marks the store dirty; ``_strategy_edge_flush_loop``
+                # in main.py persists it off the loop within
+                # STRATEGY_EDGE_FLUSH_SEC.  The store's own docstring has
+                # carried this warning since 2026-07-13 — the batch feeders in
+                # main.py were given persist=False and this caller, the only one
+                # on the money path, was not.
                 self._strategy_edge_store.record(
                     _StrategyOutcome(
                         strategy=sig.setup_class or "",
@@ -664,7 +681,8 @@ class TradeMonitor:
                         source="emitted",
                         gross_r_multiple=float(_gross_r_multiple),
                         net_r_multiple=float(_net_r_multiple),
-                    )
+                    ),
+                    persist=False,
                 )
                 # Phase-5 cohort cell: dual-write the emitted outcome under the
                 # cohort-refined key (additive; never fragments the base cell).
@@ -686,6 +704,8 @@ class TradeMonitor:
                             gross_r_multiple=float(_gross_r_multiple),
                             net_r_multiple=float(_net_r_multiple),
                         )
+                    ,
+                        persist=False,
                     )
             except Exception as exc:
                 log.debug("strategy_edge.record failed (non-critical): {}", exc)
