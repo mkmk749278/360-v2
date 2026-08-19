@@ -192,18 +192,54 @@ def test_the_kill_bound_matches_the_healthcheck_that_enforces_it():
     assert float(m.group(1)) == SCAN_CYCLE_KILL_SEC
 
 
-def test_scan_executor_is_sized_off_the_cgroup_not_the_host():
-    """The quota is what the process may use; the host count is not.
+def test_scan_executor_is_sized_for_concurrency_not_for_the_quota():
+    """The corrected premise, and why the first one was wrong.
 
-    Sized off ``os.cpu_count()`` this was 8 threads against a 2.5-core quota,
-    all contending for one GIL.
+    This test used to assert ``SCAN_EXECUTOR_WORKERS <= cpu_budget()`` — that
+    the pool is sized off the cgroup rather than the host — on the reasoning
+    that "the threads all contend for one GIL, so over-subscription buys
+    switching cost and no throughput". Right for pure-Python work, wrong here,
+    and wrong *because of the change that shipped beside it*: the indicators
+    were vectorised into numpy in the same PR, and **numpy releases the GIL**.
+    The pool that runs exactly that work shrank 8 -> 3 at the moment its work
+    became parallelisable.
+
+    Live evidence (2026-08-19): ``_MAX_CONCURRENT_SCANS`` is 20 and each scan
+    awaits ``run_in_executor``, so the ``indicators`` stage timer spans a wait —
+    461.7s of it inside a 91.15s cycle, ~5x concurrency of *waiting*, while the
+    container used **1.2 of 3.2 allotted cores**. Queueing with two cores idle
+    is what thread starvation looks like; a GIL ceiling looks like one core
+    pinned.
+
+    So the property is that the pool is big enough to keep concurrent scans off
+    a queue, bounded, and NOT clamped to the quota. `cpu_budget()` is untouched
+    and still correct for what it is actually for — reporting the quota.
     """
     from config import SCAN_EXECUTOR_WORKERS, cpu_budget
 
-    budget = cpu_budget()
-    assert budget >= 1.0
-    assert 2 <= SCAN_EXECUTOR_WORKERS <= 20
-    assert SCAN_EXECUTOR_WORKERS <= max(2, int(budget))
+    assert cpu_budget() >= 1.0, "the quota reader still works; it is just not this knob"
+    assert 2 <= SCAN_EXECUTOR_WORKERS <= 20, "bounded at both ends"
+    assert SCAN_EXECUTOR_WORKERS > int(cpu_budget()), (
+        "the executor must NOT be clamped to the cgroup quota — the work it "
+        "runs releases the GIL, so a pool the size of the quota starves it"
+    )
+
+
+def test_the_executor_can_absorb_a_meaningful_share_of_concurrent_scans():
+    """A pool far smaller than the concurrency limit turns into a queue.
+
+    Not a demand that they be equal — 20 threads on a 3-core box is its own
+    problem — but a floor, so a future 'tidy this up' cannot quietly return the
+    pool to a size that serialises 20 concurrent scans.
+    """
+    from config import SCAN_EXECUTOR_WORKERS
+    from src.scanner import _MAX_CONCURRENT_SCANS
+
+    assert SCAN_EXECUTOR_WORKERS >= _MAX_CONCURRENT_SCANS // 4, (
+        f"{SCAN_EXECUTOR_WORKERS} workers behind {_MAX_CONCURRENT_SCANS} "
+        "concurrent scans is a queue, and the queue shows up as indicator "
+        "wall-time rather than as anything named 'waiting'"
+    )
 
 
 def test_cpu_budget_reads_a_cgroup_v2_quota(tmp_path, monkeypatch):

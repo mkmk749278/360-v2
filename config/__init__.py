@@ -1857,9 +1857,32 @@ def cpu_budget() -> float:
 #: ~2.5 — they simply hand the interpreter more context switches and make the
 #: event loop wait longer for its turn.  Sized off the *quota* now, with a
 #: floor of 2 so a single-core box still overlaps I/O with compute.
+#: Threads the scanner's compute executor may run.
+#:
+#: **Restored to the pre-2026-08-19 value after cutting it caused a regression.**
+#: That morning I sized it from the cgroup quota — 8 -> 3 on this box — arguing
+#: that "the threads all contend for one GIL, so over-subscription buys
+#: switching cost and no throughput". That reasoning is correct for pure-Python
+#: work and wrong for this workload, because the *same change* vectorised the
+#: indicators into numpy, and **numpy releases the GIL** for array operations.
+#: So exactly the work that moved into this executor became GIL-releasing at the
+#: moment the pool that could run it in parallel shrank by 2.7x.
+#:
+#: The measurement that says so: `_MAX_CONCURRENT_SCANS` is 20, and each scan
+#: awaits `run_in_executor` for its indicators — so the `indicators` stage timer
+#: spans a wait, and 20 coroutines queued behind 3 workers each accrue the full
+#: wall-time. Live on 2026-08-19: 461.7s of `indicators` inside a 91.15s cycle
+#: (~5x concurrency of *waiting*), while the container sat at **1.2 of its 3.2
+#: allotted cores** — queueing with two cores idle, which is the shape a thread
+#: starvation makes and a GIL ceiling does not.
+#:
+#: Sizing by quota is right for a GIL-bound pool and wrong for one whose work
+#: releases it. The old value ran in production for months; this restores it
+#: rather than inventing a third number under time pressure, and the env
+#: override takes effect on a restart with no deploy.
 SCAN_EXECUTOR_WORKERS: int = _safe_int(
     "SCAN_EXECUTOR_WORKERS",
-    str(max(2, min(int(cpu_budget()), 20))),
+    str(min((os.cpu_count() or 4) * 2, 20)),
 )
 
 #: Whether the indicator / SMC caches key on the newest bar's timestamp as well
