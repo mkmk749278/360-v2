@@ -4,6 +4,79 @@
 
 ---
 
+## SESSION 130 2026-08-19 — the restart loop had a cause, and it was the instrument
+
+Owner, with a Telegram screenshot of the loop still firing (`HIGH —
+engine_restart_loop`, 16:35:02Z, uptime 507s -> 25s): *"it's still happening fix
+it first high priority the whole day spent on that but still not resolved"*.
+
+### What it was
+
+`healthcheck.py` fails when `data/scanner_heartbeat` is older than 120s, three
+failures flip the container unhealthy and autoheal restarts it. **The file's
+only writer was the END of a scan cycle.** So "heartbeat age" and "cycle
+wall-time" were one number, and a cycle slower than 120s *was* a restart however
+healthily the loop was advancing through it.
+
+That is a category error rather than a tuning problem — autoheal exists to clear
+a **wedge**, and a slow cycle is not a wedge — and the cure fed the disease: each
+restart re-seeds ~79 pairs over REST and rebuilds the indicator caches cold, so
+the next cycle is slower than the one that tripped the deadline. Session 129
+measured 82.4s median / 402.5s worst against that 120s bound.
+
+**The constant said so itself.** `_HEARTBEAT_MAX_AGE_SECONDS`'s comment read
+*"Must be longer than a worst-case scan cycle"* and the value did not satisfy
+it — `LANE_PROVENANCE_FIELDS` for the sixth time, checkable in one command.
+
+### The second half, and the reason the loop never self-limited
+
+The restart-loop guard added on 2026-07-24 bounds autoheal at 3 attempts — and
+it covered **only** the never-beat-since-boot branch. A scanner that beat during
+warm-up and then went stale fell through to an **unbounded** fail. That is
+exactly the observed shape, and it is why the loop ran all day instead of
+self-limiting inside 30 minutes: had the never-beat branch been the one firing,
+the existing bound would have stopped it. The module docstring claimed *"we let
+autoheal restart a genuine mid-run hang once"*; the code did not.
+
+### What shipped (#971 / ops #194)
+
+- **The scanner beats on PROGRESS** — `_touch_heartbeat_progress`, throttled to
+  ~1/5s, called when a symbol finishes scanning and at the two in-cycle
+  REST-bound units that run *before* any symbol does (mover promotion seed,
+  mover candle re-seed). A stale heartbeat now means what the healthcheck always
+  claimed: **no unit of work has finished in two minutes.**
+- **Both healthcheck branches are bounded**, on one shared counter, cleared by a
+  genuinely fresh beat so a one-off hang still gets its restarts.
+- `heartbeat_age_sec` **now reports the heartbeat file** — it was computed from
+  `last_cycle_at`, which was the same number only while the cycle end was the
+  only writer. The completed-cycle age keeps its own key.
+- Ops `/system/liveness` gains a **`slow`** state: long cycle, live beat, *no
+  restart coming* — and the `past_deadline` copy no longer promises a restart
+  that will not happen.
+
+### What this does NOT fix — say it rather than close it
+
+**The scan cycle is still slow.** This stops the restarts; it does not make a
+162s cycle fast, and Session 129's open finding stands: the cycle starves the
+event loop (`snapshot:engine_state` 132s unwritten) while ~2 of 3.2 cores idle.
+The two decisions left with the owner are unchanged (`MAX_CONCURRENT_SCANS=10`,
+and whether 120s is the right wedge bound now that it is only a wedge bound).
+
+**The trade-off, stated plainly:** if the scan loop advances while the rest of
+the engine is starved, the container now stays up with a stale dashboard instead
+of being restarted. That is the better of the two — a restart empties every
+`snapshot:*` key and the app feed outright, and cold caches make the next cycle
+worse — but it means the writer-overrun counters, not the restart count, are
+where that fault now shows.
+
+**Refutation condition, stated in advance** (Session 129's own lesson): if
+restarts continue at the same ~15-minute period after this deploy, the beat is
+not reaching the file or the loop is genuinely wedging — check
+`heartbeat_progress_writes` on `/system/liveness` before forming any new theory.
+A quiet hour proves nothing about a ~15-minute period; **judge it on 4+ hours.**
+
+---
+
 ## 🔴 SESSION 129 2026-08-19 — the engine restart loop is OPEN; the tooling to find it is not
 
 Owner, from a guest session: *"that redis snapshot not yet resolved and system

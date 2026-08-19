@@ -48,10 +48,17 @@ class _Scanner:
     _uptime_sec = Scanner._uptime_sec
     cycle_health = Scanner.cycle_health
     indicator_cache_health = Scanner.indicator_cache_health
+    # `cycle_health` stats the heartbeat file, so its reader is borrowed too.
+    # This stub caught the omission on the day the progress beat shipped, which
+    # is the whole point of it borrowing rather than hand-writing the payload.
+    _heartbeat_file_age_sec = Scanner._heartbeat_file_age_sec
 
     def __init__(self):
         self._init_cycle_timing()
         self._init_indicator_cache_counters()
+        # Not the repo's data/ path: a contract test that passed or failed on
+        # whether someone had run the engine locally is not a contract test.
+        self._HEARTBEAT_PATH = "/nonexistent/scanner_heartbeat"
         # Steady state, so the cycles below land in the graded buckets rather
         # than in the boot-warm-up ones that are deliberately kept out of them.
         self._scanner_started_at = _time.monotonic() - 10_000.0
@@ -127,7 +134,22 @@ def test_the_block_lands_under_loop_health_in_the_real_engine_state_payload():
     # asserted the 2 back — a number no scanner had ever produced, pinning the
     # author's arithmetic instead of the transport.
     expected = _Engine._scanner.cycle_health()
-    assert state["loop_health"]["scan_cycle"] == expected, "nothing may be dropped in transit"
+    # Two keys are AGES and advance between the two calls, so they are compared
+    # by presence and approximately rather than exactly — pinning a clock to the
+    # millisecond is a flaky test, not a contract. Every other key is compared
+    # by value, and the KEY SETS are compared exactly, which is what "nothing
+    # may be dropped in transit" actually means.
+    _ages = {"heartbeat_age_sec", "cycle_completed_age_sec", "in_flight_sec"}
+    got = state["loop_health"]["scan_cycle"]
+    assert set(got) == set(expected), "nothing may be dropped in transit"
+    assert {k: v for k, v in got.items() if k not in _ages} == {
+        k: v for k, v in expected.items() if k not in _ages
+    }, "nothing may be altered in transit"
+    for k in _ages & set(expected):
+        if expected[k] is None:
+            assert got[k] is None, f"{k}: absent must not become a number in transit"
+        else:
+            assert got[k] == pytest.approx(expected[k], abs=5.0)
     assert expected["over_kill"] == 1, "one cycle past the deadline was recorded"
 
     # The stage breakdown specifically: it is the only thing on the page that

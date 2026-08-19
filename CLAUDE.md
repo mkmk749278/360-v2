@@ -1913,3 +1913,47 @@ python -m src.main
   shares the loop the hang starves — so they capture the early part of a hang
   and can freeze before its peak. State that limit where the number is read; a
   reader who does not know it will take a frozen value for a settled one.
+
+- **A health check measures one quantity; make sure it is the one whose fault
+  the remedy can cure.** Three sessions hunted a cause for the autoheal restart
+  loop and the loop's cause was the check. `healthcheck.py` fails on the
+  heartbeat file's age, autoheal restarts on that, and the file's only writer
+  was the **end of a scan cycle** — so cycle wall-time and heartbeat age were
+  one number, and a cycle past 120s *was* a restart however healthily the loop
+  was advancing. Autoheal cures a **wedge**; a slow cycle is not a wedge, and
+  the restart made it worse (every restart re-seeds ~79 pairs over REST and
+  rebuilds the indicator caches cold, so the next cycle is slower than the one
+  that tripped the deadline). Measured 82.4s median / 402.5s worst against that
+  bound. The fix is not a wider bound — that only delays catching a real wedge —
+  it is to **beat on progress** (a symbol finished) so the file answers "is the
+  loop advancing" rather than "did a cycle fit in the window".
+
+  The tell was written in the file, again: `_HEARTBEAT_MAX_AGE_SECONDS`'s own
+  comment read *"Must be longer than a worst-case scan cycle"* and the value did
+  not satisfy it. That is `LANE_PROVENANCE_FIELDS` for the sixth time —
+  **a constant asserting a property it does not have, checkable in one
+  command** — and this one cost a day of restarts.
+
+  Three habits beyond the fix:
+
+  - **A bound written for one branch is not a bound on the condition.** The
+    2026-07-24 restart-loop guard caps autoheal at 3 attempts and covered
+    **only** the never-beat-since-boot branch; a scanner that beat during
+    warm-up and then went stale fell through to an unbounded fail. The
+    observed behaviour proves which branch fired: had it been the bounded one,
+    the loop would have self-limited inside 30 minutes instead of running all
+    day. **When a guard exists and the thing it guards against is happening,
+    check which branch reaches it** before looking for a new cause.
+  - **Renaming what a key measures is a cross-repo change.** `heartbeat_age_sec`
+    was computed from `last_cycle_at` — correct while the cycle end was the only
+    writer, and a lie the moment it was not. Ops grades `/system/liveness`
+    "hanging" off that key, so leaving it would have kept calling a healthy slow
+    cycle a hang. Fix the field to mean its name, publish the other under its own
+    name, and update the caption: *an alarming caption over a healthy subsystem
+    sends the owner to debug something that works* (`/invalidations`, #7).
+  - **State the refutation condition and the window before deploying.** Two
+    "it is fixed" claims died within hours on 2026-08-19 because both were read
+    off a window shorter than the period of the thing being judged. This one
+    ships with both written down: if restarts continue at the same ~15-minute
+    period, check `heartbeat_progress_writes` before forming a new theory — and
+    a quiet hour proves nothing about a ~15-minute period.
