@@ -2097,6 +2097,66 @@ def build_app(
         block = block if isinstance(block, dict) else {}
         return {"host_resources": block, "reported": bool(block) and "error" not in block}
 
+    @app.get(
+        "/internal/diag/catalog",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def diag_catalog_list() -> Dict[str, Any]:
+        """What diagnostics exist, as data — so ops keeps no second list.
+
+        A catalog mirrored in the dashboard is the drifting-mirror defect this
+        system has paid for under several names; ops renders what this returns
+        and an entry it has never heard of still appears.
+        """
+        from src import diag_catalog
+
+        return {"entries": diag_catalog.catalog()}
+
+    @app.post(
+        "/internal/diag/catalog/run",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def diag_catalog_run(body: Dict[str, Any]) -> Dict[str, Any]:
+        """Run ONE named catalog entry and return its result.
+
+        Named, never freeform: the body carries a catalog key, and
+        ``src/diag_catalog.py`` decides what that key may do. There is no shell,
+        no eval and no interpolated argument anywhere on this path, and no entry
+        can reach an order, a secret or the kill switch — asserted structurally
+        rather than promised (``tests/test_diag_catalog.py``).
+
+        In isolated mode the request is queued to the ENGINE container and this
+        handler polls for the answer, because the objects a diagnostic reads
+        live there and a reading taken here would describe the API process.
+        """
+        from config import DIAG_POLL_TIMEOUT_SEC
+
+        key = str(body.get("key") or "")
+        args = body.get("args") if isinstance(body.get("args"), dict) else {}
+
+        submit = getattr(engine, "submit_diag", None)
+        if callable(submit):
+            request_id = await submit(key, args)
+            deadline = time.time() + DIAG_POLL_TIMEOUT_SEC
+            while time.time() < deadline:
+                out = await engine.poll_diag(request_id)
+                if out is not None:
+                    return out
+                await asyncio.sleep(0.25)
+            # Timed out: say which of the two it is. "The engine did not answer"
+            # and "the diagnostic returned nothing" have different next moves.
+            return {"ok": False, "key": key, "error": (
+                f"the engine did not answer within {DIAG_POLL_TIMEOUT_SEC}s — "
+                "it may be mid-cycle or the snapshot loop may be stalled"
+            ), "request_id": request_id}
+
+        # Single-process mode: this IS the engine, so run it here.
+        from src import diag_catalog
+
+        return diag_catalog.run(key, engine, args)
+
     # ---- Activity ----
 
     @app.get(

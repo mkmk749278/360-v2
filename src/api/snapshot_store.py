@@ -73,6 +73,21 @@ KEY_CMD_CLEAR_SAR_LEDGER = "snapshot:cmd:clear_sar_ledger"
 # The queue itself carries no TTL (BRPOP consumes near-instantly; a dead
 # engine leaves entries that the consumer drains on restart and rejects as
 # stale via the envelope ``ts``), the result keys expire on their own.
+# ── Diagnostic-catalog command channel (owner-approved 2026-08-19) ─────────
+# Same request/response shape as the manual-take queue above, and for the same
+# reason: the API container serves the route, the ENGINE container holds the
+# objects a diagnostic reads, and the caller needs the answer back rather than
+# fire-and-forget. A LIST the API LPUSHes, drained by the engine, result written
+# to KEY_DIAG_RESULT_PREFIX + request_id.
+#
+# The payload carries a catalog KEY, never a command — `src/diag_catalog.py`
+# owns what that key may do, and an unknown key is refused there. Nothing on
+# this channel can reach an order, a secret or the kill switch by construction.
+KEY_CMD_DIAG = "snapshot:cmd:diag"                # Redis LIST of JSON envelopes
+KEY_DIAG_RESULT_PREFIX = "snapshot:diag_result:"  # + request_id → JSON outcome
+TTL_DIAG_RESULT = 180   # outlives the API's poll window comfortably
+DIAG_CMD_STALE_S = 60   # the engine rejects envelopes older than this
+
 KEY_CMD_TAKE = "snapshot:cmd:take"                # Redis LIST of JSON envelopes
 KEY_TAKE_RESULT_PREFIX = "snapshot:take_result:"  # + request_id → JSON outcome
 TTL_TAKE_RESULT = 120   # result outlives the API's ~8s poll window comfortably

@@ -357,6 +357,54 @@ class RedisEngineFacade:
         block = self._state.get("host_resources")
         return dict(block) if isinstance(block, dict) else {}
 
+    # ------------------------------------------------------------------
+    # Diagnostic catalog — submit to the engine container, poll for the answer
+    # ------------------------------------------------------------------
+
+    def get_diag_catalog(self) -> list:
+        """What the engine offers. Read from the catalog module, not a copy.
+
+        The catalog is pure data with no engine state behind it, so this process
+        can import and answer it directly — unlike *running* an entry, which
+        needs the objects only the engine container holds.
+        """
+        from src import diag_catalog
+
+        return diag_catalog.catalog()
+
+    async def submit_diag(self, key: str, args: dict | None = None) -> str:
+        """Queue a catalog request for the engine container. Returns request_id."""
+        import json
+        import time
+        import uuid
+
+        from src.api import snapshot_store as _store
+
+        req_id = uuid.uuid4().hex
+        env = {"request_id": req_id, "key": key,
+               "args": dict(args or {}), "ts": time.time()}
+        await self._redis.client.lpush(_store.KEY_CMD_DIAG, json.dumps(env))
+        return req_id
+
+    async def poll_diag(self, request_id: str) -> dict | None:
+        """The result, or None while the engine has not answered yet.
+
+        None is "not yet", never "nothing happened" — the caller times out and
+        says which, because a diagnostic that silently returns empty is the
+        blank-with-no-cause defect on a page built to explain faults.
+        """
+        import json
+
+        from src.api import snapshot_store as _store
+
+        raw = await self._redis.client.get(_store.KEY_DIAG_RESULT_PREFIX + request_id)
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"ok": False, "error": "unreadable result envelope"}
+
     def get_auto_execution_status(self) -> dict:
         return dict(self._state.get("auto_execution_status", {
             "mode": self._current_auto_mode,

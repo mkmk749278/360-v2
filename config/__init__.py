@@ -1795,6 +1795,18 @@ TIER3_VOLUME_SURGE_MULTIPLIER: float = _safe_float("TIER3_VOLUME_SURGE_MULTIPLIE
 # on; set false to silence once the bottleneck is identified.
 SCAN_STAGE_TIMING_ENABLED: bool = _safe_bool("SCAN_STAGE_TIMING_ENABLED", "true")
 
+# ── Diagnostic catalog (ops -> engine, 2026-08-19) ────────────────────────
+#: How long the API handler waits for the engine container to answer a queued
+#: diagnostic. The snapshot loop drains the queue on its own cadence, so this
+#: must comfortably outlive one cycle — and a timeout says *the engine did not
+#: answer*, which is a different finding from an empty result.
+DIAG_POLL_TIMEOUT_SEC: float = _safe_float("DIAG_POLL_TIMEOUT_SEC", 25.0)
+#: Master switch for the ACTION half of the catalog. Reads are always available
+#: (they mutate nothing); actions can be turned off without redeploying, which
+#: is what makes handing a read-only session the action list a reversible
+#: decision rather than a permanent one.
+DIAG_ACTIONS_ENABLED: bool = _safe_bool("DIAG_ACTIONS_ENABLED", "true")
+
 
 def cpu_budget() -> float:
     """CPU cores this **process** may actually use, not what the host has.
