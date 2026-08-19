@@ -514,3 +514,86 @@ def test_a_cycle_with_no_stage_data_does_not_wipe_what_is_there():
     h = rec.cycle_health()
     assert h["worst_sec"] == pytest.approx(200.0), "the timing still counts"
     assert h["worst_stages"] == {"smc": 40.0}, "the last known breakdown survives"
+
+
+# ---------------------------------------------------------------------------
+# The blind spot: a cycle that has not finished.
+# ---------------------------------------------------------------------------
+
+def test_an_in_flight_cycle_is_visible_before_it_completes():
+    """The defect this section exists for, stated directly.
+
+    Every counter in `cycle_health` records a cycle at COMPLETION. But
+    `healthcheck.py` kills the container on heartbeat-file age, the heartbeat is
+    touched once per completed cycle, and a cycle hung past the deadline
+    therefore appears in NONE of them. Live on 2026-08-19: the ops card read
+    "0 past the deadline, last cycle 20.76s" while autoheal was restarting the
+    engine on a failing streak of 3 — the page read healthy precisely while the
+    container was being killed.
+    """
+    import time as _t
+
+    rec = _CycleRecorder()
+    rec._record_cycle_time(20.0)                       # a fast, FINISHED cycle
+    rec._cycle_started_at = _t.time() - 200.0          # and one hung for 200s
+
+    h = rec.cycle_health()
+    assert h["over_kill"] == 0, "the finished cycle really was fast"
+    assert h["last_sec"] == pytest.approx(20.0)
+    assert h["in_flight_sec"] >= 199.0, (
+        "a hung cycle must be visible WHILE it hangs — that is the whole point"
+    )
+
+
+def test_heartbeat_age_is_reported_because_it_is_what_kills_the_container():
+    """`healthcheck.py` grades this and nothing else; the page must show it."""
+    import time as _t
+
+    from config import SCAN_CYCLE_KILL_SEC
+
+    rec = _CycleRecorder()
+    rec._record_cycle_time(9.0)
+    rec.last_cycle_at = _t.time() - (SCAN_CYCLE_KILL_SEC + 40)
+
+    h = rec.cycle_health()
+    assert h["heartbeat_age_sec"] > SCAN_CYCLE_KILL_SEC, (
+        "past the deadline the healthcheck enforces, while every completed-cycle "
+        "counter still reads clean"
+    )
+
+
+def test_both_ages_are_none_before_anything_has_run():
+    """Absent is not zero: 0s would read as 'a cycle just completed'."""
+    rec = _CycleRecorder()
+    h = rec.cycle_health()
+    assert h["in_flight_sec"] is None
+    assert h["heartbeat_age_sec"] is None
+
+
+def test_the_concurrency_limit_is_reported_beside_the_pool_it_queues_on():
+    """One without the other cannot say whether the surplus is queueing."""
+    from config import SCAN_EXECUTOR_WORKERS
+    from src.scanner import _MAX_CONCURRENT_SCANS
+
+    h = _CycleRecorder().cycle_health()
+    assert h["max_concurrent_scans"] == _MAX_CONCURRENT_SCANS
+    assert h["executor_workers"] == SCAN_EXECUTOR_WORKERS
+
+
+def test_the_concurrency_limit_is_env_overridable_and_refuses_nonsense():
+    """It was the one plausible lever on a live restart loop that could not be
+    pulled without a deploy. Zero is not a tuning choice, it is a stopped
+    scanner, so it is refused rather than honoured."""
+    from src.scanner import _safe_int_env
+
+    assert _safe_int_env("A_NAME_NOTHING_SETS", 20) == 20
+    import os
+
+    os.environ["_TEST_CONC"] = "6"
+    try:
+        assert _safe_int_env("_TEST_CONC", 20) == 6
+        for bad in ("0", "-4", "", "abc"):
+            os.environ["_TEST_CONC"] = bad
+            assert _safe_int_env("_TEST_CONC", 20) == 20, bad
+    finally:
+        os.environ.pop("_TEST_CONC", None)
