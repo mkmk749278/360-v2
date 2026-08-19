@@ -476,6 +476,8 @@ adoption decision needs. Ops surface: `/signals/sar-live`.
 | Recorded outcomes | `/track-record` `/performance` | `signal_performance.json` |
 | Reconstructed what-ifs | `/profit` `/exit-backtest` | Candle replay |
 | Diagnostics | `/diag/*` `/data` `/truth` `/invalidations` | Data volume · monitor-logs · `docker exec` diag scripts |
+| System X-ray | `/system` `/system/liveness` `/system/redis` | Docker state · engine loop counters · CPU vs **quota** |
+| **Diag console** | `/diagnostics/console` | Engine diagnostic **catalog** — named reads + reversible actions |
 | **Control plane** | `/control/*` | Owner-gated engine endpoints |
 | Alerts | `/alerts` | Monitoring agent's Redis state |
 
@@ -486,6 +488,28 @@ engine is the source of truth** — ops reads state back after every write, neve
 **Recorded vs reconstructed is a hard line.** `/track-record` is recorded reality only.
 A reconstructed number wearing a track record's name is the most dangerous artefact this
 system could produce — it is what a subscription decision would rest on.
+
+**The diagnostic catalog** (`360-v2/src/diag_catalog.py`, added 2026-08-19) is how a
+surface drives the engine **without a shell**. Ops posts a catalog *key*; the engine
+decides what that key may do. Two kinds — `read` observes, `action` mutates something
+reversible and off the money path (flush a ledger, drop a rebuildable cache, re-seed one
+symbol). **No entry can reach an order, a key, the kill switch, auto-execution mode, the
+FSM or per-user settings**, and that is asserted per entry by walking its syntax tree,
+not promised in prose. Actions are separately switchable engine-side
+(`DIAG_ACTIONS_ENABLED`), enforced where entries *run* rather than where they render.
+
+It crosses into the **engine** container over a Redis request/response queue (the
+manual-take shape: LIST in, result under a request id) because in isolated mode the API
+process cannot see the scanner, the stores or the executor — a diagnostic assembled
+there would describe the wrong process. The drain is bounded per cycle so it cannot
+starve the snapshot writes; a stale envelope is refused rather than applied.
+
+**The read-only tier** (`/guest`) is the second door: a short-lived owner-minted code,
+revoked per request rather than at login. Its scope is `GET`/`HEAD` **plus exactly one
+allow-listed POST** — the diag console — narrowed from an absolute ban on 2026-08-19
+because a pure-read tier cannot diagnose. The allow-list is bounded at one entry by test,
+each entry carries a written reason, and every other write route stays refused.
+`docs/READ_ONLY_ACCESS.md` in that repo is the full argument.
 
 **24/7 agent** (`app/agent/`, own container, 60s cycle): Tier-0 detectors — naked
 position, signing service down, engine/Redis stale, fire-rate anomalies, FSM
@@ -658,6 +682,7 @@ Violating one of these is never a trade-off to be weighed; it's a blocked design
 | 11 | Every new measurement pipeline registers a liveness probe |
 | 12 | Refuse, don't clamp — an input that can't support the computation returns None/INSUFFICIENT |
 | 13 | The engine's public IP does not change without a user-comms plan — every paid user's Binance key is whitelisted to it (§6) |
+| 14 | Nothing reachable from a non-owner surface can touch an order, a key, the kill switch, auto-execution mode, the FSM or per-user settings. The diagnostic catalog is the only such surface, and its compliance is asserted per entry by AST rather than promised (§4.6) |
 
 **Owner sign-off required** (never auto-merge): signing service / KMS / connect-time
 validation / blast-radius caps · Position FSM transitions · new evaluator paths or
@@ -682,6 +707,11 @@ substantive legal-content changes.
 | Something rotated out of the universe | Any watchdog keyed on the live universe is blind to it by construction (#815) |
 | "Would exit method X work?" | Is the arm a replay or live (§4.5)? A replay answers profitability; only a live arm answers operability, and only its population cannot be starved |
 | `/signals/sar-live` reads FROZEN or UNAVAILABLE | The engine is not writing `sar_live_arms_v1.json` — `SAR_LIVE_SHADOW_ENABLED` and the monitor loop, not the page. A live price feed is not evidence the measurement is running |
+
+| The engine restarts and the dashboard empties | Scan-cycle wall-time → heartbeat staleness → `healthcheck.py` → **autoheal manual restart** → every `snapshot:*` key past TTL. Docker's `RestartCount` is blind to it (autoheal is not the restart policy); read **uptime against stack-mates** on `/system` |
+| "Is the VPS big enough?" | `/system` — CPU against the **quota**, not the host. The same core count is a pinned process or a busy machine depending on it, and only the quota tells them apart |
+| "Where did a slow scan cycle go?" | `/system/liveness` stage breakdown, or `read.loop` on the diag console. The sums exceed the cycle by design (concurrent workers) — the **ratio** locates the cost |
+| I need engine internals no page shows | `/diagnostics/console` — named catalog, no shell. If the read does not exist, add an entry to `src/diag_catalog.py`; the guards cover it automatically |
 
 **Diagnosis order is always: real data → vendor docs → external verification → code.**
 
@@ -802,6 +832,9 @@ what the name suggests, or where the default *is* the doctrine:
 | `PATH_RETIREMENT_ENABLED` | **true** | Reads `RETIRED_PATHS`, which **ships non-empty** — so the default configuration removes two paths from the live feed. A flag whose name suggests a mechanism and whose default carries a *policy* |
 | `RETIRED_PATHS` | `MOVER_TREND_PULLBACK:SHORT,VOLUME_SURGE_BREAKOUT:*` | The policy itself, as data. `*` = both sides. **Empty retires nothing** and is a real value, not "unset" — the two are distinguished deliberately |
 | `DARK_PROMOTION_ENABLED` | **false** | Engine-wide master for dark→live promotion (#923); each per-path rule carries its own switch, and an armed rule with an empty allow-list matches **nothing** rather than everything |
+| `DIAG_ACTIONS_ENABLED` | **true** | The *action* half of the diagnostic catalog. Reads are never gated (they mutate nothing). Enforced where entries **run**, not where they render, so switching it off actually refuses a request rather than hiding a button — and it closes the write half without revoking a guest code |
+| `INDICATOR_CACHE_CONTENT_KEY` | **true** | Kill switch for the content-addressed indicator cache key. Off = the old bar-COUNT key, which stops changing at the 1,000-bar bucket cap and serves frozen indicators forever |
+| `SCAN_CYCLE_WARN_SEC` / `SCAN_CYCLE_KILL_SEC` | 60 / 120 | Not thresholds ops invented — `healthcheck.py` owns the kill number and every surface grades against these |
 
 ### The 23 liveness probes
 
@@ -898,6 +931,13 @@ curl -sI https://api.luminapp.org/api/health | grep -iE '^server:|^cf-ray'
 curl -sI --resolve api.luminapp.org:443:194.163.141.135 https://api.luminapp.org/api/health
 
 ssh <vps> 'sudo ufw status; docker ps --format "{{.Names}}\t{{.Status}}"'
+
+# What the diagnostic catalog offers, and what each entry may do. The catalog is
+# DATA — never keep a second copy of this list anywhere.
+python3 -c "from src.diag_catalog import catalog; [print(f\"{e['kind']:6} {e['key']:28} {e['label']}\") for e in catalog()]"
+
+# Prove no entry can reach the money path (walks each entry's own AST):
+python -m pytest tests/test_diag_catalog.py -q
 openssl s_client -connect app.luminapp.org:443 2>/dev/null | openssl x509 -noout -dates
 ```
 
