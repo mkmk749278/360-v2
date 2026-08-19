@@ -57,11 +57,21 @@ def _loop_health(engine: Any) -> dict[str, Any]:
     Pure reads of in-memory counters; no network, no disk, and it runs inside
     the snapshot writer's executor thread rather than on the loop.
     """
-    out: dict[str, Any] = {"scan_cycle": None, "snapshot_writer": None, "strategy_edge": None}
+    out: dict[str, Any] = {
+        "scan_cycle": None,
+        "indicator_cache": None,
+        "snapshot_writer": None,
+        "strategy_edge": None,
+    }
     scanner = getattr(engine, "_scanner", None)
     if scanner is not None and hasattr(scanner, "cycle_health"):
         try:
             out["scan_cycle"] = scanner.cycle_health()
+        except Exception:
+            pass
+    if scanner is not None and hasattr(scanner, "indicator_cache_health"):
+        try:
+            out["indicator_cache"] = scanner.indicator_cache_health()
         except Exception:
             pass
     writer = getattr(engine, "_snapshot_writer", None)

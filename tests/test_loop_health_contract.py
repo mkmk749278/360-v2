@@ -49,7 +49,8 @@ class _Engine:
 
 def test_loop_health_carries_all_three_producers():
     block = sw._loop_health(_Engine())
-    assert set(block) == {"scan_cycle", "snapshot_writer", "strategy_edge"}
+    assert set(block) == {"scan_cycle", "indicator_cache", "snapshot_writer", "strategy_edge"}
+    assert block["indicator_cache"]["stale_avoided"] == 1
     assert block["scan_cycle"]["worst_sec"] == 402.5
     assert block["snapshot_writer"]["overruns"] == 63
     assert isinstance(block["strategy_edge"], dict)
