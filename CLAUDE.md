@@ -326,6 +326,8 @@ Telegram are both acceptable paging paths.
 | Mover retention — keep a promoted pair while it is still producing (HOLD/RELEASE/EXTEND/WARMUP) | `src/mover_retention.py` |
 | Path retirement — remove a `(setup, side)` from the live feed by **diverting** it, never deleting | `src/path_retirement.py` |
 | Dark → live promotion, under owner-set per-path conditions | `src/dark_promotion.py` |
+| **Diagnostic catalog** — named engine reads + reversible actions, driven from ops. Never a shell | `src/diag_catalog.py` |
+| Host resources — CPU against the cgroup **quota**, memory, disk, and the config the running process is using | `src/host_resources.py` |
 
 ---
 
@@ -1795,3 +1797,96 @@ python -m src.main
   once the rule began working. Publish-then-read through Redis, like the three
   sibling X-rays; `runtime_report` is split from `snapshot` so the file-backed
   half stays correct in either process.
+
+- **A thread does not free the loop when the work holds the GIL — and the
+  frequency, not the duration, is what decides whether that matters.** Moving
+  the Layer-C save off `trade_monitor` with `asyncio.to_thread` genuinely
+  removed ~2s x 2 from the money path at signal close. It did **not** remove the
+  stall: measured at the real payload (41.7 MB), `json.dumps` in a thread takes
+  1.85s and the event loop loses 1.85s of it — the C encoder holds the GIL
+  throughout, so the thread moved *where* the code runs and not *whether* it
+  blocks.
+
+  Then the diagnostic built to price it inverted the conclusion. Live store:
+  11,279 cells, 198,090 records, **`saves: 0` and `recorded_total: 0` since
+  boot**. The store only goes dirty when a signal *closes*, so the stall happens
+  at roughly the rate of closed signals — about **16 a day**, not the 120/hour
+  that "every 30s when dirty" implied. Real cost, wrong order of magnitude, and
+  **not** a plausible cause of the writer overruns it was being lined up
+  against. *"A finding and a fix are separate deliverables"* arriving with the
+  measurement contradicting the fix. Corollary: **read the counter before
+  costing the operation** — duration was measurable in a sandbox and frequency
+  was only ever knowable from the running engine.
+
+- **A shell is not the way to let a surface drive the engine; a named catalog
+  is.** Asked for command execution from ops (2026-08-19), the shape that ships
+  is `src/diag_catalog.py`: entries selected by **key** from a registry, no
+  shell, no eval, no argument interpolated into a command line. The safety
+  argument is *asserted*, not written — each entry's own AST is walked for
+  money-path names and for `subprocess`/`eval`, parametrised so tomorrow's entry
+  is covered without editing a list, and the single dynamic import is pinned to
+  a literal tuple inside its own function so a later edit cannot turn it into
+  import-by-name.
+
+  The owner's security premise is worth keeping straight because it is right
+  about the threat it names and silent about this one: an IP-whitelisted,
+  futures-only, no-withdraw key defeats a **stolen** key used from anywhere
+  else, and says nothing about code running **on** the whitelisted host, where
+  futures permission is not symbol-scoped. So the exposure arbitrary execution
+  would carry is a **position**, not a withdrawal — which is exactly why the
+  catalog excludes anything that can reach an order.
+
+  Three rules fell out. **Two kinds, and the split is the whole argument**:
+  `read` observes, `action` mutates something reversible and off the money path,
+  and every action carries a written `effect` — one nobody had to justify is how
+  a list grows past what it was approved for. **Enforce the switch where entries
+  RUN**, never only where they render: hiding a button while the request still
+  executes is a control in appearance only, and the endpoint is reachable by
+  anything holding it. And **a switched-off entry still renders, marked OFF** —
+  a vanished one reads as a broken deploy.
+
+- **A request/response bridge already existed; the fire-and-forget one was the
+  wrong sibling to copy.** The diag channel needs its answer back, so it mirrors
+  the **manual-take** queue (LIST in, result under a request id, TTL) rather
+  than the mode-change key beside it. It has to cross into the engine container
+  at all for the reason `INDEX COLD` records: in isolated mode the API process
+  cannot see the scanner, the stores or the executor, so a diagnostic assembled
+  there describes the wrong process. Three properties the copy adds: the drain
+  is **bounded per cycle** so a flood cannot starve the snapshot writes that
+  loop exists to make; a **stale envelope is refused rather than applied** (the
+  caller stopped waiting, and for an action that would apply a change whose
+  requester is long gone); and a poll timeout says *"the engine did not
+  answer"* rather than returning an empty result.
+
+- **`ruff` caught what 8,648 tests could not, because no test entered the
+  handler.** A missing `DIAG_POLL_TIMEOUT_SEC` import sat inside a route body
+  the suite never exercises — `F821`, invisible to a green run. **The linter is
+  not a formality on a codebase with handlers this thin on coverage**; run it
+  before believing a passing suite.
+
+- **Two changes in one PR can each be right and jointly wrong — and "it
+  stopped" needs a window proportional to the thing's period.** #961 vectorised
+  the indicators into numpy *and* resized the scan executor from the cgroup
+  quota (8 -> 3 workers) on the reasoning that "threads contending for one GIL
+  buy switching cost and no throughput". Each half is defensible alone. Together
+  the second invalidates the first's premise: **numpy releases the GIL**, so the
+  pool running exactly that work shrank 2.7x at the moment its work became
+  parallelisable. Nothing in either half's own reasoning surfaces the
+  interaction — **when a PR changes both a workload and the resources for it,
+  state the interaction explicitly.**
+
+  I then declared the restart loop fixed off a **51-minute window with no
+  restarts**, and it returned within two hours. An autoheal loop that fires
+  every ~30-60 minutes cannot be declared fixed from 51 quiet minutes; this file
+  already says to wait for a fresh window before judging a change, and the
+  window has to be proportional to the *period of the thing being judged*.
+  **State the window beside the claim, or do not make the claim.**
+
+  The evidence that found it is the argument for the diagnostic console:
+  `_MAX_CONCURRENT_SCANS` is 20 and each scan *awaits* `run_in_executor`, so the
+  `indicators` stage timer **spans a wait** — 461.7s inside a 91.15s cycle,
+  ~5x concurrency of queued waiting, against **1.2 of 3.2 allotted cores**.
+  Queueing with two cores idle is thread starvation; a GIL ceiling pins one
+  core. Corollary worth keeping: **a stage timer that wraps an `await` measures
+  waiting, not work**, so its ratio to the cycle is a concurrency reading and
+  never a CPU one.

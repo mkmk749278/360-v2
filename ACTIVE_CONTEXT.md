@@ -4,7 +4,7 @@
 
 ---
 
-## 🟡 SESSION 129 2026-08-19 — the restart loop, and two questions no surface could answer
+## 🟡 SESSION 129 2026-08-19 — the restart loop, and driving the engine from ops
 
 Owner, from a guest session: *"that redis snapshot not yet resolved and system
 restart many times why … also that engine cpu 221% used is our vps not enough
@@ -26,7 +26,8 @@ closed signal), the indicator cache keyed on content rather than bar count
 (a capped bucket served frozen indicators forever), the indicators vectorised
 (512ms → 58.1ms per symbol, **bit-identical**, 33 comparisons against pre-change
 bodies copied verbatim from `fa9ed0a`), and the executor sized from the cgroup
-quota rather than `os.cpu_count()`.
+quota rather than `os.cpu_count()` — **and that last one was a regression;
+see below**.
 
 Post-deploy: median 15.8s, worst steady-state 46.5s, writer overruns 63/113 → 0/19.
 
@@ -59,6 +60,88 @@ earlier and **not yet explained**. The stage breakdown is the instrument for
 it and needs a real window before it can say anything. A finding and a fix are
 separate deliverables.
 
+### The console — driving the engine from ops without a shell (#965 / ops #190-191)
+
+Owner: *"what amount send commands to vps from ops, then you can directly
+interact with engine send commands accordingly fix problems"*, scoped by him to
+a catalog plus a few safe actions, usable **inside a guest session**.
+
+`src/diag_catalog.py`: entries selected by **key**, no shell, no eval, no
+interpolated argument. Six reads, four reversible actions. Nothing reaches an
+order, a key, the kill switch, auto mode, the FSM or per-user settings — and
+that is **asserted per entry by walking its AST**, parametrised so tomorrow's
+entry is covered without editing a list. Actions are switchable
+(`DIAG_ACTIONS_ENABLED`) **where entries run**, not where they render.
+
+The bridge mirrors the manual-take queue rather than the fire-and-forget mode
+key beside it, because a diagnostic needs its answer back. It crosses into the
+engine container for `INDEX COLD`'s reason: the API process cannot see the
+scanner, the stores or the executor.
+
+**Ops' guest tier gained exactly one write**, narrowed rather than deleted from
+"GET and HEAD, nothing else, ever" — an allow-list of one route, each entry
+carrying a written reason, bounded at one by test. The owner's premise (key is
+IP-whitelisted, futures-only, no withdraw) is right against a *stolen* key and
+silent about code on the whitelisted host, where futures permission is not
+symbol-scoped: the exposure is a **position**, not a withdrawal, which is why
+this is a catalog and not a shell.
+
+### What the console found in its first hour — including about itself
+
+- **It corrected this session's own speculation.** `asyncio.to_thread(json.dumps)`
+  really does not free the loop (1.85s of stall on a 41.7 MB payload, measured).
+  But live: **`saves: 0`, `recorded_total: 0` since boot** over 11,279 cells and
+  198,090 records. The store goes dirty only when a signal *closes* — so ~16
+  stalls a day, not 120/hour, and **not** a plausible cause of the writer
+  overruns it was being lined up against. Reading the counter beat two hours of
+  reasoning about the operation.
+- **`read.loop` rendered FAILED with a blank entry, blank kind and no reason.**
+  Results were parked in `request.session`, i.e. a **cookie** capped near 4 KB;
+  ~2 KB round-tripped, larger did not. Fixed server-side, plus the half that
+  matters more: an unrecognised reply now prints raw rather than rendering as a
+  blank failure. Third defect of the day found by reading a deployed page.
+- **Not concluded:** `read.scan_executor` showed `queue_depth: 0` — one sample in
+  a quiet moment. The GIL-vs-I/O question needs samples during a *slow* cycle.
+
+### The restart loop came back at 13:03, and it was mine (#967)
+
+I told the owner at ~11:40 that the restart loop had stopped. That came from a
+**51-minute window with no restarts**, which is not evidence — this file's own
+"wait for a fresh window" rule says so — and the engine restarted twice in 60
+minutes at 13:03.
+
+**Cause: the executor sizing above.** #961 took it from
+`min((os.cpu_count() or 4) * 2, 20)` = **8 workers** to
+`max(2, min(int(cpu_budget()), 20))` = **3**, arguing that threads contending
+for one GIL buy switching cost and no throughput. Right for pure Python, and
+wrong **because of the change that shipped in the same PR**: the indicators were
+vectorised into numpy, and **numpy releases the GIL**. The pool that runs exactly
+that work shrank 2.7x at the moment its work became parallelisable.
+
+The evidence came from the console shipped hours later, which is the argument for
+having built it: `_MAX_CONCURRENT_SCANS` is **20** and each scan *awaits*
+`run_in_executor`, so the `indicators` stage timer spans a **wait** — 461.7s of
+it inside a 91.15s cycle (~5x concurrency of queued waiting) while the container
+used **1.2 of 3.2 allotted cores**. Queueing with two cores idle is thread
+starvation; a GIL ceiling pins one core.
+
+Reverted in #967 to the value production ran on for months, rather than inventing
+a third number under time pressure. `cpu_budget()` is untouched and still correct
+for reporting the quota on `/system`. **Not claimed: that this ends the restart
+loop** — that needs a fresh window, and the stage breakdown is now the instrument
+for reading it.
+
+Two lessons, and the first is the one that cost the day:
+
+- **"It stopped" needs a window proportional to the thing's period.** An
+  autoheal loop that fires every ~30-60 minutes cannot be declared fixed from 51
+  quiet minutes. State the window beside the claim, or do not make the claim.
+- **Two changes in one PR can each be right and jointly wrong.** Vectorising the
+  indicators and sizing the executor were both defensible in isolation; together
+  one invalidated the other's premise. **When a PR changes both a workload and
+  the resources for it, state the interaction explicitly** — nothing in either
+  half's own reasoning surfaces it.
+
 ### Three corrections owed and paid
 
 - **Cache-cap exposure was overstated.** The owner's data: 11% of 1m buckets at
@@ -75,6 +158,18 @@ separate deliverables.
   that cannot both be true, shipped anyway. And it read scan timing from a log
   line instead of the counters built for it. v2 reads the engine's own
   published `snapshot:engine_state`, and was dry-run before being sent.
+- **The grep is not the check; acting on every hit is.** Narrowing ops'
+  guest-method invariant, I ran the repo's own "grep the suite for the
+  invariant's old words" rule, found `test_every_mutating_route_is_owner_only`,
+  quoted its body — its docstring literally called an unlisted write route in
+  the guest set *"a live contradiction waiting for rule 1 to move"* — and
+  shipped without touching it. CI caught it. The hit that mattered more was not
+  a test: `/control/access` told the owner a code *"cannot issue any write"* on
+  the page where he **mints** one. A grant's own description going stale is
+  worse than a stale caption, because it is the sentence a security decision is
+  made from.
+- **`ruff` caught an `F821` that 8,648 tests did not**, because no test enters
+  that handler. A green suite is not a substitute for the linter here.
 - **`_CycleRecorder` fell behind the real declaration twice.** Fixed by making
   the declaration borrowable (`_init_cycle_timing` /
   `_init_indicator_cache_counters`) rather than by typing four more attributes
