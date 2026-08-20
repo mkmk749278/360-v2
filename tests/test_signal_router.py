@@ -1542,13 +1542,33 @@ class TestRouterDeliveryCensusIsPublished:
     (owner, 2026-08-07).
     """
 
-    def test_the_stats_carry_the_per_setup_breakdown(self):
+    @staticmethod
+    def _real_router():
+        """A real router, not ``__new__`` with the three attributes I happened
+        to need.
+
+        The hand-built version broke the day ``delivery_stats`` grew the
+        position-lock block (2026-08-20) — it reads ``_active_signals`` and
+        ``_position_lock``, which a bypassed ``__init__`` never creates.  That
+        is the repo's own *"drive the real collaborator"* rule arriving at a
+        constructor: a stub carrying only the fields the assertion touches
+        cannot notice when the method under test starts needing more, and the
+        tempting repair — making the reader ``getattr``-defensive — would have
+        hidden a genuinely missing attribute in production.
+        """
+        from unittest.mock import MagicMock
+
         from src.signal_router import SignalRouter
-        r = SignalRouter.__new__(SignalRouter)
-        from collections import defaultdict
-        r._drop_counters = defaultdict(int)
-        r._processed_total = 0
-        r._delivered_total = 0
+
+        return SignalRouter(
+            queue=MagicMock(),
+            send_telegram=MagicMock(),
+            format_signal=lambda sig: "stub",
+            redis_client=None,
+        )
+
+    def test_the_stats_carry_the_per_setup_breakdown(self):
+        r = self._real_router()
         r._drop_counters["same_direction_throttle"] = 7
         r._drop_counters["same_direction_throttle:MOVER_TREND_PULLBACK"] = 5
         r._drop_counters["same_direction_throttle:TREND_PULLBACK_EMA"] = 2
@@ -1590,13 +1610,9 @@ class TestRouterDeliveryCensusIsPublished:
 
     def test_a_real_router_builds_a_schema_1_payload(self):
         """Drive the real object rather than a stub whose keys I chose."""
-        from collections import defaultdict
-
         from src.api.snapshot_writer import SnapshotWriter
-        from src.signal_router import SignalRouter
 
-        r = SignalRouter.__new__(SignalRouter)
-        r._drop_counters = defaultdict(int)
+        r = self._real_router()
         r._processed_total = 3
         r._delivered_total = 1
         r._drop_counters["per_channel_cap"] = 2

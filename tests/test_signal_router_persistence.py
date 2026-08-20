@@ -28,7 +28,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.channels.base import Signal
-from src.signal_router import SignalRouter
+from src.signal_router import SignalRouter, _signal_to_dict
 from src.smc import Direction
 
 
@@ -179,9 +179,29 @@ class TestRestoreJsonFallback:
         assert restored.direction == Direction.LONG
 
     async def test_restore_loads_position_lock(self, state_path):
+        """The lock survives a restart, with each direction parsed back.
+
+        Rewritten 2026-08-20.  The original wrote these two entries against
+        ``active_signals: {}`` and asserted both survived — which is the
+        outage: a lock with no signal behind it can never be released, and
+        26 of the dark lane's 30 promoted rows died on it.  The property
+        worth protecting is the *round trip*, so the signals that justify
+        the locks are now in the fixture, exactly as production writes them
+        (same line, on confirmed delivery).  ``restore`` dropping an
+        unbacked entry is asserted in ``test_position_lock_reconcile.py``.
+        """
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps({
-            "active_signals": {},
+            "active_signals": {
+                "S-1": _signal_to_dict(_make_signal(
+                    signal_id="S-1", symbol="BTCUSDT",
+                    direction=Direction.SHORT,
+                )),
+                "S-2": _signal_to_dict(_make_signal(
+                    signal_id="S-2", symbol="ETHUSDT",
+                    direction=Direction.LONG,
+                )),
+            },
             "position_lock": {"BTCUSDT": "SHORT", "ETHUSDT": "LONG"},
             "cooldown_timestamps": {},
         }))
@@ -287,7 +307,11 @@ class TestPersistRestoreCycle:
         for i, sym in enumerate(["BTCUSDT", "ETHUSDT", "SOLUSDT"], start=1):
             sig = _make_signal(signal_id=f"S-{i}", symbol=sym)
             r1._active_signals[sig.signal_id] = sig
-        r1._position_lock["BTCUSDT"] = Direction.LONG
+            # Locked on the same line the delivery path locks them, rather
+            # than only the first: the original fixture left two active
+            # signals unlocked, a state production cannot produce, and the
+            # reconcile added them back (2026-08-20).
+            r1._position_lock[sym] = sig.direction
         await r1._persist_state()
 
         # Session 2: brand-new router (mimics engine restart).
@@ -298,7 +322,11 @@ class TestPersistRestoreCycle:
         assert {s.symbol for s in r2._active_signals.values()} == {
             "BTCUSDT", "ETHUSDT", "SOLUSDT",
         }
-        assert r2._position_lock == {"BTCUSDT": Direction.LONG}
+        assert r2._position_lock == {
+            "BTCUSDT": Direction.LONG,
+            "ETHUSDT": Direction.LONG,
+            "SOLUSDT": Direction.LONG,
+        }
 
     async def test_empty_state_round_trip(self, state_path):
         """No active signals → empty file, restore stays empty."""

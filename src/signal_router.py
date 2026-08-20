@@ -187,6 +187,13 @@ class SignalRouter:
         self._active_signals: Dict[str, Signal] = {}
         self._daily_best: List[Signal] = []  # for free channel
         self._position_lock: Dict[str, Direction] = {}  # symbol → direction
+        # Reconcile counters — see _reconcile_position_lock.  Cumulative
+        # since boot and deliberately not reset: an orphan dropped at
+        # restore is the evidence that the restore skew happened, and it is
+        # the only place that evidence exists.
+        self._lock_orphans_dropped: int = 0
+        self._lock_missing_added: int = 0
+        self._lock_direction_corrected: int = 0
         # (symbol, channel) → UTC timestamp of last signal completion
         self._cooldown_timestamps: Dict[Tuple[str, str], datetime] = {}
         self._running = False
@@ -354,9 +361,113 @@ class SignalRouter:
         """
         if self._redis is not None and self._redis.available:
             await self._restore_from_redis()
-            return
-        # Redis unavailable — fall back to the on-disk JSON file.
-        self._restore_from_disk()
+        else:
+            # Redis unavailable — fall back to the on-disk JSON file.
+            self._restore_from_disk()
+
+        # Both restore paths above rebuild two maps that must agree, and
+        # neither could check that on its own — the reconcile runs here,
+        # once, after whichever one ran.  See _reconcile_position_lock.
+        if self._reconcile_position_lock()["changed"]:
+            await self._persist_state()
+
+    def _reconcile_position_lock(self) -> Dict[str, int]:
+        """Make :attr:`_position_lock` agree with :attr:`_active_signals`.
+
+        **The leak this repairs, because it cost a paid path its whole
+        output.**  The lock is written in exactly one place — beside
+        ``_active_signals[signal_id] = signal`` on confirmed delivery — and
+        released in exactly two, both of which look the symbol up *through*
+        ``_active_signals``.  At runtime the two maps therefore cannot
+        diverge.  Restore is the one place they can, and did: both restore
+        paths skip a signal whose status is no longer ``ACTIVE`` (right — a
+        closed signal must not reappear in the app's Open tab) and then
+        restore the lock map **wholesale, with no cross-check**.  So a symbol
+        whose signal had already closed came back locked with nothing behind
+        it, ``remove_signal`` could never fire for it (its ``if sig:`` guard
+        never passes), and ``_persist_state`` wrote the orphan back on every
+        save.  It compounded across restarts, and the engine restart-looped
+        all day on 2026-08-19.
+
+        Measured on the live box 2026-08-20: **2** signals ACTIVE while
+        ``correlation_lock`` had dropped **309 of 332** dequeued candidates
+        (93.1%) in one 13h process — and every one of the 30 rows the dark
+        lane promoted was killed there, 26 on this gate, **0 delivered**.
+        Six of the locked symbols had no delivered trade at all in the
+        30-day recorded book, which under a lock only ever written on
+        delivery is not a tight gate, it is a stale one.
+
+        Each half was individually right and nothing reconciled them — the
+        seam shape this repo keeps paying for (#817).  So this repairs at
+        the one site divergence is *created*; the continuous half is a
+        probe, because a guard on the first moment is not a guard on the
+        object (#836/#846) and a future edit that breaks the pairing must
+        page rather than go quiet.
+
+        Both directions are counted, and they are different faults:
+
+        - ``orphans_dropped`` — a lock with no active signal.  Over-blocking:
+          it silently costs candidates their delivery, which is what
+          happened.
+        - ``missing_added`` — an active signal with no lock.  **Under**
+          -blocking, and the more dangerous of the two, since the lock is
+          what stops a second position opening on a symbol that already has
+          one.  Repaired rather than merely counted.
+        - ``direction_corrected`` — both present, disagreeing.  Cannot arise
+          from the restore skew and is therefore corruption; counted apart so
+          it can never hide inside the ordinary case.
+        """
+        active_dir: Dict[str, Direction] = {
+            sig.symbol: sig.direction for sig in self._active_signals.values()
+        }
+
+        orphans = [sym for sym in self._position_lock if sym not in active_dir]
+        for sym in orphans:
+            self._position_lock.pop(sym, None)
+
+        missing = [sym for sym in active_dir if sym not in self._position_lock]
+        corrected = [
+            sym
+            for sym, dir_ in active_dir.items()
+            if sym in self._position_lock and self._position_lock[sym] is not dir_
+        ]
+        for sym in missing + corrected:
+            self._position_lock[sym] = active_dir[sym]
+
+        self._lock_orphans_dropped += len(orphans)
+        self._lock_missing_added += len(missing)
+        self._lock_direction_corrected += len(corrected)
+
+        if orphans:
+            log.warning(
+                "Position lock: dropped {} orphaned entr(ies) with no active "
+                "signal behind them ({}{}) — these were blocking delivery on "
+                "correlation_lock",
+                len(orphans),
+                ", ".join(sorted(orphans)[:10]),
+                "…" if len(orphans) > 10 else "",
+            )
+        if missing:
+            log.warning(
+                "Position lock: {} active signal(s) had no lock entry ({}) — "
+                "restored, a second position could have opened on them",
+                len(missing),
+                ", ".join(sorted(missing)[:10]),
+            )
+        if corrected:
+            log.warning(
+                "Position lock: {} entr(ies) disagreed on direction with the "
+                "active signal ({}) — corrected",
+                len(corrected),
+                ", ".join(sorted(corrected)[:10]),
+            )
+
+        return {
+            "orphans_dropped": len(orphans),
+            "missing_added": len(missing),
+            "direction_corrected": len(corrected),
+            "changed": len(orphans) + len(missing) + len(corrected),
+        }
 
     async def _restore_from_redis(self) -> None:
         try:
@@ -840,6 +951,46 @@ class SignalRouter:
             "drops_by_reason_setup": dict(
                 sorted(by_setup.items(), key=lambda kv: -kv[1])
             ),
+            "position_lock": self.position_lock_health(),
+        }
+
+    def position_lock_health(self) -> Dict[str, Any]:
+        """What ``correlation_lock`` is currently holding, and whether it
+        stands behind anything.
+
+        This exists because the gate that drops the most had no way to say
+        whether it was *tight* or *stale*, and those are opposite findings
+        read off the identical counter.  ``correlation_lock`` at 93% of
+        dequeued is blast-radius protection working when the locked symbols
+        have positions on them, and a silent outage when they do not — and
+        for weeks nothing on any surface could tell them apart.
+
+        ``divergence`` is the number that separates them, and it is live
+        rather than historical: on a healthy router it is 0 by construction,
+        because the two maps are written on the same line.  Anything else
+        means a path has broken that pairing and the reconcile at restore
+        will not see it until the next boot.
+        """
+        active_symbols = {sig.symbol for sig in self._active_signals.values()}
+        locked = set(self._position_lock)
+        orphaned = sorted(locked - active_symbols)
+        unlocked = sorted(active_symbols - locked)
+        return {
+            "locked": len(locked),
+            "active_signals": len(self._active_signals),
+            "active_symbols": len(active_symbols),
+            # Live divergence — an orphan here is one the reconcile has not
+            # run against yet, i.e. created after boot.  Both lists are
+            # bounded for the surface; the counts above are not.
+            "orphaned_now": len(orphaned),
+            "unlocked_now": len(unlocked),
+            "orphaned_sample": orphaned[:20],
+            "unlocked_sample": unlocked[:20],
+            # Repaired at the last restore — the evidence that the skew
+            # happened at all, which nothing else records.
+            "orphans_dropped_at_restore": self._lock_orphans_dropped,
+            "missing_added_at_restore": self._lock_missing_added,
+            "direction_corrected_at_restore": self._lock_direction_corrected,
         }
 
     async def _process(self, signal: Signal) -> None:

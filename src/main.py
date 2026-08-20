@@ -2863,6 +2863,64 @@ class CryptoSignalEngine:
             min_streak=6,
         ))
 
+        def _position_lock_integrity() -> Tuple[bool, str]:
+            """Is ``correlation_lock`` holding symbols nothing stands behind?
+
+            The lock and the active-signal map are written on adjacent lines
+            and released through each other, so on a healthy router the two
+            agree exactly and this probe is a constant True.  That is the
+            point: divergence has no benign cause, so any is a defect, and
+            for weeks there was no number anywhere that could show it.
+
+            The restore skew that caused the 2026-08-20 outage is repaired at
+            boot by ``_reconcile_position_lock``.  This is the other half —
+            a guard on the first moment is not a guard on the object, and a
+            future edit that pops one map without the other would otherwise
+            silently strangle delivery exactly as the restore did.
+
+            Both directions fail, and the copy names which: an orphan
+            over-blocks (candidates die on a gate protecting nothing), a
+            missing lock under-blocks (a second position can open on a
+            symbol that already has one) and is the worse of the two.
+            """
+            router = getattr(self, "router", None)
+            if router is None or not hasattr(router, "position_lock_health"):
+                return True, "router not started"
+            h = router.position_lock_health()
+            detail = (
+                f"{h['locked']} locked / {h['active_symbols']} active symbol(s)"
+            )
+            if h["unlocked_now"]:
+                return False, (
+                    f"{detail} — {h['unlocked_now']} active signal(s) hold NO "
+                    f"lock ({', '.join(h['unlocked_sample'])}): a second "
+                    f"position can open on a symbol that already has one"
+                )
+            if h["orphaned_now"]:
+                return False, (
+                    f"{detail} — {h['orphaned_now']} locked symbol(s) have no "
+                    f"active signal ({', '.join(h['orphaned_sample'])}): every "
+                    f"candidate on them dies on correlation_lock protecting "
+                    f"nothing"
+                )
+            if h["orphans_dropped_at_restore"]:
+                # Not a fault now — the reconcile did its job.  Said out loud
+                # because it is the only evidence the skew ever happened.
+                return True, (
+                    f"{detail}; {h['orphans_dropped_at_restore']} orphan(s) "
+                    f"dropped at restore"
+                )
+            return True, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="position_lock_integrity",
+            fn=_position_lock_integrity,
+            # Divergence is instantaneous and has no benign cause, but the
+            # delivery path mutates both maps inside one coroutine — one
+            # cycle of tolerance keeps a read taken mid-write from paging.
+            min_streak=2,
+        ))
+
         fl.add_predicate(PredicateProbe(
             name="scan_cycle",
             fn=_scan_cycle_health,
