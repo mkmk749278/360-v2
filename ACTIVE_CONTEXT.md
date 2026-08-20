@@ -4,6 +4,73 @@
 
 ---
 
+## SESSION 131 2026-08-20 — the promotion works; the correlation lock ate all of it
+
+Owner: *"actually we enable lsr to go live but nothing reached live feed and
+where they going what's happening"*, with a read-only guest code for ops.
+
+### Wall 1 is cleared — the rule promotes
+
+From the live dark ledger (1,667 rows): **30 promoted** — 25
+`LIQUIDITY_SWEEP_REVERSAL`, 5 `MOVER_AVWAP_SCALP` — and **4 of 4** LSR dark
+candidates promoted in the last 48h, 9 of 9 over 72h. Session 126's refusal
+census did its job; the rule is not what is stopping the path.
+
+### Wall 2 took 100% of it, and the gate was stale rather than tight
+
+**30 promoted → 0 delivered.** 26 `correlation_lock`, 1
+`same_direction_throttle`, 3 awaiting. That promoted set was the
+**best-performing population in the ledger** — 19W/8L/2 flat, **+0.57%/row**
+(CI [−0.26, +1.38]) against **−0.04%** for the rows left dark.
+
+`correlation_lock` had taken **309 of 332** dequeued (93.1%) in one 13h
+process across **11 setups**, while **2** signals were ACTIVE — and six of the
+locked symbols had **no delivered trade at all in the 30-day recorded book**,
+against a lock only ever written on confirmed delivery.
+
+**Mechanism (#973).** `_position_lock` and `_active_signals` are written on
+adjacent lines and released through each other, so at runtime they cannot
+diverge. Restore can: both paths skip a terminal-status signal when rebuilding
+`_active_signals` — right — and restore the lock map **wholesale with no
+cross-check**. `remove_signal` reaches the lock *through* `_active_signals`, so
+an unbacked entry is unreachable forever and `_persist_state` writes it back on
+every save. It compounds across restarts, and the engine restart-looped all day
+on 2026-08-19. Each half individually right; nothing reconciled them.
+
+Shipped: `_reconcile_position_lock` at restore (both directions counted —
+under-blocking ranked ahead of over-blocking), the repair counts kept as
+evidence, `position_lock_health()` on `delivery_stats()`, a
+`position_lock_integrity` probe for the half a boot-time guard cannot cover,
+and the ops panel (#195) that finally lets that gate say which of its two
+readings applies.
+
+### Also read, not acted on
+
+- **Session 130's fix held.** Engine **up 13h clean**, no `restarted alone`
+  badge, heartbeat 15s. That is past the 4h window Session 130 named.
+- **The `scan_cycle` probe's copy is now false.** It still says a cycle past the
+  deadline *"leaves the scanner heartbeat stale, and three consecutive failed
+  healthchecks restart this container"* — untrue since the beat moved to
+  progress. Not fixed here; it is the alarming-caption class and belongs in a
+  change of its own.
+- **LSR has produced 0 dark rows in 24h** (last 2026-08-19 05:22 UTC) while the
+  lane overall ran 125 rows in 13h. So the lock fix alone will not restore LSR
+  delivery today — there is nothing queued to promote. Worth a look:
+  `MOVER_TREND_PULLBACK` and `MOVER_AVWAP_SCALP` both sit at **exactly 500**
+  rows in the ledger against LSR's 69, which reads like a per-path cap starving
+  the rare paths (*"a dark lane whose row budget is consumed by the two
+  highest-volume paths starves exactly the rare paths it exists to measure"*).
+- `footprint_bars` probe: `RuntimeError: deque mutated during iteration`.
+
+### Refutation condition, stated in advance
+
+If `correlation_lock` stays near 93% of dequeued **after** the next restart with
+`orphaned_now` reading 0 on `/signals/router-drops`, the lock was tight all
+along and the drop rate is real capacity pressure — which is the owner's routing
+decision, not a bug. Judge it on a window containing at least one restart.
+
+---
+
 ## SESSION 130 2026-08-19 — the restart loop had a cause, and it was the instrument
 
 Owner, with a Telegram screenshot of the loop still firing (`HIGH —
