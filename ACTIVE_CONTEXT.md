@@ -4,6 +4,147 @@
 
 ---
 
+## SESSION 132 2026-08-22 — the pulse's zero, and the line that made "only MVRTP" true
+
+Owner: *"first priority check system and engine stability … then look at current
+market since 3 days … but still only MVRTP is producing signals … especially
+there is no signals on regular pairs and paths … even in this market condition
+we don't get produce any signals when will we?"* — with a read-only guest code
+for ops.
+
+### The premise was half wrong, and the half that was wrong is a bug we shipped
+
+**The engine never stopped producing.** 11 signals that day in 7 hours, and
+9 / 3 / 5 / 12 / 9 / 11 across 08-17→22 — the best rate of the week. What the
+owner was reading is `signals_today: 0` on the Pulse, which is what the isolated
+API has published on **every request in production** since the facade was
+written.
+
+`RedisEngineFacade._signal_history` returns `[]` under a comment saying
+`signals_today_count` is *"pre-computed in engine_state"*. The writer half was
+true from day one; the reader half never existed — `grep -rn signals_today
+src/api/` matches that comment **and nothing else**. So `build_pulse` walked an
+empty list and published the length of nothing.
+
+Eighth instance of *a docstring asserting a property the code beneath it does
+not have, checkable in one command*, and the first where the wrong answer is
+**indistinguishable from the right one**: zero is also what a correct count
+reads on a quiet morning. Nothing crashed, no screen was empty, the number was
+simply always the same number.
+
+### The market, because it explains most of the funnel and none of the defects
+
+BTC **+20.7%** in three days (64,249 → 78,495 → 77,544), ETH **+27.5%**, SOL
+**+23.0%**. Verified against an outside source *and* cross-checked against the
+engine's own BTC reference — 77,476 vs 77,543, agreeing to 0.1%.
+
+In that market `RANGE_FADE` ran 1,642 generated → **0** enqueued and
+`MEAN_REVERT` 2,958 → **1**, almost entirely on `setup_compat:regime_STRONG_TREND`.
+**That is the regime gate working.** Those paths come back on their own when the
+trend breaks; do not "fix" them.
+
+### The line that made "only MVRTP" and "nothing on regular pairs" one sentence
+
+`_allowed_evals = _mover_evaluators` fired on membership of
+`_mover_promoted_pairs` **alone**. So a core top-N pair up 15% on the day was
+narrowed to four evaluators — losing **15 of 19** — for its whole promotion
+window.
+
+And it accumulates on exactly the pairs it should not: `MOVER_PROMOTION_MAX_PAIRS`
+caps only movers admitted from **outside** the scan set, so core ones are exempt.
+Live box: **163 promotions inside a 330-pair universe, at most 30 of them
+synthetic.**
+
+In a broad rally the pairs a subscriber recognises are precisely the pairs that
+qualify as movers — which is why the delivered book reads LTC / DOT / ADA / FIL /
+APT / ETC / HBAR / ZEC / INJ, core pairs every one, stamped
+`MOVER_TREND_PULLBACK`.
+
+The restriction's own written argument is sound and is about a pair that is
+**only** a mover. It is not an argument about LTCUSDT: for a pair that also earns
+its regular place the mover paths are an *addition*, and whether mean-reversion
+belongs on it today is `setup_compat`'s question — the layer already answering it,
+1,585 times that window.
+
+Ops had the **display half of the same defect**, with the same tell: a comment
+about *synthetically-admitted* movers over a branch that skipped every promoted
+symbol from the Regular tab. The owner had been reading a regular universe
+roughly half its real size.
+
+### The last hop, and the owner's per-path cap
+
+`same_direction_throttle` took **499 of 500 drops — 91.6% of everything the
+router dequeued** over one 10.5h boot (545 dequeued, 17 delivered, 3.1%). Every
+candidate was long, so three global long slots stayed saturated and MVRTP held
+them (475 of 499) by submitting ~20× anyone else's volume.
+
+Owner signed off in writing on a per-path budget with no cumulative ceiling.
+Shipped as a mode (`DIRECTION_CAP_MODE`, default `global`) with **both modes
+evaluated on every candidate**, so the switch decision is read off a measured
+counterfactual rather than argued. Budget keyed on `origin_setup_class` — the
+immutable identity — because the count is recomputed from the live book and a
+key that can change lets a signal decrement a budget it never incremented.
+
+### Open — the coverage question, deliberately not answered
+
+`candle_coverage` had been violating 13 cycles at `239/330 … 139/330` — true,
+sustained, unactionable. Three populations, three repairs: 64 with no bucket at
+all, some with too few bars, 101 stale (worst 46h). The probe names them now and
+counts **core** pairs apart, because a promoted mover's frozen bucket is by
+design and a core pair's is a dead kline stream.
+
+`_refresh_stale_mover_candles` counted nothing its budget turned away; it now
+publishes `wanted` / `refreshed` / `deferred`. The arithmetic (pinned by a test):
+the sweep keeps pace only while `C <= MAX_PER_CYCLE * REFRESH_SEC / N`, i.e.
+**C ≤ 32s** at the shipped 8/120s against the 30-pair cap — inside a 16–30s
+median and well outside the 118s worst case.
+
+**No budget change.** I could not reach production, a wider budget spends REST
+weight against a vendor that has IP-banned this box, and this repo has already
+paid for three hypotheses formed off two samples in one day.
+
+**Refutation condition, stated before deploy:** if `mover_reseed:deferred` stays
+at zero across a window containing several 60s+ cycles, the budget is not the
+constraint — look at seeding for the 64 bucket-less symbols first.
+
+### Two switches waiting on a window
+
+| Switch | Ships | Flip when |
+|---|---|---|
+| `DUAL_UNIVERSE_ENABLED` | `false` | `/pairs` shows how much of the universe is narrowed |
+| `DIRECTION_CAP_MODE` | `global` | `/signals/router-drops` shows what `per_path` would have passed |
+
+### Also found, not acted on
+
+- **The diag console 403s for a guest in production.** The deployed ops build
+  predates `GUEST_ACTION_ROUTES`, so Run buttons render and every POST is
+  refused — this repo's own *"a control that 403s is indistinguishable from a
+  broken page"* rule, live. It is why this session read pages rather than
+  running live engine diagnostics.
+- **Ops CI is ~7 minutes, not the ~4 its `CLAUDE.md` claims** (08:24→08:31 and
+  08:38→08:43). Two runs is not yet drift worth rewriting a doc from; if the
+  next few hold at 7, update the number.
+- **`scan_cycle` cycle wall-time is healthy but close.** Worst-this-boot 118.3s
+  against the 120s deadline, 15 of 2,123 over the 60s warn, 0 past the deadline.
+  `indicators` is 74–76% of every slow cycle at ~5× concurrency against 8
+  workers — queueing, not CPU (1.13 of 3.2 cores).
+
+### The self-inflicted one, caught by the pre-merge re-read
+
+`mover_universe_role:` and `mover_universe:dual_*` increment inside
+`for chan in self.channels`, so they count channel **evaluations** and run at
+several times the pair count — the `setup_tf_resolver` defect this repo already
+paid a session for, committed again by the change that quotes the rule. Renamed
+`*_evals:`.
+
+Worse was the comment beside one: it claimed the ops census *"is read from this
+counter"*, which is false — the census is `_dual_universe_census`, per pair. A
+reader who believed it would have read a channel-multiplied number as a pair
+count. **Both found by re-reading my own diff as a reviewer, not by the suite,
+which was green throughout.**
+
+---
+
 ## SESSION 131 2026-08-20 — the promotion works; the correlation lock ate all of it
 
 Owner: *"actually we enable lsr to go live but nothing reached live feed and
