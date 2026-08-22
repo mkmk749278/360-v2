@@ -140,9 +140,90 @@ def _build_registry() -> Dict[str, Tunable]:
         SUPPRESSION_AUDIT_ENABLED,
         TRAIL_GOVERNOR_ENABLED,
         TRAIL_GOVERNOR_TIMEFRAME,
+        DUAL_UNIVERSE_ENABLED,
+        DIRECTION_CAP_MODE,
+        MAX_SAME_DIRECTION_PER_PATH,
+        MAX_SAME_DIRECTION_CUMULATIVE,
     )
 
     items = [
+        Tunable(
+            key="dual_universe_enabled",
+            label="Dual universe — a promoted core pair keeps its own paths",
+            description=(
+                "A promoted mover is scanned by 4 evaluators; a regular pair by "
+                "all 19. That restriction applied on promotion ALONE, so a core "
+                "top-N pair up 15% on the day lost 15 of its evaluators for the "
+                "whole window — and in a broad rally the pairs a subscriber "
+                "recognises are exactly the pairs that qualify as movers. ON "
+                "gives a pair that ALSO earns a regular place the union instead "
+                "of the mover set; whether mean-reversion belongs on it today "
+                "then goes back to setup_compat's regime gate, which is already "
+                "answering that question. A pair that exists only because the "
+                "mover path invented it is unaffected. The census runs whether "
+                "or not this is on — read it at /pairs before flipping. "
+                "Evaluator-path change: owner sign-off item."
+            ),
+            type="bool",
+            default=DUAL_UNIVERSE_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="direction_cap_mode",
+            label="Same-direction cap — whose budget",
+            description=(
+                "global: ONE budget of N concurrent signals per direction across "
+                "every path and symbol — the path submitting the most candidates "
+                "holds it. per_path: each path holds its own, so a quiet path "
+                "cannot be starved by a noisy one. Measured on the live box, this "
+                "gate took 499 of 500 router drops (91.6% of everything dequeued) "
+                "during a three-day rally where every candidate was long. "
+                "per_path RAISES blast radius: the concurrent ceiling in one "
+                "direction goes from N to N x (paths that can emit). Both modes "
+                "are evaluated on every candidate whatever this is set to, so "
+                "read what the other would have passed at "
+                "/signals/router-drops before flipping. Blast-radius cap: owner "
+                "sign-off item."
+            ),
+            type="str",
+            default=DIRECTION_CAP_MODE,
+            category="Safety",
+            choices=("global", "per_path"),
+        ),
+        Tunable(
+            key="max_same_direction_per_path",
+            label="Same-direction cap — per-path budget",
+            description=(
+                "Concurrent same-direction signals ONE path may hold in "
+                "per_path mode. At 3 a single path can hold 3 long and 3 short "
+                "at once. Ignored in global mode. Blast-radius cap: owner "
+                "sign-off item."
+            ),
+            type="int",
+            default=MAX_SAME_DIRECTION_PER_PATH,
+            category="Safety",
+            min_value=1,
+            max_value=10,
+        ),
+        Tunable(
+            key="max_same_direction_cumulative",
+            label="Same-direction cap — cumulative ceiling",
+            description=(
+                "Ceiling across ALL paths in per_path mode. 0 disables it, "
+                "which is what ships. Kept as a switch rather than deleted "
+                "because deleting a cap costs a deploy to get it back, and the "
+                "moment you want it back is the moment you cannot wait for one. "
+                "Counted as its own dimension: a path at its own bound is "
+                "working and throttled, a book at this ceiling is a different "
+                "finding. Ignored in global mode. Blast-radius cap: owner "
+                "sign-off item."
+            ),
+            type="int",
+            default=MAX_SAME_DIRECTION_CUMULATIVE,
+            category="Safety",
+            min_value=0,
+            max_value=60,
+        ),
         Tunable(
             key="setup_tf_correction_live",
             label="Per-setup timeframe correction (money path)",

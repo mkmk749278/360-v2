@@ -1073,6 +1073,31 @@ _MOVER_EVALUATORS: frozenset[str] = frozenset({
 })
 
 
+def _dual_universe_live() -> bool:
+    """Is the dual-universe EFFECT on right now — ops tunable, not boot env.
+
+    `runtime_tunables.get` is the hot-path-safe accessor (one Firestore doc
+    read per 5s TTL covers every key) and never raises, which is what makes it
+    admissible on this path: the caller sits inside the per-channel scan loop.
+
+    It returns the env default whenever the client is not wired — a test, or a
+    `docker exec` one-shot. That is why the ops census reads this same function
+    rather than the config constant: the panel must say what the ENGINE is
+    doing, and a surface reporting a boot default while the engine runs an
+    owner-set value is the defect the cohort-edge census cost a session over.
+
+    An unreadable tunable falls back to the value the process booted with,
+    which is the behaviour that was already shipping — a config read must never
+    be the reason an evaluator set changes.
+    """
+    try:
+        from src import runtime_tunables as _rt
+
+        return bool(_rt.get("dual_universe_enabled"))
+    except Exception:  # noqa: BLE001 - the scan set must not depend on a read
+        return bool(DUAL_UNIVERSE_ENABLED)
+
+
 def _all_scalp_evaluators() -> frozenset[str]:
     """Every evaluator ``ScalpChannel`` defines, read off the class.
 
@@ -2134,7 +2159,7 @@ class Scanner:
         )
         universe = len(self.pair_mgr.pairs) or 0
         return {
-            "enabled": bool(DUAL_UNIVERSE_ENABLED),
+            "enabled": _dual_universe_live(),
             "min_volume_usd": float(DUAL_UNIVERSE_MIN_VOLUME_USD),
             "universe_size": universe,
             "promoted": len(self._mover_promoted_pairs),
@@ -9926,7 +9951,7 @@ class Scanner:
                     self._suppression_counters[
                         f"mover_universe_role_evals:{_mover_role or 'none'}"
                     ] += 1
-                    if _is_dual and DUAL_UNIVERSE_ENABLED:
+                    if _is_dual and _dual_universe_live():
                         # Union, not intersection.  `None` already means "no
                         # restriction", and the union of "everything" with any
                         # set is "everything" — so a structurally-aged dual
