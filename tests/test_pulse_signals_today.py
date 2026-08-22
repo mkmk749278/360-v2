@@ -25,9 +25,8 @@ between two halves that were each individually right.
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional
+from typing import Any, List
 
 import pytest
 

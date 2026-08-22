@@ -1173,6 +1173,52 @@ STALE_TF_REFUSE_ENABLED: bool = _safe_bool("STALE_TF_REFUSE_ENABLED", "false")
 #: skipped EVERY promoted mover before evaluation (the "nothing fires" root cause).
 MOVER_MAX_SPREAD_PCT: float = _safe_float("MOVER_MAX_SPREAD_PCT", "0.5")
 
+# ---------------------------------------------------------------------------
+# Dual universe — a pair may be BOTH a regular pair and a promoted mover
+# ---------------------------------------------------------------------------
+#
+# Owner, 2026-08-22: *"if something is moved to promoted pairs, but by volume
+# it should still keep in regular pairs too, so one pair can be there in two
+# universes"*.
+#
+# The scanner restricts a promoted mover to four evaluators (VSB / BDS /
+# MVRTP / MVAVW) and applies that restriction on membership of
+# ``_mover_promoted_pairs`` alone — so a **core top-N pair** that happens to
+# be up 15% today loses thirteen of its seventeen evaluators for the whole
+# promotion window.  Only movers from OUTSIDE the core set are capped
+# (``MOVER_PROMOTION_MAX_PAIRS`` = 30); core ones are exempt from that cap and
+# accumulate, so on 2026-08-22 the live box held 163 promotions inside a
+# 330-pair universe with at most 30 of them synthetic.
+#
+# That is the mechanism behind "no signals on regular pairs and paths": in a
+# broad rally the pairs a subscriber recognises are exactly the pairs that
+# qualify as movers, and qualifying silently narrows them to the mover paths.
+#
+# When enabled, a promotion on a pair that ALSO earns regular membership adds
+# the mover evaluators instead of replacing the pair's own set.  Whether
+# mean-reversion belongs on an extended core pair is then decided by
+# ``setup_compat``'s regime gate, which is the layer built to decide it,
+# rather than by a hard evaluator ban the pair cannot argue with.
+#
+# Default OFF: this is an evaluator-path change on a live money path, so it
+# ships dark per CLAUDE.md § Project Phase.  The CENSUS runs regardless and is
+# rendered on the ops Pairs page — it says how much of the universe is
+# affected and deliberately cannot say how many more signals would result,
+# because the evaluators it names are the ones that did not run.
+DUAL_UNIVERSE_ENABLED: bool = _safe_bool("DUAL_UNIVERSE_ENABLED", "false")
+
+# Volume at which a SYNTHETIC mover (one admitted from outside the top-N) is
+# also treated as a regular pair.  A pair already in the universe on its own
+# merit qualifies without reference to this number — it is only for the pairs
+# the mover path itself invented.
+#
+# 50M is not a new threshold: it is the MIDCAP boundary ``pair_manager`` has
+# used to tier pairs since it was written.  Reusing it keeps this from being a
+# number chosen while looking at one window.
+DUAL_UNIVERSE_MIN_VOLUME_USD: float = _safe_float(
+    "DUAL_UNIVERSE_MIN_VOLUME_USD", "50000000"
+)
+
 # ── Real-time mover IGNITION detector (catch movers at minute-zero) ───────────
 # Replaces the lagging 24h-%change promotion trigger with a real-time signal off
 # the `!ticker@arr` all-market futures stream: a short-window price move + a

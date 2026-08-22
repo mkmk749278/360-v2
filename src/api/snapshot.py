@@ -1671,15 +1671,47 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
 
     pair_mgr = getattr(engine, "pair_mgr", None)
     pairs = getattr(pair_mgr, "pairs", None) if pair_mgr is not None else None
+    # Which universes each promoted symbol is in, read off the scanner's own
+    # resolver rather than re-derived here — one writer, one answer.
+    _role_of = getattr(scanner, "mover_universe_role", None)
+
+    def _universe_role(sym: str) -> str:
+        if _role_of is None:
+            return ""
+        try:
+            return str(_role_of(sym) or "")
+        except Exception:
+            return ""
+
+    _dual_roles = {"dual_core", "dual_volume"}
+
     if isinstance(pairs, dict):
         for sym, info in pairs.items():
-            # A synthetically-admitted mover lives in pair_mgr AND the promoted
-            # set — show it only under Promoting, not Regular.
-            if sym in _promoted_keys:
+            # A pair can be in BOTH universes (owner, 2026-08-22), and this
+            # branch used to deny it.  The comment said "a *synthetically-
+            # admitted* mover lives in pair_mgr AND the promoted set — show it
+            # only under Promoting", which is right about a synthetic mover and
+            # was applied to EVERY promoted symbol: a core top-N pair vanished
+            # from Regular for the whole promotion window.  On 2026-08-22 that
+            # was 163 of a 330-pair universe hidden behind a tab reading
+            # "Regular (167)", so the owner was reading a regular universe
+            # roughly half its real size — the display half of the same defect
+            # the scanner had, and the same tell (a comment describing a
+            # property the code beneath it does not have).
+            #
+            # A pair that exists ONLY because the mover path invented it still
+            # belongs under Promoting alone: it is not a regular pair, and
+            # listing it as one would be the opposite error.
+            _role = _universe_role(sym)
+            if sym in _promoted_keys and _role not in _dual_roles:
                 continue
             tier = getattr(info, "tier", None)
             regular.append({
                 "symbol": sym,
+                # Present in both lists, and each row says so — a reader
+                # counting two tabs must not double-count silently.
+                "also_promoted": sym in _promoted_keys,
+                "universe_role": _role,
                 "tier": getattr(tier, "value", str(tier)) if tier is not None else "?",
                 "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
                 "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
@@ -1734,6 +1766,10 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
             rt = _ret_rows.get(sym) or {}
             promoting.append({
                 "symbol": sym,
+                # dual_core / dual_volume / mover_only — which universes this
+                # pair is in, and therefore whether the mover restriction is
+                # narrowing a pair that has its own paths to run.
+                "universe_role": _universe_role(sym),
                 "minutes_left": round(max(0.0, (float(expiry or 0.0) - _mono) / 60.0), 1),
                 "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
                 "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
@@ -1794,13 +1830,31 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         retention = {"error": str(exc)}
 
+    # The dual-universe census, from the scanner that decides it.  Published
+    # whether or not the effect flag is on: the effect ships dark and the
+    # measurement does not, because "measured but nowhere to look" is an
+    # unfinished change.  Absent (not empty) when the scanner cannot answer,
+    # so the page can tell an engine predating this from a quiet one.
+    dual_universe: Dict[str, Any] = {}
+    _census = getattr(scanner, "_dual_universe_census", None)
+    if callable(_census):
+        try:
+            dual_universe = _census() or {}
+        except Exception as exc:  # noqa: BLE001
+            dual_universe = {"error": str(exc)}
+
     return {
         "regular": regular,
         "promoting": promoting,
+        # Counts overlap by construction now: a dual pair is in both lists.
+        # Published apart so a reader adding the two and overshooting the
+        # universe size reads it as the overlap it is, not as a bug.
         "regular_count": len(regular),
         "promoting_count": len(promoting),
+        "dual_count": sum(1 for r in regular if r.get("also_promoted")),
         "ignition": ignition,
         "retention": retention,
+        "dual_universe": dual_universe,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
