@@ -1173,6 +1173,52 @@ STALE_TF_REFUSE_ENABLED: bool = _safe_bool("STALE_TF_REFUSE_ENABLED", "false")
 #: skipped EVERY promoted mover before evaluation (the "nothing fires" root cause).
 MOVER_MAX_SPREAD_PCT: float = _safe_float("MOVER_MAX_SPREAD_PCT", "0.5")
 
+# ---------------------------------------------------------------------------
+# Dual universe — a pair may be BOTH a regular pair and a promoted mover
+# ---------------------------------------------------------------------------
+#
+# Owner, 2026-08-22: *"if something is moved to promoted pairs, but by volume
+# it should still keep in regular pairs too, so one pair can be there in two
+# universes"*.
+#
+# The scanner restricts a promoted mover to four evaluators (VSB / BDS /
+# MVRTP / MVAVW) and applies that restriction on membership of
+# ``_mover_promoted_pairs`` alone — so a **core top-N pair** that happens to
+# be up 15% today loses thirteen of its seventeen evaluators for the whole
+# promotion window.  Only movers from OUTSIDE the core set are capped
+# (``MOVER_PROMOTION_MAX_PAIRS`` = 30); core ones are exempt from that cap and
+# accumulate, so on 2026-08-22 the live box held 163 promotions inside a
+# 330-pair universe with at most 30 of them synthetic.
+#
+# That is the mechanism behind "no signals on regular pairs and paths": in a
+# broad rally the pairs a subscriber recognises are exactly the pairs that
+# qualify as movers, and qualifying silently narrows them to the mover paths.
+#
+# When enabled, a promotion on a pair that ALSO earns regular membership adds
+# the mover evaluators instead of replacing the pair's own set.  Whether
+# mean-reversion belongs on an extended core pair is then decided by
+# ``setup_compat``'s regime gate, which is the layer built to decide it,
+# rather than by a hard evaluator ban the pair cannot argue with.
+#
+# Default OFF: this is an evaluator-path change on a live money path, so it
+# ships dark per CLAUDE.md § Project Phase.  The CENSUS runs regardless and is
+# rendered on the ops Pairs page — it says how much of the universe is
+# affected and deliberately cannot say how many more signals would result,
+# because the evaluators it names are the ones that did not run.
+DUAL_UNIVERSE_ENABLED: bool = _safe_bool("DUAL_UNIVERSE_ENABLED", "false")
+
+# Volume at which a SYNTHETIC mover (one admitted from outside the top-N) is
+# also treated as a regular pair.  A pair already in the universe on its own
+# merit qualifies without reference to this number — it is only for the pairs
+# the mover path itself invented.
+#
+# 50M is not a new threshold: it is the MIDCAP boundary ``pair_manager`` has
+# used to tier pairs since it was written.  Reusing it keeps this from being a
+# number chosen while looking at one window.
+DUAL_UNIVERSE_MIN_VOLUME_USD: float = _safe_float(
+    "DUAL_UNIVERSE_MIN_VOLUME_USD", "50000000"
+)
+
 # ── Real-time mover IGNITION detector (catch movers at minute-zero) ───────────
 # Replaces the lagging 24h-%change promotion trigger with a real-time signal off
 # the `!ticker@arr` all-market futures stream: a short-window price move + a
@@ -2771,6 +2817,52 @@ MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
 # most ~3 of our pairs before the dump exhausts.  Env-overridable per B8
 # so the operator can widen on low-volatility days without a redeploy.
 MAX_SAME_DIRECTION_GLOBAL: int = int(os.getenv("MAX_SAME_DIRECTION_GLOBAL", "3"))
+
+# ---------------------------------------------------------------------------
+# Per-path same-direction cap — the owner's replacement for the global one
+# ---------------------------------------------------------------------------
+#
+# Owner, 2026-08-22: *"set cap per path 3 same direction and no cumulative max
+# cap anyways, so per path can individually produce 3 signals same direction —
+# so we can get max 6, 3 longs 3 shorts at same time"*.
+#
+# What the global cap was doing, measured on the live box over one 10.5h boot:
+# **545 dequeued, 17 delivered (3.1%), and `same_direction_throttle` took 499
+# of the 500 drops — 91.6% of everything the router dequeued.**  During a
+# three-day melt-up every candidate is long, so a global budget of three long
+# slots is saturated permanently, and the largest path holds them: MVRTP took
+# 475 of those 499 because it submits roughly twenty times anyone else's
+# volume.  A smaller path's handful of candidates then arrive into a book whose
+# slots are already held, which is starvation by arithmetic rather than by
+# design.
+#
+# The correlation argument the global cap was written on is real and unchanged:
+# top USDT-M alts are 0.85-0.95 correlated to BTC, so N same-direction
+# positions are close to one position N times over.  What changes is who the
+# budget belongs to.  Per path, a strategy cannot be starved by a noisier
+# neighbour, and the concentration a reader should worry about is bounded by
+# the number of LIVE paths rather than by the number of candidates.
+#
+# **This raises blast radius and the owner signed it off in writing.**  It is
+# recorded here rather than in a commit message because the next reader of this
+# constant needs the same context: the concurrent-long ceiling goes from 3 to
+# 3 x (paths that can emit), and what still stands behind it is the daily loss
+# budget, the kill switch, the correlation-group limit, the per-channel cap and
+# the per-symbol cooldown.
+DIRECTION_CAP_MODE: str = _safe_choice(
+    "DIRECTION_CAP_MODE", "global", frozenset({"global", "per_path"}),
+)
+
+#: Concurrent same-direction signals ONE path may hold, in ``per_path`` mode.
+MAX_SAME_DIRECTION_PER_PATH: int = _safe_int("MAX_SAME_DIRECTION_PER_PATH", "3")
+
+#: Cumulative ceiling across every path in ``per_path`` mode.  ``0`` disables
+#: it, which is what the owner asked for ("no cumulative max cap") and what
+#: ships.  It stays a tunable rather than being deleted so the ceiling can be
+#: re-armed from ops without a redeploy if the per-path book proves too
+#: concentrated — deleting a cap costs a deploy to get back, and the moment
+#: you want it back is the moment you cannot wait for one.
+MAX_SAME_DIRECTION_CUMULATIVE: int = _safe_int("MAX_SAME_DIRECTION_CUMULATIVE", "0")
 
 # ---------------------------------------------------------------------------
 # Regime Kill Switch — BTC whipsaw detection

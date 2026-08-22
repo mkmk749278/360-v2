@@ -300,9 +300,43 @@ class RedisEngineFacade:
 
     @property
     def _signal_history(self) -> list:
-        # History is not needed for per-user pulse/auto-mode/positions reads;
-        # signals_today_count is pre-computed in engine_state.
+        """Always empty in isolated mode — the history lives in the engine.
+
+        **Read :attr:`signals_today_count` beside this, not instead of it.**
+        This property returned ``[]`` under a comment saying the count was
+        "pre-computed in engine_state", which was true of the *writer* and
+        false of every reader: ``grep -rn signals_today src/api/`` matched
+        that comment and nothing else, so ``build_pulse`` walked this empty
+        list and the Pulse header published ``signals_today: 0`` for every
+        request the isolated API served — i.e. all of production — while the
+        feed built from the same engine showed 11 signals stamped that day
+        (owner-caught 2026-08-22).
+
+        A docstring asserting a property the code beneath it does not have,
+        checkable in one command, for the seventh time in these two repos.
+        The half that was missing is below; ``test_pulse_signals_today.py``
+        drives the real writer payload through this real facade so a future
+        field derived from ``_signal_history`` cannot silently read zero.
+        """
         return []
+
+    @property
+    def signals_today_count(self) -> Optional[int]:
+        """Today's signal count as the engine counted it, or ``None``.
+
+        ``None`` means *the engine did not say* — an engine predating the key,
+        or a snapshot that has not refreshed — and is deliberately not ``0``:
+        a reader that cannot tell "no signals today" from "nobody told me"
+        publishes the first when it means the second, which is the defect this
+        property exists to close.
+        """
+        raw = self._state.get("signals_today_count")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
 
     @property
     def _channels(self) -> list:

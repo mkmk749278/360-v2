@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from src.utils import get_logger
@@ -195,6 +195,44 @@ def _agent_name_for(setup_class: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _signal_date(sig: Any) -> Optional[date]:
+    """The calendar (UTC) date a signal was stamped, or ``None``.
+
+    ``Signal.timestamp`` is a ``datetime`` when constructed and can come back
+    as an **ISO string** from a restart-restored record — ``main.py``'s expiry
+    path already documents that shape.  ``getattr(...) is not None`` passes on
+    a string and ``.date()`` then raises, so the guard has to be about the
+    type rather than about presence.
+    """
+    ts = getattr(sig, "timestamp", None)
+    if isinstance(ts, datetime):
+        return ts.date()
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts).date()
+        except ValueError:
+            return None
+    return None
+
+
+def _precomputed_signals_today(engine: Any) -> Optional[int]:
+    """Today's count from a process that can see the history, or ``None``.
+
+    Isolated mode splits the engine in two: the engine container holds
+    ``_signal_history`` and the api container serves HTTP.  ``SnapshotWriter``
+    has published ``signals_today_count`` across that boundary all along and
+    nothing read it.  Which process holds the state is not a deployment
+    detail — see ``RedisEngineFacade.signals_today_count``.
+    """
+    raw = getattr(engine, "signals_today_count", None)
+    if raw is None:
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 async def build_pulse(
     engine: Any,
     *,
@@ -349,14 +387,27 @@ async def build_pulse(
     if pair_mgr is not None and hasattr(pair_mgr, "symbols"):
         scanning_pairs = len(pair_mgr.symbols)
 
-    history = getattr(engine, "_signal_history", []) or []
-    today = _now().date()
-    signals_today = sum(
-        1
-        for s in history
-        if getattr(s, "timestamp", None) is not None
-        and s.timestamp.date() == today
-    )
+    # Today's signal count.  The engine walks its own history; the isolated
+    # API process has none — ``RedisEngineFacade._signal_history`` is ``[]``
+    # by construction, so walking it here published ``signals_today: 0`` on
+    # every request production served, beside a feed showing that day's
+    # signals (owner-caught 2026-08-22).  Prefer the count the process that
+    # HOLDS the history computed, and fall back to walking only when no such
+    # count was published.
+    #
+    # ``None`` from the precomputed side means *the engine did not say* and
+    # falls through to the walk; it must never be read as zero, which is the
+    # whole defect.  In single-process mode there is no precomputed count and
+    # the walk is authoritative, so both deployments answer the same question.
+    signals_today = _precomputed_signals_today(engine)
+    if signals_today is None:
+        history = getattr(engine, "_signal_history", []) or []
+        today = _now().date()
+        signals_today = sum(
+            1
+            for s in history
+            if _signal_date(s) == today
+        )
 
     status: str = "Healthy"
     if rm is not None and rm.daily_kill_tripped:
@@ -1620,15 +1671,47 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
 
     pair_mgr = getattr(engine, "pair_mgr", None)
     pairs = getattr(pair_mgr, "pairs", None) if pair_mgr is not None else None
+    # Which universes each promoted symbol is in, read off the scanner's own
+    # resolver rather than re-derived here — one writer, one answer.
+    _role_of = getattr(scanner, "mover_universe_role", None)
+
+    def _universe_role(sym: str) -> str:
+        if _role_of is None:
+            return ""
+        try:
+            return str(_role_of(sym) or "")
+        except Exception:
+            return ""
+
+    _dual_roles = {"dual_core", "dual_volume"}
+
     if isinstance(pairs, dict):
         for sym, info in pairs.items():
-            # A synthetically-admitted mover lives in pair_mgr AND the promoted
-            # set — show it only under Promoting, not Regular.
-            if sym in _promoted_keys:
+            # A pair can be in BOTH universes (owner, 2026-08-22), and this
+            # branch used to deny it.  The comment said "a *synthetically-
+            # admitted* mover lives in pair_mgr AND the promoted set — show it
+            # only under Promoting", which is right about a synthetic mover and
+            # was applied to EVERY promoted symbol: a core top-N pair vanished
+            # from Regular for the whole promotion window.  On 2026-08-22 that
+            # was 163 of a 330-pair universe hidden behind a tab reading
+            # "Regular (167)", so the owner was reading a regular universe
+            # roughly half its real size — the display half of the same defect
+            # the scanner had, and the same tell (a comment describing a
+            # property the code beneath it does not have).
+            #
+            # A pair that exists ONLY because the mover path invented it still
+            # belongs under Promoting alone: it is not a regular pair, and
+            # listing it as one would be the opposite error.
+            _role = _universe_role(sym)
+            if sym in _promoted_keys and _role not in _dual_roles:
                 continue
             tier = getattr(info, "tier", None)
             regular.append({
                 "symbol": sym,
+                # Present in both lists, and each row says so — a reader
+                # counting two tabs must not double-count silently.
+                "also_promoted": sym in _promoted_keys,
+                "universe_role": _role,
                 "tier": getattr(tier, "value", str(tier)) if tier is not None else "?",
                 "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
                 "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
@@ -1683,6 +1766,10 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
             rt = _ret_rows.get(sym) or {}
             promoting.append({
                 "symbol": sym,
+                # dual_core / dual_volume / mover_only — which universes this
+                # pair is in, and therefore whether the mover restriction is
+                # narrowing a pair that has its own paths to run.
+                "universe_role": _universe_role(sym),
                 "minutes_left": round(max(0.0, (float(expiry or 0.0) - _mono) / 60.0), 1),
                 "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
                 "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
@@ -1743,13 +1830,31 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         retention = {"error": str(exc)}
 
+    # The dual-universe census, from the scanner that decides it.  Published
+    # whether or not the effect flag is on: the effect ships dark and the
+    # measurement does not, because "measured but nowhere to look" is an
+    # unfinished change.  Absent (not empty) when the scanner cannot answer,
+    # so the page can tell an engine predating this from a quiet one.
+    dual_universe: Dict[str, Any] = {}
+    _census = getattr(scanner, "_dual_universe_census", None)
+    if callable(_census):
+        try:
+            dual_universe = _census() or {}
+        except Exception as exc:  # noqa: BLE001
+            dual_universe = {"error": str(exc)}
+
     return {
         "regular": regular,
         "promoting": promoting,
+        # Counts overlap by construction now: a dual pair is in both lists.
+        # Published apart so a reader adding the two and overshooting the
+        # universe size reads it as the overlap it is, not as a bug.
         "regular_count": len(regular),
         "promoting_count": len(promoting),
+        "dual_count": sum(1 for r in regular if r.get("also_promoted")),
         "ignition": ignition,
         "retention": retention,
+        "dual_universe": dual_universe,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 

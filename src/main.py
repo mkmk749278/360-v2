@@ -4405,23 +4405,84 @@ class CryptoSignalEngine:
             syms = list(pairs.keys())
             if not syms:
                 return False, "no universe symbols"
+
+            # Name the cause, don't just report the rate.  This probe read
+            # "239/330 with >=20 candles, 139/330 updated within 45m" for
+            # thirteen sustained cycles on 2026-08-22 — true, sustained, and
+            # unactionable, because three completely different populations
+            # produce the same two fractions and each has a different fix:
+            #
+            #   no_bucket   the store has never held this symbol at all.  On
+            #               the live box 64 of a 330-pair universe: seeding
+            #               never ran for them or ran and failed.
+            #   short       a bucket exists with under 20 bars — seeded and
+            #               not filled, which is a young admission, not a
+            #               dead feed.
+            #   stale       enough bars, and the newest one is old.  For a
+            #               promoted mover that is the REST re-seed sweep
+            #               falling behind (no WS klines); for a CORE pair it
+            #               is a dead kline stream, which is a different and
+            #               much worse fault.
+            #
+            # A probe that names its cause pays for itself the first time it
+            # fires; this one had been firing for thirteen cycles saying only
+            # that something was wrong.
+            promoted = set(
+                getattr(getattr(self, "_scanner", None), "_mover_promoted_pairs", {})
+                or {}
+            )
+            buckets: Dict[str, int] = {
+                "no_bucket": 0, "short": 0, "stale": 0, "fresh": 0,
+            }
+            #: Stale/absent CORE pairs, tracked apart because a core pair has a
+            #: WS kline subscription and a promoted one does not — the same
+            #: symptom means "a stream died" on one and "the re-seed budget is
+            #: behind" on the other.
+            core_bad: List[str] = []
             ok_n = 0
             fresh_n = 0
             for s in syms:
                 cd = self.data_store.get_candles(s, "15m") or {}
                 closes = cd.get("close")
-                if closes is None or len(closes) < 20:
+                if closes is None:
+                    buckets["no_bucket"] += 1
+                    if s not in promoted:
+                        core_bad.append(s)
+                    continue
+                if len(closes) < 20:
+                    buckets["short"] += 1
+                    if s not in promoted:
+                        core_bad.append(s)
                     continue
                 ok_n += 1
                 age = self.data_store.last_kline_age_seconds(s, "15m")
                 # ``None`` = never stamped, which is not evidence of freshness.
                 if age is not None and float(age) <= float(_max_age):
                     fresh_n += 1
+                    buckets["fresh"] += 1
+                else:
+                    buckets["stale"] += 1
+                    if s not in promoted:
+                        core_bad.append(s)
             n = len(syms)
             healthy = (ok_n / n) >= 0.7 and (fresh_n / n) >= 0.7
+            causes = ", ".join(
+                f"{k}={v}" for k, v in buckets.items() if v
+            ) or "none"
+            # A core pair with no live 15m series is the fault worth waking
+            # somebody for, and it was previously pooled with every promoted
+            # mover whose bucket froze by design.  Named, and sampled so the
+            # next move is a symbol rather than a percentage.
+            core_note = ""
+            if core_bad:
+                core_note = (
+                    f"; {len(core_bad)} CORE pair(s) unusable "
+                    f"(e.g. {', '.join(sorted(core_bad)[:5])})"
+                )
             return healthy, (
                 f"{ok_n}/{n} symbols with ≥20 15m candles, "
-                f"{fresh_n}/{n} updated within {int(float(_max_age) // 60)}m"
+                f"{fresh_n}/{n} updated within {int(float(_max_age) // 60)}m "
+                f"[{causes}; {len(promoted)} promoted of {n}]{core_note}"
             )
 
         fl.add_predicate(PredicateProbe(name="candle_coverage", fn=_coverage, min_streak=6))

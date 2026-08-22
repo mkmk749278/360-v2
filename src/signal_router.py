@@ -29,6 +29,9 @@ from config import (
     CHANNEL_TELEGRAM_MAP,
     MAX_CONCURRENT_SIGNALS_PER_CHANNEL,
     MAX_SAME_DIRECTION_GLOBAL,
+    MAX_SAME_DIRECTION_PER_PATH,
+    MAX_SAME_DIRECTION_CUMULATIVE,
+    DIRECTION_CAP_MODE,
     MAX_SIGNAL_HOLD_SECONDS,
     SIGNAL_EXPIRY_ENABLED,
     SIGNAL_TYPE_LABELS,
@@ -170,6 +173,29 @@ def _persist_active_state_to_disk(payload: Dict[str, Any]) -> None:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class _DirectionCap:
+    """One candidate's same-direction verdict under BOTH modes.
+
+    Carried as a value rather than a tuple of bools so the gate, the log line
+    and the counterfactual all read the same fields — a second reading of
+    "would this have been blocked" is how the panel that justifies a switch
+    ends up disagreeing with the gate that performs it.
+    """
+
+    mode: str
+    key: str
+    direction: str
+    blocked: bool
+    reason: str
+    count: int
+    limit: int
+    same_dir_total: int
+    same_dir_path: int
+    would_block_global: bool
+    would_block_per_path: bool
+
+
 class SignalRouter:
     """Consumes signals from a queue, scores, filters, and dispatches."""
 
@@ -235,6 +261,22 @@ class SignalRouter:
         # quiet. Never reset — a counter the reader has to catch mid-window is
         # a counter that reports a fault which is not happening.
         self._drop_counters: Dict[str, int] = defaultdict(int)
+        # What each same-direction mode WOULD have done to every candidate this
+        # gate saw.  In-process integers, reset on restart; see
+        # ``direction_cap_report``.
+        #
+        # The four outcome buckets are seeded at zero rather than created on
+        # first increment: a bucket that is absent until it fires teaches the
+        # reader that its absence means "none", when it equally means the
+        # counting stopped — and the two disagreement buckets are exactly the
+        # ones a switch decision is read from, so an absent `global_only` is
+        # the worst possible blank on this panel.
+        self._direction_cap_counterfactual: Dict[str, int] = defaultdict(int)
+        for _bucket in (
+            "evaluated", "both_block", "global_only", "per_path_only",
+            "neither_blocks",
+        ):
+            self._direction_cap_counterfactual[_bucket] = 0
         self._delivered_total: int = 0
         self._processed_total: int = 0
         # Optional callback: called after a paid signal is successfully posted.
@@ -901,6 +943,177 @@ class SignalRouter:
             _fo.record("signal_router.drop_stamp", exc)
         return None
 
+    # ------------------------------------------------------------------
+    # Same-direction cap — the budget, its key, and both modes at once
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def direction_budget_key(signal: Signal) -> str:
+        """Which budget this candidate spends — one writer, one answer.
+
+        Keyed on ``origin_setup_class``, the scanner-stamped **immutable**
+        identity, because ``setup_class`` can be rewritten downstream by
+        arbitration and confluence.  A budget whose key can change between the
+        moment a signal is admitted and the moment it is counted lets a signal
+        decrement a budget it never incremented — and the count here is
+        recomputed from the live book on every candidate, so the two ends must
+        agree about every row or the cap drifts silently.
+
+        A candidate with no setup identity gets its own named bucket rather
+        than sharing one with a real path.  A fallback is not a default: if a
+        call site stops stamping, that must be visible as an odd budget rather
+        than hidden inside whichever path happens to be quiet.
+        """
+        origin = str(getattr(signal, "origin_setup_class", "") or "").strip()
+        if origin:
+            return origin.upper()
+        current = str(getattr(signal, "setup_class", "") or "").strip()
+        return current.upper() if current else "UNCLASSIFIED"
+
+    def _direction_cap_decision(self, signal: Signal) -> "_DirectionCap":
+        """Evaluate BOTH modes; apply the configured one.
+
+        The counterfactual is not a second implementation — it is the same two
+        counts read under two rules, so the panel that justifies switching
+        cannot disagree with the gate that would do the switching.
+        """
+        direction = signal.direction
+        key = self.direction_budget_key(signal)
+
+        same_dir_total = 0
+        same_dir_path = 0
+        for s in self._active_signals.values():
+            if s.direction != direction:
+                continue
+            same_dir_total += 1
+            if self.direction_budget_key(s) == key:
+                same_dir_path += 1
+
+        would_block_global = same_dir_total >= MAX_SAME_DIRECTION_GLOBAL
+        would_block_path = same_dir_path >= MAX_SAME_DIRECTION_PER_PATH
+        # The cumulative ceiling is a SEPARATE dimension from the per-path
+        # budget, and stays separate so the two never pool: a path at its own
+        # bound is working and throttled, a book at a cumulative ceiling is a
+        # different finding with a different fix.  ``0`` disables it — which is
+        # what the owner asked for and what ships.
+        cumulative = MAX_SAME_DIRECTION_CUMULATIVE
+        would_block_cumulative = bool(cumulative) and same_dir_total >= cumulative
+
+        if DIRECTION_CAP_MODE == "per_path":
+            if would_block_path:
+                blocked, reason = True, f"per-path cap for {key}"
+                count, limit = same_dir_path, MAX_SAME_DIRECTION_PER_PATH
+            elif would_block_cumulative:
+                blocked, reason = True, "cumulative ceiling"
+                count, limit = same_dir_total, cumulative
+            else:
+                blocked, reason = False, ""
+                count, limit = same_dir_path, MAX_SAME_DIRECTION_PER_PATH
+        else:
+            blocked = would_block_global
+            reason = "global cap" if blocked else ""
+            count, limit = same_dir_total, MAX_SAME_DIRECTION_GLOBAL
+
+        return _DirectionCap(
+            mode=DIRECTION_CAP_MODE,
+            key=key,
+            direction=direction.value,
+            blocked=blocked,
+            reason=reason,
+            count=count,
+            limit=limit,
+            same_dir_total=same_dir_total,
+            same_dir_path=same_dir_path,
+            would_block_global=would_block_global,
+            would_block_per_path=would_block_path or would_block_cumulative,
+        )
+
+    def _record_direction_cap_counterfactual(self, cap: "_DirectionCap") -> None:
+        """Count what each mode WOULD have done to this candidate.
+
+        Four buckets rather than a single "would be delivered" total, because
+        the two interesting ones are the disagreements and a total cannot show
+        them.  ``global_only`` is the population the owner is asking about:
+        candidates the global cap kills that a per-path budget would pass.
+        """
+        c = self._direction_cap_counterfactual
+        c["evaluated"] += 1
+        g, p = cap.would_block_global, cap.would_block_per_path
+        if g and p:
+            c["both_block"] += 1
+        elif g:
+            c["global_only"] += 1
+            c[f"global_only:{cap.key}"] += 1
+        elif p:
+            c["per_path_only"] += 1
+            c[f"per_path_only:{cap.key}"] += 1
+        else:
+            c["neither_blocks"] += 1
+
+    def direction_cap_report(self) -> Dict[str, Any]:
+        """What the cap is doing, and what the other mode would have done.
+
+        Published whether or not the mode has been switched: the effect ships
+        default-OFF and the measurement does not, because a decision with
+        nowhere to read it is a decision that keeps getting deferred.
+
+        **Counters are cumulative since engine start and reset on restart** —
+        they are in-process integers, not a ledger, so a low number after a
+        deploy is a young process rather than a quiet market.
+
+        The counterfactual answers *how many more candidates would survive this
+        hop* and is structurally incapable of answering *how many more would be
+        profitable* — every one of them still faces TP/SL sanity, the staleness
+        checks and the channel floor below this gate, and their outcomes are
+        unknowable because they never traded.
+        """
+        c = self._direction_cap_counterfactual
+        evaluated = int(c.get("evaluated", 0) or 0)
+        flat = {k: v for k, v in c.items() if ":" not in k}
+        by_key = {k: v for k, v in c.items() if ":" in k}
+        # Live occupancy per (path, direction) — the budgets actually held
+        # right now, which is what makes a saturated cap legible as
+        # saturation rather than as an absence of candidates.
+        held: Dict[str, int] = defaultdict(int)
+        for s in self._active_signals.values():
+            held[f"{self.direction_budget_key(s)}|{s.direction.value}"] += 1
+
+        # The disagreement bucket belonging to the mode that is NOT running:
+        # in `global` mode the interesting population is what a per-path budget
+        # would have passed, and vice versa.
+        other_bucket = (
+            "global_only" if DIRECTION_CAP_MODE == "global" else "per_path_only"
+        )
+        would_gain = int(c.get(other_bucket, 0) or 0)
+
+        return {
+            "mode": DIRECTION_CAP_MODE,
+            "per_path_limit": MAX_SAME_DIRECTION_PER_PATH,
+            "global_limit": MAX_SAME_DIRECTION_GLOBAL,
+            # 0 means the cumulative ceiling is OFF, which is a decision
+            # somebody made and not an unset value.
+            "cumulative_limit": MAX_SAME_DIRECTION_CUMULATIVE,
+            "evaluated": evaluated,
+            "counterfactual": dict(sorted(flat.items())),
+            "counterfactual_by_path": dict(
+                sorted(by_key.items(), key=lambda kv: -kv[1])
+            ),
+            #: Candidates the CURRENT mode kills that the other would pass,
+            #: as a share of everything this gate saw.  The number the switch
+            #: decision is read from — so it is computed in two named steps
+            #: rather than a nested conditional expression: a chain that has to
+            #: be traced to be believed is the wrong shape for the one figure
+            #: somebody will act on.
+            #:
+            #: Note the denominator is candidates that REACHED this gate, not
+            #: everything dequeued — the correlation lock, per-channel cap and
+            #: correlation-group limit sit above it.
+            "would_gain": would_gain,
+            "would_gain_share": (would_gain / evaluated) if evaluated else None,
+            "budgets_held": dict(sorted(held.items(), key=lambda kv: -kv[1])),
+            "budgets_held_total": sum(held.values()),
+        }
+
     def _log_delivery_stats(self) -> None:
         """One line a minute naming where the dequeued signals went.
 
@@ -952,6 +1165,12 @@ class SignalRouter:
                 sorted(by_setup.items(), key=lambda kv: -kv[1])
             ),
             "position_lock": self.position_lock_health(),
+            # The same-direction cap's own X-ray, beside the counter it
+            # explains.  `same_direction_throttle` took 91.6% of every drop
+            # over one boot and the row above can only say that it did — this
+            # says which budgets are held and what the other mode would have
+            # passed.
+            "direction_cap": self.direction_cap_report(),
         }
 
     def position_lock_health(self) -> Dict[str, Any]:
@@ -1056,20 +1275,28 @@ class SignalRouter:
             )
             return self._drop(signal, "correlation_group_limit")
 
-        # Global same-direction cap (Correlation Throttle).
+        # Same-direction cap (Correlation Throttle) — global or per path.
+        #
         # Top-75 USDT-M alts are 0.85-0.95 correlated to BTC; when BTC
-        # dumps/pumps all same-direction positions SL simultaneously.
-        # The group-based check above only covers ~25 named pairs; this
-        # catch-all prevents blast-radius on the long tail of alts.
-        same_dir_count = sum(
-            1 for s in self._active_signals.values()
-            if s.direction == signal.direction
-        )
-        if same_dir_count >= MAX_SAME_DIRECTION_GLOBAL:
+        # dumps/pumps all same-direction positions SL simultaneously.  The
+        # group-based check above only covers ~25 named pairs; this catch-all
+        # prevents blast-radius on the long tail of alts.
+        #
+        # In ``global`` mode the budget belongs to the book, which measured
+        # 91.6% of every drop the router made over one 10.5h boot: three long
+        # slots against a market where every candidate was long, and the
+        # highest-volume path holding them by arithmetic.  In ``per_path`` mode
+        # the budget belongs to each path, so a strategy cannot be starved by a
+        # noisier neighbour.  Both are evaluated on every candidate whatever
+        # the mode, and the counterfactual is published — the decision to
+        # switch is read off what the OTHER mode would have done, not guessed.
+        cap = self._direction_cap_decision(signal)
+        self._record_direction_cap_counterfactual(cap)
+        if cap.blocked:
             log.info(
-                "correlation_throttle skip {} {} – {}/{} same-direction active",
-                signal.symbol, signal.direction.value,
-                same_dir_count, MAX_SAME_DIRECTION_GLOBAL,
+                "correlation_throttle skip {} {} – {} ({}/{} in {} mode)",
+                signal.symbol, signal.direction.value, cap.reason,
+                cap.count, cap.limit, cap.mode,
             )
             return self._drop(signal, "same_direction_throttle")
 

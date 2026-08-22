@@ -110,6 +110,8 @@ from config import (
     MOVER_PROMOTION_MIN_PCT,
     MOVER_PROMOTION_MIN_VOLUME_USD,
     MOVER_MAX_SPREAD_PCT,
+    DUAL_UNIVERSE_ENABLED,
+    DUAL_UNIVERSE_MIN_VOLUME_USD,
     COUNTERTREND_MOVER_HARD_BLOCK_ENABLED,
     COUNTERTREND_MOVER_MIN_FAN_PCT,
     RANGE_FADE_CONTEXT_GATE_ENABLED,
@@ -1041,6 +1043,51 @@ MIN_1D_LEVELS_FOR_STRUCTURE_PATHS: int = int(
 # whale-driven), funding family (rate-driven).  These can safely fire
 # on freshly-promoted pairs.  Anything not in this set is structure-
 # based and falls under the structure-readiness gate.
+#: Evaluators a promoted mover is restricted to.  Module-level because it has
+#: three readers now — the scan-loop restriction, the dual-universe census and
+#: the tests — and the moment a set like this is defined inside the loop that
+#: uses it, the second reader becomes a copy.  ``MEASUREMENT_SUFFIXES`` drifted
+#: for a week exactly that way.
+_MOVER_EVALUATORS: frozenset[str] = frozenset({
+    "_evaluate_volume_surge_breakout",
+    "_evaluate_breakdown_short",
+    # Continuation pullback on a confirmed mover (Session 29).
+    # VSB/BDS catch the ignition; this catches the repeated
+    # MA-pullback re-entries that follow.
+    "_evaluate_mover_trend_pullback",
+    # Anchored-VWAP mover scalp — the participant-cost reload, the
+    # primary continuation entry for a confirmed mover (2026-06-28).
+    "_evaluate_mover_avwap_scalp",
+    # _evaluate_mean_revert is DELIBERATELY absent: a mover promotion is a
+    # trending/ignition context — the anti-thesis of fading an extension back
+    # to the mean.  _evaluate_range_fade is DELIBERATELY absent for the same
+    # reason: an igniting mover has no tested two-sided range to fade.
+    #
+    # Both arguments are about a pair that is ONLY a mover, and both were
+    # applied to every promoted pair including the core ones — see
+    # ``Scanner.mover_universe_role``.  On a core pair the question "is
+    # mean-reversion appropriate right now" already has an owner:
+    # ``setup_compat``'s regime gate, which suppressed 1,585 MEAN_REVERT
+    # candidates on STRONG_TREND in the 2026-08-22 window and needs no help
+    # from an evaluator ban the pair cannot argue with.
+})
+
+
+def _all_scalp_evaluators() -> frozenset[str]:
+    """Every evaluator ``ScalpChannel`` defines, read off the class.
+
+    Derived rather than listed: a hand-kept roster is silent by construction
+    on the next evaluator, and this one feeds the census that tells the owner
+    which of his paths a promotion is currently withholding.  A wrong answer
+    there reads as "that path had nothing to say".
+    """
+    from src.channels.scalp import ScalpChannel
+
+    return frozenset(
+        name for name in dir(ScalpChannel) if name.startswith("_evaluate_")
+    )
+
+
 _YOUNG_PAIR_EVALUATORS: frozenset[str] = frozenset({
     "_evaluate_volume_surge_breakout",
     "_evaluate_breakdown_short",
@@ -2016,6 +2063,99 @@ class Scanner:
 
         return True
 
+    #: Universe roles a scanned symbol can hold.  ``DUAL`` is the population
+    #: this vocabulary exists for — before it there was no word for "in both",
+    #: which is why the code could not act on it.
+    MOVER_ROLE_NONE = ""
+    MOVER_ROLE_MOVER_ONLY = "mover_only"
+    MOVER_ROLE_DUAL_CORE = "dual_core"
+    MOVER_ROLE_DUAL_VOLUME = "dual_volume"
+
+    def mover_universe_role(self, symbol: str) -> str:
+        """Which universes *symbol* is in right now — one writer, one answer.
+
+        ``_ensure_mover_pair`` synthesises a ``PairInfo`` **only** when the
+        symbol is absent from ``pair_mgr.pairs``; anything already there was
+        earned on 24h volume and is returned untouched.  So membership of
+        ``_synthetic_mover_pairs`` is exactly "this pair exists only because
+        the mover path invented it", and its complement is exactly the
+        dual-universe population — derived from state the scanner already
+        keeps rather than from a list somebody has to remember to update.
+
+        Three roles rather than a bool, because their next moves differ:
+
+        * ``dual_core`` — a top-N pair currently also igniting.  This is the
+          large population, and the one the owner was looking for when he
+          asked why the majors stopped producing on their own paths.
+        * ``dual_volume`` — a synthetic mover trading at core-pair volume.
+          It never earned a top-N slot, but treating it as a mover *only* is
+          an accident of when the universe was last refreshed rather than a
+          statement about the instrument.
+        * ``mover_only`` — a genuine outside-the-universe mover.  The mover
+          restriction was written for exactly this pair and still applies.
+
+        Answering for a symbol that is not promoted returns ``MOVER_ROLE_NONE``
+        rather than a role, so a caller cannot read "not a mover" as "not
+        dual" by accident.
+        """
+        if symbol not in self._mover_promoted_pairs:
+            return self.MOVER_ROLE_NONE
+        if symbol not in self._synthetic_mover_pairs:
+            return self.MOVER_ROLE_DUAL_CORE
+        info = self.pair_mgr.pairs.get(symbol)
+        vol = float(getattr(info, "volume_24h_usd", 0.0) or 0.0) if info else 0.0
+        if vol >= DUAL_UNIVERSE_MIN_VOLUME_USD:
+            return self.MOVER_ROLE_DUAL_VOLUME
+        return self.MOVER_ROLE_MOVER_ONLY
+
+    def _dual_universe_census(self) -> Dict[str, Any]:
+        """What the dual rule sees, whether or not it is allowed to act.
+
+        The effect ships default-OFF (``DUAL_UNIVERSE_ENABLED``) because it is
+        an evaluator-path change on a live money path.  The measurement does
+        not: a dark change without its ops surface is not dark, it is off, and
+        this is the number the activation decision is read from.
+
+        **It says how much of the universe is affected and cannot say how much
+        better it would be.**  The evaluators it names are precisely the ones
+        that did not run, so nothing here is a count of foregone signals — the
+        same limit the ``setup_tf`` census carries, stated rather than left for
+        a reader to assume the flattering reading.
+        """
+        roles: Dict[str, int] = {}
+        symbols: Dict[str, List[str]] = {}
+        for sym in self._mover_promoted_pairs:
+            role = self.mover_universe_role(sym)
+            roles[role] = roles.get(role, 0) + 1
+            symbols.setdefault(role, []).append(sym)
+        restricted = (
+            roles.get(self.MOVER_ROLE_DUAL_CORE, 0)
+            + roles.get(self.MOVER_ROLE_DUAL_VOLUME, 0)
+        )
+        universe = len(self.pair_mgr.pairs) or 0
+        return {
+            "enabled": bool(DUAL_UNIVERSE_ENABLED),
+            "min_volume_usd": float(DUAL_UNIVERSE_MIN_VOLUME_USD),
+            "universe_size": universe,
+            "promoted": len(self._mover_promoted_pairs),
+            "by_role": roles,
+            # Sorted and bounded: this rides the snapshot, and an unbounded
+            # symbol list on a hot payload is the cost rule's own shape.
+            "symbols": {k: sorted(v)[:60] for k, v in symbols.items()},
+            "symbols_truncated": {k: max(0, len(v) - 60) for k, v in symbols.items()},
+            #: Pairs a promotion is currently narrowing that would keep their
+            #: own evaluators under the dual rule.  With the flag ON this is
+            #: how many the rule widened; with it OFF it is how many it would.
+            "dual_candidates": restricted,
+            "dual_share_of_universe": (restricted / universe) if universe else 0.0,
+            #: The evaluators a restricted pair loses.  Named rather than
+            #: counted — "13 evaluators" tells the reader nothing about which
+            #: of his paths went quiet.
+            "withheld_evaluators": sorted(
+                e for e in _all_scalp_evaluators() if e not in _MOVER_EVALUATORS
+            ),
+        }
+
     def _ensure_mover_pair(
         self, symbol: str, change_pct: Optional[float] = None, vol: Optional[float] = None,
     ) -> Optional["PairInfo"]:
@@ -2352,6 +2492,25 @@ class Scanner:
             return
         now_mono = time.monotonic()
         to_refresh: List[str] = []
+        # What the budget turned away.  The loop used to `break` at the cap and
+        # count nothing, so an under-provisioned sweep was indistinguishable
+        # from a sweep with nothing to do — a fail-open exit with no counter,
+        # which is how the harm stays invisible.
+        #
+        # The arithmetic is worth stating because it decides whether this can
+        # keep up at all: with N movers each needing a refresh every
+        # MOVER_CANDLE_REFRESH_SEC and a scan cycle of C seconds, supply is
+        # MAX_PER_CYCLE * (REFRESH_SEC / C) and demand is N, so the sweep keeps
+        # pace only while C <= MAX_PER_CYCLE * REFRESH_SEC / N. At the shipped
+        # 8 / 120s against the 30-pair promotion cap that is C <= 32s — inside
+        # a median cycle measured at 16-30s and comfortably outside the 118s
+        # worst case, where the sweep silently falls to a fraction of demand.
+        #
+        # That is an argument for measuring, not for a new number: this counter
+        # makes `wanted` vs `refreshed` readable from the running engine, and a
+        # budget chosen from it costs REST weight against a vendor that has
+        # IP-banned this box before. Deferred rather than guessed.
+        deferred = 0
         for sym in active:
             try:
                 age = data_store.last_kline_age_seconds(sym, "1m")
@@ -2367,11 +2526,24 @@ class Scanner:
             last_attempt = self._mover_last_reseed.get(sym, 0.0)
             if now_mono - last_attempt < MOVER_CANDLE_REFRESH_SEC:
                 continue
-            to_refresh.append(sym)
             if len(to_refresh) >= MOVER_CANDLE_REFRESH_MAX_PER_CYCLE:
-                break
+                # Eligible, stale, and not refreshed this cycle. Counted rather
+                # than dropped: the whole list is walked now instead of broken
+                # out of, so `deferred` is the real shortfall and not "however
+                # many were left when we stopped looking".
+                deferred += 1
+                continue
+            to_refresh.append(sym)
+        self._suppression_counters["mover_reseed:wanted"] += len(to_refresh) + deferred
+        self._suppression_counters["mover_reseed:deferred"] += deferred
+        if deferred:
+            log.debug(
+                "mover candle refresh: budget {} exhausted, {} pair(s) deferred",
+                MOVER_CANDLE_REFRESH_MAX_PER_CYCLE, deferred,
+            )
         if not to_refresh:
             return
+        self._suppression_counters["mover_reseed:refreshed"] += len(to_refresh)
         for sym in to_refresh:
             self._mover_last_reseed[sym] = now_mono
         # Drop throttle entries for symbols no longer scanned (bounded map).
@@ -9670,25 +9842,9 @@ class Scanner:
                 # signals from the same symbol are deduplicated here so that only one
                 # setup per direction can enter _pending_signals per cycle.
 
-                # Movers promotion: restrict to VSB + BREAKDOWN_SHORT only.
+                # Movers promotion: restrict to the mover evaluator set.
                 # Spread pre-check: thin mover pairs with >0.5% spread are skipped.
-                _mover_evaluators = frozenset({
-                    "_evaluate_volume_surge_breakout",
-                    "_evaluate_breakdown_short",
-                    # Continuation pullback on a confirmed mover (Session 29).
-                    # VSB/BDS catch the ignition; this catches the repeated
-                    # MA-pullback re-entries that follow.  Ships dark.
-                    "_evaluate_mover_trend_pullback",
-                    # Anchored-VWAP mover scalp — the participant-cost reload, the
-                    # primary continuation entry for a confirmed mover (2026-06-28).
-                    "_evaluate_mover_avwap_scalp",
-                    # _evaluate_mean_revert is DELIBERATELY absent: a mover
-                    # promotion is a trending/ignition context — the anti-thesis
-                    # of fading an extension back to the mean.
-                    # _evaluate_range_fade is DELIBERATELY absent for the same
-                    # reason: an igniting mover has no tested two-sided range
-                    # to fade — the "edge" would be the launchpad.
-                })
+                _mover_evaluators = _MOVER_EVALUATORS
                 _is_mover = symbol in self._mover_promoted_pairs
                 # spread_pct is a PERCENT of mid (0.5 == 0.5%), same unit as the
                 # config threshold. The prior gate compared against 0.005 — i.e.
@@ -9728,9 +9884,75 @@ class Scanner:
                         f"young_pair_restriction:{symbol}"
                     ] += 1
                 if _is_mover:
-                    # Mover restriction is the stricter of the two — it
-                    # always supersedes when both apply (intersection).
-                    _allowed_evals = _mover_evaluators
+                    # A pair can be in BOTH universes (owner, 2026-08-22).
+                    #
+                    # This branch used to read `_allowed_evals =
+                    # _mover_evaluators` unconditionally, on membership of
+                    # `_mover_promoted_pairs` alone — so a core top-N pair up
+                    # 15% on the day lost thirteen of its seventeen
+                    # evaluators for the whole promotion window.  In a broad
+                    # rally the pairs a subscriber recognises are exactly the
+                    # pairs that qualify as movers, which is how "only MVRTP
+                    # produces" and "nothing fires on the regular pairs"
+                    # became the same sentence: on 2026-08-22 the box held
+                    # 163 promotions inside a 330-pair universe, and at most
+                    # 30 of those can be synthetic (`MOVER_PROMOTION_MAX_PAIRS`
+                    # caps only the movers from OUTSIDE the scan set — core
+                    # ones are exempt from it and accumulate).
+                    #
+                    # The restriction's own argument, written above
+                    # `_MOVER_EVALUATORS`, is about a pair that is ONLY a
+                    # mover, and it still holds for one.  For a pair that also
+                    # earns its regular place the mover paths are an ADDITION,
+                    # and whether mean-reversion belongs on it today is
+                    # `setup_compat`'s regime gate's question — the layer built
+                    # to answer it, which is already answering it, rather than
+                    # a ban the pair cannot argue with.
+                    _mover_role = self.mover_universe_role(symbol)
+                    _is_dual = _mover_role in (
+                        self.MOVER_ROLE_DUAL_CORE, self.MOVER_ROLE_DUAL_VOLUME,
+                    )
+                    # `_evals` is in the name because this line sits INSIDE
+                    # `for chan in self.channels` — it counts channel
+                    # evaluations, not pairs, and runs at several times the
+                    # promoted-pair count. A reader taking it for a pair count
+                    # would be off by the channel multiplier, which is exactly
+                    # what `setup_tf_resolver`'s counters cost a session over.
+                    #
+                    # The per-PAIR answer is `_dual_universe_census`, which
+                    # walks `_mover_promoted_pairs` once, and that is what the
+                    # ops Pairs page renders. These counters are for spotting a
+                    # role that stops being computed at all.
+                    self._suppression_counters[
+                        f"mover_universe_role_evals:{_mover_role or 'none'}"
+                    ] += 1
+                    if _is_dual and DUAL_UNIVERSE_ENABLED:
+                        # Union, not intersection.  `None` already means "no
+                        # restriction", and the union of "everything" with any
+                        # set is "everything" — so a structurally-aged dual
+                        # pair keeps the unrestricted scan it would have had
+                        # without the promotion, and a young one keeps the
+                        # young-pair allowlist WIDENED by the mover paths
+                        # rather than replaced by them.
+                        if _allowed_evals is not None:
+                            _allowed_evals = frozenset(_allowed_evals) | _mover_evaluators
+                        self._suppression_counters["mover_universe_evals:dual_applied"] += 1
+                    else:
+                        if _is_dual:
+                            # Measured, not applied — a pair whose own paths
+                            # this promotion is currently withholding.
+                            #
+                            # Per channel evaluation, like its sibling above.
+                            # The sentence that was here said the ops census is
+                            # "read from this counter", which was FALSE: the
+                            # census is `_dual_universe_census`, per pair, and
+                            # a reader who believed the comment would have read
+                            # a channel-multiplied number as a pair count.
+                            # Caught on the pre-merge re-read of my own diff.
+                            self._suppression_counters[
+                                "mover_universe_evals:dual_withheld"
+                            ] += 1
+                        _allowed_evals = _mover_evaluators
 
                 _raw_result = await loop.run_in_executor(
                     self._scan_executor,
