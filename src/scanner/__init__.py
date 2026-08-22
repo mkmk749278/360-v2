@@ -9912,8 +9912,19 @@ class Scanner:
                     _is_dual = _mover_role in (
                         self.MOVER_ROLE_DUAL_CORE, self.MOVER_ROLE_DUAL_VOLUME,
                     )
+                    # `_evals` is in the name because this line sits INSIDE
+                    # `for chan in self.channels` — it counts channel
+                    # evaluations, not pairs, and runs at several times the
+                    # promoted-pair count. A reader taking it for a pair count
+                    # would be off by the channel multiplier, which is exactly
+                    # what `setup_tf_resolver`'s counters cost a session over.
+                    #
+                    # The per-PAIR answer is `_dual_universe_census`, which
+                    # walks `_mover_promoted_pairs` once, and that is what the
+                    # ops Pairs page renders. These counters are for spotting a
+                    # role that stops being computed at all.
                     self._suppression_counters[
-                        f"mover_universe_role:{_mover_role or 'none'}"
+                        f"mover_universe_role_evals:{_mover_role or 'none'}"
                     ] += 1
                     if _is_dual and DUAL_UNIVERSE_ENABLED:
                         # Union, not intersection.  `None` already means "no
@@ -9925,16 +9936,21 @@ class Scanner:
                         # rather than replaced by them.
                         if _allowed_evals is not None:
                             _allowed_evals = frozenset(_allowed_evals) | _mover_evaluators
-                        self._suppression_counters["mover_universe:dual_applied"] += 1
+                        self._suppression_counters["mover_universe_evals:dual_applied"] += 1
                     else:
                         if _is_dual:
-                            # Measured, not applied.  The census on the ops
-                            # Pairs page is read from this counter, and it is
-                            # what the activation decision is read from — a
-                            # dark change with nowhere to look is not dark,
-                            # it is off.
+                            # Measured, not applied — a pair whose own paths
+                            # this promotion is currently withholding.
+                            #
+                            # Per channel evaluation, like its sibling above.
+                            # The sentence that was here said the ops census is
+                            # "read from this counter", which was FALSE: the
+                            # census is `_dual_universe_census`, per pair, and
+                            # a reader who believed the comment would have read
+                            # a channel-multiplied number as a pair count.
+                            # Caught on the pre-merge re-read of my own diff.
                             self._suppression_counters[
-                                "mover_universe:dual_withheld"
+                                "mover_universe_evals:dual_withheld"
                             ] += 1
                         _allowed_evals = _mover_evaluators
 

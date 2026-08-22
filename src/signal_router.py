@@ -1077,6 +1077,15 @@ class SignalRouter:
         held: Dict[str, int] = defaultdict(int)
         for s in self._active_signals.values():
             held[f"{self.direction_budget_key(s)}|{s.direction.value}"] += 1
+
+        # The disagreement bucket belonging to the mode that is NOT running:
+        # in `global` mode the interesting population is what a per-path budget
+        # would have passed, and vice versa.
+        other_bucket = (
+            "global_only" if DIRECTION_CAP_MODE == "global" else "per_path_only"
+        )
+        would_gain = int(c.get(other_bucket, 0) or 0)
+
         return {
             "mode": DIRECTION_CAP_MODE,
             "per_path_limit": MAX_SAME_DIRECTION_PER_PATH,
@@ -1091,17 +1100,16 @@ class SignalRouter:
             ),
             #: Candidates the CURRENT mode kills that the other would pass,
             #: as a share of everything this gate saw.  The number the switch
-            #: decision is read from.
-            "would_gain": (
-                int(c.get("global_only", 0) or 0) if DIRECTION_CAP_MODE == "global"
-                else int(c.get("per_path_only", 0) or 0)
-            ),
-            "would_gain_share": (
-                (int(c.get("global_only", 0) or 0) / evaluated) if evaluated
-                and DIRECTION_CAP_MODE == "global"
-                else (int(c.get("per_path_only", 0) or 0) / evaluated) if evaluated
-                else None
-            ),
+            #: decision is read from — so it is computed in two named steps
+            #: rather than a nested conditional expression: a chain that has to
+            #: be traced to be believed is the wrong shape for the one figure
+            #: somebody will act on.
+            #:
+            #: Note the denominator is candidates that REACHED this gate, not
+            #: everything dequeued — the correlation lock, per-channel cap and
+            #: correlation-group limit sit above it.
+            "would_gain": would_gain,
+            "would_gain_share": (would_gain / evaluated) if evaluated else None,
             "budgets_held": dict(sorted(held.items(), key=lambda kv: -kv[1])),
             "budgets_held_total": sum(held.values()),
         }
