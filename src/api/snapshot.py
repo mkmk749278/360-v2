@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from src.utils import get_logger
@@ -195,6 +195,44 @@ def _agent_name_for(setup_class: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _signal_date(sig: Any) -> Optional[date]:
+    """The calendar (UTC) date a signal was stamped, or ``None``.
+
+    ``Signal.timestamp`` is a ``datetime`` when constructed and can come back
+    as an **ISO string** from a restart-restored record — ``main.py``'s expiry
+    path already documents that shape.  ``getattr(...) is not None`` passes on
+    a string and ``.date()`` then raises, so the guard has to be about the
+    type rather than about presence.
+    """
+    ts = getattr(sig, "timestamp", None)
+    if isinstance(ts, datetime):
+        return ts.date()
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts).date()
+        except ValueError:
+            return None
+    return None
+
+
+def _precomputed_signals_today(engine: Any) -> Optional[int]:
+    """Today's count from a process that can see the history, or ``None``.
+
+    Isolated mode splits the engine in two: the engine container holds
+    ``_signal_history`` and the api container serves HTTP.  ``SnapshotWriter``
+    has published ``signals_today_count`` across that boundary all along and
+    nothing read it.  Which process holds the state is not a deployment
+    detail — see ``RedisEngineFacade.signals_today_count``.
+    """
+    raw = getattr(engine, "signals_today_count", None)
+    if raw is None:
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 async def build_pulse(
     engine: Any,
     *,
@@ -349,14 +387,27 @@ async def build_pulse(
     if pair_mgr is not None and hasattr(pair_mgr, "symbols"):
         scanning_pairs = len(pair_mgr.symbols)
 
-    history = getattr(engine, "_signal_history", []) or []
-    today = _now().date()
-    signals_today = sum(
-        1
-        for s in history
-        if getattr(s, "timestamp", None) is not None
-        and s.timestamp.date() == today
-    )
+    # Today's signal count.  The engine walks its own history; the isolated
+    # API process has none — ``RedisEngineFacade._signal_history`` is ``[]``
+    # by construction, so walking it here published ``signals_today: 0`` on
+    # every request production served, beside a feed showing that day's
+    # signals (owner-caught 2026-08-22).  Prefer the count the process that
+    # HOLDS the history computed, and fall back to walking only when no such
+    # count was published.
+    #
+    # ``None`` from the precomputed side means *the engine did not say* and
+    # falls through to the walk; it must never be read as zero, which is the
+    # whole defect.  In single-process mode there is no precomputed count and
+    # the walk is authoritative, so both deployments answer the same question.
+    signals_today = _precomputed_signals_today(engine)
+    if signals_today is None:
+        history = getattr(engine, "_signal_history", []) or []
+        today = _now().date()
+        signals_today = sum(
+            1
+            for s in history
+            if _signal_date(s) == today
+        )
 
     status: str = "Healthy"
     if rm is not None and rm.daily_kill_tripped:

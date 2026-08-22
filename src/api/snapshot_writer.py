@@ -560,14 +560,23 @@ class SnapshotWriter:
         pair_mgr = getattr(engine, "pair_mgr", None)
         scanning_pairs = len(pair_mgr.symbols) if pair_mgr and hasattr(pair_mgr, "symbols") else 0
 
-        # Signals today
+        # Signals today.  This container HOLDS the history, so this is the
+        # authoritative count — and it is the only one, because the api
+        # container's facade has no history to walk (see
+        # ``RedisEngineFacade.signals_today_count``).  Published under
+        # ``signals_today_count`` below; ``build_pulse`` prefers it.
+        #
+        # Dated through ``snapshot._signal_date`` rather than
+        # ``s.timestamp.date()`` so the writer and the reader answer the same
+        # question about the same row: a restart-restored record can carry an
+        # ISO **string**, on which ``is not None`` passes and ``.date()``
+        # raises.  Two implementations of "which day is this signal" is how
+        # the two ends silently disagree.
+        from src.api.snapshot import _signal_date
+
         history = getattr(engine, "_signal_history", []) or []
         today = datetime.now(timezone.utc).date()
-        signals_today = sum(
-            1 for s in history
-            if getattr(s, "timestamp", None) is not None
-            and s.timestamp.date() == today
-        )
+        signals_today = sum(1 for s in history if _signal_date(s) == today)
 
         # Auto-execution status
         auto_status: dict = {
