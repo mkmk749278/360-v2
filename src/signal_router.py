@@ -173,6 +173,38 @@ def _persist_active_state_to_disk(payload: Dict[str, Any]) -> None:
         )
 
 
+def _tunable_str(key: str, fallback: str) -> str:
+    """A live ops tunable, or the boot default if it cannot be read.
+
+    `runtime_tunables.get` is the hot-path-safe accessor (one Firestore doc
+    read per 5s TTL, every key) and never raises. It returns the ENV default
+    whenever the client is not wired — a test, or a `docker exec` one-shot,
+    which is exactly why a diagnostic run outside the engine process reports
+    what the image was built with rather than what the owner set.
+
+    Wrapped rather than called inline so a read failure can never decide a
+    money-path gate: an unreadable tunable falls back to the value the process
+    booted with, which is the behaviour that was already shipping.
+    """
+    try:
+        from src import runtime_tunables as _rt
+
+        val = _rt.get(key)
+        return str(val) if val is not None else fallback
+    except Exception:  # noqa: BLE001 - a gate must not fail on a config read
+        return fallback
+
+
+def _tunable_int(key: str, fallback: int) -> int:
+    try:
+        from src import runtime_tunables as _rt
+
+        val = _rt.get(key)
+        return int(val) if val is not None else fallback
+    except Exception:  # noqa: BLE001 - see _tunable_str
+        return fallback
+
+
 @dataclasses.dataclass(frozen=True)
 class _DirectionCap:
     """One candidate's same-direction verdict under BOTH modes.
@@ -977,6 +1009,22 @@ class SignalRouter:
         counts read under two rules, so the panel that justifies switching
         cannot disagree with the gate that would do the switching.
         """
+        # Read the LIVE values, not the boot defaults. `runtime_tunables.get`
+        # is the hot-path-safe accessor — one Firestore doc read per 5s TTL
+        # covers every key — and falls back to the env default when the client
+        # is not wired, which is what a test and a `docker exec` one-shot both
+        # get. That fallback is why a diagnostic run outside the engine process
+        # reports what the image was built with rather than what the owner set;
+        # the counters below are read from the engine itself for that reason.
+        mode = _tunable_str("direction_cap_mode", DIRECTION_CAP_MODE)
+        per_path_limit = _tunable_int(
+            "max_same_direction_per_path", MAX_SAME_DIRECTION_PER_PATH
+        )
+        cumulative = _tunable_int(
+            "max_same_direction_cumulative", MAX_SAME_DIRECTION_CUMULATIVE
+        )
+        global_limit = MAX_SAME_DIRECTION_GLOBAL
+
         direction = signal.direction
         key = self.direction_budget_key(signal)
 
@@ -989,33 +1037,32 @@ class SignalRouter:
             if self.direction_budget_key(s) == key:
                 same_dir_path += 1
 
-        would_block_global = same_dir_total >= MAX_SAME_DIRECTION_GLOBAL
-        would_block_path = same_dir_path >= MAX_SAME_DIRECTION_PER_PATH
+        would_block_global = same_dir_total >= global_limit
+        would_block_path = same_dir_path >= per_path_limit
         # The cumulative ceiling is a SEPARATE dimension from the per-path
         # budget, and stays separate so the two never pool: a path at its own
         # bound is working and throttled, a book at a cumulative ceiling is a
         # different finding with a different fix.  ``0`` disables it — which is
         # what the owner asked for and what ships.
-        cumulative = MAX_SAME_DIRECTION_CUMULATIVE
         would_block_cumulative = bool(cumulative) and same_dir_total >= cumulative
 
-        if DIRECTION_CAP_MODE == "per_path":
+        if mode == "per_path":
             if would_block_path:
                 blocked, reason = True, f"per-path cap for {key}"
-                count, limit = same_dir_path, MAX_SAME_DIRECTION_PER_PATH
+                count, limit = same_dir_path, per_path_limit
             elif would_block_cumulative:
                 blocked, reason = True, "cumulative ceiling"
                 count, limit = same_dir_total, cumulative
             else:
                 blocked, reason = False, ""
-                count, limit = same_dir_path, MAX_SAME_DIRECTION_PER_PATH
+                count, limit = same_dir_path, per_path_limit
         else:
             blocked = would_block_global
             reason = "global cap" if blocked else ""
-            count, limit = same_dir_total, MAX_SAME_DIRECTION_GLOBAL
+            count, limit = same_dir_total, global_limit
 
         return _DirectionCap(
-            mode=DIRECTION_CAP_MODE,
+            mode=mode,
             key=key,
             direction=direction.value,
             blocked=blocked,
@@ -1081,18 +1128,21 @@ class SignalRouter:
         # The disagreement bucket belonging to the mode that is NOT running:
         # in `global` mode the interesting population is what a per-path budget
         # would have passed, and vice versa.
-        other_bucket = (
-            "global_only" if DIRECTION_CAP_MODE == "global" else "per_path_only"
-        )
+        mode = _tunable_str("direction_cap_mode", DIRECTION_CAP_MODE)
+        other_bucket = "global_only" if mode == "global" else "per_path_only"
         would_gain = int(c.get(other_bucket, 0) or 0)
 
         return {
-            "mode": DIRECTION_CAP_MODE,
-            "per_path_limit": MAX_SAME_DIRECTION_PER_PATH,
+            "mode": mode,
+            "per_path_limit": _tunable_int(
+                "max_same_direction_per_path", MAX_SAME_DIRECTION_PER_PATH
+            ),
             "global_limit": MAX_SAME_DIRECTION_GLOBAL,
             # 0 means the cumulative ceiling is OFF, which is a decision
             # somebody made and not an unset value.
-            "cumulative_limit": MAX_SAME_DIRECTION_CUMULATIVE,
+            "cumulative_limit": _tunable_int(
+                "max_same_direction_cumulative", MAX_SAME_DIRECTION_CUMULATIVE
+            ),
             "evaluated": evaluated,
             "counterfactual": dict(sorted(flat.items())),
             "counterfactual_by_path": dict(

@@ -69,20 +69,50 @@ def _fill(router: SignalRouter, *signals: Signal) -> None:
         router._active_signals[s.signal_id] = s
 
 
+# The mode and the two budgets became ops TUNABLES on 2026-08-22 (the owner
+# asked how to make them live, and env-only meant an SSH session and an engine
+# restart per flip). These fixtures therefore set the tunable rather than the
+# module constant: patching the constant would leave every test below asserting
+# a mechanism that no longer delivers the value, which is an assertion outliving
+# its premise at the exact moment somebody changes the premise.
+#
+# `MAX_SAME_DIRECTION_GLOBAL` stays a module constant and is still patched as
+# one — it is the pre-existing cap and did not move.
+
+def _tunable_store(monkeypatch, **values):
+    import src.runtime_tunables as rt_mod
+    from src.runtime_tunables import registry
+
+    def _get(key: str):
+        if key in values:
+            return values[key]
+        tun = registry().get(key)
+        return tun.default if tun is not None else None
+
+    monkeypatch.setattr(rt_mod, "get", _get)
+    return values
+
+
 @pytest.fixture
 def per_path(monkeypatch):
-    monkeypatch.setattr(sr, "DIRECTION_CAP_MODE", "per_path")
-    monkeypatch.setattr(sr, "MAX_SAME_DIRECTION_PER_PATH", 3)
-    monkeypatch.setattr(sr, "MAX_SAME_DIRECTION_CUMULATIVE", 0)
     monkeypatch.setattr(sr, "MAX_SAME_DIRECTION_GLOBAL", 3)
+    return _tunable_store(
+        monkeypatch,
+        direction_cap_mode="per_path",
+        max_same_direction_per_path=3,
+        max_same_direction_cumulative=0,
+    )
 
 
 @pytest.fixture
 def global_mode(monkeypatch):
-    monkeypatch.setattr(sr, "DIRECTION_CAP_MODE", "global")
-    monkeypatch.setattr(sr, "MAX_SAME_DIRECTION_PER_PATH", 3)
-    monkeypatch.setattr(sr, "MAX_SAME_DIRECTION_CUMULATIVE", 0)
     monkeypatch.setattr(sr, "MAX_SAME_DIRECTION_GLOBAL", 3)
+    return _tunable_store(
+        monkeypatch,
+        direction_cap_mode="global",
+        max_same_direction_per_path=3,
+        max_same_direction_cumulative=0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -196,15 +226,14 @@ def test_the_cumulative_ceiling_is_off_and_that_is_a_decision_not_an_unset(per_p
     assert cap.same_dir_total == 18
 
 
-def test_re_arming_the_cumulative_ceiling_works_without_a_redeploy(
-    per_path, monkeypatch
-):
+def test_re_arming_the_cumulative_ceiling_works_without_a_redeploy(per_path):
     """It stays a tunable rather than being deleted.
 
     Deleting a cap costs a deploy to get it back, and the moment you want it
-    back is the moment you cannot wait for one.
+    back is the moment you cannot wait for one — and since 2026-08-22 re-arming
+    it is an ops click rather than a redeploy, which is what this asserts.
     """
-    monkeypatch.setattr(sr, "MAX_SAME_DIRECTION_CUMULATIVE", 10)
+    per_path["max_same_direction_cumulative"] = 10
     r = _router()
     for path in ["P1", "P2", "P3", "P4"]:
         _fill(r, *[_sig(f"{path}{c}USDT", origin=path) for c in "ABC"])
