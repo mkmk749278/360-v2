@@ -649,10 +649,18 @@ class TestCorrelationThrottle:
     The group-based check_correlation_limit only covers ~25 named pairs.
     The global cap prevents more than N same-direction active signals
     regardless of symbol, guarding against BTC-dump simultaneous SL scenario.
+
+    **These pin ``global`` mode specifically** (2026-08-22).  The gate now has
+    two, and this class asserts the behaviour of one of them: without pinning
+    the mode these tests would silently start describing whichever mode the
+    environment happened to select, which is an assertion outliving its
+    premise at the moment somebody changes the premise.  ``per_path`` has its
+    own file, ``tests/test_direction_cap.py``.
     """
 
     def _make_router_with_cap(self, cap: int, queue, sent_messages, monkeypatch):
         import src.signal_router as sr_mod
+        monkeypatch.setattr(sr_mod, "DIRECTION_CAP_MODE", "global")
         monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", cap)
         for ch in ("360_SCALP",):
             monkeypatch.setitem(sr_mod.CHANNEL_TELEGRAM_MAP, ch, "premium")

@@ -2819,6 +2819,52 @@ MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
 MAX_SAME_DIRECTION_GLOBAL: int = int(os.getenv("MAX_SAME_DIRECTION_GLOBAL", "3"))
 
 # ---------------------------------------------------------------------------
+# Per-path same-direction cap — the owner's replacement for the global one
+# ---------------------------------------------------------------------------
+#
+# Owner, 2026-08-22: *"set cap per path 3 same direction and no cumulative max
+# cap anyways, so per path can individually produce 3 signals same direction —
+# so we can get max 6, 3 longs 3 shorts at same time"*.
+#
+# What the global cap was doing, measured on the live box over one 10.5h boot:
+# **545 dequeued, 17 delivered (3.1%), and `same_direction_throttle` took 499
+# of the 500 drops — 91.6% of everything the router dequeued.**  During a
+# three-day melt-up every candidate is long, so a global budget of three long
+# slots is saturated permanently, and the largest path holds them: MVRTP took
+# 475 of those 499 because it submits roughly twenty times anyone else's
+# volume.  A smaller path's handful of candidates then arrive into a book whose
+# slots are already held, which is starvation by arithmetic rather than by
+# design.
+#
+# The correlation argument the global cap was written on is real and unchanged:
+# top USDT-M alts are 0.85-0.95 correlated to BTC, so N same-direction
+# positions are close to one position N times over.  What changes is who the
+# budget belongs to.  Per path, a strategy cannot be starved by a noisier
+# neighbour, and the concentration a reader should worry about is bounded by
+# the number of LIVE paths rather than by the number of candidates.
+#
+# **This raises blast radius and the owner signed it off in writing.**  It is
+# recorded here rather than in a commit message because the next reader of this
+# constant needs the same context: the concurrent-long ceiling goes from 3 to
+# 3 x (paths that can emit), and what still stands behind it is the daily loss
+# budget, the kill switch, the correlation-group limit, the per-channel cap and
+# the per-symbol cooldown.
+DIRECTION_CAP_MODE: str = _safe_choice(
+    "DIRECTION_CAP_MODE", "global", frozenset({"global", "per_path"}),
+)
+
+#: Concurrent same-direction signals ONE path may hold, in ``per_path`` mode.
+MAX_SAME_DIRECTION_PER_PATH: int = _safe_int("MAX_SAME_DIRECTION_PER_PATH", "3")
+
+#: Cumulative ceiling across every path in ``per_path`` mode.  ``0`` disables
+#: it, which is what the owner asked for ("no cumulative max cap") and what
+#: ships.  It stays a tunable rather than being deleted so the ceiling can be
+#: re-armed from ops without a redeploy if the per-path book proves too
+#: concentrated — deleting a cap costs a deploy to get back, and the moment
+#: you want it back is the moment you cannot wait for one.
+MAX_SAME_DIRECTION_CUMULATIVE: int = _safe_int("MAX_SAME_DIRECTION_CUMULATIVE", "0")
+
+# ---------------------------------------------------------------------------
 # Regime Kill Switch — BTC whipsaw detection
 # ---------------------------------------------------------------------------
 # Detailed documentation in src/regime_kill_switch.py.  These constants are
