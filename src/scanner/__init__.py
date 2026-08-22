@@ -2492,6 +2492,25 @@ class Scanner:
             return
         now_mono = time.monotonic()
         to_refresh: List[str] = []
+        # What the budget turned away.  The loop used to `break` at the cap and
+        # count nothing, so an under-provisioned sweep was indistinguishable
+        # from a sweep with nothing to do — a fail-open exit with no counter,
+        # which is how the harm stays invisible.
+        #
+        # The arithmetic is worth stating because it decides whether this can
+        # keep up at all: with N movers each needing a refresh every
+        # MOVER_CANDLE_REFRESH_SEC and a scan cycle of C seconds, supply is
+        # MAX_PER_CYCLE * (REFRESH_SEC / C) and demand is N, so the sweep keeps
+        # pace only while C <= MAX_PER_CYCLE * REFRESH_SEC / N. At the shipped
+        # 8 / 120s against the 30-pair promotion cap that is C <= 32s — inside
+        # a median cycle measured at 16-30s and comfortably outside the 118s
+        # worst case, where the sweep silently falls to a fraction of demand.
+        #
+        # That is an argument for measuring, not for a new number: this counter
+        # makes `wanted` vs `refreshed` readable from the running engine, and a
+        # budget chosen from it costs REST weight against a vendor that has
+        # IP-banned this box before. Deferred rather than guessed.
+        deferred = 0
         for sym in active:
             try:
                 age = data_store.last_kline_age_seconds(sym, "1m")
@@ -2507,11 +2526,24 @@ class Scanner:
             last_attempt = self._mover_last_reseed.get(sym, 0.0)
             if now_mono - last_attempt < MOVER_CANDLE_REFRESH_SEC:
                 continue
-            to_refresh.append(sym)
             if len(to_refresh) >= MOVER_CANDLE_REFRESH_MAX_PER_CYCLE:
-                break
+                # Eligible, stale, and not refreshed this cycle. Counted rather
+                # than dropped: the whole list is walked now instead of broken
+                # out of, so `deferred` is the real shortfall and not "however
+                # many were left when we stopped looking".
+                deferred += 1
+                continue
+            to_refresh.append(sym)
+        self._suppression_counters["mover_reseed:wanted"] += len(to_refresh) + deferred
+        self._suppression_counters["mover_reseed:deferred"] += deferred
+        if deferred:
+            log.debug(
+                "mover candle refresh: budget {} exhausted, {} pair(s) deferred",
+                MOVER_CANDLE_REFRESH_MAX_PER_CYCLE, deferred,
+            )
         if not to_refresh:
             return
+        self._suppression_counters["mover_reseed:refreshed"] += len(to_refresh)
         for sym in to_refresh:
             self._mover_last_reseed[sym] = now_mono
         # Drop throttle entries for symbols no longer scanned (bounded map).

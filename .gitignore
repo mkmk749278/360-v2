@@ -113,3 +113,4 @@ data/pricing_freshness.json.tmp
 # ledgers now short-circuit before writing it, and it must never be committed
 # again: it differs on every branch and conflicted on every merge.
 .tmp
+.venv-engine/
