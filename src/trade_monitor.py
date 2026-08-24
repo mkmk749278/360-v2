@@ -331,6 +331,23 @@ class TradeMonitor:
         # rejections).  Cleared in ``_record_outcome`` alongside
         # ``_order_placed_ids``.
         self._last_open_attempt_at: Dict[str, Any] = {}
+        # Signal ids whose terminal outcome has actually been written to the
+        # performance record.  Set inside ``_record_outcome`` at the point the
+        # record is appended -- where it becomes true, not where it is
+        # convenient -- and pruned against the active book once per cycle in
+        # ``_check_all``, so it is bounded by the open book rather than by the
+        # number of signals ever closed.
+        #
+        # Read by ``_recover_unfinalised_close``.  Without it, a close that set
+        # a terminal status and then failed mid-flight cannot be told apart
+        # from one that completed, and re-running the record would double-count
+        # the trade -- the exact failure the terminal short-circuit was added
+        # to prevent.
+        self._outcome_recorded_ids: set = set()
+        # How many wedged closes this process has recovered.  A non-zero value
+        # is not "healthy": it means a close path raised after mutating
+        # ``sig.status``, and the raiser is worth finding.
+        self._unfinalised_recovered: int = 0
         self._running = False
         # Optional callback invoked with the symbol whenever a stop-loss is hit.
         # Set after construction (e.g. to scanner.set_symbol_sl_cooldown).
@@ -527,6 +544,12 @@ class TradeMonitor:
                 promotion_age_sec=float(getattr(sig, "promotion_age_sec", -1.0) or -1.0),
                 promotion_change_pct=getattr(sig, "promotion_change_pct", None),
             )
+            # Stamped here, immediately after the append, because this is the
+            # line at which "this signal has a closed-signal record" becomes
+            # true.  Everything below (circuit breaker, cooldown callbacks,
+            # Layer-C, the observer) is downstream bookkeeping whose failure
+            # must not make the trade look unrecorded to the recovery path.
+            self._outcome_recorded_ids.add(sig.signal_id)
         # Circuit breaker ALWAYS uses actual PnL (real exit price)
         if self._circuit_breaker is not None:
             self._circuit_breaker.record_outcome(
@@ -819,6 +842,74 @@ class TradeMonitor:
         sig.status = outcome_label
         return outcome_label
 
+    def _recover_unfinalised_close(self, sig: Signal) -> bool:
+        """Complete a close that stamped a terminal status and then failed.
+
+        Every terminal path here mutates ``sig.status`` *before* it awaits, and
+        only afterwards records the outcome and drops the signal from the
+        active book.  An exception anywhere in between -- a Telegram post, a
+        push, a broker call -- therefore leaves the signal carrying a terminal
+        label with no record and no removal, and the short-circuit at the top
+        of :meth:`_evaluate_signal` then returns on every subsequent tick.  The
+        guard is correct about not re-evaluating a closed signal and, on its
+        own, converts a transient I/O failure into a permanent one.
+
+        Measured 2026-08-24: LITUSDT LONG sat ``BREAKEVEN_EXIT`` for two days,
+        absent from all 1,297 rows of the closed-signal record, still being
+        walked by the monitor, and holding one of the three slots in the global
+        same-direction budget -- which the router counts straight off
+        ``_active_signals``, so a dead signal starves live ones.
+
+        Deliberately synchronous.  The two steps that were skipped are both
+        sync; awaiting anything here would re-open the same hole one level
+        down, in the recovery meant to close it.
+
+        The broker close is **not** re-issued.  The exchange-side stop rests
+        independently of this process and fills on its own, and firing a close
+        for a position that may no longer exist is a money-path action that
+        does not belong in an error path.  Engine-vs-broker divergence is the
+        reconciler's job and it already closes zombies.
+
+        Returns ``True`` when this call finalised something.
+        """
+        sid = sig.signal_id
+        if sid in self._outcome_recorded_ids:
+            # Recorded, but still in the book -- the removal is what was lost.
+            # Dropping it is what frees the direction budget.
+            self._remove(sid)
+            self._unfinalised_recovered += 1
+            log.warning(
+                "Recovered wedged close for {} {} (status={}): outcome was "
+                "already recorded, the removal was not -- dropping from the "
+                "active book",
+                sig.symbol, sid, sig.status,
+            )
+            return True
+
+        status = (getattr(sig, "status", "") or "").upper()
+        # Re-derive the flags ``_record_outcome`` needs from the label the
+        # close already committed to.  The SL family all come from
+        # ``classify_trade_outcome(hit_sl=True)`` over a ``pnl_pct`` that
+        # ``_set_realized_pnl`` had already realised before the status was
+        # stamped, so the classifier reproduces the same label rather than
+        # inventing a new one; INVALIDATED / EXPIRED are honoured verbatim by
+        # ``_record_outcome`` itself.
+        hit_sl = status in {"SL_HIT", "BREAKEVEN_EXIT", "PROFIT_LOCKED"}
+        hit_tp = 3 if status in {"FULL_TP_HIT", "TP3_HIT"} else 0
+        expired = status == "EXPIRED"
+
+        self._record_outcome(sig, hit_tp=hit_tp, hit_sl=hit_sl, expired=expired)
+        self._remove(sid)
+        self._unfinalised_recovered += 1
+        log.warning(
+            "Recovered wedged close for {} {} (status={}, hit_sl={}, hit_tp={}): "
+            "a close path stamped the terminal status and then raised before "
+            "recording -- the signal is now in the closed-signal record and out "
+            "of the active book. Total recovered this process: {}",
+            sig.symbol, sid, status, hit_sl, hit_tp, self._unfinalised_recovered,
+        )
+        return True
+
     async def start(self) -> None:
         self._running = True
         log.info("Trade monitor started")
@@ -837,6 +928,13 @@ class TradeMonitor:
 
     async def _check_all(self) -> None:
         signals = self._get_signals()
+        # Bound the recorded-id set to the open book.  Once a signal leaves
+        # ``_active_signals`` nothing consults its marker again, so intersecting
+        # with the live keys each cycle keeps the set the size of the book
+        # instead of the size of all history -- and costs one set operation on
+        # a loop that already walks every signal.
+        if self._outcome_recorded_ids:
+            self._outcome_recorded_ids &= set(signals.keys())
 
         async def _process_signal(sig: Signal) -> None:
             price = self._latest_price(sig.symbol)
@@ -938,7 +1036,31 @@ class TradeMonitor:
             # ledger, never a column in SAR's: see atr_trail_live's docstring.
             atr_trail_live.observe_signal(sig, self._store, price=price)
 
-        await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
+        # ``return_exceptions=True`` is load-bearing, not tidiness.  Without
+        # it one raising signal aborts the whole gather: every sibling's result
+        # is discarded, and -- worse -- everything BELOW this line is skipped
+        # for the cycle, which is the pricing-freshness publish, both trailing
+        # lanes' sweeps and ledger flushes, and the live trail governor.  The
+        # exception then surfaced only as a single "Monitor error" line from
+        # ``start()``, naming no symbol.  One bad signal must cost one signal.
+        _tracked = list(signals.values())
+        _results = await asyncio.gather(
+            *[_process_signal(sig) for sig in _tracked],
+            return_exceptions=True,
+        )
+        for _sig, _res in zip(_tracked, _results):
+            if isinstance(_res, BaseException):
+                if isinstance(_res, asyncio.CancelledError):
+                    raise _res
+                from src import fail_open
+                fail_open.record("trade_monitor._process_signal", _res)
+                log.error(
+                    "Signal evaluation failed for {} {} (status={}): {!r} — "
+                    "the rest of the cycle continues; a terminal status left "
+                    "behind by this raise is finalised on the next tick",
+                    _sig.symbol, _sig.signal_id,
+                    getattr(_sig, "status", "?"), _res,
+                )
         self._publish_pricing_freshness(signals)
         # Advance every open arm, from the LEDGER — not from the signal list
         # above (#835).  ``observe_signal`` opens arms because only the signal
@@ -1975,6 +2097,13 @@ class TradeMonitor:
         # active for TP2 / TP3 progression.  Only fully-closed states are
         # in ``_TERMINAL_STATUSES``.
         if sig.status in _TERMINAL_STATUSES:
+            # ...but a terminal status is not proof the close COMPLETED.  Every
+            # path here stamps the status before it awaits and records/removes
+            # afterwards, so a raise in between leaves exactly this state, and a
+            # bare ``return`` makes it permanent.  Finalise it instead; the
+            # double-evaluation this guard exists to prevent is still prevented,
+            # because the recovery is gated on whether the record was written.
+            self._recover_unfinalised_close(sig)
             return
 
         price = sig.current_price
@@ -2869,7 +2998,23 @@ class TradeMonitor:
         lines.append(f"⏰ {fmt_ts()}")
 
         text = "\n".join(lines)
-        await self._send(channel_id, text)
+        # Fail-open (2026-08-24).  This is the FIRST await on every terminal
+        # close path, it runs AFTER ``sig.status`` has been mutated to the
+        # terminal label, and it had no handler of any kind -- so a Telegram
+        # timeout propagated out of ``_evaluate_signal``, past
+        # ``_record_outcome`` and ``_remove``, and wedged the signal for good.
+        # ``_check_all`` gathers without ``return_exceptions``, so it also cut
+        # that cycle short for every other signal and skipped the sweeps below
+        # the gather.  A subscriber post is never worth either.
+        try:
+            await self._send(channel_id, text)
+        except Exception as exc:  # noqa: BLE001 -- a post must not abort a close
+            from src import fail_open
+            fail_open.record("trade_monitor._post_update", exc)
+            log.warning(
+                "Telegram update post failed for {} {}: {}",
+                sig.symbol, sig.signal_id, exc,
+            )
 
     async def _post_pre_tp_alert(
         self,
