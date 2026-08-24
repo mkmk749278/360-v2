@@ -3,7 +3,7 @@
     "overrides": {
       "FUNDING_EXTREME_SIGNAL": {
         "suppress_negative": null,
-        "min_samples": 20
+        "min_samples": 15
       },
       "MOVER_TREND_PULLBACK@ATR": {
         "suppress_negative": null,
@@ -429,7 +429,7 @@
       ]
     },
     "last_change_cycle": {
-      "FUNDING_EXTREME_SIGNAL|min_samples": 7,
+      "FUNDING_EXTREME_SIGNAL|min_samples": 1523,
       "MOVER_TREND_PULLBACK@ATR|min_samples": 1275,
       "QUIET_COMPRESSION_BREAK@ATR|min_samples": 14,
       "QUIET_COMPRESSION_BREAK@FIXED|min_samples": 14,
@@ -459,7 +459,7 @@
       "TREND_PULLBACK_EMA|min_samples": 1365,
       "SHADOW_RANGE_FADE|min_samples": 1399
     },
-    "cycle": 1484
+    "cycle": 1527
   },
   "ledger": [
     {
@@ -1305,12 +1305,25 @@
       "ev_per_suppression_r": null,
       "n": 17,
       "routable": true
+    },
+    {
+      "strategy": "FUNDING_EXTREME_SIGNAL",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=16)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 16,
+      "routable": true
     }
   ],
   "pending": [],
   "active_overrides": {
     "FUNDING_EXTREME_SIGNAL": {
-      "min_samples": 20
+      "min_samples": 15
     },
     "MOVER_TREND_PULLBACK@ATR": {
       "min_samples": 15
