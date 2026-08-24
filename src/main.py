@@ -621,6 +621,28 @@ class CryptoSignalEngine:
 
         sig.status = "CANCELLED"
 
+        # Record the outcome BEFORE the alert and the archive.  Until
+        # 2026-08-24 this path called ``_record_outcome`` exactly zero times:
+        # the signal was archived into ``_signal_history`` (so it showed in the
+        # app feed as closed) and dropped from the router, with no row in the
+        # closed-signal record -- every reconciler-closed signal missing from
+        # the track record by construction, and invisible because the feed said
+        # it had closed normally.
+        #
+        # It is recorded as CANCELLED rather than blended into the SL/TP
+        # outcomes: the broker had no matching position, so the P&L above is an
+        # approximation from the last-known mark and must stay separable from
+        # trades that actually filled.  ``_record_outcome`` honours the status
+        # verbatim, so the label survives.
+        recorded = False
+        if self.monitor is not None:
+            recorded = self.monitor._record_outcome_guarded(
+                sig,
+                hit_tp=0,
+                hit_sl=False,
+                site="main._reconciler_close_signal",
+            )
+
         try:
             symbol = getattr(sig, "symbol", "?")
             pnl = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
@@ -635,7 +657,75 @@ class CryptoSignalEngine:
         except Exception as exc:
             log.warning("reconciler_close_signal alert failed: %s", exc)
 
-        self._remove_and_archive(sig_id)
+        if recorded:
+            self._remove_and_archive(sig_id)
+        else:
+            log.error(
+                "reconciler close for %s did NOT record — leaving the signal "
+                "in the router so the close is retried rather than archived "
+                "with no closed-signal row",
+                sig_id,
+            )
+
+    def finalise_restored_terminals(self) -> int:
+        """Record every signal the restore found already closed.
+
+        ``SignalRouter._absorb_restored`` parks signals whose persisted status
+        is terminal.  They are finished, so they must not go back into the
+        active book -- but they had stamped a terminal label without completing
+        their close, which means no closed-signal record was ever written for
+        them.  Dropping them (the pre-2026-08-24 behaviour) made that permanent
+        and silent: the trade simply was not in the track record, and nothing
+        anywhere counted it.
+
+        Archives into ``_signal_history`` as well, so the app's closed feed and
+        the record agree about what happened rather than one of them being
+        short.
+
+        Returns how many were recorded.
+        """
+        pending = list(getattr(self.router, "restored_terminal_signals", []) or [])
+        if not pending:
+            return 0
+        try:
+            self.router.restored_terminal_signals.clear()
+        except Exception:  # noqa: BLE001 -- clearing is bookkeeping, not the work
+            pass
+
+        recorded = 0
+        for sig in pending:
+            status = (getattr(sig, "status", "") or "").upper()
+            # Re-derive the flags from the label the close already committed to
+            # -- the same mapping ``_recover_unfinalised_close`` uses, because
+            # this is that recovery arriving one process later.
+            hit_sl = status in {"SL_HIT", "BREAKEVEN_EXIT", "PROFIT_LOCKED"}
+            hit_tp = 3 if status in {"FULL_TP_HIT", "TP3_HIT"} else 0
+            expired = status == "EXPIRED"
+            ok = self.monitor._record_outcome_guarded(
+                sig,
+                hit_tp=hit_tp,
+                hit_sl=hit_sl,
+                expired=expired,
+                site="main.finalise_restored_terminals",
+            )
+            if not ok:
+                continue
+            recorded += 1
+            self._signal_history.append(sig)
+
+        if recorded:
+            self._signal_history = self._signal_history[-500:]
+            try:
+                save_history(self._signal_history)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("signal_history flush failed (restore drain): {}", exc)
+            log.warning(
+                "Recorded {} signal(s) that closed without finishing before the "
+                "last restart — pre-fix these were dropped by the restore and "
+                "never reached the closed-signal record",
+                recorded,
+            )
+        return recorded
 
     def _remove_and_archive(self, signal_id: str) -> None:
         """Remove a signal from active tracking and archive it in history."""
@@ -2911,6 +3001,48 @@ class CryptoSignalEngine:
                     f"dropped at restore"
                 )
             return True, detail
+
+        def _close_accounting() -> Tuple[bool, str]:
+            """Is every closed signal reaching the closed-signal record?
+
+            The population that would be harmed is *closes*, not signals: this
+            counts trades whose ``_record_outcome`` raised, which is the exact
+            state in which a trade is missing from the track record. Keyed on
+            that rather than on anything convenient, because the four ways a
+            close could be lost before 2026-08-24 were all invisible to every
+            probe here -- the owner found them by hand-joining the app feed
+            against the record.
+
+            A recovered wedge is reported and does NOT fail: the trade did land,
+            and paging for a healed condition is how a real one stops standing
+            out. An unrecorded close does fail -- that is a live data loss.
+            """
+            mon = getattr(self, "monitor", None)
+            if mon is None:
+                return True, "monitor not constructed"
+            unrecorded = int(getattr(mon, "_unrecorded_closes", 0) or 0)
+            recovered = int(getattr(mon, "_unfinalised_recovered", 0) or 0)
+            if unrecorded:
+                return False, (
+                    f"{unrecorded} close(s) failed to write a closed-signal "
+                    f"record — those trades are missing from the track record "
+                    f"until retried; check fail_open for the raising site"
+                )
+            if recovered:
+                return True, (
+                    f"no unrecorded closes; {recovered} wedged close(s) "
+                    f"recovered — a close path raised after stamping its "
+                    f"terminal status, worth finding"
+                )
+            return True, "no unrecorded closes"
+
+        fl.add_predicate(PredicateProbe(
+            name="close_accounting",
+            fn=_close_accounting,
+            # A lost trade is instantaneous and has no benign cause; 2 cycles
+            # only so a single transient blip during a deploy does not page.
+            min_streak=2,
+        ))
 
         fl.add_predicate(PredicateProbe(
             name="position_lock_integrity",

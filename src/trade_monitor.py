@@ -55,7 +55,7 @@ from config import (
     TRAILING_ATR_MULTIPLIER,
 )
 from src.btc_direction import check_btc_direction_gate
-from src.channels.base import Signal, TrailingStopState
+from src.channels.base import TERMINAL_STATUSES, Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
 from src.execution import be_policy as _be_policy
 from src.execution import runner_policy as _runner_policy
@@ -232,17 +232,9 @@ def _escape_md(text: str) -> str:
 # TP1_HIT and TP2_HIT are NOT in this set — those signals stay active for
 # higher-TP progression.  Only states that mean "fully closed, lifecycle
 # complete" go here.
-_TERMINAL_STATUSES: frozenset = frozenset({
-    "SL_HIT",
-    "BREAKEVEN_EXIT",
-    "PROFIT_LOCKED",
-    "INVALIDATED",
-    "EXPIRED",
-    "CANCELLED",
-    "FULL_TP_HIT",
-    "TP3_HIT",
-    "CLOSED",
-})
+# Imported, not re-typed: this used to be a hand-written copy of the same nine
+# strings that ``api.snapshot`` also carried.  See channels.base for why.
+_TERMINAL_STATUSES: frozenset = TERMINAL_STATUSES
 
 # Counter-trend-by-design setups exempted from the EMA9/EMA21 crossover
 # invalidation rule.  Per CLAUDE.md HTF-policy doctrine, LSR and FAR fade an
@@ -348,6 +340,11 @@ class TradeMonitor:
         # is not "healthy": it means a close path raised after mutating
         # ``sig.status``, and the raiser is worth finding.
         self._unfinalised_recovered: int = 0
+        # Closes whose ``_record_outcome`` raised. Every one is a trade that is
+        # missing from the closed-signal record until it is retried, so this is
+        # watched by the ``close_accounting`` liveness probe rather than only
+        # logged.
+        self._unrecorded_closes: int = 0
         self._running = False
         # Optional callback invoked with the symbol whenever a stop-loss is hit.
         # Set after construction (e.g. to scanner.set_symbol_sl_cooldown).
@@ -458,7 +455,14 @@ class TradeMonitor:
         # cleanup; this prevents future records from accumulating the same
         # bug.
         sig_status = (getattr(sig, "status", "") or "").upper()
-        if sig_status in {"INVALIDATED", "EXPIRED"}:
+        # CANCELLED and CLOSED joined this set on 2026-08-24.  Neither reached
+        # here before: the reconciler's zombie close never called this at all,
+        # and the manual close passed ``expired=True``, so every operator close
+        # was filed in the record as an EXPIRY.  Deriving the label from
+        # (hit_tp, hit_sl, expired) cannot distinguish "the operator closed
+        # this" from "the clock ran out" -- the close already knows, and the
+        # record should keep what it knew.
+        if sig_status in {"INVALIDATED", "EXPIRED", "CANCELLED", "CLOSED"}:
             outcome_label = sig_status
             # Distinguish expiries where the entry limit never filled —
             # there was no position, so stats consumers must be able to
@@ -841,6 +845,51 @@ class TradeMonitor:
         )
         sig.status = outcome_label
         return outcome_label
+
+    def _record_outcome_guarded(
+        self,
+        sig: Signal,
+        *,
+        hit_tp: int,
+        hit_sl: bool,
+        expired: bool = False,
+        site: str,
+    ) -> bool:
+        """Record a terminal outcome and say whether it landed.
+
+        The one way to record, so that no close path can lose a trade by
+        ordering its I/O wrongly.  Two rules come with it:
+
+        * **Call this BEFORE any await.** Recording is synchronous; a network
+          call placed ahead of it can skip it, and every instance of this bug
+          has had that shape.
+        * **Gate the removal on the return value.** A signal that failed to
+          record must stay in the active book, where
+          :meth:`_recover_unfinalised_close` will retry it on the next tick.
+          Removing it anyway is what makes the loss permanent -- the recovery
+          path only ever sees signals still in the book.
+
+        Measured 2026-08-22: BTCUSDT SHORT closed manually at +1.08% and has no
+        row in any of the 1,297 in the closed-signal record, because
+        ``close_signal_manual`` put ``_post_update`` ahead of the record inside
+        one try block and ran ``_remove`` unconditionally after it.
+        """
+        from src import fail_open
+
+        try:
+            self._record_outcome(sig, hit_tp=hit_tp, hit_sl=hit_sl, expired=expired)
+            return True
+        except Exception as exc:  # noqa: BLE001 -- caller decides what to do
+            fail_open.record(site, exc)
+            self._unrecorded_closes += 1
+            log.error(
+                "FAILED to record terminal outcome for {} {} (status={}, site={}): "
+                "{!r}. The signal is being LEFT in the active book so the close "
+                "can be retried; total unrecorded this process: {}",
+                sig.symbol, sig.signal_id, getattr(sig, "status", "?"),
+                site, exc, self._unrecorded_closes,
+            )
+            return False
 
     def _recover_unfinalised_close(self, sig: Signal) -> bool:
         """Complete a close that stamped a terminal status and then failed.
@@ -2056,19 +2105,47 @@ class TradeMonitor:
             self._set_realized_pnl(sig, price)
             realized = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
         sig.status = "CLOSED"
+        # Record FIRST, and gate the removal on it.  Until 2026-08-24 this block
+        # ran ``_post_update`` -> ``_record_outcome`` -> ``_broker_close_full``
+        # inside ONE try, with ``_remove`` unconditional after it: a Telegram
+        # failure on the first line skipped the record and the broker close,
+        # and the signal was archived and dropped anyway.  That is worse than
+        # the wedge it resembles, because a removed signal never comes back to
+        # ``_evaluate_signal`` and so can never be recovered.  BTCUSDT SHORT
+        # +1.08% (2026-08-22) is a measured instance: in the feed, in no row of
+        # the closed-signal record.
+        recorded = self._record_outcome_guarded(
+            sig,
+            hit_tp=0,
+            hit_sl=False,
+            expired=True,
+            site="trade_monitor.close_signal_manual",
+        )
+        # Both of these are internally fail-open; the outer guard is here so
+        # that a future edit to either cannot reach the removal decision below.
         try:
-            await self._post_update(sig, f"🛑 CLOSED (manual — {reason})")
-            self._record_outcome(sig, hit_tp=0, hit_sl=False, expired=True)
             await self._broker_close_full(sig, reason=reason, fill_price=fill)
+            await self._post_update(sig, f"🛑 CLOSED (manual — {reason})")
         except Exception as _exc:
             fail_open.record("trade_monitor.close_signal_manual", _exc)
-        self._remove(sig.signal_id)
+        if recorded:
+            self._remove(sig.signal_id)
+        else:
+            log.error(
+                "manual close {} {} did NOT record — leaving it in the active "
+                "book so the close is retried rather than lost",
+                signal_id, sig.symbol,
+            )
         log.info(
             "manual close {} {} at {} pnl={:.2f}% (reason={})",
             signal_id, sig.symbol, fill, realized, reason,
         )
         return {
             "closed": True,
+            # False means the position was flattened but the trade is not yet
+            # in the closed-signal record -- the caller's surface should not
+            # report a clean close it cannot evidence.
+            "recorded": recorded,
             "signal_id": signal_id,
             "symbol": sig.symbol,
             "status": "CLOSED",

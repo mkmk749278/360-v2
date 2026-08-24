@@ -37,6 +37,44 @@ _VOL_COMPRESS_FACTOR: float = 0.7  # Low-vol: compress TP targets
 # Fallback TP3 ratio used when adj_ratios has fewer than 3 elements.
 _DEFAULT_TP3_RATIO: float = 2.0
 
+# ---------------------------------------------------------------------------
+# Signal lifecycle vocabulary — ONE definition, every reader imports it
+# ---------------------------------------------------------------------------
+#
+# ``Signal.status`` is read by the monitor (may I still evaluate this?), by the
+# router's restore (may I bring this back?) and by the API snapshot (is this
+# open?).  Each of those had, or was about to grow, its own hand-written copy of
+# the answer -- ``trade_monitor._TERMINAL_STATUSES`` and
+# ``api.snapshot._TERMINAL_STATUSES`` were already two copies of the same nine
+# strings, agreeing only because nobody had edited one of them yet.  The fix for
+# a drifting mirror is not a second mirror: both now import these, and
+# ``tests/test_signal_status_vocabulary.py`` fails if a third copy appears.
+
+#: Fully closed. The lifecycle is over: record the outcome and drop the signal.
+TERMINAL_STATUSES: frozenset = frozenset({
+    "SL_HIT",
+    "BREAKEVEN_EXIT",
+    "PROFIT_LOCKED",
+    "INVALIDATED",
+    "EXPIRED",
+    "CANCELLED",
+    "FULL_TP_HIT",
+    "TP3_HIT",
+    "CLOSED",
+})
+
+#: Still running, and therefore still owed monitoring and a restore across a
+#: restart.  ``TP1_HIT`` / ``TP2_HIT`` are deliberately here and NOT terminal:
+#: the position is live and progressing toward TP2 / TP3.  The router's restore
+#: used to test ``status != "ACTIVE"``, which discarded exactly these -- a
+#: signal that had banked TP1 vanished on every engine restart, was never
+#: recorded, and its remaining legs never fired.
+LIVE_STATUSES: frozenset = frozenset({
+    "ACTIVE",
+    "TP1_HIT",
+    "TP2_HIT",
+})
+
 
 def _default_trailing_desc(trailing_atr_mult: float) -> str:
     """Return a standardised trailing stop description string."""

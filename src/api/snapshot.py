@@ -16,6 +16,7 @@ import time
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from src.channels.base import TERMINAL_STATUSES as _BASE_TERMINAL_STATUSES
 from src.utils import get_logger
 
 from .schemas import (
@@ -515,10 +516,10 @@ def build_tickers(engine: Any) -> List[TickerItem]:
 # ---------------------------------------------------------------------------
 
 
-_TERMINAL_STATUSES: frozenset = frozenset({
-    "SL_HIT", "BREAKEVEN_EXIT", "PROFIT_LOCKED", "INVALIDATED",
-    "EXPIRED", "CANCELLED", "FULL_TP_HIT", "TP3_HIT", "CLOSED",
-})
+# Imported, not re-typed -- see channels.base.TERMINAL_STATUSES.  This module
+# and trade_monitor each carried their own copy of these nine strings; they
+# agreed only because nobody had yet edited one of them.
+_TERMINAL_STATUSES: frozenset = _BASE_TERMINAL_STATUSES
 
 
 def _hold_mins(dispatch_ts: Optional[Any], terminal_ts: Optional[Any]) -> Optional[int]:

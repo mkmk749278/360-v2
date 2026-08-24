@@ -256,8 +256,11 @@ class TestRestoreJsonFallback:
         layer captures whatever's in ``_active_signals`` at the moment
         of write, including signals mid-removal during shutdown.
 
-        Restore must skip any signal whose status has already gone
-        terminal — those belong in history, not the active map.
+        Restore must keep any signal whose status has already gone terminal
+        out of the active map — those belong in history.  It must NOT do that
+        to TP1_HIT/TP2_HIT, which are still running (corrected 2026-08-24),
+        and it must hand the terminal ones back for recording rather than
+        discarding them.
         """
         from src.signal_router import _signal_to_dict
         active_sig = _make_signal(signal_id="ACT-1", symbol="ETHUSDT")
@@ -288,9 +291,32 @@ class TestRestoreJsonFallback:
         router = _make_router_no_redis()
         await router.restore()
 
-        # Only the genuinely-active signal restored; the three terminal
-        # ones dropped on the floor.
-        assert set(router._active_signals.keys()) == {"ACT-1"}
+        # The invariant this test was written for still holds: a signal that
+        # went INVALIDATED / SL_HIT before the last persist must not come back
+        # in the app's "Open" tab.
+        assert "INV-1" not in router._active_signals
+        assert "SL-1" not in router._active_signals
+
+        # TP1_HIT is NOT terminal and never was (see
+        # ``channels.base.LIVE_STATUSES`` and ``trade_monitor``'s own comment:
+        # "TP1_HIT and TP2_HIT are NOT in this set — those signals stay active
+        # for higher-TP progression").  The old ``status != "ACTIVE"`` filter
+        # swept it in with the terminal ones, so a signal that had banked TP1
+        # and was still running toward TP2/TP3 vanished on every engine
+        # restart, was never recorded, and its remaining legs never fired.
+        # This assertion is corrected, not relaxed: 2026-08-24.
+        assert set(router._active_signals.keys()) == {"ACT-1", "TP1-1"}
+
+        # ...and the genuinely terminal ones are no longer "dropped on the
+        # floor".  A terminal status in the persisted state is a close that
+        # stamped its label and did not finish, so it is owed a closed-signal
+        # record; the engine drains this list at boot
+        # (``CryptoSignalEngine.finalise_restored_terminals``).  Dropping them
+        # is how LITUSDT closed BREAKEVEN_EXIT and appears in none of the
+        # record's 1,297 rows.
+        assert sorted(s.signal_id for s in router.restored_terminal_signals) == [
+            "INV-1", "SL-1",
+        ]
 
 
 # ---------------------------------------------------------------------------
