@@ -194,6 +194,16 @@ class Bootstrap:
                 await engine.router.restore()
             except Exception as exc:
                 log.warning("Failed to restore router state: {}", exc)
+            # Drain any signal that was persisted mid-close.  The restore keeps
+            # these out of the active book (they are finished) but no longer
+            # discards them: without this the trade is archived nowhere and
+            # never reaches the closed-signal record, which is how LITUSDT
+            # closed BREAKEVEN_EXIT on 2026-08-22 and appears in none of the
+            # record's 1,297 rows.
+            try:
+                engine.finalise_restored_terminals()
+            except Exception as exc:
+                log.warning("Failed to finalise restored terminal signals: {}", exc)
 
         # 0f. Restore OrderManager open-quantity tracking from Redis so DCA,
         # close_partial, and close_full work correctly for signals that were

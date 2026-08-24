@@ -38,7 +38,7 @@ from config import (
     TELEGRAM_ACTIVE_CHANNEL_ID,
     TELEGRAM_FREE_CHANNEL_ID,
 )
-from src.channels.base import Signal
+from src.channels.base import LIVE_STATUSES, TERMINAL_STATUSES, Signal
 from src.correlation import check_correlation_limit
 from src.push_notifications import push_signal_published
 from src.redis_client import RedisClient
@@ -130,6 +130,31 @@ def _resolve_active_state_path() -> Path:
     """Resolve the JSON-fallback path lazily so test fixtures can override
     via env var after module import."""
     return Path(os.getenv("ACTIVE_ROUTER_STATE_PATH", _ACTIVE_STATE_PATH_DEFAULT))
+
+
+def _classify_restored_status(raw_status: Any) -> str:
+    """``live`` / ``terminal`` / ``unknown`` for a persisted signal's status.
+
+    Both restore paths used to test ``status != "ACTIVE"`` and drop everything
+    else in one bucket.  That was wrong in both directions:
+
+    * ``TP1_HIT`` / ``TP2_HIT`` are **not** terminal -- the position is live and
+      progressing toward TP2/TP3 -- so a restart silently discarded a signal
+      that had already banked TP1, never recorded it, and its remaining legs
+      never fired.
+    * A genuinely terminal status meant a close that had stamped its label and
+      not finished; dropping it here is precisely how that trade left no row in
+      the closed-signal record.  They are handed back to the engine instead.
+
+    An unrecognised status is its own answer, never folded into either: a blank
+    needs a cause before it gets a caption, and the fixes differ.
+    """
+    status = str(raw_status or "ACTIVE").upper()
+    if status in LIVE_STATUSES:
+        return "live"
+    if status in TERMINAL_STATUSES:
+        return "terminal"
+    return "unknown"
 
 
 def _load_active_state_from_disk() -> Optional[Dict[str, Any]]:
@@ -243,6 +268,11 @@ class SignalRouter:
         self._format_signal = format_signal
         self._redis = redis_client
         self._active_signals: Dict[str, Signal] = {}
+        # Signals found in the persisted state carrying a TERMINAL status: a
+        # close that stamped its label and did not finish.  The engine drains
+        # this after ``restore()`` and records each one, so the trade reaches
+        # the closed-signal record instead of vanishing on restart.
+        self.restored_terminal_signals: List[Signal] = []
         self._daily_best: List[Signal] = []  # for free channel
         self._position_lock: Dict[str, Direction] = {}  # symbol → direction
         # Reconcile counters — see _reconcile_position_lock.  Cumulative
@@ -418,6 +448,70 @@ class SignalRouter:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _absorb_restored(self, signals_data: Any) -> Dict[str, int]:
+        """Sort a persisted signal map into live / terminal / unknown.
+
+        One implementation for both backends.  The two restore paths carried
+        the same filter written out twice, which is how they would have drifted
+        the moment one was corrected -- and the correction was overdue in both.
+
+        Live signals go back into the active book.  Terminal ones are parked on
+        :attr:`restored_terminal_signals` for the engine to RECORD, not dropped:
+        a terminal status in the persisted state means a close that stamped its
+        label and did not finish, and discarding it here is exactly why such a
+        trade left no row in the closed-signal record.
+        """
+        counts = {"live": 0, "terminal": 0, "unknown": 0, "unparseable": 0}
+        if not isinstance(signals_data, dict):
+            return counts
+        for sid, data in signals_data.items():
+            if not isinstance(data, dict):
+                counts["unparseable"] += 1
+                continue
+            kind = _classify_restored_status(data.get("status"))
+            sig = _signal_from_dict(data)
+            if sig is None:
+                counts["unparseable"] += 1
+                continue
+            if kind == "live":
+                self._active_signals[sid] = sig
+                counts["live"] += 1
+            elif kind == "terminal":
+                self.restored_terminal_signals.append(sig)
+                counts["terminal"] += 1
+            else:
+                counts["unknown"] += 1
+        return counts
+
+    @staticmethod
+    def _log_restore_counts(backend: str, counts: Dict[str, int]) -> None:
+        """Say what the restore did with everything it did not bring back.
+
+        Each bucket is named rather than pooled into "skipped": a terminal
+        signal is owed a record, an unknown status is a vocabulary bug, and an
+        unparseable payload is a serialiser bug.  Three different fixes.
+        """
+        if counts["terminal"]:
+            log.warning(
+                "{} restore: {} signal(s) carried a TERMINAL status — these "
+                "closed without finishing and are being handed back for "
+                "recording, not dropped",
+                backend, counts["terminal"],
+            )
+        if counts["unknown"]:
+            log.error(
+                "{} restore: {} signal(s) carried an UNRECOGNISED status and "
+                "were dropped — neither live nor terminal, so the status "
+                "vocabulary in channels.base is incomplete",
+                backend, counts["unknown"],
+            )
+        if counts["unparseable"]:
+            log.error(
+                "{} restore: {} persisted signal(s) could not be parsed back "
+                "into a Signal and were lost",
+                backend, counts["unparseable"],
+            )
+
     async def restore(self) -> None:
         """Reload active state from Redis (or JSON-file fallback) after a
         process restart.
@@ -454,9 +548,12 @@ class SignalRouter:
         released in exactly two, both of which look the symbol up *through*
         ``_active_signals``.  At runtime the two maps therefore cannot
         diverge.  Restore is the one place they can, and did: both restore
-        paths skip a signal whose status is no longer ``ACTIVE`` (right — a
-        closed signal must not reappear in the app's Open tab) and then
-        restore the lock map **wholesale, with no cross-check**.  So a symbol
+        paths keep a signal whose status has gone TERMINAL out of the active
+        map (right — a closed signal must not reappear in the app's Open tab;
+        note that as of 2026-08-24 this is keyed on ``TERMINAL_STATUSES``, not
+        on ``!= "ACTIVE"``, so a still-running ``TP1_HIT`` is restored rather
+        than discarded) and then restore the lock map **wholesale, with no
+        cross-check**.  So a symbol
         whose signal had already closed came back locked with nothing behind
         it, ``remove_signal`` could never fire for it (its ``if sig:`` guard
         never passes), and ``_persist_state`` wrote the orphan back on every
@@ -553,26 +650,12 @@ class SignalRouter:
             raw = await client.get(_REDIS_KEY_SIGNALS)
             if raw:
                 signals_data: Dict[str, Any] = json.loads(raw)
-                skipped_terminal = 0
-                for sid, data in signals_data.items():
-                    if isinstance(data, dict):
-                        status = str(data.get("status", "ACTIVE")).upper()
-                        if status != "ACTIVE":
-                            skipped_terminal += 1
-                            continue
-                    sig = _signal_from_dict(data)
-                    if sig is not None:
-                        self._active_signals[sid] = sig
+                counts = self._absorb_restored(signals_data)
                 log.info(
-                    "Restored {} active signal(s) from Redis",
+                    "Restored {} live signal(s) from Redis",
                     len(self._active_signals),
                 )
-                if skipped_terminal > 0:
-                    log.info(
-                        "Skipped {} terminal-status signal(s) from Redis "
-                        "restore (closed mid-shutdown)",
-                        skipped_terminal,
-                    )
+                self._log_restore_counts("Redis", counts)
 
             # Restore position lock
             raw = await client.get(_REDIS_KEY_POSITION_LOCK)
@@ -607,35 +690,13 @@ class SignalRouter:
             return
 
         signals_data = data.get("active_signals") or {}
-        skipped_terminal = 0
-        if isinstance(signals_data, dict):
-            for sid, sig_data in signals_data.items():
-                if not isinstance(sig_data, dict):
-                    continue
-                # Skip signals that hit a terminal status before the
-                # last persist fired.  Pre-fix, they'd reappear in the
-                # app's "Open" tab tagged INVALIDATED / SL_HIT / TP1_HIT
-                # because the persistence layer captures whatever's in
-                # the active map at the moment of write — including
-                # signals mid-removal during shutdown.
-                status = str(sig_data.get("status", "ACTIVE")).upper()
-                if status != "ACTIVE":
-                    skipped_terminal += 1
-                    continue
-                sig = _signal_from_dict(sig_data)
-                if sig is not None:
-                    self._active_signals[sid] = sig
+        counts = self._absorb_restored(signals_data)
         if self._active_signals:
             log.info(
-                "Restored {} active signal(s) from disk",
+                "Restored {} live signal(s) from disk",
                 len(self._active_signals),
             )
-        if skipped_terminal > 0:
-            log.info(
-                "Skipped {} terminal-status signal(s) from disk restore "
-                "(closed mid-shutdown)",
-                skipped_terminal,
-            )
+        self._log_restore_counts("disk", counts)
 
         lock_data = data.get("position_lock") or {}
         if isinstance(lock_data, dict):

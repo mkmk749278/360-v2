@@ -20,9 +20,11 @@ setups — and six of the locked symbols had no delivered trade at all in the
 confirmed delivery, so a symbol that was never delivered cannot hold a
 legitimate one.  The gate was not tight, it was stale.
 
-**The mechanism.**  Both restore paths skip a signal whose status is no
-longer ``ACTIVE`` when rebuilding ``_active_signals`` — right, or a closed
-signal reappears in the app's Open tab — and then restore ``_position_lock``
+**The mechanism.**  Both restore paths keep a signal whose status has gone
+TERMINAL out of ``_active_signals`` — right, or a closed signal reappears in
+the app's Open tab.  (That test was ``!= "ACTIVE"`` until 2026-08-24, which
+also discarded still-running ``TP1_HIT``/``TP2_HIT`` signals; it is now keyed
+on ``TERMINAL_STATUSES``.)  They then restore ``_position_lock``
 wholesale with no cross-check.  Both release paths (``remove_signal``,
 ``cleanup_expired``) reach the lock *through* ``_active_signals``, so an
 entry with no signal behind it is unreachable forever, and ``_persist_state``
@@ -133,7 +135,14 @@ class TestRestoreDropsOrphanedLocks:
         state_path.write_text(json.dumps({
             "active_signals": {
                 "CLOSED-1": _signal_dict(_make_signal(
-                    signal_id="CLOSED-1", symbol="WLDUSDT", status="TP1_HIT",
+                    # SL_HIT, not TP1_HIT (corrected 2026-08-24, matching the
+                    # sibling test above).  TP1_HIT is NOT terminal — the
+                    # position is live and running toward TP2/TP3 — so its lock
+                    # is legitimate, not an orphan, and the restore now keeps
+                    # such a signal.  Dropping that lock would let a second
+                    # position open on a symbol still holding one, which is the
+                    # thing the lock exists to prevent.
+                    signal_id="CLOSED-1", symbol="WLDUSDT", status="SL_HIT",
                 )),
             },
             "position_lock": {"WLDUSDT": "SHORT"},
