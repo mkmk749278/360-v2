@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-24T02:12:52.377465+00:00",
-  "generated_at_ts": 1787537572.3774652,
+  "generated_at": "2026-08-25T02:09:48.771009+00:00",
+  "generated_at_ts": 1787623788.7710094,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "ba052b94ac3655261c2893c6c393bdc700306ebd",
+  "git_sha": "13dda65e2bf69d897970f0e8fdf1aa35fe13ecf0",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 4032,
-    "strategy_matrix_scored_cells": 967,
+    "strategy_matrix_cells": 4591,
+    "strategy_matrix_scored_cells": 1128,
     "performance_setups": 15,
     "suppression_gates": 0
   },
@@ -25,7 +25,7 @@
       {
         "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
         "context_key": "ASIA/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
-        "edge_r": 1.9438652148318294,
+        "edge_r": 1.8054662440745455,
         "n": 50,
         "verdict": "STRONG"
       },
@@ -60,10 +60,10 @@
     ],
     "weakest_cells": [
       {
-        "strategy": "TREND_PULLBACK_EMA",
-        "context_key": "NY/QUIET/COMPRESSED/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.3601355131565465,
-        "n": 48,
+        "strategy": "MOVER_TREND_PULLBACK@TUNED",
+        "context_key": "LONDON/ACCUMULATION/EXPANDED/BTC_NEUTRAL",
+        "edge_r": -1.4464810258579872,
+        "n": 16,
         "verdict": "NEGATIVE"
       },
       {
@@ -74,16 +74,16 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "MOVER_AVWAP_SCALP",
-        "context_key": "ASIA/MARKDOWN/EXPANDED/BTC_NEUTRAL",
-        "edge_r": -1.3552165130121654,
-        "n": 15,
+        "strategy": "TREND_PULLBACK_EMA",
+        "context_key": "NY/QUIET/COMPRESSED/BTC_NEUTRAL/MIDCAP",
+        "edge_r": -1.29763790573518,
+        "n": 50,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "MOVER_TREND_PULLBACK@TUNED",
-        "context_key": "ASIA/MARKUP/NORMAL/BTC_NEUTRAL",
-        "edge_r": -1.2288344096725696,
+        "strategy": "MOVER_TREND_PULLBACK",
+        "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": -1.2212860554417693,
         "n": 50,
         "verdict": "NEGATIVE"
       },
