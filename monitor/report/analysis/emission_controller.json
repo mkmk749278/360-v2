@@ -137,8 +137,8 @@
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
         "KEEP",
-        "KEEP",
-        "KEEP"
+        "SKIP",
+        "SKIP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -464,7 +464,7 @@
       "SHADOW_RANGE_FADE|min_samples": 1399,
       "FAILED_AUCTION_RECLAIM|min_samples": 1536
     },
-    "cycle": 1571
+    "cycle": 1615
   },
   "ledger": [
     {

@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-25T02:09:48.771009+00:00",
-  "generated_at_ts": 1787623788.7710094,
+  "generated_at": "2026-08-26T02:13:29.112883+00:00",
+  "generated_at_ts": 1787710409.1128829,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "13dda65e2bf69d897970f0e8fdf1aa35fe13ecf0",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 4591,
-    "strategy_matrix_scored_cells": 1128,
+    "strategy_matrix_cells": 5013,
+    "strategy_matrix_scored_cells": 1245,
     "performance_setups": 15,
     "suppression_gates": 0
   },
@@ -53,17 +53,31 @@
       {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
         "context_key": "ASIA/MARKUP/COMPRESSED/BTC_RISING",
-        "edge_r": 1.0665816772514627,
-        "n": 39,
+        "edge_r": 1.0646059923403979,
+        "n": 40,
         "verdict": "STRONG"
       }
     ],
     "weakest_cells": [
       {
+        "strategy": "WHALE_MOMENTUM",
+        "context_key": "NY/ACCUMULATION/NORMAL/BTC_NEUTRAL/MAJOR",
+        "edge_r": -1.370522517520046,
+        "n": 26,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "WHALE_MOMENTUM",
+        "context_key": "NY/ACCUMULATION/NORMAL/BTC_NEUTRAL",
+        "edge_r": -1.370522517520046,
+        "n": 26,
+        "verdict": "NEGATIVE"
+      },
+      {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
         "context_key": "LONDON/ACCUMULATION/EXPANDED/BTC_NEUTRAL",
-        "edge_r": -1.4464810258579872,
-        "n": 16,
+        "edge_r": -1.3614425510179706,
+        "n": 17,
         "verdict": "NEGATIVE"
       },
       {
@@ -76,21 +90,7 @@
       {
         "strategy": "TREND_PULLBACK_EMA",
         "context_key": "NY/QUIET/COMPRESSED/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.29763790573518,
-        "n": 50,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "MOVER_TREND_PULLBACK",
-        "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
-        "edge_r": -1.2212860554417693,
-        "n": 50,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "FUNDING_EXTREME_SIGNAL",
-        "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_RISING/ALTCOIN",
-        "edge_r": -1.203866219069753,
+        "edge_r": -1.3068721306304332,
         "n": 50,
         "verdict": "NEGATIVE"
       }
