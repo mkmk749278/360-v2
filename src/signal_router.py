@@ -80,14 +80,40 @@ async def _delivery_sleep(secs: float) -> None:
     await asyncio.sleep(secs)
 
 
+#: Every ``datetime`` field on :class:`Signal`, derived from the dataclass.
+#:
+#: ``_signal_to_dict`` converts **all** datetimes to ISO strings by walking the
+#: values, so the restore has to cover all of them or the round trip is lossy —
+#: and lossy in the way this repo keeps paying for, because nothing observes it
+#: while the process lives.  It was a hand-written list of three names, which is
+#: a floor: it covers exactly the fields somebody already typed and is silent by
+#: construction on the next one.  Five had accumulated
+#: (``dispatch_timestamp``, ``first_sl_touch_timestamp``,
+#: ``first_tp_touch_timestamp``, ``terminal_outcome_timestamp``,
+#: ``pre_tp_timestamp``) and every one came back as a ``str``.
+#:
+#: Nothing noticed until #981 gave a restored terminal signal to
+#: ``_record_outcome``, which calls ``.timestamp()`` on three of them:
+#: ``AttributeError: 'str' object has no attribute 'timestamp'``, so the restore
+#: drain recorded nothing and the trade it exists to save stayed missing.  The
+#: ``close_accounting`` probe shipped in that same PR caught it in production
+#: within 28 minutes.
+_SIGNAL_DATETIME_FIELDS: frozenset = frozenset(
+    f.name
+    for f in dataclasses.fields(Signal)
+    if "datetime" in str(f.type)
+)
+
+
 def _signal_from_dict(data: dict) -> Optional[Signal]:
     """Reconstruct a Signal from a Redis-deserialized dict."""
     try:
         d = data.copy()
         if isinstance(d.get("direction"), str):
             d["direction"] = Direction(d["direction"])
-        # Restore all datetime fields that were serialized as ISO strings
-        for field in ("timestamp", "last_lifecycle_check", "dca_timestamp"):
+        # Restore every datetime field the serializer stringified — derived
+        # from the dataclass, never listed here.  See _SIGNAL_DATETIME_FIELDS.
+        for field in _SIGNAL_DATETIME_FIELDS:
             if isinstance(d.get(field), str):
                 d[field] = datetime.fromisoformat(d[field])
         return Signal(**d)
