@@ -112,6 +112,10 @@
       "FAILED_AUCTION_RECLAIM": {
         "suppress_negative": null,
         "min_samples": 25
+      },
+      "MOVER_AVWAP_SCALP@SAREXIT": {
+        "suppress_negative": null,
+        "min_samples": 25
       }
     },
     "history": {
@@ -137,8 +141,8 @@
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
         "KEEP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -430,6 +434,16 @@
         "HOLD",
         "HOLD",
         "HOLD"
+      ],
+      "MOVER_AVWAP_SCALP@SAREXIT|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "MOVER_AVWAP_SCALP@SAREXIT|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ]
     },
     "last_change_cycle": {
@@ -462,9 +476,10 @@
       "MOVER_TREND_PULLBACK@TUNED|min_samples": 855,
       "TREND_PULLBACK_EMA|min_samples": 1365,
       "SHADOW_RANGE_FADE|min_samples": 1399,
-      "FAILED_AUCTION_RECLAIM|min_samples": 1536
+      "FAILED_AUCTION_RECLAIM|min_samples": 1536,
+      "MOVER_AVWAP_SCALP@SAREXIT|min_samples": 1627
     },
-    "cycle": 1615
+    "cycle": 1672
   },
   "ledger": [
     {
@@ -1336,6 +1351,19 @@
       "ev_per_suppression_r": null,
       "n": 27,
       "routable": true
+    },
+    {
+      "strategy": "MOVER_AVWAP_SCALP@SAREXIT",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=25)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 25,
+      "routable": false
     }
   ],
   "pending": [],
@@ -1425,6 +1453,9 @@
     },
     "FAILED_AUCTION_RECLAIM": {
       "min_samples": 25
+    },
+    "MOVER_AVWAP_SCALP@SAREXIT": {
+      "min_samples": 25
     }
   },
   "routability": {
@@ -1437,6 +1468,7 @@
       "FAILED_AUCTION_RECLAIM@SAREXIT",
       "MEAN_REVERT@ATR",
       "MEAN_REVERT@FIXED",
+      "MOVER_AVWAP_SCALP@SAREXIT",
       "MOVER_TREND_PULLBACK@ATR",
       "MOVER_TREND_PULLBACK@SAREXIT",
       "MOVER_TREND_PULLBACK@TUNED",
@@ -1463,6 +1495,9 @@
       },
       "MEAN_REVERT@FIXED": {
         "min_samples": 15
+      },
+      "MOVER_AVWAP_SCALP@SAREXIT": {
+        "min_samples": 25
       },
       "MOVER_TREND_PULLBACK@ATR": {
         "min_samples": 15
