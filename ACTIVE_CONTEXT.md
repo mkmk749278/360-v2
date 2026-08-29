@@ -4,6 +4,63 @@
 
 ---
 
+## SESSION 133 2026-08-29 — production liveness alerts: current state, not lifetime scars
+
+Issue #984 asked whether the engine alerts represented active defects, stale monitor
+state, or evidence that required owner review. Four confirmed monitor defects were
+fixed without changing scoring, gates, routing, FSM, or auto-trading behavior:
+
+1. **`scan_cycle` was lifetime-latched.** One old `over_kill` increment kept the
+   probe red forever and its copy still claimed any slow cycle stale-dated the
+   heartbeat, despite progress heartbeats having separated those facts. The scanner
+   now retains a bounded 20-cycle steady-state window while preserving lifetime and
+   boot totals. Liveness grades the actual heartbeat plus sustained recent pressure;
+   historical breaches remain diagnostic evidence and age out of the verdict.
+2. **`candle_coverage` graded the wrong population.** `pair_mgr.pairs` is the full
+   Tier-1/2/3 universe, while only Tier-1 futures own continuous kline WebSockets.
+   The probe now grades Tier-1 futures plus explicitly promoted movers, labels the
+   two populations separately, and no longer calls stale Tier-2/3 REST discovery
+   symbols dead core streams.
+3. **`cohort_edge_gate` contradicted its own contract.** Single-macro concentration
+   was documented as informational but returned `False`. It remains visible in the
+   detail and no longer pages; gate-on with evidence expiry disabled still fails.
+4. **`stale_tf_scoring` was lifetime-latched.** It now compares cumulative-counter
+   deltas between probe intervals: fresh stale-TF events sustain the alert, stopping
+   events recover it, and lifetime totals remain in detail. Refusal remains dark;
+   no money-path flag was armed.
+
+Two pre-existing portability defects exposed by the focused baseline were also fixed:
+`cpu_budget()` now reports the cgroup quota directly (rather than clamping it to a
+possibly affinity-limited host count), and the documented/restored scan executor
+baseline is 8 workers on every host unless explicitly overridden.
+
+### Alerts deliberately not converted into behavior changes
+
+- `tuned_variants`: historical evidence only identifies 140 cumulative
+  `atr_arm_uncomputable` non-stamps. The same return covers short, zero-ATR,
+  degenerate, and >5% clamp inputs; no production-shaped input census proves which.
+  Do not loosen the geometry clamp or relabel these as expected without that evidence.
+- `dark_resolution`: six open rows had no fresh bars. Correcting the coverage
+  population prevents a misleading aggregate page but does not manufacture missing
+  candles; feed/reseed evidence is still required.
+- `mean_revert_emission` / `range_fade_emission`: positive post-scoring suppressed
+  edge is disjoint from the dominant pre-scoring regime/setup rejects. No gate was
+  loosened.
+- `edge_reconciliation` was healthy in the captured production snapshot
+  (`MOVER_TREND_PULLBACK +0.28R`, below the 0.30 bound).
+
+### Validation
+
+- Focused liveness suite: **88 passed**.
+- Tuned geometry / health contracts: **58 passed**.
+- Full suite: **8,804 passed, 58 skipped** (one existing aiohttp unclosed-session
+  stderr line; pytest exit 0).
+- Ruff on changed and related files: **all checks passed**.
+
+PR: #985 (`fix/engine-liveness-alerts-984`).
+
+---
+
 ## SESSION 132 2026-08-22 — the pulse's zero, and the line that made "only MVRTP" true
 
 Owner: *"first priority check system and engine stability … then look at current

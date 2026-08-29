@@ -2858,15 +2858,11 @@ class CryptoSignalEngine:
             app's feed — was invisible to ops, to the truth report and to the
             monitoring agent alike.
 
-            Graded on the LEADING edge, not the terminal one.  ``over_kill`` is
-            a cycle that has already earned a restart; by the time a probe fires
-            on that the container is going down.  The sustained-pressure check
-            is the actionable one, and it fires while the cycle still has room.
-
-            The rate is measured over the whole boot, deliberately: a restart
-            resets it, so a probe that keeps reporting pressure across restarts
-            is describing a condition the restarts are not curing — which is
-            exactly the loop this is here to catch.
+            Graded on current progress and a bounded recent cycle window, not
+            lifetime incident history.  Progress heartbeats mean a slow cycle no
+            longer implies a restart: stale heartbeat age is the wedge signal,
+            while sustained recent warn-bound pressure is the capacity signal.
+            Lifetime totals remain in the detail for diagnosis.
 
             **Boot warm-up is excluded from the verdict and reported beside
             it.** A cold start re-seeds 75 pairs over REST and rebuilds every
@@ -2890,23 +2886,29 @@ class CryptoSignalEngine:
                     f" (plus {h.get('over_warn_boot', 0)}/{h.get('over_kill_boot', 0)} "
                     f"during boot warm-up, not counted)"
                 )
+            recent_n = int(h.get("recent_cycles", 0))
+            recent_warn = int(h.get("recent_over_warn", 0))
+            recent_kill = int(h.get("recent_over_kill", 0))
+            heartbeat_age = h.get("heartbeat_age_sec")
             detail = (
                 f"last {h['last_sec']}s, worst {h['worst_sec']}s over {h['cycles']} "
-                f"cycles; {h['over_warn']} over {h['warn_sec']:.0f}s, "
-                f"{h['over_kill']} over the {h['kill_sec']:.0f}s healthcheck "
-                f"deadline{_boot_note}; {h['executor_workers']} executor workers"
+                f"lifetime cycles; lifetime {h['over_warn']} over {h['warn_sec']:.0f}s, "
+                f"{h['over_kill']} over {h['kill_sec']:.0f}s{_boot_note}; recent "
+                f"{recent_warn}/{recent_kill} warn/kill breaches in {recent_n}/"
+                f"{h.get('recent_window_size', recent_n)} cycles; heartbeat age "
+                f"{heartbeat_age if heartbeat_age is not None else 'unreadable'}s; "
+                f"{h['executor_workers']} executor workers"
             )
-            if h["over_kill"]:
+            if heartbeat_age is None or float(heartbeat_age) > float(h["kill_sec"]):
                 return False, (
-                    f"{detail} — a cycle past the deadline leaves the scanner "
-                    f"heartbeat stale, and three consecutive failed healthchecks "
-                    f"restart this container"
+                    f"{detail} — scanner progress heartbeat is stale or unreadable; "
+                    f"three consecutive failed healthchecks restart this container"
                 )
-            # A single slow cycle is weather; a book of them is the condition.
-            if h["cycles"] >= 10 and h["over_warn"] / h["cycles"] > 0.5:
+            # A single slow cycle is weather; a recent book of them is the condition.
+            if recent_n >= 10 and recent_warn / recent_n > 0.5:
                 return False, (
-                    f"{detail} — over half of all cycles are past the warn bound, "
-                    f"so the deadline is one busy market away"
+                    f"{detail} — over half of the recent completed cycles are past "
+                    f"the warn bound, so capacity pressure is current"
                 )
             return True, detail
 
@@ -4534,9 +4536,31 @@ class CryptoSignalEngine:
             from config import CANDLE_COVERAGE_MAX_AGE_SEC as _max_age
 
             pairs = getattr(self.pair_mgr, "pairs", {}) or {}
-            syms = list(pairs.keys())
+            promoted = set(
+                getattr(getattr(self, "_scanner", None), "_mover_promoted_pairs", {})
+                or {}
+            )
+            # Continuous kline liveness belongs to Tier-1 futures only. Tier 2/3
+            # are REST-polled discovery populations and must not dilute or fail a
+            # WebSocket contract they do not have. Promoted movers are included
+            # separately because their REST re-seed path intentionally owes them
+            # fresh candles while promoted.
+            tier1_helper = getattr(self.pair_mgr, "tier1_futures_symbols", None)
+            if tier1_helper is not None:
+                core_syms = set(tier1_helper)
+            elif any(hasattr(info, "tier") for info in pairs.values()):
+                core_syms = {
+                    symbol for symbol, info in pairs.items()
+                    if str(getattr(info, "tier", "")).upper().endswith("TIER1")
+                    and str(getattr(info, "market", "futures")).lower() == "futures"
+                }
+            else:
+                # Compatibility for minimal test/diagnostic stubs that predate
+                # pair tiers; production PairInfo always takes a branch above.
+                core_syms = set(pairs)
+            syms = sorted(core_syms | promoted)
             if not syms:
-                return False, "no universe symbols"
+                return False, "no Tier-1 futures or promoted mover symbols"
 
             # Name the cause, don't just report the rate.  This probe read
             # "239/330 with >=20 candles, 139/330 updated within 45m" for
@@ -4559,10 +4583,6 @@ class CryptoSignalEngine:
             # A probe that names its cause pays for itself the first time it
             # fires; this one had been firing for thirteen cycles saying only
             # that something was wrong.
-            promoted = set(
-                getattr(getattr(self, "_scanner", None), "_mover_promoted_pairs", {})
-                or {}
-            )
             buckets: Dict[str, int] = {
                 "no_bucket": 0, "short": 0, "stale": 0, "fresh": 0,
             }
@@ -4578,12 +4598,12 @@ class CryptoSignalEngine:
                 closes = cd.get("close")
                 if closes is None:
                     buckets["no_bucket"] += 1
-                    if s not in promoted:
+                    if s in core_syms:
                         core_bad.append(s)
                     continue
                 if len(closes) < 20:
                     buckets["short"] += 1
-                    if s not in promoted:
+                    if s in core_syms:
                         core_bad.append(s)
                     continue
                 ok_n += 1
@@ -4594,7 +4614,7 @@ class CryptoSignalEngine:
                     buckets["fresh"] += 1
                 else:
                     buckets["stale"] += 1
-                    if s not in promoted:
+                    if s in core_syms:
                         core_bad.append(s)
             n = len(syms)
             healthy = (ok_n / n) >= 0.7 and (fresh_n / n) >= 0.7
@@ -4608,13 +4628,14 @@ class CryptoSignalEngine:
             core_note = ""
             if core_bad:
                 core_note = (
-                    f"; {len(core_bad)} CORE pair(s) unusable "
+                    f"; {len(core_bad)} Tier-1 CORE pair(s) unusable "
                     f"(e.g. {', '.join(sorted(core_bad)[:5])})"
                 )
             return healthy, (
                 f"{ok_n}/{n} symbols with ≥20 15m candles, "
                 f"{fresh_n}/{n} updated within {int(float(_max_age) // 60)}m "
-                f"[{causes}; {len(promoted)} promoted of {n}]{core_note}"
+                f"[{causes}; {len(core_syms)} Tier-1 futures + "
+                f"{len(promoted)} promoted movers monitored]{core_note}"
             )
 
         fl.add_predicate(PredicateProbe(name="candle_coverage", fn=_coverage, min_streak=6))
@@ -4733,15 +4754,17 @@ class CryptoSignalEngine:
             if gate_on and max_age <= 0:
                 return False, "gate ON with evidence expiry DISABLED — " + detail
             if len(macros) == 1 and len(stats) >= 10:
-                return False, (
+                return True, (
                     f"all {len(stats)} cohorts share macro_dir={macros.pop()} — a "
-                    f"macro flip resets every cohort at once; " + detail
+                    f"macro flip resets every cohort at once (informational); " + detail
                 )
             return True, detail
 
         fl.add_predicate(PredicateProbe(
             name="cohort_edge_gate", fn=_cohort_edge_gate, min_streak=6,
         ))
+
+        _stale_tf_previous = {"scored": 0, "gated": 0, "withheld": 0}
 
         def _stale_tf_scoring():
             """Did any signal get scored on a *known-stale* timeframe?
@@ -4762,13 +4785,24 @@ class CryptoSignalEngine:
             counts = snap.get("counts") or {}
             scored = sum(v for k, v in counts.items() if k.startswith("scoring:"))
             gated = sum(v for k, v in counts.items() if k.startswith("gate:"))
-            if not scored and not gated:
-                return True, "no known-stale timeframe reached scoring"
             withheld = sum(v for k, v in counts.items() if k.startswith("withheld:"))
+            new_scored = max(0, scored - _stale_tf_previous["scored"])
+            new_gated = max(0, gated - _stale_tf_previous["gated"])
+            new_withheld = max(0, withheld - _stale_tf_previous["withheld"])
+            _stale_tf_previous.update(
+                scored=scored, gated=gated, withheld=withheld,
+            )
+            if not new_scored and not new_gated:
+                return True, (
+                    "no new known-stale timeframe reached scoring "
+                    f"(lifetime scored={scored}, gate reads={gated}, "
+                    f"withheld={withheld})"
+                )
             last = (snap.get("last") or {}).get("scoring:15m") or {}
             return False, (
-                f"scored on stale TF {scored}x (gate reads {gated}x, "
-                f"withheld {withheld}x — refusal "
+                f"new stale-TF events: scored {new_scored}x, gate reads "
+                f"{new_gated}x, withheld {new_withheld}x (lifetime scored "
+                f"{scored}x; refusal "
                 f"{'ARMED' if _df.refusal_enabled() else 'dark'}); "
                 f"last {last.get('symbol', '?')} age={last.get('age_sec', '?')}s"
             )

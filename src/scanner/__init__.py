@@ -14,7 +14,7 @@ import os
 import re
 import json
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -379,6 +379,11 @@ SCANNER_PROGRESS_HEARTBEAT: bool = os.getenv(
 #: bounded write rate keeps this off the "uncached hot-path I/O" list whatever
 #: the pair count grows to. Well under the 120s the healthcheck allows.
 _HEARTBEAT_PROGRESS_MIN_INTERVAL_SEC: float = 5.0
+
+#: Completed steady-state cycles retained for the liveness verdict. Lifetime
+#: totals remain available for incident history, but an old breach must not keep
+#: the current scanner red forever.
+_CYCLE_HEALTH_WINDOW: int = 20
 
 # Higher-TF keys whose closed-candle counts fingerprint the SMC result cache.
 # Excludes 1m: the in-progress partial candle's last_close changes every tick,
@@ -3208,6 +3213,10 @@ class Scanner:
         self.cycles_over_kill: int = 0
         self.cycles_over_warn_boot: int = 0
         self.cycles_over_kill_boot: int = 0
+        #: Bounded steady-state history used by the liveness verdict. Lifetime
+        #: counters above remain diagnostic evidence; this window answers whether
+        #: pressure is current. Boot cycles are intentionally excluded.
+        self._recent_cycle_seconds = deque(maxlen=_CYCLE_HEALTH_WINDOW)
         #: Per-stage breakdown captured AT the worst cycle, and at the most
         #: recent slow one. The breakdown already existed — it was logged and
         #: nowhere else, so answering "where did a 156s cycle go" meant grepping
@@ -3296,6 +3305,8 @@ class Scanner:
         # verdict made the probe read violating for the whole life of a healthy
         # boot. Red that can never be anything but red is a dead instrument.
         _booting = self._uptime_sec() < SCAN_CYCLE_BOOT_GRACE_SEC
+        if not _booting:
+            self._recent_cycle_seconds.append(float(seconds))
         if seconds > SCAN_CYCLE_WARN_SEC:
             if _booting:
                 self.cycles_over_warn_boot += 1
@@ -3322,6 +3333,7 @@ class Scanner:
 
         Pure read of in-memory counters, safe from any thread.
         """
+        recent = tuple(self._recent_cycle_seconds)
         return {
             "cycles": self.cycle_count,
             "last_sec": round(self.last_cycle_sec, 2),
@@ -3334,6 +3346,10 @@ class Scanner:
             "over_warn_boot": self.cycles_over_warn_boot,
             "over_kill_boot": self.cycles_over_kill_boot,
             "boot_grace_sec": SCAN_CYCLE_BOOT_GRACE_SEC,
+            "recent_window_size": _CYCLE_HEALTH_WINDOW,
+            "recent_cycles": len(recent),
+            "recent_over_warn": sum(s > SCAN_CYCLE_WARN_SEC for s in recent),
+            "recent_over_kill": sum(s > SCAN_CYCLE_KILL_SEC for s in recent),
             # Where a slow cycle actually went. Sums are wall-time accumulated
             # across concurrent symbol scans, so they can exceed the cycle's own
             # duration — the RATIO between stages is what locates the cost, and
