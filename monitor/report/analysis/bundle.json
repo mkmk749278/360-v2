@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-08-28T11:46:58.849348+00:00",
-  "generated_at_ts": 1787917618.849348,
+  "generated_at": "2026-08-29T07:22:07.546525+00:00",
+  "generated_at_ts": 1787988127.5465255,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "cc661d80f3793e8a72e17fbba8bceee4672e4830",
+  "git_sha": "019b4f893a887a0e734d04be806ee5d2ce5cdb4f",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,18 +15,25 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 5966,
-    "strategy_matrix_scored_cells": 1491,
+    "strategy_matrix_cells": 6741,
+    "strategy_matrix_scored_cells": 1655,
     "performance_setups": 15,
     "suppression_gates": 0
   },
   "headlines": {
     "strongest_cells": [
       {
-        "strategy": "QUIET_COMPRESSION_BREAK",
-        "context_key": "ASIA/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
-        "edge_r": 1.5435305387595792,
-        "n": 32,
+        "strategy": "FAILED_AUCTION_RECLAIM",
+        "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_FALLING/ALTCOIN",
+        "edge_r": 1.553575342649317,
+        "n": 22,
+        "verdict": "STRONG"
+      },
+      {
+        "strategy": "FAILED_AUCTION_RECLAIM",
+        "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_FALLING",
+        "edge_r": 1.4379834353351528,
+        "n": 23,
         "verdict": "STRONG"
       },
       {
@@ -37,10 +44,10 @@
         "verdict": "STRONG"
       },
       {
-        "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
-        "context_key": "ASIA/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
-        "edge_r": 1.3404987872529026,
-        "n": 50,
+        "strategy": "QUIET_COMPRESSION_BREAK",
+        "context_key": "ASIA/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": 1.1961382404277534,
+        "n": 37,
         "verdict": "STRONG"
       },
       {
@@ -49,16 +56,23 @@
         "edge_r": 1.1902698349417515,
         "n": 50,
         "verdict": "STRONG"
-      },
-      {
-        "strategy": "MOVER_TREND_PULLBACK",
-        "context_key": "NY/VOLATILE_EXPANSION/EXPANDED/BTC_NEUTRAL/MIDCAP",
-        "edge_r": 1.1902698349417515,
-        "n": 50,
-        "verdict": "STRONG"
       }
     ],
     "weakest_cells": [
+      {
+        "strategy": "MOVER_TREND_PULLBACK@TUNED",
+        "context_key": "LONDON/QUIET/COMPRESSED/BTC_NEUTRAL",
+        "edge_r": -6.781935313875323,
+        "n": 50,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "MOVER_TREND_PULLBACK@TUNED",
+        "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_FALLING",
+        "edge_r": -1.9455332367637819,
+        "n": 23,
+        "verdict": "NEGATIVE"
+      },
       {
         "strategy": "TREND_PULLBACK_EMA",
         "context_key": "NY/QUIET/COMPRESSED/BTC_NEUTRAL/MIDCAP",
@@ -77,20 +91,6 @@
         "strategy": "TREND_PULLBACK_EMA",
         "context_key": "ASIA/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
         "edge_r": -1.2437928239888003,
-        "n": 17,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "MOVER_AVWAP_SCALP",
-        "context_key": "ASIA/RANGE/NORMAL/BTC_RISING/MAJOR",
-        "edge_r": -1.2259605716959712,
-        "n": 27,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "MOVER_AVWAP_SCALP",
-        "context_key": "ASIA/MARKDOWN/EXPANDED/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.2144700399707045,
         "n": 17,
         "verdict": "NEGATIVE"
       }

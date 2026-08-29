@@ -1,21 +1,21 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 588,
-    "wins": 173,
-    "losses": 230,
-    "neutral": 185,
-    "win_rate_pct": 29.4,
-    "avg_pnl_pct": 0.1227
+    "n": 609,
+    "wins": 185,
+    "losses": 235,
+    "neutral": 189,
+    "win_rate_pct": 30.4,
+    "avg_pnl_pct": 0.1838
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 225,
+    "n": 227,
     "wins": 43,
-    "losses": 71,
-    "neutral": 111,
-    "win_rate_pct": 19.1,
-    "avg_pnl_pct": 0.257
+    "losses": 72,
+    "neutral": 112,
+    "win_rate_pct": 18.9,
+    "avg_pnl_pct": 0.2482
   },
   {
     "setup": "SR_FLIP_RETEST",
@@ -28,12 +28,12 @@
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
-    "n": 98,
-    "wins": 29,
+    "n": 99,
+    "wins": 30,
     "losses": 48,
     "neutral": 21,
-    "win_rate_pct": 29.6,
-    "avg_pnl_pct": 0.0039
+    "win_rate_pct": 30.3,
+    "avg_pnl_pct": 0.0197
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
@@ -46,12 +46,21 @@
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 58,
+    "n": 61,
+    "wins": 9,
+    "losses": 26,
+    "neutral": 26,
+    "win_rate_pct": 14.8,
+    "avg_pnl_pct": -0.1706
+  },
+  {
+    "setup": "BREAKDOWN_SHORT",
+    "n": 30,
     "wins": 8,
-    "losses": 25,
-    "neutral": 25,
-    "win_rate_pct": 13.8,
-    "avg_pnl_pct": -0.206
+    "losses": 15,
+    "neutral": 7,
+    "win_rate_pct": 26.7,
+    "avg_pnl_pct": 0.9438
   },
   {
     "setup": "VOLUME_SURGE_BREAKOUT",
@@ -63,31 +72,22 @@
     "avg_pnl_pct": -0.4475
   },
   {
-    "setup": "BREAKDOWN_SHORT",
-    "n": 29,
-    "wins": 8,
-    "losses": 15,
-    "neutral": 6,
-    "win_rate_pct": 27.6,
-    "avg_pnl_pct": 0.9764
-  },
-  {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 23,
-    "wins": 6,
-    "losses": 7,
-    "neutral": 10,
-    "win_rate_pct": 26.1,
-    "avg_pnl_pct": 0.2414
+    "n": 28,
+    "wins": 9,
+    "losses": 8,
+    "neutral": 11,
+    "win_rate_pct": 32.1,
+    "avg_pnl_pct": 0.4292
   },
   {
     "setup": "TREND_PULLBACK_EMA",
-    "n": 14,
-    "wins": 1,
+    "n": 15,
+    "wins": 2,
     "losses": 4,
     "neutral": 9,
-    "win_rate_pct": 7.1,
-    "avg_pnl_pct": -0.0932
+    "win_rate_pct": 13.3,
+    "avg_pnl_pct": 0.0985
   },
   {
     "setup": "FUNDING_EXTREME_SIGNAL",
