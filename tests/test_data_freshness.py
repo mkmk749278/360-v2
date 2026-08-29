@@ -217,14 +217,24 @@ class TestLivenessProbe:
         payload = fl.run_cycle()
         assert payload["features"]["stale_tf_scoring"]["status"] == "ok"
 
-        # Now a real stale-scoring event happens.
+        # A sustained condition means NEW stale scoring on each probe interval;
+        # one historical event must not latch the process red forever.
         _age(store, "BTCUSDT", "15m", 6 * 3600)
-        df.audit_indicators(
-            store=store, symbol="BTCUSDT", indicators={"15m": {"atr_last": 2.0}}
-        )
         for _ in range(7):
+            df.audit_indicators(
+                store=store,
+                symbol="BTCUSDT",
+                indicators={"15m": {"atr_last": 2.0}},
+            )
             payload = fl.run_cycle()
         feature = payload["features"]["stale_tf_scoring"]
         assert feature["status"] == "violating"
-        assert "scored on stale TF 1x" in feature["detail"]
+        assert "new stale-TF events: scored 1x" in feature["detail"]
         assert "stale_tf_scoring" in [a["feature"] for a in payload["alerts"]]
+
+        # Once no new event arrives, the current condition has recovered. The
+        # lifetime total remains in detail for incident history.
+        payload = fl.run_cycle()
+        feature = payload["features"]["stale_tf_scoring"]
+        assert feature["status"] == "ok"
+        assert "lifetime scored=7" in feature["detail"]

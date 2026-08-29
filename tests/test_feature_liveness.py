@@ -487,6 +487,39 @@ class TestEngineWiring:
         assert "candle_coverage" not in [a["feature"] for a in payload["alerts"]]
 
 
+def test_single_macro_cohort_concentration_is_informational(monkeypatch):
+    """Concentration is useful context, not a broken liveness invariant."""
+    from types import SimpleNamespace
+
+    from src import runtime_tunables
+    from src.main import CryptoSignalEngine
+    from src.scanner import _cohort_edge_store
+
+    # The macro component must remain exactly one value; vary a different key
+    # component so these are ten real cohort cells rather than one duplicated row.
+    stats = {
+        f"SETUP{i}/LONG/RANGING/DECLINE": {"n": 10}
+        for i in range(10)
+    }
+    monkeypatch.setattr(_cohort_edge_store, "all_stats", lambda: stats)
+    monkeypatch.setattr(_cohort_edge_store, "frozen_cohorts", lambda: [])
+    monkeypatch.setattr(
+        runtime_tunables,
+        "get",
+        lambda key: True if key == "cohort_edge_gate_enabled" else 30.0,
+    )
+
+    liveness = CryptoSignalEngine._build_feature_liveness(SimpleNamespace())
+    probe = next(
+        p for p in liveness._predicate_probes if p.name == "cohort_edge_gate"
+    )
+    healthy, detail = probe.fn()
+
+    assert healthy is True
+    assert "informational" in detail
+    assert "macro_dir=DECLINE" in detail
+
+
 class TestTruthReportSection:
     def test_markdown_renders_manifest_and_alerts(self):
         from src.runtime_truth_report import format_truth_report_markdown

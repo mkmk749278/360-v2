@@ -23,6 +23,7 @@ counter is how the harm stays invisible.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -172,14 +173,23 @@ def _real_probe():
     return eng, probe
 
 
-def _coverage(symbols: List[str], series, ages, promoted=()):
+def _coverage(symbols: List[str], series, ages, promoted=(), tiers=None):
     """Run the real probe against a store we control, and return what it says.
 
     The probe's output is a ``(healthy, detail)`` pair and the **detail string
     is the artifact the owner reads**, so that is what these tests assert on.
     """
     eng, probe = _real_probe()
-    eng.pair_mgr = type("_PM", (), {"pairs": {s: object() for s in symbols}})()
+    promoted_set = set(promoted)
+    tiers = tiers or {}
+    pairs = {
+        s: SimpleNamespace(
+            tier=tiers.get(s, "TIER2" if s in promoted_set else "TIER1"),
+            market="futures",
+        )
+        for s in symbols
+    }
+    eng.pair_mgr = type("_PM", (), {"pairs": pairs})()
     eng.data_store = _CoverageStore(series, ages)
     eng._scanner = type(
         "_SC", (), {"_mover_promoted_pairs": {s: 0.0 for s in promoted}},
@@ -230,6 +240,32 @@ def test_a_stale_core_pair_is_named_apart_from_a_stale_mover():
         "a promoted mover's frozen bucket is by design and must not be "
         "reported as a dead kline stream"
     )
+
+
+def test_rest_only_tiers_do_not_dilute_tier1_websocket_coverage():
+    """Tier 2/3 are REST discovery populations, not continuous WS streams."""
+    syms = ["COREUSDT", "DISCOVERYUSDT", "LIGHTUSDT"]
+    series = {
+        "COREUSDT": {"close": [1.0] * 50},
+        "DISCOVERYUSDT": {"close": [1.0] * 50},
+        "LIGHTUSDT": {"close": [1.0] * 50},
+    }
+    ages = {"COREUSDT": 10.0, "DISCOVERYUSDT": 99999.0, "LIGHTUSDT": 99999.0}
+    healthy, detail = _coverage(
+        syms,
+        series,
+        ages,
+        tiers={
+            "COREUSDT": "TIER1",
+            "DISCOVERYUSDT": "TIER2",
+            "LIGHTUSDT": "TIER3",
+        },
+    )
+
+    assert healthy is True
+    assert "1/1 symbols" in detail
+    assert "1 Tier-1 futures" in detail
+    assert "DISCOVERYUSDT" not in detail and "LIGHTUSDT" not in detail
 
 
 def test_a_never_stamped_age_is_not_evidence_of_freshness():

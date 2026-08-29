@@ -297,6 +297,73 @@ def test_cpu_budget_falls_back_to_the_host_when_unlimited(tmp_path, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# Current scan-cycle liveness verdict
+# ---------------------------------------------------------------------------
+
+
+def _scan_cycle_probe(rec):
+    """Return the real engine predicate while keeping scanner state controlled."""
+    from types import SimpleNamespace
+
+    from src.main import CryptoSignalEngine
+
+    stub = SimpleNamespace(_scanner=rec)
+    liveness = CryptoSignalEngine._build_feature_liveness(stub)
+    return next(p for p in liveness._predicate_probes if p.name == "scan_cycle")
+
+
+def test_historical_cycle_breach_ages_out_of_the_liveness_verdict(tmp_path):
+    from config import SCAN_CYCLE_KILL_SEC
+    from src.scanner import _CYCLE_HEALTH_WINDOW
+
+    rec = _CycleRecorder()
+    rec._HEARTBEAT_PATH = str(tmp_path / "scanner_heartbeat")
+    rec._touch_heartbeat()
+    rec._record_cycle_time(SCAN_CYCLE_KILL_SEC + 1)
+    for _ in range(_CYCLE_HEALTH_WINDOW):
+        rec._record_cycle_time(5.0)
+
+    healthy, detail = _scan_cycle_probe(rec).fn()
+    assert healthy is True
+    assert rec.cycle_health()["over_kill"] == 1, "lifetime evidence must remain"
+    assert rec.cycle_health()["recent_over_kill"] == 0
+    assert "lifetime" in detail and "recent" in detail
+
+
+def test_stale_progress_heartbeat_fails_current_liveness(tmp_path):
+    from config import SCAN_CYCLE_KILL_SEC
+
+    rec = _CycleRecorder()
+    rec._HEARTBEAT_PATH = str(tmp_path / "scanner_heartbeat")
+    rec._touch_heartbeat()
+    _os.utime(
+        rec._HEARTBEAT_PATH,
+        (_time.time() - SCAN_CYCLE_KILL_SEC - 1,) * 2,
+    )
+    rec._record_cycle_time(5.0)
+
+    healthy, detail = _scan_cycle_probe(rec).fn()
+    assert healthy is False
+    assert "progress heartbeat is stale" in detail
+
+
+def test_recent_sustained_cycle_pressure_fails_liveness(tmp_path):
+    from config import SCAN_CYCLE_WARN_SEC
+
+    rec = _CycleRecorder()
+    rec._HEARTBEAT_PATH = str(tmp_path / "scanner_heartbeat")
+    rec._touch_heartbeat()
+    for _ in range(6):
+        rec._record_cycle_time(SCAN_CYCLE_WARN_SEC + 1)
+    for _ in range(4):
+        rec._record_cycle_time(5.0)
+
+    healthy, detail = _scan_cycle_probe(rec).fn()
+    assert healthy is False
+    assert "over half of the recent completed cycles" in detail
+
+
+# ---------------------------------------------------------------------------
 # 3. Deferred edge-store persistence
 # ---------------------------------------------------------------------------
 

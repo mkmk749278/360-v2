@@ -1878,7 +1878,7 @@ def cpu_budget() -> float:
         if quota_s != "max":
             period = float(period_s)
             if period > 0:
-                return max(1.0, min(host, float(quota_s) / period))
+                return max(1.0, float(quota_s) / period)
         return host
     except (OSError, ValueError, IndexError):
         pass
@@ -1889,7 +1889,7 @@ def cpu_budget() -> float:
         with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r", encoding="utf-8") as fh:
             period = float(fh.read().strip())
         if quota > 0 and period > 0:
-            return max(1.0, min(host, quota / period))
+            return max(1.0, quota / period)
     except (OSError, ValueError):
         pass
     return host
@@ -1928,7 +1928,7 @@ def cpu_budget() -> float:
 #: override takes effect on a restart with no deploy.
 SCAN_EXECUTOR_WORKERS: int = _safe_int(
     "SCAN_EXECUTOR_WORKERS",
-    str(min((os.cpu_count() or 4) * 2, 20)),
+    "8",
 )
 
 #: Whether the indicator / SMC caches key on the newest bar's timestamp as well
