@@ -1387,6 +1387,13 @@ class Scanner:
         # the last refresh ATTEMPT per symbol.
         self._mover_last_reseed: Dict[str, float] = {}
 
+        # Per-symbol throttle for the Tier-1 CORE pair dead-stream recovery
+        # re-seed (``_refresh_stale_core_candles``, 2026-08-29) — monotonic ts
+        # of the last refresh ATTEMPT per symbol.  Kept separate from the
+        # mover throttle: the two sweeps run on different intervals and a
+        # symbol can migrate between populations (mover → core admission).
+        self._core_last_reseed: Dict[str, float] = {}
+
         # Per-(symbol, direction, level_bucket) "level in play" registry —
         # see _check_and_record_level_in_play.  Blocks stuck-level repeat-
         # fires from level-anchored evaluators (SR_FLIP_RETEST / VSB /
@@ -2603,6 +2610,113 @@ class Scanner:
 
         await asyncio.gather(*[_reseed(s) for s in to_refresh])
 
+    async def _refresh_stale_core_candles(self) -> None:
+        """Dead-stream recovery for Tier-1 CORE pairs (2026-08-29).
+
+        Core pairs have a WS kline subscription, so under normal operation
+        their 1m age hovers near zero and this sweep does nothing.  When a
+        stream dies silently — the failure mode that left 18 Tier-1 pairs
+        (including BTCUSDT) unusable on the live box while the coverage probe
+        named the fault every cycle — NOTHING re-seeded a core pair: the
+        mover sweep covers only promoted pairs, `seed_all` runs only at boot,
+        and the WS manager's own restart logic can restore the connection
+        without backfilling the gap that accumulated while it was down.
+
+        Same shape as ``_refresh_stale_mover_candles`` deliberately: per-
+        symbol attempt throttle (a dead symbol can't burn the budget every
+        cycle), per-cycle budget with a `deferred` counter so an under-
+        provisioned sweep is measurable rather than invisible, fail-soft
+        (the dispatch staleness gate owns downstream protection), and a
+        heartbeat beat per completed unit of REST-bound work.
+
+        Counters: ``core_reseed:wanted`` / ``core_reseed:refreshed`` /
+        ``core_reseed:deferred``.
+        """
+        from config import (
+            CORE_CANDLE_REFRESH_MAX_PER_CYCLE,
+            CORE_CANDLE_REFRESH_SEC,
+        )
+        if CORE_CANDLE_REFRESH_SEC <= 0:
+            return
+        data_store = getattr(self, "data_store", None)
+        if data_store is None or not hasattr(data_store, "last_kline_age_seconds"):
+            return
+        tier1_helper = getattr(self.pair_mgr, "tier1_futures_symbols", None)
+        if tier1_helper is None:
+            return  # minimal test/diagnostic stub — no tiered universe
+        try:
+            core_syms = list(tier1_helper())
+        except TypeError:
+            core_syms = list(tier1_helper)
+        if not core_syms:
+            return
+        now_mono = time.monotonic()
+        to_refresh: List[str] = []
+        deferred = 0
+        for sym in core_syms:
+            try:
+                age = data_store.last_kline_age_seconds(sym, "1m")
+                age = None if age is None else float(age)
+            except (TypeError, ValueError):
+                continue
+            # ``age is None`` = never stamped.  For a mover that means a
+            # legacy seed; for a core pair at steady state it means the WS
+            # stream never wrote a single frame — the worst case, refresh it.
+            if age is not None and age <= CORE_CANDLE_REFRESH_SEC:
+                continue
+            last_attempt = self._core_last_reseed.get(sym, 0.0)
+            if now_mono - last_attempt < CORE_CANDLE_REFRESH_SEC:
+                continue
+            if len(to_refresh) >= CORE_CANDLE_REFRESH_MAX_PER_CYCLE:
+                # Walk the whole list so `deferred` is the real shortfall,
+                # not "however many were left when we stopped looking".
+                deferred += 1
+                continue
+            to_refresh.append(sym)
+        self._suppression_counters["core_reseed:wanted"] += len(to_refresh) + deferred
+        self._suppression_counters["core_reseed:deferred"] += deferred
+        if deferred:
+            log.warning(
+                "core candle refresh: budget {} exhausted, {} Tier-1 pair(s) "
+                "deferred — more dead streams than the per-cycle budget covers",
+                CORE_CANDLE_REFRESH_MAX_PER_CYCLE, deferred,
+            )
+        if not to_refresh:
+            return
+        self._suppression_counters["core_reseed:refreshed"] += len(to_refresh)
+        # A core pair needing a REST re-seed is a fault (its stream died),
+        # not maintenance — log at WARNING so the recovery is visible next
+        # to the coverage probe's complaint, with the same symbols.
+        log.warning(
+            "core candle refresh: re-seeding {} Tier-1 pair(s) with dead/stale "
+            "kline streams: {}", len(to_refresh), to_refresh,
+        )
+        for sym in to_refresh:
+            self._core_last_reseed[sym] = now_mono
+        # Bounded map: drop throttle entries for symbols out of the universe.
+        if len(self._core_last_reseed) > 256:
+            keep = set(core_syms)
+            self._core_last_reseed = {
+                s: t for s, t in self._core_last_reseed.items() if s in keep
+            }
+
+        async def _reseed(sym: str) -> None:
+            info = self.pair_mgr.pairs.get(sym)
+            if info is None:
+                return
+            try:
+                await self.data_store.seed_symbol(sym, info.market)
+                log.info("core candle refresh: re-seeded {}", sym)
+            except Exception as exc:
+                log.warning("core candle refresh failed for {}: {}", sym, exc)
+            finally:
+                # REST-bound work before any symbol finishes scanning this
+                # cycle — owe the wedge detector a beat per completed unit,
+                # same contract as the mover sweep.
+                self._touch_heartbeat_progress()
+
+        await asyncio.gather(*[_reseed(s) for s in to_refresh])
+
     async def scan_loop(self) -> None:
         """Periodic scan over all pairs / channels."""
         log.info("Scanner loop started")
@@ -2797,6 +2911,10 @@ class Scanner:
                 _promoted = self._update_volume_baseline(_sorted_pairs_set)
                 # Movers promotion: pairs with extreme 24h % change — restricted to VSB+BREAKDOWN
                 _mover_promoted = await self._update_movers_promotion(_sorted_pairs_set)
+                # Tier-1 CORE dead-stream recovery (2026-08-29): re-seed core
+                # pairs whose WS kline stream stopped writing.  No-op while
+                # the WS is healthy; bounded REST work when it is not.
+                await self._refresh_stale_core_candles()
                 _all_promoted = list(dict.fromkeys(_promoted + _mover_promoted))  # dedup, order-stable
                 if _all_promoted:
                     _added = 0

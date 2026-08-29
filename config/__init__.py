@@ -1149,6 +1149,26 @@ MOVER_CANDLE_REFRESH_SEC: float = _safe_float("MOVER_CANDLE_REFRESH_SEC", "120")
 #: Max mover re-seeds per scan cycle — bounds the REST weight burst when many
 #: promoted movers go stale in the same cycle (each re-seed is ~6 kline calls).
 MOVER_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int("MOVER_CANDLE_REFRESH_MAX_PER_CYCLE", "8")
+#: Re-seed a Tier-1 CORE pair's candles when its 1m data is older than this
+#: many seconds (2026-08-29).  Core pairs DO have a WS kline subscription, so
+#: unlike the mover sweep this is not routine maintenance — it is dead-stream
+#: recovery.  On the live box 18 Tier-1 core pairs (including BTCUSDT) sat
+#: unusable for days because their kline streams died and NOTHING re-seeded a
+#: core pair: the coverage probe named the fault every cycle while every
+#: evaluator read frozen candles and the dispatch staleness gate (rightly)
+#: blocked what little got through.  A healthy WS keeps 1m age near zero, so
+#: 300s (five missed 1m closes) is unambiguous stream death, not jitter.
+#: 0 disables the sweep.
+CORE_CANDLE_REFRESH_SEC: float = _safe_float("CORE_CANDLE_REFRESH_SEC", "300")
+#: Max core-pair re-seeds per scan cycle.  Sized for the partial-failure case
+#: (a handful of dead streams), not a full WS outage — supply is
+#: MAX_PER_CYCLE * (REFRESH_SEC / cycle_sec) ≈ 4 * (300 / 25) = 48 pairs of
+#: sustained coverage against the 75-pair Tier-1 set, and a full outage is
+#: already owned by the WS-degraded REST-only mode.  The `core_reseed:*`
+#: counters make wanted-vs-refreshed readable from the running engine so a
+#: bigger budget can be argued from measurement, not guessed (REST weight is
+#: spent against a vendor that has IP-banned this box before).
+CORE_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int("CORE_CANDLE_REFRESH_MAX_PER_CYCLE", "4")
 #: How old the newest 15m bar may be before the ``candle_coverage`` liveness
 #: probe stops calling a symbol's 15m series live.  Three bars: a 15m stream
 #: writes on close, so two consecutive misses is already a real feed problem

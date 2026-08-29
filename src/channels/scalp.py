@@ -863,6 +863,39 @@ class ScalpChannel(BaseChannel):
         self._active_no_signal_reason = self._no_signal_reason_token(reason)
         return None
 
+    def _disabled_evaluator_rejects(self) -> Dict[str, str]:
+        """Map of evaluator name -> rejection token for paths that are
+        statically disabled by feature flag (2026-08-29).
+
+        Hoisted out of the evaluator bodies so ``evaluate()`` can record the
+        rejection without invoking a function whose first statement is a
+        flag check.  On the live box the two dormant paths (ORB, CLS) were
+        burning ~59k no-op evaluator calls each per truth-report window —
+        every call constructing a frame just to return
+        ``self._reject("feature_disabled")``.
+
+        Telemetry contract is preserved EXACTLY: the same ``attempts`` /
+        ``no_signal`` / ``no_signal_reason`` counters are incremented with the
+        same tokens (``feature_disabled`` / ``cls_disabled_merged_into_lsr``),
+        so the truth report still surfaces non-zero suppression telemetry for
+        disabled paths — distinguishing "disabled by doctrine" from "no
+        candidates" cleanly, per the CLS disablement note (OWNER_BRIEF §3.4a).
+
+        The in-evaluator flag checks remain as a safety net for direct calls
+        (tests, diagnostics) — this map is an optimisation, not the source of
+        truth for the disablement.  Reads the module globals at call time so
+        env re-enables and test patches (``patch("src.channels.scalp.
+        SCALP_ORB_ENABLED", ...)``) keep working.
+        """
+        disabled: Dict[str, str] = {}
+        if not SCALP_ORB_ENABLED:
+            disabled["_evaluate_opening_range_breakout"] = "feature_disabled"
+        if _CLS_DISABLED_2026_05_17:
+            disabled["_evaluate_continuation_liquidity_sweep"] = (
+                "cls_disabled_merged_into_lsr"
+            )
+        return disabled
+
     @staticmethod
     def _mover_path_live(tunable_key: str, boot_default: bool) -> bool:
         """Live/shadow switch for a mover path, read from the ops-controlled
@@ -1153,6 +1186,9 @@ class ScalpChannel(BaseChannel):
         # mover-promoted pairs to VSB + BREAKDOWN_SHORT only.
         profile = smc_data.get("pair_profile") if smc_data else None
         self._reset_generation_telemetry()
+        # Feature-flag-disabled paths: recorded in telemetry with their
+        # doctrine tokens but never invoked (see _disabled_evaluator_rejects).
+        _disabled_rejects = self._disabled_evaluator_rejects()
         results: List[Signal] = []
         for evaluator_name, evaluator in (
             ("_evaluate_standard", self._evaluate_standard),
@@ -1178,6 +1214,17 @@ class ScalpChannel(BaseChannel):
             if allowed_evaluators is not None and evaluator_name not in allowed_evaluators:
                 continue  # restricted scan context — skip evaluators not in allowlist
             _path = self._generation_path_token(evaluator_name)
+            _disabled_reason = _disabled_rejects.get(evaluator_name)
+            if _disabled_reason is not None:
+                # Statically disabled path — same counters and tokens the
+                # evaluator's own flag check would have produced, without the
+                # per-pair-per-cycle no-op call.
+                self._generation_telemetry["attempts"][_path] += 1
+                self._generation_telemetry["no_signal"][_path] += 1
+                self._generation_telemetry["no_signal_reason"][
+                    f"{_path}:{_disabled_reason}"
+                ] += 1
+                continue
             self._generation_telemetry["attempts"][_path] += 1
             self._active_generation_path = _path
             self._active_no_signal_reason = None
