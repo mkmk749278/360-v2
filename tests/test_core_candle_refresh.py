@@ -13,8 +13,9 @@ silently dropped.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import src.scanner as scanner_mod
 from src.scanner import Scanner
 
 
@@ -131,6 +132,40 @@ async def test_stub_pair_manager_without_tier_helper_is_a_noop():
     sc.data_store.last_kline_age_seconds.return_value = 9999.0
     await sc._refresh_stale_core_candles()  # must not raise
     sc.data_store.seed_symbol.assert_not_awaited()
+
+
+async def test_first_refresh_runs_on_a_freshly_booted_clock():
+    """A low ``time.monotonic()`` must not throttle the FIRST-EVER refresh.
+
+    ``time.monotonic()`` counts from BOOT on Linux, not from process start, so
+    on a fresh machine it returns a small number — 120s here.  The throttle
+    originally defaulted a missing entry to ``0.0``, which is a real value on
+    that same scale, so ``now_mono - 0.0 < CORE_CANDLE_REFRESH_SEC`` was TRUE
+    and the sweep skipped every symbol for the first 300s of process life.
+
+    That is the worst window to be silent in: a just-restarted engine is
+    exactly when a dead stream's backfill gap is widest, and it is the state
+    autoheal leaves the container in.  It also made the suite host-dependent —
+    green on a long-lived dev box, red on a fresh CI runner, which is how it
+    reached a PR (2026-08-31).
+    """
+    sc = _make_scanner({"BTCUSDT": _info()})
+    sc.data_store.last_kline_age_seconds.return_value = 9999.0
+    with patch.object(scanner_mod.time, "monotonic", return_value=120.0):
+        await sc._refresh_stale_core_candles()
+    sc.data_store.seed_symbol.assert_awaited_once_with("BTCUSDT", "futures")
+
+
+async def test_throttle_still_holds_on_a_freshly_booted_clock():
+    # The converse of the above: fixing the sentinel must not disable the
+    # throttle itself.  Two sweeps 1s apart on a low clock = still one attempt.
+    sc = _make_scanner({"BTCUSDT": _info()})
+    sc.data_store.last_kline_age_seconds.return_value = 9999.0
+    with patch.object(scanner_mod.time, "monotonic", return_value=120.0):
+        await sc._refresh_stale_core_candles()
+    with patch.object(scanner_mod.time, "monotonic", return_value=121.0):
+        await sc._refresh_stale_core_candles()
+    assert sc.data_store.seed_symbol.await_count == 1
 
 
 async def test_heartbeat_progress_is_touched_per_reseed():

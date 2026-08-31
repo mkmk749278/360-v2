@@ -128,6 +128,12 @@ def _pool_report(label: str, mgr: Any) -> Dict[str, Any]:
         # live read. That is this page reporting a fault that is not happening —
         # against its own rule. The engine's number is reused rather than a
         # second threshold being invented here.
+        # The ``0.0`` default is safe here — it is a ``>`` staleness test, not
+        # a ``<`` cooldown, so a stream with no stamp reads as maximally silent
+        # and is REPORTED rather than hidden (and the explicit
+        # ``s not in stream_ts`` arm makes that independent of the arithmetic).
+        # The cooldown form of this pattern is a live defect: see
+        # ``plan_refresh_batch`` and the scanner re-seed throttles.
         silent = [
             s for s in streams
             if (now - stream_ts.get(s, 0.0)) > silence_budget_s or s not in stream_ts

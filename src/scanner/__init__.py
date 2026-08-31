@@ -1385,6 +1385,13 @@ class Scanner:
         # Per-symbol throttle for the promoted-mover candle re-seed
         # (``_refresh_stale_mover_candles``, 2026-07-10) — monotonic ts of
         # the last refresh ATTEMPT per symbol.
+        #
+        # A MISSING key means "never attempted" and is read with
+        # ``.get(sym)`` → ``None``, never ``.get(sym, 0.0)``: on Linux
+        # ``time.monotonic()`` counts from BOOT, so 0.0 is an ordinary value
+        # on the same scale and a 0.0 sentinel silently throttles every
+        # symbol's first-ever refresh for the first REFRESH_SEC of process
+        # life (2026-08-31).
         self._mover_last_reseed: Dict[str, float] = {}
 
         # Per-symbol throttle for the Tier-1 CORE pair dead-stream recovery
@@ -1392,6 +1399,7 @@ class Scanner:
         # of the last refresh ATTEMPT per symbol.  Kept separate from the
         # mover throttle: the two sweeps run on different intervals and a
         # symbol can migrate between populations (mover → core admission).
+        # Same missing-key-means-never contract as the mover map above.
         self._core_last_reseed: Dict[str, float] = {}
 
         # Per-(symbol, direction, level_bucket) "level in play" registry —
@@ -2560,8 +2568,19 @@ class Scanner:
             # seed) — refresh it too so the pair gets a real freshness stamp.
             if age is not None and age <= MOVER_CANDLE_REFRESH_SEC:
                 continue
-            last_attempt = self._mover_last_reseed.get(sym, 0.0)
-            if now_mono - last_attempt < MOVER_CANDLE_REFRESH_SEC:
+            # ``None`` — never attempted — and NOT 0.0.  ``time.monotonic()``
+            # is time since BOOT on Linux, so 0.0 is a real point on the same
+            # scale, ~0-300s behind a freshly-booted engine.  With a sentinel
+            # of 0.0 the guard reads ``now_mono - 0.0 < REFRESH_SEC`` and
+            # suppresses the FIRST-EVER refresh of every symbol for the first
+            # REFRESH_SEC of process life — exactly the window after a restart
+            # when a re-seed is most needed.  An explicit ``None`` cannot
+            # collide with a clock reading.
+            last_attempt = self._mover_last_reseed.get(sym)
+            if (
+                last_attempt is not None
+                and now_mono - last_attempt < MOVER_CANDLE_REFRESH_SEC
+            ):
                 continue
             if len(to_refresh) >= MOVER_CANDLE_REFRESH_MAX_PER_CYCLE:
                 # Eligible, stale, and not refreshed this cycle. Counted rather
@@ -2664,8 +2683,18 @@ class Scanner:
             # stream never wrote a single frame — the worst case, refresh it.
             if age is not None and age <= CORE_CANDLE_REFRESH_SEC:
                 continue
-            last_attempt = self._core_last_reseed.get(sym, 0.0)
-            if now_mono - last_attempt < CORE_CANDLE_REFRESH_SEC:
+            # ``None`` = never attempted.  See the mover sweep's note: 0.0 is
+            # a live value on the ``time.monotonic()`` scale (seconds since
+            # boot), so using it as "never" throttles the first-ever re-seed
+            # of every core pair for the first CORE_CANDLE_REFRESH_SEC of
+            # process life.  That is the worst possible window to be silent
+            # in: a just-restarted engine is precisely when a dead stream's
+            # backfill gap is widest.
+            last_attempt = self._core_last_reseed.get(sym)
+            if (
+                last_attempt is not None
+                and now_mono - last_attempt < CORE_CANDLE_REFRESH_SEC
+            ):
                 continue
             if len(to_refresh) >= CORE_CANDLE_REFRESH_MAX_PER_CYCLE:
                 # Walk the whole list so `deferred` is the real shortfall,

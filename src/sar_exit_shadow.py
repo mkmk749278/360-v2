@@ -1202,6 +1202,15 @@ def plan_refresh_batch(
     (nothing new to fetch).  ``age_seconds`` returning ``None`` means "never
     stamped", which is not evidence of freshness — those are refreshed.
 
+    A symbol ABSENT from ``last_refresh_at`` was never refreshed and is
+    therefore never throttled.  That absence is read as ``None`` and not as
+    ``0.0``: ``now_mono`` is ``time.monotonic()``, which on Linux counts from
+    BOOT, so 0.0 is an ordinary reading on the same scale rather than a value
+    no live clock can produce.  A 0.0 default makes the guard
+    ``now_mono - 0.0 < refresh_sec`` true for the whole first ``refresh_sec``
+    of host uptime, silently throttling every symbol's FIRST refresh — the
+    ledger's coldest moment, when nothing has candles yet.
+
     ``starved`` counts symbols that were eligible but turned away by
     ``max_per_cycle``.  It exists because the loop this replaces ``break``ed at
     the cap, so a budget too small for the ledger was indistinguishable from
@@ -1214,7 +1223,8 @@ def plan_refresh_batch(
     starved = 0
     cap = int(max_per_cycle)
     for sym in symbols:
-        if now_mono - float(last_refresh_at.get(sym, 0.0)) < float(refresh_sec):
+        prev = last_refresh_at.get(sym)
+        if prev is not None and now_mono - float(prev) < float(refresh_sec):
             continue
         age = age_seconds(sym)
         if age is not None and float(age) <= float(refresh_sec):

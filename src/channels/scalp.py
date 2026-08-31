@@ -917,7 +917,15 @@ class ScalpChannel(BaseChannel):
             return boot_default
 
     def _prune_mover_reasons(self, now: float) -> None:
-        """Drop stale per-symbol mover-reason entries (cheap, bounded)."""
+        """Drop stale per-symbol mover-reason entries (cheap, bounded).
+
+        The ``r.get("ts", 0.0)`` default is safe here, unlike the same-looking
+        pattern in the candle-refresh throttles: this is a TTL expiry (``>``),
+        not a cooldown (``<``), and every record is stamped on creation.  A
+        record somehow missing ``ts`` reads as maximally OLD and is pruned —
+        the conservative direction.  The cooldown form would read it as
+        maximally RECENT and suppress work.
+        """
         if len(self._mover_last_reason) > 256:
             stale = [
                 s for s, r in self._mover_last_reason.items()
