@@ -695,6 +695,222 @@ def register(
 
 
     @app.get(
+        "/api/auto-trade/signal-outcomes",
+        tags=["auto-mode"],
+        dependencies=[Depends(auth)],
+    )
+    async def auto_trade_signal_outcomes(
+        identity: Any = Depends(identity_dep),
+        limit: int = 40,
+    ) -> dict:
+        """What happened to each recent signal ON THIS USER'S ACCOUNT.
+
+        Owner, 2026-08-31: *"why don't we show actually same like signal
+        it's outcome — actually what traded in binance, so the user can
+        understand what the engine produced and what's traded in
+        binance"*.
+
+        The two halves already existed and had never been joined.  The
+        Signals tab renders the ENGINE's object (entry / SL / TP and a
+        live mark) and says so in its own subtitle — *"All Lumin signals
+        · Your own trades → Trade tab"*.  The Trade tab renders the
+        USER's object, and its only per-signal record was the dispatch
+        *event*, which is a record of a placement ATTEMPT: it carries no
+        fill, no PnL and no close state, which is why a placed row
+        asserts "Position is open" in the present tense forever and can
+        sit directly under "YOUR OPEN POSITIONS 0".
+
+        This endpoint is the join, keyed by ``signal_id`` so the app can
+        put the user's own outcome on the signal card itself:
+
+            {
+              "outcomes": [
+                {
+                  "signal_id": str,
+                  "symbol": str,
+                  "direction": "LONG" | "SHORT",
+                  "status": "open" | "closed" | "not_traded",
+                  "state": str | null,          # FSM state, when a position exists
+                  "entry_price_filled": float | null,   # what Binance filled
+                  "filled_qty": float | null,
+                  "realized_pnl_usd": float | null,
+                  "close_reason": str | null,   # "TP1" | "SL" | "MANUAL" | ...
+                  "opened_at": str | null,      # ISO-8601 UTC
+                  "closed_at": str | null,
+                  "not_traded_class": str | null,   # "rejected" | "preference"
+                  "not_traded_reason": str | null,  # exception class / skip reason
+                  "not_traded_detail": str | null,
+                  "binance_code": int | null,
+                  "source": "auto" | "manual_take",
+                }, ...
+              ],
+              "closed_window": int,   # closed rows this read covered
+              "closed_truncated": bool,
+              "events_window": int,
+              "events_truncated": bool,
+            }
+
+        Three rules the shape carries, each one this repo has already
+        paid for on another surface:
+
+        * **Absence is not "not traded".**  A signal with no entry here
+          has no record on this account *within the windows named in the
+          response* — which is a different fact from a signal this
+          account declined, and the caller must not collapse them.  Both
+          window sizes and both truncation flags ride the payload so the
+          app can say which it is instead of guessing.
+        * **"Not traded" is two classes with two different next moves.**
+          ``rejected`` means the order path was reached and Binance or a
+          tripwire refused (top up, re-whitelist the key, widen the
+          symbol list); ``preference`` means the user's OWN path/regime
+          filter declined it and nothing was wrong.  Pooling them into
+          one grey "skipped" chip is how a working account reads as a
+          broken one.
+        * **The position wins over the event.**  Where both exist the
+          position document is what Binance did; the dispatch event only
+          contributes ``source`` (auto fan-out vs the user's own tap).
+
+        Cost: the open half is served from the in-memory live index
+        (zero Firestore reads); the closed half is one bounded ordered
+        query (``closed_at`` DESC, capped); the event half is the same
+        bounded read the Recent Activity card already does.  Nothing
+        here streams the never-pruned positions collection — that read
+        is the one this system's cost discipline was written about.
+        """
+        from src.execution import dispatch_log as _dl
+        from src.execution import position_state as _ps
+
+        firebase_uid = _extract_firebase_uid(identity)
+        if firebase_uid is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Signal outcomes requires Firebase sign-in.",
+            )
+
+        limit = max(1, min(int(limit), 100))
+
+        def _iso(value: Any) -> Optional[str]:
+            return value.isoformat() if value is not None else None
+
+        rows: dict[str, dict] = {}
+        closed_window = 0
+        events_window = 0
+
+        # --- positions (open from the index, closed from the bounded read)
+        if _ps._db is not None:
+            try:
+                open_positions = await asyncio.to_thread(
+                    _ps.list_positions_for_user, firebase_uid
+                )
+            except _ps.PositionStateNotInitialisedError:
+                open_positions = []
+            except Exception:
+                log.exception(
+                    "signal_outcomes: open-position read failed uid={}",
+                    firebase_uid,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Could not reach the position store. Please retry.",
+                )
+            try:
+                closed_positions = await asyncio.to_thread(
+                    _ps.list_recent_closed_positions_for_user,
+                    firebase_uid,
+                    limit=limit,
+                )
+            except _ps.PositionStateNotInitialisedError:
+                closed_positions = []
+            except Exception:
+                log.exception(
+                    "signal_outcomes: closed-position read failed uid={}",
+                    firebase_uid,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Could not reach the position store. Please retry.",
+                )
+            closed_window = len(closed_positions)
+            for p in list(closed_positions) + list(open_positions):
+                terminal = _ps.is_terminal(p.state)
+                rows[p.signal_id] = {
+                    "signal_id": p.signal_id,
+                    "symbol": p.symbol,
+                    "direction": p.side,
+                    "status": "closed" if terminal else "open",
+                    "state": p.state.value,
+                    "entry_price_filled": p.entry_price_filled,
+                    "filled_qty": p.filled_qty,
+                    "realized_pnl_usd": p.realized_pnl_total,
+                    "close_reason": p.close_reason or None,
+                    "opened_at": _iso(p.created_at),
+                    "closed_at": _iso(p.closed_at),
+                    "not_traded_class": None,
+                    "not_traded_reason": None,
+                    "not_traded_detail": None,
+                    "binance_code": None,
+                    "source": "auto",
+                }
+
+        # --- dispatch events: the "not traded" half, plus ``source``
+        events = await asyncio.to_thread(
+            _dl.list_recent_events, firebase_uid, limit=limit
+        )
+        events_window = len(events)
+        for e in events:
+            existing = rows.get(e.signal_id)
+            if existing is not None:
+                # A position exists: Binance's own record wins on every
+                # money field.  The event still owns ``source``, which no
+                # position document carries.
+                existing["source"] = e.source
+                continue
+            if e.outcome == "placed":
+                # Placed, but no position document within the windows
+                # above — the position is older than the closed read
+                # reached.  Recording it as "not traded" would be a
+                # fabricated outcome, so it is left out entirely and the
+                # window counts below say why it could be missing.
+                continue
+            if e.outcome == "skipped":
+                not_traded_class = "preference"
+                reason = e.skip_reason or "preference"
+            else:
+                not_traded_class = "rejected"
+                reason = e.reject_class or "rejected"
+            rows[e.signal_id] = {
+                "signal_id": e.signal_id,
+                "symbol": e.symbol,
+                "direction": e.direction,
+                "status": "not_traded",
+                "state": None,
+                "entry_price_filled": None,
+                "filled_qty": None,
+                "realized_pnl_usd": None,
+                "close_reason": None,
+                "opened_at": _iso(e.timestamp),
+                "closed_at": None,
+                "not_traded_class": not_traded_class,
+                "not_traded_reason": reason,
+                "not_traded_detail": e.reject_detail,
+                "binance_code": e.reject_binance_code,
+                "source": e.source,
+            }
+
+        ordered = sorted(
+            rows.values(),
+            key=lambda r: (r.get("opened_at") or ""),
+            reverse=True,
+        )
+        return {
+            "outcomes": ordered,
+            "closed_window": closed_window,
+            "closed_truncated": closed_window >= limit,
+            "events_window": events_window,
+            "events_truncated": events_window >= limit,
+        }
+
+    @app.get(
         "/api/auto-trade/recent-events",
         tags=["auto-mode"],
         dependencies=[Depends(auth)],

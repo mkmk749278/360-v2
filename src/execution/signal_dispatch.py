@@ -431,9 +431,32 @@ def auto_dispatch_health_check(
             f"skipped; check the fan-out summary log (cumulative skips: "
             f"{top})"
         )
+    # Publish the FUNNEL, not just the gap.  Until 2026-08-31 the healthy
+    # message carried ``attempts`` and ``fanouts`` and nothing else, so
+    # ``placed_total`` / ``skipped_total`` / the per-reason ``skip:*`` and
+    # ``rejected:*`` breakdowns — all of them computed on every fan-out —
+    # appeared on no surface in either repo, in either state.  "How many of
+    # today's signals actually reached Binance, and what stopped the rest"
+    # was therefore unanswerable from the one page built to answer it.
+    # Note ``skip {skip_gap}`` below is a GAP since the last order attempt,
+    # not a count of skips; the cumulative count is ``skipped``, and reading
+    # the first as the second is how a fleet of silent skips looks like zero.
+    placed = float(t.get("placed_total", 0.0))
+    skipped = float(t.get("skipped_total", 0.0))
+    reasons = {
+        k.split(":", 1)[1]: v
+        for k, v in t.items()
+        if (k.startswith("skip:") or k.startswith("rejected:")) and v > 0
+    }
+    top = ", ".join(
+        f"{k}={v:.0f}"
+        for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])[:4]
+    )
     return True, (
-        f"attempts={attempts:.0f} fanouts={fan:.0f} "
-        f"(gaps: skip {skip_gap:.0f}, empty-roster {empty_gap:.0f}; "
+        f"placed={placed:.0f} rejected={attempts - placed:.0f} "
+        f"skipped={skipped:.0f} over {fan:.0f} fan-out(s) to a keyed roster"
+        + (f"; top reasons: {top}" if top else "")
+        + f" (gaps: skip {skip_gap:.0f}, empty-roster {empty_gap:.0f}; "
         f"threshold {threshold})"
     )
 
@@ -853,6 +876,18 @@ async def dispatch_signal_to_active_users(
             (None, None) if _manual
             else _uo.resolve_auto_trade_preferences_uid(uid)
         )
+        #
+        # These two are also the only gates in this function that can let
+        # one signal through and stop the next one on an otherwise-armed
+        # account — every gate above is a property of the ACCOUNT, so when
+        # one of them is closed nothing trades at all.  That makes them the
+        # answer to "some of my signals trade and some don't", and until
+        # 2026-08-31 they returned here writing nothing anywhere.  They now
+        # stamp a ``skipped`` dispatch_log row so the app can say which of
+        # the user's own preferences declined this signal; the
+        # account-level gates above deliberately do not (see
+        # ``dispatch_log.record_skipped`` for the cost argument).
+        from src.execution import dispatch_log as _dl_skip
         if _path_pref is not None:
             _setup_tok = (setup_class or "").upper()
             if _setup_tok not in _path_pref:
@@ -860,6 +895,19 @@ async def dispatch_signal_to_active_users(
                     "signal_dispatch: skipping user uid={} signal_id={} — "
                     "setup {} not in user path preference (size={})",
                     uid, signal_id, _setup_tok or "<none>", len(_path_pref),
+                )
+                _dl_skip.record_skipped(
+                    firebase_uid=uid,
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=entry_price,
+                    skip_reason="path_preference",
+                    skip_detail=(
+                        f"{_setup_tok or 'this setup'} is not in your "
+                        f"auto-trade setup list."
+                    ),
+                    source=_dispatch_source,
                 )
                 _note("skip:path_pref")
                 return False
@@ -870,6 +918,19 @@ async def dispatch_signal_to_active_users(
                     "signal_dispatch: skipping user uid={} signal_id={} — "
                     "regime {} not in user regime preference (size={})",
                     uid, signal_id, _regime_tok or "<none>", len(_regime_pref),
+                )
+                _dl_skip.record_skipped(
+                    firebase_uid=uid,
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=entry_price,
+                    skip_reason="regime_preference",
+                    skip_detail=(
+                        f"Market regime {_regime_tok or 'unknown'} is not in "
+                        f"your auto-trade regime list."
+                    ),
+                    source=_dispatch_source,
                 )
                 _note("skip:regime_pref")
                 return False
