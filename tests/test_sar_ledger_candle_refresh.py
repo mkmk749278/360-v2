@@ -498,6 +498,45 @@ class TestRefreshBatchPlanning:
             f"carried 85 on 2026-07-29"
         )
 
+    def test_a_never_refreshed_symbol_is_due_on_a_freshly_booted_clock(self):
+        """The boot-clock defect.
+
+        ``now_mono`` is ``time.monotonic()``, which on Linux counts from BOOT,
+        not from process start — a just-started engine on a just-booted host
+        reads a small number, not a large one.  Reading a missing throttle
+        entry as ``0.0`` therefore compares a live clock value against another
+        live clock value: ``now_mono - 0.0 < refresh_sec`` holds for the entire
+        first ``refresh_sec`` (900s) of host uptime, so EVERY symbol's first
+        refresh is throttled away during exactly the window when no symbol has
+        candles yet.  The absence of a key must be ``None``, which no clock can
+        return.
+
+        The rest of this class passes ``now_mono=10_000.0`` and so never
+        exercised the low-uptime branch.
+        """
+        due, starved = sar.plan_refresh_batch(
+            ["AAAUSDT"], last_refresh_at={},
+            age_seconds=lambda s: None,
+            now_mono=120.0, refresh_sec=900.0, max_per_cycle=1,
+        )
+        assert due == ["AAAUSDT"], (
+            "a symbol never refreshed was throttled because the host had been "
+            "up for less than one refresh interval"
+        )
+        assert starved == 0
+
+    def test_the_throttle_still_holds_on_a_freshly_booted_clock(self):
+        """The converse: fixing the sentinel must not disable the throttle.
+
+        A symbol refreshed 1s ago on a low monotonic clock is still throttled.
+        """
+        due, starved = sar.plan_refresh_batch(
+            ["AAAUSDT"], last_refresh_at={"AAAUSDT": 119.0},
+            age_seconds=lambda s: None,
+            now_mono=120.0, refresh_sec=900.0, max_per_cycle=1,
+        )
+        assert due == [] and starved == 0
+
 
 class TestRefreshBudgetHealth:
     @pytest.fixture(autouse=True)

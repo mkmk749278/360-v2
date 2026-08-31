@@ -307,12 +307,29 @@ class TestCalendarMonth:
 
     def test_the_window_and_the_month_are_different_answers(self, client):
         """Not merely different parameters — the route must not quietly serve
-        the rolling window under a month's heading."""
+        the rolling window under a month's heading.
+
+        The month asked for is deliberately **not the current one**. Comparing a
+        30-day window against the CURRENT month compares two dates that are
+        allowed to coincide: a 30-day window floors to `now - 30d`, and on the
+        31st of a 31-day month that is the 1st — the same string the month mode
+        returns. The assertion then fails on a true answer, purely because of
+        the date CI happened to run on (seen 2026-08-31, run 33362589296).
+
+        A month two back cannot collide: its 1st is always >=59 days behind
+        today, and the window's start is never more than 31. The property under
+        test is unchanged — only the proxy for it is no longer calendar-lucky.
+        """
         now = datetime.now(tz=timezone.utc)
+        earlier = (now.replace(day=1) - timedelta(days=1)).replace(day=1) - timedelta(
+            days=1
+        )
         window = client.get("/api/track-record?days=30").json()
-        month = client.get(f"/api/track-record?month={now:%Y-%m}").json()
+        month = client.get(f"/api/track-record?month={earlier:%Y-%m}").json()
         assert window["month"] == ""
-        assert month["month"] != ""
+        assert month["month"] == f"{earlier:%Y-%m}"
+        # The month is served as itself, not as the window relabelled.
+        assert month["range_start"] == f"{earlier:%Y-%m}-01"
         assert window["range_start"] != month["range_start"]
 
     def test_a_bad_month_is_named_rather_than_silently_a_window(self, client):

@@ -4618,6 +4618,17 @@ class CryptoSignalEngine:
                         core_bad.append(s)
             n = len(syms)
             healthy = (ok_n / n) >= 0.7 and (fresh_n / n) >= 0.7
+            # Core pairs page on their OWN threshold, not the pooled ratio
+            # (2026-08-29).  18 dead Tier-1 streams — including BTCUSDT — sat
+            # inside a passing 70% pooled ratio for days: the probe NAMED them
+            # in its detail string while asserting healthy, because the
+            # denominators were diluted with promoted movers whose staleness
+            # is a different, budgeted fault.  A core pair with no live kline
+            # stream is unusable for every evaluator and unrecoverable without
+            # intervention (now the scanner's core re-seed sweep), so more
+            # than a small absolute number of them is page-worthy on its own.
+            if core_syms and len(core_bad) > max(2, len(core_syms) // 15):
+                healthy = False
             causes = ", ".join(
                 f"{k}={v}" for k, v in buckets.items() if v
             ) or "none"

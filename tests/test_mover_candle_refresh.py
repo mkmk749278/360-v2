@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import src.scanner as scanner_mod
 from src.scanner import Scanner
 
 
@@ -96,3 +97,36 @@ async def test_refresh_disabled_by_zero_interval(monkeypatch):
     sc.data_store.last_kline_age_seconds.return_value = 999.0
     await sc._refresh_stale_mover_candles(["GUAUSDT"])
     sc.data_store.seed_symbol.assert_not_awaited()
+
+
+async def test_first_refresh_runs_on_a_freshly_booted_clock():
+    """A low ``time.monotonic()`` must not throttle the FIRST-EVER refresh.
+
+    Same defect as the core sweep's, found alongside it on 2026-08-31 and
+    silent here for longer: ``.get(sym, 0.0)`` used 0.0 to mean "never
+    attempted", but ``time.monotonic()`` counts from BOOT on Linux, so 0.0 is
+    an ordinary reading on that scale.  Within the first
+    ``MOVER_CANDLE_REFRESH_SEC`` of process life the guard therefore held for
+    every symbol.
+
+    A promoted mover has no WS kline subscription, so the re-seed sweep is its
+    ONLY candle write — suppressing it means every evaluator reads frozen data
+    and the dispatch staleness gate blocks the pair.  This is pinned on both
+    sweeps because the second copy of a defect is how the first one comes back.
+    """
+    sc = _make_scanner({"GUAUSDT": _info()})
+    sc.data_store.last_kline_age_seconds.return_value = 9999.0
+    with patch.object(scanner_mod.time, "monotonic", return_value=60.0):
+        await sc._refresh_stale_mover_candles(["GUAUSDT"])
+    sc.data_store.seed_symbol.assert_awaited_once_with("GUAUSDT", "futures")
+
+
+async def test_throttle_still_holds_on_a_freshly_booted_clock():
+    # The converse: the sentinel fix must not disable the throttle itself.
+    sc = _make_scanner({"GUAUSDT": _info()})
+    sc.data_store.last_kline_age_seconds.return_value = 9999.0
+    with patch.object(scanner_mod.time, "monotonic", return_value=60.0):
+        await sc._refresh_stale_mover_candles(["GUAUSDT"])
+    with patch.object(scanner_mod.time, "monotonic", return_value=61.0):
+        await sc._refresh_stale_mover_candles(["GUAUSDT"])
+    assert sc.data_store.seed_symbol.await_count == 1

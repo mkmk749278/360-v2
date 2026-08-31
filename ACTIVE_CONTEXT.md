@@ -4,6 +4,72 @@
 
 ---
 
+## SESSION 134 2026-08-31 — two clock assumptions, both latent, both host/date dependent
+
+PR #986's CI was red. Neither failure was in the feature code it shipped; both were
+pre-existing defects that the new tests were simply the first to touch. `-x` meant
+the second was invisible until the first was cleared, so "CI is red" was concealing
+two independent bugs, not one.
+
+1. **`0.0` as a "never happened" sentinel against `time.monotonic()`.** On Linux
+   `CLOCK_MONOTONIC` counts from BOOT, not process start, so `0.0` is an ordinary
+   reading on the same scale rather than a value no live clock can return. Every
+   guard of the form `now_mono - map.get(k, 0.0) < WINDOW` therefore collapses to
+   `uptime < WINDOW` and suppresses the FIRST-EVER action for every key during the
+   first WINDOW of host uptime. That is why the suite was host-dependent: green on
+   a long-lived dev box, red on a fresh CI runner. Fixed at three sites — the core
+   candle re-seed (300s, the visible failure), the mover re-seed (300s, pre-existing
+   on `main`), and `sar_exit_shadow.plan_refresh_batch` (900s, pre-existing, widest
+   blind spot). Absence is now `None`; the throttles themselves are unchanged.
+
+   The mover site is the one with real measurement-plane consequence and it was
+   never reported: promoted movers carry no WS kline subscription, so that sweep is
+   their ONLY candle write. Suppressed, evaluators read frozen arrays and the
+   dispatch staleness gate blocks the pair outright.
+
+   **This was the third recurrence.** `macro_watchdog.py` already carried this exact
+   fix and its explanation in two places. It kept returning because the reasoning
+   lived at the sites that had been bitten rather than where the state is declared,
+   so the contract now sits on each throttle map's declaration — the next author
+   meets it where they add the key, not after CI goes red. The two look-alikes that
+   are NOT defects (`data_intake` silent-stream, `scalp._prune_mover_reasons`) were
+   annotated as safe, because both are `>` staleness/TTL tests where a `0.0` default
+   reads as maximally OLD and fails safe. Only the `<` cooldown form inverts into
+   suppressing work. Without that note the next reader "fixes" them into regressions.
+
+2. **A test asserting two date computations never coincide.**
+   `test_the_window_and_the_month_are_different_answers` proved "a month is not the
+   rolling window relabelled" by asserting the two `range_start`s differ, against the
+   CURRENT month. They are permitted to coincide: a 30-day window floors to
+   `now - 30d`, which on the 31st of a 31-day month IS the 1st. The product code was
+   correct and its answer was true; the assertion was false. A sweep of 2024-2028
+   showed it fails on 28 days — every 31st of a 31-day month — so it was not a
+   coincidence to wait out (my first read, and wrong). Re-anchored on a month two
+   back, where collision is arithmetically impossible: 0 failures over the same
+   sweep. Also tightened to assert the month is served AS ITSELF rather than merely
+   differing from the window, which was the property actually meant.
+
+No scoring, gate, routing, FSM, or money-path behaviour changed. No flag was armed.
+
+**Also corrected `ARCHITECTURE.md` §9**, which §11 requires to move with the code:
+eight drifted counts (FSM 8→9, probes 23→52, ops routes ~60→109, modules 224→251,
+settings 587→615, `*_ENABLED` 68→81, endpoints ~70→73, Redis keys 7+4→14+4), plus
+`CANCELLED_NO_FILL` — the only terminal state that is not `CLOSED` — which was
+missing from both the §9 list and the §4.4 diagram. More useful than the numbers:
+**two §10 re-derivation commands were themselves wrong**, which is why the drift
+survived. The FSM command was end-anchored on `CLOSED = `, so it stopped one state
+short and CONFIRMED the wrong count to anyone who ran it; the settings command was
+line-based while most `_safe_*` calls wrap, and missed `os.getenv` entirely. Both
+fixed, and the three counts that are defensible as more than one number now carry
+their counting rule inline so they don't get reverted.
+
+**Open:** `lumin-app` still documents "Telegram is banned in-region" in 5 files as
+the rationale for retiring the bot paywall. The premise is false; the retirement
+may still be right for other reasons, so the comments need rewriting on the real
+reason rather than deleting. Separate repo, separate PR, not started.
+
+---
+
 ## SESSION 133 2026-08-29 — production liveness alerts: current state, not lifetime scars
 
 Issue #984 asked whether the engine alerts represented active defects, stale monitor

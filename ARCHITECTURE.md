@@ -342,6 +342,8 @@ stateDiagram-v2
   PRE_TP_FIRED --> TP1_HIT
   TRAILING --> TP1_HIT
   TP1_HIT --> TP2_HIT
+  PENDING_ENTRY --> CANCELLED_NO_FILL: TTL elapsed, reconciler cancelled the resting LIMIT
+  CANCELLED_NO_FILL --> [*]
   OPEN --> CLOSED: SL · expiry · manual close
   PRE_TP_FIRED --> CLOSED
   TRAILING --> CLOSED
@@ -799,18 +801,18 @@ has to be applied by hand in all three places.
 | Repos | 4 | §1 |
 | Containers in production | 8 | engine · api · redis · signing · autoheal · watchdog + ops web · ops agent (ops redis makes 9 with its own) |
 | Confidence tiers | 3 | A+ 80–100 · B 65–79 · FILTERED < 65 |
-| Position FSM states | **8** | `PositionState` — PENDING_ENTRY · PENDING · OPEN · PRE_TP_FIRED · TP1_HIT · TP2_HIT · TRAILING · CLOSED |
+| Position FSM states | **9** | `PositionState` — PENDING_ENTRY · PENDING · OPEN · PRE_TP_FIRED · TP1_HIT · TP2_HIT · TRAILING · CLOSED · CANCELLED_NO_FILL (terminal, zero-P&L: entry never filled) |
 | Execution profiles | 4 | D (TP1-full, **default**) · A · B · C — B17 |
 | Portfolio layers | 7 | A · B · C · C-consumer · D · G (D recommendation-only) |
-| Engine API endpoints | ~70 | `src/api/` — ~43 consumed by the app, rest ops/admin/webhooks |
-| Ops dashboard routes | ~60 | `360ce-ops/app/routes/` |
+| Engine API endpoints | 73 | `src/api/` — ~43 consumed by the app, rest ops/admin/webhooks |
+| Ops dashboard routes | 109 | `360ce-ops/app/routes/` — 41 modules, 127 decorators over 109 distinct paths (a path with both GET and POST is one route) |
 | SQLite tables | 13 | §5 |
-| Redis snapshot keys | 7 state + 4 command | §5 |
+| Redis snapshot keys | 14 state + 4 command | §5 — `snapshot:diag_result:` and `snapshot:take_result:` are per-request key *prefixes*, not single keys |
 | Business rules | 18 | `OWNER_BRIEF.md` Part IV (B5 retired) |
-| Engine Python modules | 224 | `src/**/*.py` |
-| Env-overridable settings | **587** | `config/__init__.py` — every value, per B8 |
-| `*_ENABLED` feature flags | 68 | `config/__init__.py` |
-| Feature-liveness probes | **23** | `main._build_feature_liveness` |
+| Engine Python modules | 251 | `src/**/*.py` |
+| Env-overridable settings | **615** | `config/__init__.py` — distinct env keys across `_safe_*` (436) and `os.getenv` (179), per B8 |
+| `*_ENABLED` feature flags | 81 | `config/__init__.py` — the §10 command counts declared `_safe_bool` flags; 103 `*_ENABLED` names exist in total, the rest being derived or aliased |
+| Feature-liveness probes | **52** | `main._build_feature_liveness` — 9 `RateProbe` + 43 `PredicateProbe` |
 
 ### Flags whose default surprises people
 
@@ -836,18 +838,27 @@ what the name suggests, or where the default *is* the doctrine:
 | `INDICATOR_CACHE_CONTENT_KEY` | **true** | Kill switch for the content-addressed indicator cache key. Off = the old bar-COUNT key, which stops changing at the 1,000-bar bucket cap and serves frozen indicators forever |
 | `SCAN_CYCLE_WARN_SEC` / `SCAN_CYCLE_KILL_SEC` | 60 / 120 | Not thresholds ops invented — `healthcheck.py` owns the kill number and every surface grades against these |
 
-### The 23 liveness probes
+### The 52 liveness probes
 
 A feature whose output can silently flat-line without paging is unfinished — this is the
 list that enforces it (`RateProbe` = throughput, `PredicateProbe` = health assertion):
 
 ```
-auto_dispatch · btc_reference · candle_coverage · context_emission_policy
-edge_reconciliation · emission_controller · emission_controller_routability
-gate_override_shadow · geometry_ab · market_context · mean_revert_emission
-mean_revert_path · range_fade_emission · range_fade_path · sar_alignment_crosscheck
-sar_exit_shadow · sar_ledger_candles · shadow_units · stale_tf_scoring
-staleness_v2_shadow · strategy_edge · suppression_audit · tuned_variants
+aggtrade_feed · atr_trail_live_arms · auto_dispatch · btc_reference
+candle_coverage · candle_series_integrity · close_accounting · cohort_edge_gate
+context_emission_policy · dark_atr_trail_arms · dark_promotion_rules
+dark_resolution · dark_sar_arms · depth_feed · edge_reconciliation
+emission_controller · emission_controller_routability · entry_feature_inputs
+entry_quality_effective · footprint_bars · gate_override_shadow · geometry_ab
+indicator_cache_key · market_context · mean_revert_emission · mean_revert_path
+mover_admission_metadata · mover_retention · position_lock_integrity
+prescoring_audit · price_action_lane · promoted_pair_integrity
+range_fade_emission · range_fade_path · sar_alignment_crosscheck
+sar_exit_shadow · sar_hold_arm · sar_ledger_candles · sar_live_arms
+sar_refresh_budget · sar_resolution_progress · scan_cycle · setup_tf_resolver
+shadow_units · snapshot_writer · stale_tf_scoring · staleness_v2_shadow
+strategy_edge · structural_snap · structural_veto_lane · suppression_audit
+tuned_variants
 ```
 
 Never signal "idle" or "disabled" by raising inside a `PredicateProbe` — that converts to
@@ -900,11 +911,20 @@ grep -rhoE '"/api/[a-zA-Z0-9_/{}-]+"' src/api/ | sort -u       # engine endpoint
 grep -rhoE '@router\.(get|post)\("[^"]*"' app/routes/*.py      # ops routes (in 360ce-ops)
 grep -rhoE 'CREATE TABLE IF NOT EXISTS [a-z_]+' src/ | sort -u # SQLite tables
 grep -rhoE '"snapshot:[a-z_:]+"' src/ | sort -u                # Redis keys
-grep -oE 'name="[a-z_0-9]+"' src/main.py | sort -u             # liveness probes
-grep -oE '^[A-Z_]+_ENABLED: bool = _safe_bool\("[A-Z_]+", *"(true|false)"' config/__init__.py
+grep -oE 'name="[a-z_0-9]+"' src/main.py | sort -u | wc -l     # liveness probes (all live in the builder)
+grep -cE '^[A-Z_]+_ENABLED: bool = _safe_bool\("[A-Z_]+", *"(true|false)"' config/__init__.py
+
+# Env-overridable settings. Must be a UNION over both readers and must not be
+# line-based: most `_safe_*` calls wrap across lines, so `grep -c` undercounts.
+python3 -c "import re;s=open('config/__init__.py').read();\
+print(len(set(re.findall(r'_safe_(?:bool|int|float|str)\(\s*\"([A-Z_0-9]+)\"',s))|\
+set(re.findall(r'os\.getenv\(\s*\"([A-Z_0-9]+)\"',s))))"
 
 # ── State ────────────────────────────────────────────────────────────────────
-sed -n '/class PositionState/,/CLOSED = /p' src/execution/position_state.py
+# Anchored on the class, not on a member name: an end-anchor of `CLOSED = `
+# stopped one state short once CANCELLED_NO_FILL was added after it.
+grep -cE '^    [A-Z_0-9]+ = "' src/execution/position_state.py
+grep -oE '^    [A-Z_0-9]+ = "' src/execution/position_state.py
 grep -rhoE '[a-z_]+\.json' src/ config/ | sort | uniq -c | sort -rn   # data files by use
 ```
 

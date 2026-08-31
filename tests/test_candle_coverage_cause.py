@@ -277,24 +277,63 @@ def test_a_never_stamped_age_is_not_evidence_of_freshness():
     assert "0/1 updated" in detail
 
 
-def test_the_healthy_thresholds_are_unchanged():
-    """This change names causes; it must not move the bar.
+def test_the_pooled_healthy_thresholds_are_unchanged():
+    """The pooled 0.7 bar must not move.
 
     A probe that starts passing on the same data as part of a 'clarity' change
     is a silenced detector, and the counters this repo keeps are exactly the
     ones that stop standing out when that happens.
+
+    2026-08-29: the stale population here is PROMOTED MOVERS, deliberately —
+    mover staleness is a budgeted re-seed shortfall and is exactly what the
+    pooled ratio is for.  Core-pair staleness now pages on its own absolute
+    rule (see test_dead_core_pairs_page_regardless_of_the_pooled_ratio) and
+    would mask this test's subject if used here.
     """
     syms = [f"S{i}USDT" for i in range(10)]
+    movers = syms[:4]
     series = {s: {"close": [1.0] * 50} for s in syms}
     ages = dict.fromkeys(syms, 10.0)
-    for s in syms[:4]:
+    for s in movers:
+        ages[s] = 99999.0
+
+    healthy, detail = _coverage(syms, series, ages, promoted=movers)
+    assert healthy is False, "6/10 fresh must still fail the 0.7 bar"
+
+    # …and the same data one symbol better must pass, so the bar has
+    # not quietly moved with the wording.
+    ages[movers[0]] = 10.0
+    healthy_7, _ = _coverage(syms, series, ages, promoted=movers)
+    assert healthy_7 is True, "7/10 is the bar and must pass"
+
+
+def test_dead_core_pairs_page_regardless_of_the_pooled_ratio():
+    """More than a handful of unusable CORE pairs is page-worthy on its own.
+
+    2026-08-29: 18 dead Tier-1 streams — including BTCUSDT — sat inside a
+    passing 70% pooled ratio for days while the probe NAMED them in its
+    detail string and asserted healthy.  A core pair with no live kline
+    stream is unusable for every evaluator; the pooled denominators, diluted
+    with promoted movers whose staleness is a different budgeted fault, must
+    not be able to vote that down.  Threshold: len(core_bad) >
+    max(2, len(core_syms) // 15).
+    """
+    syms = [f"S{i}USDT" for i in range(30)]
+    series = {s: {"close": [1.0] * 50} for s in syms}
+    ages = dict.fromkeys(syms, 10.0)
+    # 3 dead core pairs out of 30 — 90% pooled fresh, comfortably above the
+    # 0.7 bar, and exactly the shape of the live incident in miniature.
+    for s in syms[:3]:
         ages[s] = 99999.0
 
     healthy, detail = _coverage(syms, series, ages)
-    assert healthy is False, "6/10 fresh must still fail the 0.7 bar"
+    assert healthy is False, (
+        "3 unusable CORE pairs must page even at a 90% pooled fresh ratio"
+    )
+    assert "3 Tier-1 CORE pair(s) unusable" in detail
 
-    # …and the same data one symbol better is still a fail, so the bar has
-    # not quietly moved with the wording.
-    ages[syms[0]] = 10.0
-    healthy_7, _ = _coverage(syms, series, ages)
-    assert healthy_7 is True, "7/10 is the bar and must pass"
+    # …while 2 dead core pairs (at or under the absolute floor) still pass:
+    # a single flapping stream plus one late frame is not an incident.
+    ages[syms[2]] = 10.0
+    healthy_2, _ = _coverage(syms, series, ages)
+    assert healthy_2 is True, "2 unusable CORE pairs is under the page bar"
