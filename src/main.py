@@ -5068,6 +5068,33 @@ class CryptoSignalEngine:
             ),
             min_streak=3,
         ))
+
+        # Paper fan-out (2026-08-31, owner: "live and paper trading not
+        # happening at the same time").  The same shape as the probe above,
+        # on the lane that had no counters at all: PaperBookFanout._eligible
+        # returned False with no counter, no log and no stamp, so a paper
+        # roster being filtered out entirely and a quiet tape produced an
+        # identical empty book.  The same question was asked on 2026-07-16
+        # and closed in ACTIVE_CONTEXT as "not resolved from here — needs
+        # the VPS reads"; it stays unresolvable until this number exists.
+        #
+        # Registered whether or not the fan-out is the active order manager,
+        # deliberately: a probe that appears only in paper mode teaches the
+        # reader that its absence means "fine", when it equally means the
+        # engine-wide mode moved and per-user paper stopped filling — which
+        # is precisely the condition being investigated.  With no fan-out
+        # running the counters stay at zero and the probe reports the
+        # baseline rather than a fault.
+        from src.execution import paper_book_registry as _pbr_liveness
+        _paper_dispatch_state: Dict[str, Optional[float]] = {}
+
+        fl.add_predicate(PredicateProbe(
+            name="paper_dispatch",
+            fn=lambda: _pbr_liveness.paper_dispatch_health_check(
+                _paper_dispatch_state
+            ),
+            min_streak=3,
+        ))
         return fl
 
     def _build_global_market_context(self):

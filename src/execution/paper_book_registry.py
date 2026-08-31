@@ -28,8 +28,9 @@ and SURVIVES engine invalidation — the user manages the upside.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 from config import MAX_POSITION_USD, POSITION_SIZE_PCT
 from src.paper_order_manager import PaperOrderManager
@@ -39,6 +40,112 @@ log = get_logger("execution.paper_book_registry")
 
 # Modes that opt a user into paper simulation.
 _PAPER_MODES: frozenset = frozenset({"paper", "both"})
+
+# ---------------------------------------------------------------------------
+# Fan-out telemetry (2026-08-31)
+# ---------------------------------------------------------------------------
+#
+# Owner, 2026-08-31: *"live and paper trading not happening at the same
+# time"*.  The engine supports it — ``signal_dispatch`` gates on
+# ``mode in ("live","both")`` and this fan-out on ``("paper","both")`` —
+# and the same question was asked on 2026-07-16 and closed in
+# ``ACTIVE_CONTEXT`` as *"not resolved from here — needs the VPS reads"*.
+#
+# It was unresolvable for a structural reason rather than a hard one:
+# ``_eligible`` returned ``False`` with no counter, no log and no stamp;
+# ``_paper_users`` returning ``{}`` (store offline, boot order, or nobody
+# opted in) was equally silent; and there was no liveness probe for this
+# fan-out at all.  So "paper is not filling while live is" and "no signal
+# was offered" produced an identical empty book, which is the
+# blank-needs-a-cause defect this system has paid for repeatedly — here on
+# the one lane that had no counter to publish in the first place.
+#
+# This is the ``skip:*`` breakdown ``signal_dispatch`` has had since
+# 2026-07-18, one layer over.  Monotonic since boot, in-process only, and
+# read by :func:`paper_dispatch_totals`.
+_PAPER_FANOUT_TOTALS: Dict[str, float] = defaultdict(float)
+
+
+def paper_dispatch_totals() -> Dict[str, float]:
+    """Snapshot of the paper fan-out counters.
+
+    Keys: ``fanouts_total`` (entry fan-outs invoked),
+    ``fanouts_with_users_total`` (… that resolved a non-empty paper
+    roster), ``considered_total`` (user × signal pairs evaluated),
+    ``opened_total``, ``skipped_total``, plus per-reason ``skip:*``
+    (``symbol_pref`` / ``path_pref`` / ``regime_pref``) and
+    ``rejected:place_failed``.
+    """
+    return dict(_PAPER_FANOUT_TOTALS)
+
+
+def reset_paper_totals_for_test() -> None:
+    _PAPER_FANOUT_TOTALS.clear()
+
+
+def paper_dispatch_health_check(
+    state: Dict[str, Optional[float]],
+    totals: Optional[Dict[str, float]] = None,
+    *,
+    gap_threshold: int = 5,
+) -> Tuple[bool, str]:
+    """Pure predicate for the ``paper_dispatch`` feature-liveness probe.
+
+    Violates when ``gap_threshold`` entry fan-outs have reached a
+    non-empty paper roster without a single book opening a position —
+    every paper user being filtered out, which is what "paper stopped
+    filling while live kept going" looks like from inside the engine.
+
+    Deliberately does NOT violate on an empty roster: nobody having paper
+    enabled is a legitimate state and would page forever.  It is reported
+    in the message instead, because "no paper users" and "paper users, all
+    filtered" have opposite next moves and had been indistinguishable.
+
+    ``state`` is caller-owned memory across probe cycles.  Pure in the
+    ops-detector sense — all inputs are parameters, no hidden I/O.
+    """
+    t = totals if totals is not None else paper_dispatch_totals()
+    fan = float(t.get("fanouts_with_users_total", 0.0))
+    opened = float(t.get("opened_total", 0.0))
+    considered = float(t.get("considered_total", 0.0))
+    skipped = float(t.get("skipped_total", 0.0))
+    empty = float(t.get("fanouts_total", 0.0)) - fan
+
+    restarted = (
+        opened < float(state.get("opened") or 0.0)
+        or fan < float(state.get("fan_at_last_open") or 0.0)
+    )
+    if state.get("opened") is None or restarted:
+        state["opened"] = opened
+        state["fan_at_last_open"] = fan
+        return True, "baseline captured"
+
+    if opened > float(state["opened"] or 0.0):
+        state["fan_at_last_open"] = fan
+    state["opened"] = opened
+    gap = fan - float(state["fan_at_last_open"] or 0.0)
+
+    reasons = {
+        k.removeprefix("skip:"): v
+        for k, v in t.items()
+        if k.startswith("skip:") and v > 0
+    }
+    top = ", ".join(
+        f"{k}={v:.0f}"
+        for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])[:4]
+    ) or "none recorded"
+
+    if gap >= gap_threshold:
+        return False, (
+            f"{gap:.0f} signals fanned out to paper users with ZERO books "
+            f"opening a position — every paper user is being filtered out "
+            f"by their own paper preferences (skips: {top})"
+        )
+    return True, (
+        f"opened={opened:.0f} of {considered:.0f} considered, "
+        f"skipped={skipped:.0f} over {fan:.0f} fan-out(s) to a paper "
+        f"roster ({empty:.0f} with no paper users); reasons: {top}"
+    )
 
 # Close reasons that an entry-only position must SURVIVE (the engine hands
 # the exit to the user).  Everything else (sl_hit, expired, cancelled,
@@ -195,22 +302,33 @@ class PaperBookFanout:
                 out[int(uid)] = fb
         return out
 
-    def _eligible(self, firebase_uid: str, signal: Any) -> bool:
-        """Apply the user's PAPER eligibility (symbol / path / regime)."""
+    def _eligibility(self, firebase_uid: str, signal: Any) -> Optional[str]:
+        """The user's PAPER eligibility (symbol / path / regime).
+
+        Returns ``None`` when the signal is admitted, otherwise the NAME of
+        the preference that declined it.  It returned a bare ``bool`` until
+        2026-08-31, which is why "paper is not filling" could not be told
+        apart from "no signal was offered" from any surface: a rejection
+        here left nothing behind at all.
+        """
         try:
             from src.api import user_overrides as _uo
             sym_fs, path_fs, regime_fs = _uo.resolve_paper_preferences_uid(
                 firebase_uid
             )
         except Exception:
-            return True  # soft-fail toward including the signal
+            return None  # soft-fail toward including the signal
         if sym_fs is not None and _symbol_token(signal) not in sym_fs:
-            return False
+            return "symbol_pref"
         if path_fs is not None and _setup_token(signal) not in path_fs:
-            return False
+            return "path_pref"
         if regime_fs is not None and _regime_token(signal) not in regime_fs:
-            return False
-        return True
+            return "regime_pref"
+        return None
+
+    def _eligible(self, firebase_uid: str, signal: Any) -> bool:
+        """Back-compat wrapper — the boolean question, one call deeper."""
+        return self._eligibility(firebase_uid, signal) is None
 
     def _management_mode(self, firebase_uid: str, signal: Any) -> str:
         try:
@@ -238,8 +356,26 @@ class PaperBookFanout:
             return None
         opened_any = False
         holders: Dict[int, str] = self._holders.setdefault(signal_id, {})
-        for uid, fb in self._paper_users().items():
-            if not self._eligible(fb, signal):
+        users = self._paper_users()
+        # Per-fan-out tally, folded into the monotonic totals below.  The
+        # empty-roster case is counted separately and never as a skip: "no
+        # user has paper on" and "paper users exist and were all filtered"
+        # are different faults with different fixes, and pooling them is
+        # what made the 2026-07-16 paper-freeze question unanswerable.
+        outcomes: Counter = Counter()
+        _PAPER_FANOUT_TOTALS["fanouts_total"] += 1
+        if users:
+            _PAPER_FANOUT_TOTALS["fanouts_with_users_total"] += 1
+        for uid, fb in users.items():
+            outcomes["considered"] += 1
+            declined_by = self._eligibility(fb, signal)
+            if declined_by is not None:
+                log.debug(
+                    "paper fanout: skipping uid=%s sig=%s — %s declined it",
+                    uid, signal_id, declined_by,
+                )
+                outcomes[f"skip:{declined_by}"] += 1
+                outcomes["skipped"] += 1
                 continue
             mode = self._management_mode(fb, signal)
             book = self._registry.get(uid)
@@ -250,10 +386,22 @@ class PaperBookFanout:
                     "paper fanout: place_market_order failed uid=%s sig=%s: %s",
                     uid, signal_id, exc,
                 )
+                outcomes["rejected:place_failed"] += 1
                 continue
             if oid is not None:
                 holders[uid] = mode
                 opened_any = True
+                outcomes["opened"] += 1
+            else:
+                # The book declined without raising — its own risk manager
+                # (daily-loss breaker, max-concurrent, min-equity).  Counted
+                # apart from a preference skip because the user changed
+                # nothing and only the book can release it.
+                outcomes["rejected:book_declined"] += 1
+        for _k, _v in outcomes.items():
+            _PAPER_FANOUT_TOTALS[
+                _k if ":" in _k else f"{_k}_total"
+            ] += float(_v)
         if not holders:
             self._holders.pop(signal_id, None)
         # Synthetic id so TradeMonitor marks the signal active when ANY book

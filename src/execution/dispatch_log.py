@@ -76,7 +76,7 @@ class DispatchEvent:
     signal_id: str
     symbol: str
     direction: str  # "LONG" | "SHORT"
-    outcome: str  # "placed" | "rejected"
+    outcome: str  # "placed" | "rejected" | "skipped"
     timestamp: datetime
     entry_price: float = 0.0
     total_qty: float = 0.0
@@ -85,6 +85,11 @@ class DispatchEvent:
     reject_detail: Optional[str] = None  # str(exc) — full diagnostic
     reject_binance_code: Optional[int] = None  # extracted from binance_body
     reject_binance_msg: Optional[str] = None  # extracted from binance_body
+    # Skipped-only field (None on placed/rejected events): which per-signal
+    # gate declined this signal for this user — ``path_preference`` or
+    # ``regime_preference``.  See :func:`record_skipped` for why only those
+    # two reasons are ever persisted.
+    skip_reason: Optional[str] = None
     # Dispatch source: "auto" (signal fan-out) | "manual_take" (user tapped
     # Take trade in the app — owner-approved server-side take, 2026-07-17).
     source: str = "auto"
@@ -240,6 +245,82 @@ def record_rejected(
         )
 
 
+def record_skipped(
+    *,
+    firebase_uid: str,
+    signal_id: str,
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    skip_reason: str,
+    skip_detail: str,
+    source: str = "auto",
+) -> None:
+    """Record a signal this user's own PER-SIGNAL preference declined.
+
+    Why this exists (2026-08-31, owner: *"seems to be every signal is not
+    trading in binance, don't know why some hit trading"*).  ``_one_user``
+    has two classes of "did not trade":
+
+    * the order path was reached and Binance or a tripwire refused ⇒
+      :func:`record_rejected`, and the app has surfaced the reason since
+      the card shipped;
+    * a per-user gate returned before the order path ⇒ **nothing was
+      written anywhere**.  The engine counts those in ``_FANOUT_TOTALS``
+      under ``skip:*``, and the only consumer of that dict is a
+      fleet-blackout liveness probe whose healthy message prints
+      ``attempts`` and ``fanouts`` and neither the skips nor the placed
+      count.  So "why did THIS signal not trade on my account" had no
+      answer on any surface, in either repo.
+
+    **Only the two per-signal reasons are persisted, and that is a cost
+    decision, not an oversight.**  ``mode`` / ``tier`` / ``auto_paused``
+    are properties of the ACCOUNT: when one of them is closed *nothing*
+    trades, so a row per signal per user would be one Firestore write per
+    fan-out per non-live user forever — unbounded in users × signals, on
+    a path that already bills the dominant share of this system's
+    Firestore cost — to restate a fact
+    ``GET /api/auto-trade/runtime-status`` already returns once per visit
+    (``user_mode`` / ``tier_allows_auto`` / ``auto_paused``).  They keep
+    their in-memory ``skip:*`` counter and are answered by that endpoint.
+
+    ``path_preference`` and ``regime_preference`` are the opposite: they
+    are the ONLY gates that can let one signal through and stop the next
+    one on an otherwise-armed account, which is precisely the state the
+    owner was looking at.  They are also self-bounding — a user with no
+    preference set (the default) can never produce a row here.
+
+    Soft-fail same as :func:`record_placed`.
+    """
+    if not is_initialised():
+        return
+    try:
+        event_id = f"{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+        doc = {
+            "event_id": event_id,
+            "firebase_uid": firebase_uid,
+            "signal_id": signal_id,
+            "symbol": symbol,
+            "direction": direction,
+            "outcome": "skipped",
+            "timestamp": datetime.now(timezone.utc),
+            "entry_price": float(entry_price),
+            "total_qty": 0.0,
+            "skip_reason": skip_reason,
+            # Reuses reject_detail rather than adding a parallel field: the
+            # app renders one "why" line per row and a second detail key
+            # would be a second thing to keep in sync for no reader.
+            "reject_detail": skip_detail,
+            "source": source,
+        }
+        _events_collection(firebase_uid).document(event_id).set(doc)
+    except Exception:
+        log.exception(
+            "dispatch_log.record_skipped failed: uid=%s signal_id=%s reason=%s",
+            firebase_uid, signal_id, skip_reason,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Read path — called by the API endpoint
 # ---------------------------------------------------------------------------
@@ -333,5 +414,6 @@ def _from_firestore_dict(data: dict) -> DispatchEvent:
             else None
         ),
         reject_binance_msg=data.get("reject_binance_msg"),
+        skip_reason=data.get("skip_reason"),
         source=str(data.get("source") or "auto"),
     )

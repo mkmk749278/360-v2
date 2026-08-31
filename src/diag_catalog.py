@@ -269,6 +269,85 @@ def _asyncio_tasks(ctx: Ctx) -> Dict[str, Any]:
     return {"count": len(rows), "tasks": sorted(rows, key=lambda r: r["name"])}
 
 
+def _dispatch_funnel(ctx: Ctx) -> Dict[str, Any]:
+    """Where every delivered signal went, per user, since boot.
+
+    Owner, 2026-08-31: *"seems to be every signal is not trading in binance
+    don't know why some hit trading"*. Both fan-outs have counted their own
+    outcomes all along and neither published the breakdown anywhere: the
+    live one's ``dispatch_totals()`` had a single consumer — a blackout
+    probe whose healthy message printed ``attempts`` and ``fanouts`` and
+    neither the placed count nor the skip reasons — and the paper one had no
+    counters at all until this change.
+
+    Reads two module-level dicts. Touches no order, no key and no position.
+    """
+    from src.execution import paper_book_registry as _paper
+    from src.execution import signal_dispatch as _live
+
+    live = _live.dispatch_totals()
+    paper = _paper.paper_dispatch_totals()
+    _boot = getattr(ctx.engine, "_boot_time", 0.0)
+
+    def _split(totals: Dict[str, float], prefix: str) -> Dict[str, float]:
+        return {
+            k.split(":", 1)[1]: v
+            for k, v in totals.items()
+            if k.startswith(prefix) and v > 0
+        }
+
+    live_attempts = float(live.get("attempts_total", 0.0))
+    live_placed = float(live.get("placed_total", 0.0))
+    return {
+        # Counters are monotonic SINCE BOOT and reset on every restart, so a
+        # small number here is a young process rather than a quiet tape. The
+        # uptime is beside them because reading one without the other is how
+        # a restart reads as a blackout.
+        "uptime_sec": round(
+            max(0.0, time.monotonic() - float(_boot or 0.0)) if _boot else 0.0,
+            1,
+        ),
+        "live": {
+            "fanouts": float(live.get("fanouts_total", 0.0)),
+            "fanouts_with_users": float(
+                live.get("fanouts_with_users_total", 0.0)
+            ),
+            "fanouts_empty_roster": float(
+                live.get("fanouts_empty_roster_total", 0.0)
+            ),
+            "placed": live_placed,
+            "rejected": live_attempts - live_placed,
+            # Skipped users never reach the order path, so they write no
+            # per-user row and are invisible to the app's activity card for
+            # every reason except the two per-signal preferences. This is
+            # the only place the account-level ones are counted at all.
+            "skipped": float(live.get("skipped_total", 0.0)),
+            "skip_reasons": _split(live, "skip:"),
+            "reject_classes": _split(live, "rejected:"),
+        },
+        "paper": {
+            "fanouts": float(paper.get("fanouts_total", 0.0)),
+            "fanouts_with_users": float(
+                paper.get("fanouts_with_users_total", 0.0)
+            ),
+            "considered": float(paper.get("considered_total", 0.0)),
+            "opened": float(paper.get("opened_total", 0.0)),
+            "skipped": float(paper.get("skipped_total", 0.0)),
+            "skip_reasons": _split(paper, "skip:"),
+            "reject_classes": _split(paper, "rejected:"),
+        },
+        "note": (
+            "live.skipped counts users the dispatcher declined BEFORE the "
+            "order path; only path_pref and regime_pref persist a per-user "
+            "row (the account-level ones would be one Firestore write per "
+            "fan-out per non-live user forever). paper.fanouts stays at 0 "
+            "unless the engine-wide auto-execution mode is 'paper' — the "
+            "per-user paper books are that mode's order manager, so a mode "
+            "change stops them without stopping live dispatch."
+        ),
+    }
+
+
 for _e in (
     Entry("read.scan_executor", "Scan executor queue", "read",
           "Worker count, live threads and queued work — tells a GIL-bound loop "
@@ -287,6 +366,11 @@ for _e in (
     Entry("read.tasks", "Asyncio task census", "read",
           "Engine tasks, and which have finished or been cancelled.",
           _asyncio_tasks),
+    Entry("read.dispatch_funnel", "Signal → order funnel", "read",
+          "Per delivered signal, how many users got an order placed, how "
+          "many were rejected and how many were skipped before the order "
+          "path — with the reasons, for both the live and paper fan-outs.",
+          _dispatch_funnel),
 ):
     register(_e)
 

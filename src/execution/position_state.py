@@ -131,6 +131,11 @@ _NON_TERMINAL_STATE_VALUES = tuple(
     s.value for s in PositionState if s not in _TERMINAL_STATES
 )
 
+# Hard cap on the bounded closed-history read below.  A render bound, not a
+# retention policy: the collection is never pruned, so without a ceiling a
+# caller could ask for the whole history through a "limited" query.
+_MAX_CLOSED_HISTORY: int = 100
+
 
 def is_terminal(state: PositionState) -> bool:
     """True if the state cannot transition further.  FSM uses this to
@@ -816,6 +821,98 @@ def list_positions_for_user(
             )
             continue
         if not include_closed and is_terminal(pos.state):
+            continue
+        out.append(pos)
+    return out
+
+
+def list_recent_closed_positions_for_user(
+    firebase_uid: str, *, limit: int = 25
+) -> list[Position]:
+    """Return the user's most recently CLOSED positions, newest first.
+
+    Why this exists (2026-08-31, owner: *"why don't we show ... its
+    outcome, actually what traded in binance, so the user can understand
+    what the engine produced and what's traded in binance"*).
+
+    Everything that question needs — ``entry_price_filled``,
+    ``filled_qty``, ``realized_pnl_total``, ``close_reason``,
+    ``closed_at`` — has been written into the position document since the
+    FSM shipped, and was readable through no endpoint.
+    ``GET /api/auto-trade/positions`` excludes terminal states
+    deliberately (it answers "what is open right now") and its docstring
+    pointed at a trade-records endpoint that is still ``TBD``.  So the
+    app's only record of a placed order was the dispatch *event*, which
+    is a record of an ATTEMPT and carries no outcome at all — which is
+    why the Trade tab renders "YOUR OPEN POSITIONS 0" directly above
+    rows asserting "Position is open".
+
+    Cost discipline.  ``list_positions_for_user(include_closed=True)``
+    streams the whole never-pruned collection, and that unfiltered stream
+    is exactly the read this module's own comment calls the dominant
+    Firestore cost for this collection — it must never be put on an
+    app-poll path.  This query is bounded two ways instead: ``order_by``
+    ``closed_at`` DESC with a ``limit``.  It needs no composite index (a
+    single field), and open positions carry ``closed_at = None``, which
+    Firestore sorts last under DESC, so they fall outside the window
+    rather than having to be filtered out with a second clause.
+
+    The Python-side ``is_terminal`` guard is defence-in-depth: on a
+    collection whose closed docs outnumber the open ones by orders of
+    magnitude the ordering alone is enough, but a fresh account with two
+    open positions and no closed ones would otherwise return them.
+    """
+    limit = max(1, min(int(limit), _MAX_CLOSED_HISTORY))
+    with _lock:
+        if _db is None:
+            raise PositionStateNotInitialisedError(
+                "position_state not initialised — call init_position_state at boot"
+            )
+        coll = (
+            _db.collection("users")
+            .document(firebase_uid)
+            .collection("positions")
+        )
+    try:
+        from google.cloud.firestore_v1 import Query  # type: ignore[import-not-found]
+    except Exception:
+        Query = None  # type: ignore[assignment]
+    try:
+        if Query is not None:
+            docs = coll.order_by(
+                "closed_at", direction=Query.DESCENDING,
+            ).limit(limit).stream()
+        else:
+            # SDK shape drift — refuse rather than fall back to an
+            # unbounded stream.  An empty list here reads as "no closed
+            # trades", which is wrong; a raise reaches the endpoint's
+            # handler, which says the store could not be read.
+            raise RuntimeError(
+                "google.cloud.firestore_v1.Query unavailable — refusing an "
+                "unbounded closed-position scan"
+            )
+    except Exception:
+        log.exception(
+            "list_recent_closed_positions_for_user: query failed uid={}",
+            firebase_uid,
+        )
+        raise
+
+    out: list[Position] = []
+    for doc in docs:
+        data = doc.to_dict()
+        if not data:
+            continue
+        try:
+            pos = _from_firestore_dict(data)
+        except Exception:
+            log.exception(
+                "list_recent_closed_positions_for_user: skipping malformed "
+                "doc uid={} doc_id={}",
+                firebase_uid, doc.id,
+            )
+            continue
+        if not is_terminal(pos.state):
             continue
         out.append(pos)
     return out
