@@ -1102,11 +1102,27 @@ class UserOverridesStore:
             # subscription accordingly. Mode-not-in-partial → no change.
             prior_mode = (existing.get("mode") or "").lower() or None
             new_mode = (merged.get("mode") or "").lower() or None
+            #
+            # Asked via the shared predicate, never ``== "paper"``. ``both``
+            # runs the paper book too, and the literal comparison read it as
+            # "not paper" — so a user switching paper → both had their paper
+            # subscription CLOSED, silently truncating the trade history they
+            # are allowed to read, because they enabled something additional
+            # (#989). A window governs what a user may see about their own
+            # money; it must never narrow on a mode change that widens what
+            # they asked for.
             if "mode" in cleaned and prior_mode != new_mode:
-                if new_mode == "paper":
+                from src.execution import exec_mode as _em
+
+                was_open = _em.paper_subscription_should_be_open(prior_mode)
+                should_open = _em.paper_subscription_should_be_open(new_mode)
+                if should_open and not was_open:
                     self._open_paper_subscription_locked(int(user_id), now)
-                elif prior_mode == "paper":
+                elif was_open and not should_open:
                     self._close_paper_subscription_locked(int(user_id), now)
+                # paper → both (or both → paper) hits neither arm: the window
+                # is already open and must stay exactly as it is. Re-opening
+                # would stamp a new window and orphan the trades before it.
             return self.get_auto_trade(user_id)
 
     # ---- per-symbol management mode (Signals-tab full vs entry) ---------

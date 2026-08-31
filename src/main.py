@@ -1189,6 +1189,23 @@ class CryptoSignalEngine:
         survive a restart.
         """
         new_mode = (new_mode or "").strip().lower()
+        # ``both`` is a PER-USER mode and is deliberately refused here.
+        #
+        # This setter swaps ``self._order_manager`` between a paper and a
+        # live implementation — one object, one behaviour. There is no
+        # construction of it that is simultaneously both, so accepting
+        # ``both`` at the engine-wide level could only silently pick one
+        # and report success, which is the failure mode #989 was about.
+        # It is named as an unsupported SCOPE rather than an invalid mode,
+        # because the value is perfectly valid one layer up: per-user
+        # ``both`` works via signal_dispatch (live) plus the paper
+        # subscription window (paper), which are independent.
+        if new_mode == "both":
+            return False, (
+                "'both' is a per-user mode, not an engine-wide one — the "
+                "engine has a single order manager. Set it per user via "
+                "PUT /api/settings/user/auto-trade."
+            )
         if new_mode not in {"off", "paper", "live"}:
             return False, f"invalid mode {new_mode!r} — must be off / paper / live"
         if new_mode == self._current_auto_mode:

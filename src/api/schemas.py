@@ -24,7 +24,7 @@ class PulseSnapshot(BaseModel):
     """High-level engine status — drives the Pulse tab dashboard."""
 
     status: Literal["Healthy", "Degraded", "Down"] = "Healthy"
-    mode: Literal["off", "paper", "live"]
+    mode: Literal["off", "paper", "live", "both"]
     regime: str = Field(..., description="BTC market regime, e.g. TRENDING_UP")
     regime_pct_trending: float = Field(
         0.0, description="Percentage of recent cycles classified as trending"
@@ -368,7 +368,7 @@ class ActivityResponse(BaseModel):
 
 
 class AutoModeStatus(BaseModel):
-    mode: Literal["off", "paper", "live"]
+    mode: Literal["off", "paper", "live", "both"]
     open_positions: int
     daily_pnl_usd: float
     daily_loss_pct: float
@@ -395,7 +395,7 @@ class PnlPoint(BaseModel):
 
 
 class PnlHistoryResponse(BaseModel):
-    mode: Literal["off", "paper", "live"]
+    mode: Literal["off", "paper", "live", "both"]
     days: int
     items: List[PnlPoint]
     weekly_pnl_usd: float
@@ -559,13 +559,13 @@ class TrackRecordSignalsResponse(BaseModel):
 
 
 class AutoModeChangeRequest(BaseModel):
-    mode: Literal["off", "paper", "live"]
+    mode: Literal["off", "paper", "live", "both"]
 
 
 class AutoModeChangeResponse(BaseModel):
     success: bool
     message: str
-    mode: Literal["off", "paper", "live"]
+    mode: Literal["off", "paper", "live", "both"]
 
 
 class AutoModeResumeMineResponse(BaseModel):

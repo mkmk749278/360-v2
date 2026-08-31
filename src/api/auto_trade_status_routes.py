@@ -726,6 +726,13 @@ def register(
                   "reject_detail": str | null,
                   "reject_binance_code": int | null,
                   "reject_binance_msg": str | null,
+                  # Present-state reconciliation (#988). Null when the
+                  # position store has no document for this signal.
+                  "position_state": str | null,     # e.g. "OPEN", "CLOSED"
+                  "position_is_open": bool | null,
+                  "realized_pnl_usd": float | null,
+                  "entry_price_filled": float | null,
+                  "closed_at": str | null,          # ISO-8601 UTC
                 }, ...
               ]
             }
@@ -734,8 +741,27 @@ def register(
         Returns ``{"events": []}`` when the dispatch_log isn't
         initialised (engine boot without GCP env) — UI gracefully
         renders the empty-state copy.
+
+        **Why the position join is here and not in the app.**  A dispatch
+        event records the *placement moment* and nothing else — its
+        ``outcome`` is ``placed``/``rejected`` forever, which is a true
+        fact about the past and must stay immutable.  The app used to pair
+        every ``placed`` row with the hardcoded copy "Position is open —
+        Lumin manages it from here.", a sentence structurally incapable of
+        ever becoming "closed": there was no field it could read to know
+        otherwise.  The result was 20 rows claiming open positions
+        directly beneath an OPEN POSITIONS counter reading 0 — the display
+        plane asserting money-path state it had no source for
+        (owner-reported 2026-08-31, #988).
+
+        The join happens server-side because the position store is the
+        authority on present state and the app must not be the place where
+        two sources of truth get reconciled.  ``signal_id`` is the key and
+        it was already on both records, so this is a read-time join, not
+        new instrumentation.
         """
         from src.execution import dispatch_log as _dl
+        from src.execution import position_state as _ps
 
         firebase_uid = _extract_firebase_uid(identity)
         if firebase_uid is None:
@@ -752,30 +778,92 @@ def register(
         events = await asyncio.to_thread(
             _dl.list_recent_events, firebase_uid, limit=limit
         )
-        return {
-            "events": [
-                {
-                    "event_id": e.event_id,
-                    "signal_id": e.signal_id,
-                    "symbol": e.symbol,
-                    "direction": e.direction,
-                    "outcome": e.outcome,
-                    "timestamp": (
-                        e.timestamp.isoformat()
-                        if e.timestamp is not None
-                        else None
-                    ),
-                    "entry_price": e.entry_price,
-                    "total_qty": e.total_qty,
-                    "reject_class": e.reject_class,
-                    "reject_detail": e.reject_detail,
-                    "reject_binance_code": e.reject_binance_code,
-                    "reject_binance_msg": e.reject_binance_msg,
-                    "source": e.source,
-                }
-                for e in events
-            ],
+
+        # Resolve present state for the PLACED rows only. Rejected events
+        # never became a position, so looking them up would be a guaranteed
+        # miss per row — and this is a per-visit Trade-tab poll, so the read
+        # count is the cost that matters (Cost Discipline).
+        #
+        # Fetched by explicit signal_id rather than
+        # ``list_positions_for_user(include_closed=True)``: that streams the
+        # user's ENTIRE position history, which is never pruned, so it would
+        # bill one read per historical position on every tab visit to answer
+        # a question about at most `limit` rows. De-duplicated because a
+        # signal can carry more than one dispatch event (retry, manual take
+        # after an auto reject).
+        placed_ids = {
+            e.signal_id for e in events
+            if e.outcome == "placed" and e.signal_id
         }
+
+        def _load_states() -> dict:
+            out: dict = {}
+            for sid in placed_ids:
+                try:
+                    out[sid] = _ps.get_position(firebase_uid, sid)
+                except Exception:
+                    # Missing doc / store offline / uninitialised: leave the
+                    # key absent so the row renders as "state unknown"
+                    # instead of asserting a state we cannot support. Never
+                    # fatal — the activity feed must render without it.
+                    continue
+            return out
+
+        states: dict = {}
+        if placed_ids:
+            try:
+                states = await asyncio.to_thread(_load_states)
+            except Exception:
+                log.exception(
+                    "auto_trade_recent_events: position join failed uid={}",
+                    firebase_uid,
+                )
+                states = {}
+
+        def _joined(e: Any) -> dict:
+            row = {
+                "event_id": e.event_id,
+                "signal_id": e.signal_id,
+                "symbol": e.symbol,
+                "direction": e.direction,
+                "outcome": e.outcome,
+                "timestamp": (
+                    e.timestamp.isoformat()
+                    if e.timestamp is not None
+                    else None
+                ),
+                "entry_price": e.entry_price,
+                "total_qty": e.total_qty,
+                "reject_class": e.reject_class,
+                "reject_detail": e.reject_detail,
+                "reject_binance_code": e.reject_binance_code,
+                "reject_binance_msg": e.reject_binance_msg,
+                "source": e.source,
+                # Explicit nulls, always present. An ABSENT key and a null
+                # one are the same thing to most JSON clients, but the app
+                # needs to distinguish "we looked and there is no position"
+                # from "this build doesn't send the field" — so the contract
+                # is that the keys always exist and null means unknown.
+                "position_state": None,
+                "position_is_open": None,
+                "realized_pnl_usd": None,
+                "entry_price_filled": None,
+                "closed_at": None,
+            }
+            pos = states.get(e.signal_id)
+            if pos is not None:
+                row["position_state"] = pos.state.value
+                row["position_is_open"] = not _ps.is_terminal(pos.state)
+                row["realized_pnl_usd"] = pos.realized_pnl_total
+                row["entry_price_filled"] = pos.entry_price_filled
+                row["closed_at"] = (
+                    pos.closed_at.isoformat()
+                    if pos.closed_at is not None
+                    else None
+                )
+            return row
+
+        return {"events": [_joined(e) for e in events]}
 
 
 def _extract_firebase_uid(identity: Any) -> Optional[str]:

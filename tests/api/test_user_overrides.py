@@ -1103,6 +1103,105 @@ def test_paper_mode_transition_paper_to_live_closes_subscription(
     assert subs[0][1] is not None
 
 
+# ---------------------------------------------------------------------------
+# mode='both' — the window must not narrow when the user asks for MORE.
+#
+# The transition arms used to compare against the literal ``"paper"``, so
+# ``both`` — which runs the paper book AND places live orders — was read as
+# "not paper". Enabling live on top of paper therefore CLOSED the paper
+# subscription, truncating the trade history the user is permitted to read,
+# as a side effect of asking for an additional capability (#989).
+# ---------------------------------------------------------------------------
+
+
+def test_paper_to_both_keeps_the_same_window_open(
+    store: UserOverridesStore,
+) -> None:
+    """The reported defect. Adding live execution to paper must neither
+    close the window nor open a second one — the paper book kept running,
+    so the window it is recorded against is still the same window."""
+    store.update_auto_trade(1, {"mode": "paper"})
+    first = store.get_paper_subscriptions(1)
+    store.update_auto_trade(1, {"mode": "both"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1, "paper→both must not open a second window"
+    assert subs[0][1] is None, "paper→both must not close the paper window"
+    assert subs[0][0] == first[0][0], "the window's start must not move"
+
+
+def test_both_opens_a_window_from_off(
+    store: UserOverridesStore,
+) -> None:
+    """``both`` runs the paper book, so entering it from off must open a
+    window — otherwise the paper trades it generates are unreadable."""
+    store.update_auto_trade(1, {"mode": "both"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is None
+
+
+def test_live_to_both_opens_a_window(
+    store: UserOverridesStore,
+) -> None:
+    """live → both ADDS the paper book. No window existed; one must now."""
+    store.update_auto_trade(1, {"mode": "live"})
+    assert store.get_paper_subscriptions(1) == []
+    store.update_auto_trade(1, {"mode": "both"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is None
+
+
+def test_both_to_live_closes_the_window(
+    store: UserOverridesStore,
+) -> None:
+    """The converse must still work, or the window would never close.
+    Dropping paper from ``both`` ends the paper window."""
+    store.update_auto_trade(1, {"mode": "both"})
+    store.update_auto_trade(1, {"mode": "live"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is not None
+
+
+def test_both_to_off_closes_the_window(
+    store: UserOverridesStore,
+) -> None:
+    store.update_auto_trade(1, {"mode": "both"})
+    store.update_auto_trade(1, {"mode": "off"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is not None
+
+
+def test_both_to_paper_keeps_the_window_open(
+    store: UserOverridesStore,
+) -> None:
+    """Dropping only the LIVE half leaves the paper book running, so the
+    window is untouched — the symmetric case of paper→both."""
+    store.update_auto_trade(1, {"mode": "both"})
+    first = store.get_paper_subscriptions(1)
+    store.update_auto_trade(1, {"mode": "paper"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is None
+    assert subs[0][0] == first[0][0]
+
+
+def test_both_round_trip_does_not_fragment_history(
+    store: UserOverridesStore,
+) -> None:
+    """paper → both → paper is three writes and ONE window. Every
+    spurious open/close pair fragments the history into windows the
+    trade-list filter then has to stitch back together."""
+    store.update_auto_trade(1, {"mode": "paper"})
+    store.update_auto_trade(1, {"mode": "both"})
+    store.update_auto_trade(1, {"mode": "paper"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is None
+
+
 def test_reset_paper_subscription_discards_history_and_opens_fresh(
     store: UserOverridesStore,
 ) -> None:

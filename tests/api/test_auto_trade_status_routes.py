@@ -928,6 +928,247 @@ def test_recent_events_returns_user_events_from_firestore(
 
 
 # ---------------------------------------------------------------------------
+# recent-events position join (#988 / #990)
+#
+# A DispatchEvent is an append-only record of the PLACEMENT MOMENT. It has
+# an `outcome` of 'placed' | 'rejected' and NO close/exit field — and that
+# immutability is correct, it is an audit log. The bug was that the app
+# rendered "Position is open — Lumin manages it from here." from `isPlaced`
+# alone, so a row that was placed and closed weeks ago still claimed to be
+# open forever. Twenty rows asserted "open" directly underneath a correct
+# open-position count of 0.
+#
+# The fix joins live position state server-side at read time. These tests
+# pin the three things that matter: an open position reads open, a CLOSED
+# one reads closed WITH its realised PnL, and a missing position degrades
+# to null rather than inventing a state.
+# ---------------------------------------------------------------------------
+
+
+def _mk_position(signal_id: str, uid: str, state, **kw):
+    """Minimal Position in a given FSM state. Only the fields the join
+    reads are meaningful; the rest are structurally required."""
+    from src.execution.position_state import Position
+    defaults = dict(
+        signal_id=signal_id, firebase_uid=uid, symbol="BTCUSDT",
+        side="BUY", state=state,
+        entry_price_target=29000.0, entry_price_filled=29012.5,
+        sl_price=28500.0, tp1_price=29500.0, tp2_price=30000.0,
+        tp3_price=30500.0,
+        total_qty=0.017, tp1_qty=0.006, tp2_qty=0.006, tp3_qty=0.005,
+    )
+    defaults.update(kw)
+    return Position(**defaults)
+
+
+def _install_placed_event(monkeypatch, signal_id="sig-A"):
+    """One 'placed' dispatch event, dispatch_log init guard satisfied."""
+    from datetime import datetime, timezone
+    from src.execution import dispatch_log
+
+    def _fake_list(firebase_uid: str, *, limit: int = 20):
+        return [dispatch_log.DispatchEvent(
+            event_id="evt-1", firebase_uid=firebase_uid, signal_id=signal_id,
+            symbol="BTCUSDT", direction="LONG", outcome="placed",
+            timestamp=datetime.now(timezone.utc),
+            entry_price=29000.0, total_qty=0.017,
+        )]
+
+    dispatch_log._db = MagicMock()
+    monkeypatch.setattr(dispatch_log, "list_recent_events", _fake_list)
+
+
+def test_recent_events_open_position_reports_open(monkeypatch) -> None:
+    """OPEN is non-terminal → position_is_open True and the filled entry
+    price is surfaced so the app can show what actually traded (#990)."""
+    from src.execution import position_state as _ps
+    _install_placed_event(monkeypatch)
+    monkeypatch.setattr(
+        _ps, "get_position",
+        lambda uid, sid: _mk_position(sid, uid, _ps.PositionState.OPEN),
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-1"))
+    ev = TestClient(app).get("/api/auto-trade/recent-events").json()["events"][0]
+    assert ev["position_state"] == "OPEN"
+    assert ev["position_is_open"] is True
+    assert ev["closed_at"] is None
+    # The engine SIGNALLED 29000 but Binance FILLED at 29012.5. Both must
+    # reach the app — that difference is the whole point of #990.
+    assert ev["entry_price"] == 29000.0
+    assert ev["entry_price_filled"] == 29012.5
+
+
+def test_recent_events_closed_position_does_not_claim_open(
+    monkeypatch,
+) -> None:
+    """THE #988 REGRESSION TEST. A placed-then-closed trade must not read
+    as open, and must carry the realised PnL that replaces the bogus
+    'Lumin manages it from here' present-tense claim."""
+    from datetime import datetime, timezone
+    from src.execution import position_state as _ps
+    closed = datetime.now(timezone.utc)
+    _install_placed_event(monkeypatch)
+    monkeypatch.setattr(
+        _ps, "get_position",
+        lambda uid, sid: _mk_position(
+            sid, uid, _ps.PositionState.CLOSED,
+            closed_at=closed, realized_pnl_total=12.34,
+        ),
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-2"))
+    ev = TestClient(app).get("/api/auto-trade/recent-events").json()["events"][0]
+    # outcome stays 'placed' forever — it is a historical fact and the
+    # audit log must not be rewritten. Present state lives beside it.
+    assert ev["outcome"] == "placed"
+    assert ev["position_state"] == "CLOSED"
+    assert ev["position_is_open"] is False
+    assert ev["realized_pnl_usd"] == 12.34
+    assert ev["closed_at"] is not None
+
+
+def test_recent_events_cancelled_no_fill_is_not_open(monkeypatch) -> None:
+    """CANCELLED_NO_FILL is the other terminal state. It is easy to miss
+    because it is not literally named 'closed' — a hand-rolled
+    `state == "CLOSED"` check would call it open."""
+    from src.execution import position_state as _ps
+    _install_placed_event(monkeypatch)
+    monkeypatch.setattr(
+        _ps, "get_position",
+        lambda uid, sid: _mk_position(
+            sid, uid, _ps.PositionState.CANCELLED_NO_FILL),
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-3"))
+    ev = TestClient(app).get("/api/auto-trade/recent-events").json()["events"][0]
+    assert ev["position_state"] == "CANCELLED_NO_FILL"
+    assert ev["position_is_open"] is False
+
+
+def test_recent_events_missing_position_yields_explicit_nulls(
+    monkeypatch,
+) -> None:
+    """Store raises (no doc / offline). The keys must still be PRESENT and
+    null: the app has to tell 'we looked, there is nothing' apart from
+    'this server build does not send the field'. It must never fall back
+    to asserting open."""
+    from src.execution import position_state as _ps
+
+    def _boom(uid, sid):
+        raise _ps.PositionNotFoundError(sid)
+
+    _install_placed_event(monkeypatch)
+    monkeypatch.setattr(_ps, "get_position", _boom)
+    app = _build_app(identity=_firebase_user(uid="fb-4"))
+    ev = TestClient(app).get("/api/auto-trade/recent-events").json()["events"][0]
+    for key in ("position_state", "position_is_open", "realized_pnl_usd",
+                "entry_price_filled", "closed_at"):
+        assert key in ev, f"{key} must always be present"
+        assert ev[key] is None
+    # The feed itself still renders.
+    assert ev["outcome"] == "placed"
+
+
+def test_recent_events_rejected_rows_skip_the_position_lookup(
+    monkeypatch,
+) -> None:
+    """A rejected order never became a position, so looking one up would
+    be a guaranteed-miss billed read. Cost discipline: only PLACED rows
+    are joined."""
+    from datetime import datetime, timezone
+    from src.execution import dispatch_log
+    from src.execution import position_state as _ps
+
+    def _fake_list(firebase_uid: str, *, limit: int = 20):
+        return [dispatch_log.DispatchEvent(
+            event_id="evt-r", firebase_uid=firebase_uid, signal_id="sig-R",
+            symbol="PROMUSDT", direction="SHORT", outcome="rejected",
+            timestamp=datetime.now(timezone.utc),
+            reject_class="OrderRejectedByBinance", reject_binance_code=-2019,
+        )]
+
+    dispatch_log._db = MagicMock()
+    monkeypatch.setattr(dispatch_log, "list_recent_events", _fake_list)
+
+    calls = []
+
+    def _spy(uid, sid):
+        calls.append(sid)
+        raise AssertionError("must not look up a rejected order")
+
+    monkeypatch.setattr(_ps, "get_position", _spy)
+    app = _build_app(identity=_firebase_user(uid="fb-5"))
+    ev = TestClient(app).get("/api/auto-trade/recent-events").json()["events"][0]
+    assert calls == []
+    assert ev["outcome"] == "rejected"
+    assert ev["position_is_open"] is None
+
+
+def test_recent_events_duplicate_signal_ids_looked_up_once(
+    monkeypatch,
+) -> None:
+    """One signal can carry several dispatch events (retry, or a manual
+    take after an auto reject). The join must de-duplicate — otherwise
+    the read cost scales with retries, and both rows must still resolve
+    to the SAME state."""
+    from datetime import datetime, timezone, timedelta
+    from src.execution import dispatch_log
+    from src.execution import position_state as _ps
+
+    now = datetime.now(timezone.utc)
+
+    def _fake_list(firebase_uid: str, *, limit: int = 20):
+        return [
+            dispatch_log.DispatchEvent(
+                event_id=f"evt-{i}", firebase_uid=firebase_uid,
+                signal_id="sig-DUP", symbol="BTCUSDT", direction="LONG",
+                outcome="placed", timestamp=now - timedelta(minutes=i),
+                entry_price=29000.0, total_qty=0.017,
+            ) for i in range(2)
+        ]
+
+    dispatch_log._db = MagicMock()
+    monkeypatch.setattr(dispatch_log, "list_recent_events", _fake_list)
+
+    calls = []
+
+    def _spy(uid, sid):
+        calls.append(sid)
+        return _mk_position(sid, uid, _ps.PositionState.OPEN)
+
+    monkeypatch.setattr(_ps, "get_position", _spy)
+    app = _build_app(identity=_firebase_user(uid="fb-6"))
+    body = TestClient(app).get("/api/auto-trade/recent-events").json()
+    assert len(body["events"]) == 2
+    assert calls == ["sig-DUP"], f"expected 1 lookup, got {calls}"
+    assert all(e["position_is_open"] is True for e in body["events"])
+
+
+def test_recent_events_never_streams_whole_position_history(
+    monkeypatch,
+) -> None:
+    """Cost-discipline guard. ``list_positions_for_user`` streams the
+    user's ENTIRE never-pruned history — one billed read per historical
+    position on every tab visit. The join must fetch by explicit
+    signal_id instead."""
+    from src.execution import position_state as _ps
+    _install_placed_event(monkeypatch)
+    monkeypatch.setattr(
+        _ps, "get_position",
+        lambda uid, sid: _mk_position(sid, uid, _ps.PositionState.OPEN),
+    )
+
+    def _forbidden(*a, **k):
+        raise AssertionError(
+            "list_positions_for_user streams unbounded history; "
+            "the join must fetch by signal_id"
+        )
+
+    monkeypatch.setattr(_ps, "list_positions_for_user", _forbidden)
+    app = _build_app(identity=_firebase_user(uid="fb-7"))
+    r = TestClient(app).get("/api/auto-trade/recent-events")
+    assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # resume-disabled-mine — self-serve breaker recovery (owner-approved
 # 2026-07-18): the paused card's "Re-enable auto-trade" button
 # ---------------------------------------------------------------------------

@@ -652,12 +652,30 @@ class SnapshotWriter:
             raw = await self._redis.client.get(_store.KEY_CMD_SET_MODE)
             if raw is None:
                 return
+            from src.execution import exec_mode as _em
+
             new_mode = (raw or "").strip().lower()
-            # Always delete first so a crash below doesn't re-apply on next cycle.
-            await self._redis.client.delete(_store.KEY_CMD_SET_MODE)
-            if new_mode not in {"off", "paper", "live"}:
-                log.warning("snapshot_writer: ignoring invalid mode command: {!r}", new_mode)
+            # VALIDATE BEFORE DELETING. The delete used to come first, so an
+            # unsupported mode was consumed and dropped with only a warning —
+            # nothing reached the caller and nothing retried. That is how a
+            # perfectly well-formed ``both`` from the app vanished silently
+            # (#989): the key was gone before anyone judged its contents, so
+            # the failure was invisible on every surface.
+            #
+            # An INVALID command is still deleted — leaving it would re-warn
+            # every cycle forever — but only after it has been named as the
+            # reason. A VALID one is deleted before being applied, so a crash
+            # inside ``set_auto_execution_mode`` cannot re-apply it next cycle
+            # (the original, and correct, reason the delete came early).
+            if not _em.is_valid(new_mode):
+                await self._redis.client.delete(_store.KEY_CMD_SET_MODE)
+                log.warning(
+                    "snapshot_writer: ignoring invalid mode command: {!r} "
+                    "(valid: {})",
+                    new_mode, " / ".join(sorted(_em.VALID_MODES)),
+                )
                 return
+            await self._redis.client.delete(_store.KEY_CMD_SET_MODE)
             log.info("snapshot_writer: applying mode command from API: {!r}", new_mode)
             ok, msg = self._engine.set_auto_execution_mode(new_mode)
             log.info("snapshot_writer: mode command result: {}", msg)

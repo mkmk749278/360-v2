@@ -458,9 +458,26 @@ class RedisEngineFacade:
         Returns ``(True, queued_message)`` so the route handler path is identical
         to the direct-engine path.
         """
-        new_mode = (new_mode or "").strip().lower()
-        if new_mode not in {"off", "paper", "live"}:
-            return False, f"invalid mode {new_mode!r} — must be off / paper / live"
+        # Validate against the one canonical mode set, never a literal
+        # written here: a hand-copied ``{"off","paper","live"}`` is how
+        # ``both`` came to be accepted on write and rejected on the way to
+        # the engine.
+        from src.execution import exec_mode as _em
+
+        new_mode = _em.normalise(new_mode) or (new_mode or "").strip().lower()
+        if not _em.is_valid(new_mode):
+            return False, (
+                f"invalid mode {new_mode!r} — must be one of "
+                f"{' / '.join(sorted(_em.VALID_MODES))}"
+            )
+        # Mirror the engine's own refusal (``Engine.set_auto_execution_mode``)
+        # rather than queueing a command the engine will reject a cycle later,
+        # where the reason would reach nobody.
+        if new_mode == "both":
+            return False, (
+                "'both' is a per-user mode, not an engine-wide one — set it "
+                "per user via PUT /api/settings/user/auto-trade."
+            )
         current = self._current_auto_mode
         if new_mode == current:
             return False, f"already in {new_mode.upper()} mode — nothing to do"
