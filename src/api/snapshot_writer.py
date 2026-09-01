@@ -32,6 +32,11 @@ from . import snapshot_store as _store
 log = get_logger("api.snapshot_writer")
 
 _CYCLE_INTERVAL_S   = 15   # ≈ one scan cycle
+# Republish the exchange-position key at least this often even when nothing
+# changed, so it stays inside its 90s TTL. Comfortably under that bound: an
+# expired key must mean "the engine stopped publishing", and it stops meaning
+# that the moment a healthy quiet account can let it lapse.
+_EXCHANGE_REFRESH_S = 45
 _ACTIVITY_INTERVAL_S = 30
 _AGENTS_INTERVAL_S   = 60
 
@@ -132,6 +137,10 @@ class SnapshotWriter:
         self.last_completed_at: float = 0.0
         #: Per-payload cost of the last cycle, so the 75s total can be attributed.
         self.write_times: dict[str, float] = {}
+        #: Generation and monotonic stamp of the last exchange-position write,
+        #: so a quiet account costs nothing between changes.
+        self._exchange_positions_gen: int = -1
+        self._exchange_positions_at: float = 0.0
         # Dedicated 1-thread pool for Pydantic serialisation — keeps heavy
         # model-construction off the engine's main asyncio event loop.
         self._executor = _TPE(max_workers=1, thread_name_prefix="snapshot-writer")
@@ -282,6 +291,8 @@ class SnapshotWriter:
             await self._write_dark_promotion()
         with self._timing("position_marks"):
             await self._write_position_marks()
+        with self._timing("exchange_positions"):
+            await self._write_exchange_positions()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             with self._timing("activity"):
                 await self._write_activity()
@@ -541,6 +552,49 @@ class SnapshotWriter:
             )
         except Exception:
             log.exception("snapshot_writer: failed to write position marks")
+
+    async def _write_exchange_positions(self) -> None:
+        """Publish what BINANCE says each user holds.
+
+        The index lives in the engine container (it is fed by the per-user
+        websocket and by the reconciler); the endpoint that renders it runs in
+        the api container, which has neither.  Same crossing as the position
+        marks beside this, and the same reason the trail-governor X-ray had to
+        make it: a handler cannot read in-process state from the other
+        process, however carefully it is written.
+
+        Written on a GENERATION gate rather than on a timer.  The index only
+        moves when the exchange says something, which on a quiet account is
+        never — so this is normally a no-op, and the periodic write below
+        exists solely to keep the key inside its TTL so that an expired key
+        keeps meaning "the engine stopped publishing".
+        """
+        try:
+            from src.execution import exchange_positions as _xp
+
+            gen = _xp.get_generation()
+            now = time.monotonic()
+            unchanged = gen == self._exchange_positions_gen
+            fresh = (now - self._exchange_positions_at) < _EXCHANGE_REFRESH_S
+            if unchanged and fresh:
+                return
+            payload = {
+                "users": _xp.snapshot_all(),
+                "stamped_at": time.time(),
+                "generation": gen,
+                "counters": _xp.counters(),
+            }
+            await self._set(
+                _store.KEY_EXCHANGE_POSITIONS,
+                payload,
+                _store.TTL_EXCHANGE_POSITIONS,
+            )
+            self._exchange_positions_gen = gen
+            self._exchange_positions_at = now
+        except Exception:
+            log.exception(
+                "snapshot_writer: failed to write exchange positions"
+            )
 
     async def _write_engine_state(self) -> None:
         try:

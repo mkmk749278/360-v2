@@ -2029,3 +2029,57 @@ python -m src.main
   a fan-out, join the two ledgers and count** — the shape of the miss list is
   the diagnosis, and "some signals" turned out to name one filter and one
   setting rather than a fault.
+
+- **Ask what the vendor is already telling you before inferring it.** The
+  position card was built to show "exactly what Binance shows", and its first
+  cut computed size, entry and unrealized PnL from the engine's own document
+  marked with a mark price — because nobody checked what was already on the
+  wire. `events.parse_event` had decoded `ACCOUNT_UPDATE` into a typed
+  dataclass (signed size, entry price, unrealized PnL, margin type, isolated
+  wallet) since the user-data stream shipped, and `grep` for a consumer
+  returned **nothing**: `PositionFSM` no-ops it, and its docstring said
+  "consumed by PR-9 reconciler" — the reconciler consumes `positionRisk` over
+  REST and has never seen a stream event. Beside it,
+  `_fetch_binance_positions` fetched the whole `positionRisk` row every cycle
+  and kept `positionAmt`, discarding `liquidationPrice` and `leverage`, which
+  exist in **no other source at all**.
+
+  So this was not a missing feature, it was a missing *reader* — the third
+  variant of this repo's commonest defect, after "written and never read" and
+  "read and never written": **arriving, parsed, and dropped.** The tell is
+  the cheapest one there is: a docstring naming a consumer, and a grep for
+  that consumer.
+
+  Two rules the fix carries. **Two sources for one quantity are kept apart by
+  clock and by authority, not merged**: the push wins for the fields both
+  carry, because a five-minute REST snapshot overwriting a live size walks the
+  number backwards on screen; REST supplies only what the push cannot; and
+  freshness is reported per SOURCE, since one "as of" over two clocks is a
+  claim neither of them made. And **a flat frame is a fact, not an absence** —
+  the exchange saying "you are out" is precisely the fact the Trade tab could
+  not distinguish from "nothing was ever placed", so it is recorded with its
+  timestamp and retained briefly rather than deleted.
+
+  Corollary, found by writing the test rather than by reading the code: a
+  retain window a whole class of rows never enters is not a bound. Stamping
+  `flat_since` only on the open→flat TRANSITION left every position whose
+  FIRST frame is flat — the ordinary case after a restart — unevictable
+  forever.
+
+- **Preventing the defect is not repairing it, and shipping only the first
+  half leaves the screen the owner complained about.** The terminal-close
+  sweep guarantees no NEW orphaned bracket, and said nothing about the 24
+  already resting: `reconcile_user` filters to non-terminal positions, so a
+  document that closed before the fix landed is never looked at again. A
+  backlog is finite and historical, which makes it exactly the thing a
+  one-off, converging sweep can clear — and exactly the thing that stays
+  forever if nobody writes one.
+
+  The safety argument is worth copying because it needed no new vendor
+  behaviour to be verified: the sweep cancels only ids appearing BOTH on one
+  of our own closed documents AND in Binance's list of open algo orders for
+  that symbol. It therefore cannot reach an order we did not place, cannot act
+  on a stale id, and cannot touch anything protecting a live position — and
+  `None` from that fetch ("we could not ask") is kept strictly apart from an
+  empty set ("Binance confirmed nothing is open"), because conflating them
+  clears every id and declares a dirty account clean.
