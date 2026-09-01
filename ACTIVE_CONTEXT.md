@@ -4,6 +4,67 @@
 
 ---
 
+## SESSION 136 2026-09-01 — the exchange was describing the position all along
+
+Owner on #992/#150: *"screenshot are fine implement it fully production grade
+only"*. So I audited what I had just shipped against this file's own ban on
+scaffolds and found three compromises, two of which I had written the excuse
+for in the comments.
+
+**1. The orphan fix prevented new orphans and cleaned none.** The terminal-close
+sweep fires on a transition; `reconcile_user` filters to non-terminal positions,
+so the 24 orders already resting on the owner's account were never revisited.
+The sweep is now EVIDENCE-BASED: it cancels only ids that appear both on one of
+our closed documents and in Binance's own `algoOpenOrders` for that symbol, so
+it can never reach an order we did not place. One bounded closed-history read
+per user per process, then nothing — a clean account finds every id already zero
+and never looks again. `None` from the fetch (could not ask) is kept strictly
+apart from an empty set (Binance confirmed nothing is open); conflating them
+would clear every id and declare a dirty account clean.
+
+**2. `ACCOUNT_UPDATE` was parsed and read by nothing.** `events.parse_event` has
+decoded Binance's own position push — signed size, entry price, unrealized PnL,
+margin type — since the user-data stream shipped. `PositionFSM` no-ops it and
+its docstring said "consumed by PR-9 reconciler"; the reconciler consumes
+`positionRisk` over REST and has never seen a stream event. Separately
+`_fetch_binance_positions` fetched the whole `positionRisk` row every cycle and
+kept `positionAmt`, discarding `liquidationPrice` and `leverage` — which exist
+nowhere else at all. **That is why the first cut of the position card had to
+infer a position the exchange was describing for free.**
+
+`src/execution/exchange_positions.py` is the reader for both. No new
+subscription, no new poll, no vendor round trip. Two writers kept apart because
+they are on different clocks and have different authority: the push wins for the
+fields both carry (a ~5-minute REST snapshot overwriting a live size walks the
+number backwards), REST supplies what the push cannot, and freshness is reported
+PER SOURCE rather than as one "as of" over two clocks. A flat frame is RECORDED,
+not dropped — it is the exchange saying "you are out", which is the fact the
+Trade tab could not distinguish from "nothing was ever placed".
+
+**3. `/api/auto-trade/positions` is now a join, not a projection.** Size and
+entry come from the exchange when it has spoken, from the engine when it has
+not, and every row says which (`qty_source` / `entry_source`). `exchange_state`
+has three values because an empty book has three causes — an engine that has
+said nothing must never render as a flat account. The divergence the owner
+actually saw is NAMED (`exchange_flat`: the engine holds it open, Binance says
+you are out — the two-hour backstop, 39 of 140 positions that week). And a
+position Binance holds that the engine has no record of now appears in its own
+`unmanaged` list: never merged into the managed rows, never dropped, and
+previously invisible on every surface we have.
+
+Also retired the `marks_age_sec`-copied-onto-every-row compromise whose own
+comment admitted it existed to avoid widening a return type; the repository
+returns a proper `ServerSidePositions` envelope.
+
+One defect of my own, found by writing the test: a position whose FIRST frame is
+flat (the ordinary case after a restart) got `flat_since = None` and was
+therefore never evictable — a retain window a whole class of rows never enters
+is not a bound.
+
+Engine: 8905 passed, ruff clean, mypy unchanged at 122.
+
+---
+
 ## SESSION 135 2026-09-01 — the account and the feed, reconciled against Binance's own record
 
 Owner sent his Binance Futures position history (143 closed positions, 24 Aug –

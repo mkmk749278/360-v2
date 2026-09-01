@@ -291,9 +291,16 @@ class PositionFSM:
 
     async def handle_event(self, event: _events.Event) -> None:
         """Top-level dispatch.  ORDER_TRADE_UPDATE → state transition;
-        other event types are no-ops in this FSM (ACCOUNT_UPDATE is
-        consumed by PR-9 reconciler; MARGIN_CALL by PR-8 tripwires;
-        listenKeyExpired by the worker's outer reconnect loop).
+        other event types are no-ops in this FSM (ACCOUNT_UPDATE by
+        ``exchange_positions``, composed onto the same worker handler in
+        ``worker_manager._build_event_handler``; MARGIN_CALL by PR-8
+        tripwires; listenKeyExpired by the worker's outer reconnect loop).
+
+        That first clause used to read "ACCOUNT_UPDATE is consumed by PR-9
+        reconciler", and it was false: the reconciler consumes ``positionRisk``
+        over REST and has never seen a stream event.  Nothing read the push at
+        all, which is why the position card had to infer a position Binance
+        was describing for free.
 
         Any exception is logged but does NOT propagate — the WS
         consumer's design (PR-5) absorbs handler failures so one

@@ -27,11 +27,52 @@ from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
 from src.utils import get_logger
+from . import events as _events
 from . import position_state as _ps
 from .position_fsm import PositionFSM
 from .position_worker import PositionWorker
 
 log = get_logger("execution.worker_manager")
+
+def _build_event_handler(firebase_uid: str, fsm: PositionFSM):
+    """Compose the user-data-stream consumers for one user.
+
+    Two INDEPENDENT readers of the same socket, deliberately not one:
+
+    * ``PositionFSM.handle_event`` — the money path.  Advances the engine's
+      own state machine on ``ORDER_TRADE_UPDATE`` and no-ops on everything
+      else, which its docstring has always said.
+    * ``exchange_positions.apply_account_update`` — the measurement path.
+      Absorbs ``ACCOUNT_UPDATE``, which Binance has been pushing (signed size,
+      entry price, unrealized PnL, margin type) since the stream shipped and
+      which nothing read: the FSM's docstring says the reconciler consumes it,
+      and the reconciler consumes ``positionRisk`` instead.  That is why the
+      position card had to infer a position the exchange was describing for
+      free.
+
+    Composed here rather than inside the FSM so the FSM's contract stays true
+    and, more importantly, so the ordering is fixed and the blast radius is
+    one-directional: the FSM runs FIRST and its result is never affected by
+    the tap, and the tap is wrapped so a fault in a display feature can never
+    cost a fill event.  ``apply_account_update`` already swallows its own
+    exceptions; the guard here is belt-and-braces at the seam where the two
+    concerns meet.
+    """
+    from . import exchange_positions as _xp
+
+    async def _handle(event) -> None:
+        await fsm.handle_event(event)
+        if isinstance(event, _events.AccountUpdate):
+            try:
+                _xp.apply_account_update(firebase_uid, event)
+            except Exception:  # noqa: BLE001 — never cost a fill
+                log.exception(
+                    "worker_manager: exchange-position tap failed uid={}",
+                    firebase_uid,
+                )
+
+    return _handle
+
 
 # Registry: firebase_uid → (worker, task).  Checked before double-starting.
 _workers: Dict[str, Tuple[PositionWorker, asyncio.Task]] = {}
@@ -170,7 +211,9 @@ async def start_user_worker(firebase_uid: str) -> Optional[asyncio.Task]:
             return None  # already running
 
     fsm = PositionFSM(firebase_uid)
-    worker = PositionWorker(firebase_uid, handler=fsm.handle_event)
+    worker = PositionWorker(
+        firebase_uid, handler=_build_event_handler(firebase_uid, fsm),
+    )
     task = asyncio.create_task(
         worker.run(),
         name=f"position_worker_{firebase_uid[:12]}",
@@ -284,4 +327,13 @@ async def stop_all_workers() -> None:
                 await rec.unregister_user(uid)
             except Exception:
                 pass
+        # Drop the exchange's picture of this user with the socket that fed
+        # it.  Keeping it would describe an account nobody is watching as
+        # though we still were — the same "presence of data is not currency of
+        # data" fault the trailing-exit arms paid for.
+        try:
+            from . import exchange_positions as _xp
+            _xp.forget_user(uid)
+        except Exception:
+            pass
     log.info("worker_manager: stop_all_workers called ({} workers)", len(_workers))

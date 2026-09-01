@@ -693,6 +693,30 @@ class RedisEngineFacade:
             return None
         return parsed if isinstance(parsed, dict) else None
 
+    async def read_exchange_positions(self) -> Optional[dict]:
+        """Return the published ``{users, stamped_at, generation, counters}``
+        or ``None`` when the key could not be read.
+
+        ``None`` and an empty ``users`` map are different answers and the
+        caller must keep them apart: the first is the engine having stopped
+        publishing (or Redis being down), the second is the engine publishing
+        and tracking nobody.  Collapsing them renders a cold engine as an
+        account with no positions.
+        """
+        if not self._redis.available:
+            return None
+        raw = await self._redis.client.get(_store.KEY_EXCHANGE_POSITIONS)
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            log.warning(
+                "redis_engine.read_exchange_positions: malformed payload",
+            )
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     def published_signal(self, signal_id: str) -> Optional[dict]:
         """Best-effort lookup of one signal dict from ``snapshot:signals_all``
         for pre-validation (existence / is_open) before enqueueing a take.

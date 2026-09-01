@@ -74,6 +74,39 @@ def get_instance() -> Optional["Reconciler"]:
 _FUTURES_ALGO_OPEN_ORDERS_PATH = "/fapi/v1/algoOpenOrders"
 _DEFAULT_INTERVAL_S = 60.0
 
+# ---------------------------------------------------------------------------
+# Orphan backlog — the protective orders that were already resting when the
+# terminal-close sweep shipped
+# ---------------------------------------------------------------------------
+#
+# ``position_fsm.cancel_protective_orders`` retires a bracket at the moment a
+# position goes terminal, so no NEW orphan can be created.  It says nothing
+# about the ones already on the account: ``reconcile_user`` filters to
+# non-terminal positions, so a document that closed before that fix shipped is
+# never looked at again and its orders rest forever.  The owner's account
+# carried 24 of them (Positions 0 / Conditional 24, oldest 15h) on 2026-09-01,
+# and shipping the prevention without the cleanup leaves exactly that screen.
+#
+# The sweep is EVIDENCE-BASED, and that is the whole safety argument: it asks
+# Binance which algo orders are actually open on the symbol and cancels only
+# ids that appear in BOTH that answer and our own closed document.  So it can
+# never fire at an order it did not place, never act on a stale id, and never
+# touch anything protecting a live position.  An algoId is unique per account,
+# so even a symbol that has since re-entered is safe.
+#
+# It converges to zero cost.  One bounded closed-history query per user per
+# process (single-field index, no composite), and thereafter nothing at all
+# once the user's suspect set is empty — a clean account does the read once,
+# finds every order id already zero, makes no exchange call and never looks
+# again.
+_ORPHAN_SWEEP_HISTORY_LIMIT = 50
+
+# Cancels attempted per user per cycle.  A bound you cannot compute in advance
+# is a blast-radius cap and it is counted: the backlog is drained over several
+# cycles rather than in one burst against an account that has been IP-banned
+# for hammering before.  Residue carries to the next cycle.
+_ORPHAN_SWEEP_MAX_CANCELS = 12
+
 # Order healing skips positions with FSM activity in this window so a
 # reconcile cycle can never race an in-flight cancel→replace transition
 # (the pre-TP paths zero an order id and place its replacement within
@@ -140,6 +173,23 @@ class Reconciler:
         self._active_uids: Set[str] = set()
         self._lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
+        # Users whose historical closed positions have already been walked
+        # once this process.  The backlog is finite and historical, so the
+        # read happens once and never again unless a cancel fails.
+        self._orphan_history_read: Set[str] = set()
+        # uid -> [(symbol, attr, order_id), ...] still owed a cancel.  Carries
+        # across cycles so the per-cycle cap drains rather than drops.
+        self._orphan_pending: Dict[str, List[tuple]] = {}
+        # Counted, because a sweep that silently finds nothing and a sweep
+        # that never ran read identically from outside.
+        self.orphan_counts: Dict[str, int] = {
+            "history_reads": 0,
+            "suspects_found": 0,
+            "confirmed_open": 0,
+            "cancelled": 0,
+            "already_gone": 0,
+            "failed": 0,
+        }
 
     async def register_user(self, firebase_uid: str) -> None:
         async with self._lock:
@@ -183,7 +233,13 @@ class Reconciler:
         Pulls FSM state + Binance state; calls :meth:`_diff` to
         compute the divergence set; applies the fixes.  Public so
         tests can exercise without spinning up the loop.
+
+        Also drains the orphan backlog (see ``_ORPHAN_SWEEP_HISTORY_LIMIT``).
+        That runs on its own and is deliberately NOT inside the early return
+        below: a user whose positions have all closed has no live position to
+        reconcile and is exactly the user whose bracket may still be resting.
         """
+        await self._sweep_orphan_backlog(firebase_uid)
         positions = self._positions_for_user(firebase_uid)
         # Filter to non-terminal positions — terminal ones are
         # already done; no point reconciling them.
@@ -467,6 +523,147 @@ class Reconciler:
         from src.execution import pretp_dispatcher as _pd
         _pd.spawn_untrack(fsm_position.symbol)
 
+    async def _sweep_orphan_backlog(self, firebase_uid: str) -> None:
+        """Cancel protective orders left resting by a position that closed
+        before the terminal-close sweep existed.
+
+        See the module-level ``_ORPHAN_SWEEP_*`` note for why this exists and
+        why it is safe.  In one sentence: it cancels only ids that appear both
+        on one of OUR closed position documents and in Binance's own list of
+        open algo orders for that symbol, so it can never reach an order we
+        did not place or one that is protecting something live.
+
+        Never raises — this is cleanup running beside real reconciliation, and
+        a failure to tidy must not stop a naked position being healed.
+        """
+        try:
+            await self._sweep_orphan_backlog_inner(firebase_uid)
+        except Exception:
+            log.exception(
+                "reconciler: orphan backlog sweep failed uid={}", firebase_uid,
+            )
+
+    async def _sweep_orphan_backlog_inner(self, firebase_uid: str) -> None:
+        pending = self._orphan_pending.get(firebase_uid) or []
+
+        if not pending and firebase_uid not in self._orphan_history_read:
+            # The one bounded history read, once per user per process.
+            self._orphan_history_read.add(firebase_uid)
+            self.orphan_counts["history_reads"] += 1
+            try:
+                closed = await asyncio.to_thread(
+                    _position_state.list_recent_closed_positions_for_user,
+                    firebase_uid,
+                    limit=_ORPHAN_SWEEP_HISTORY_LIMIT,
+                )
+            except Exception as exc:
+                # Allow a retry next cycle rather than marking the user done
+                # on a transient Firestore error — "swept" and "could not
+                # read" must not become the same state.
+                self._orphan_history_read.discard(firebase_uid)
+                log.warning(
+                    "reconciler: orphan history read failed uid={} exc={}",
+                    firebase_uid, exc,
+                )
+                return
+            for pos in closed:
+                for attr in _position_state.PROTECTIVE_ORDER_ATTRS:
+                    order_id = int(getattr(pos, attr, 0) or 0)
+                    if order_id:
+                        pending.append((pos.symbol, pos.signal_id, attr, order_id))
+            self.orphan_counts["suspects_found"] += len(pending)
+            if pending:
+                log.info(
+                    "reconciler: orphan backlog uid={} — {} suspect order(s) "
+                    "across {} closed position(s)",
+                    firebase_uid, len(pending),
+                    len({p[1] for p in pending}),
+                )
+
+        if not pending:
+            self._orphan_pending.pop(firebase_uid, None)
+            return
+
+        client = self._signing_client_factory()
+        placer = self._order_placer_factory(firebase_uid)
+        # One algoOpenOrders fetch per distinct symbol, cached for this cycle.
+        open_ids_cache: Dict[str, Optional[Set[int]]] = {}
+        budget = _ORPHAN_SWEEP_MAX_CANCELS
+        carried: List[tuple] = []
+
+        for item in pending:
+            symbol, signal_id, attr, order_id = item
+            if budget <= 0:
+                carried.append(item)
+                continue
+            if symbol not in open_ids_cache:
+                open_ids_cache[symbol] = await self._fetch_open_algo_ids(
+                    firebase_uid, client, symbol
+                )
+            open_ids = open_ids_cache[symbol]
+            if open_ids is None:
+                # The fetch failed. An empty set must only ever mean "Binance
+                # confirmed nothing is open" — so a failure carries the item
+                # rather than concluding the order is gone.
+                carried.append(item)
+                continue
+            if order_id not in open_ids:
+                # Already filled, cancelled, or expired. Nothing to do; clear
+                # the id off the document so it is never reconsidered.
+                self.orphan_counts["already_gone"] += 1
+                await self._clear_orphan_id(firebase_uid, signal_id, attr)
+                continue
+            self.orphan_counts["confirmed_open"] += 1
+            budget -= 1
+            try:
+                await placer.cancel_algo_order(symbol=symbol, algo_id=order_id)
+            except Exception as exc:
+                self.orphan_counts["failed"] += 1
+                log.warning(
+                    "reconciler: orphan cancel FAILED uid={} symbol={} "
+                    "{}={} exc={} — retrying next cycle",
+                    firebase_uid, symbol, attr, order_id, exc,
+                )
+                carried.append(item)
+                continue
+            self.orphan_counts["cancelled"] += 1
+            log.info(
+                "reconciler: cancelled ORPHANED {} uid={} symbol={} "
+                "algo_id={} (position {} is closed)",
+                attr, firebase_uid, symbol, order_id, signal_id,
+            )
+            await self._clear_orphan_id(firebase_uid, signal_id, attr)
+
+        if carried:
+            self._orphan_pending[firebase_uid] = carried
+        else:
+            self._orphan_pending.pop(firebase_uid, None)
+
+    async def _clear_orphan_id(
+        self, firebase_uid: str, signal_id: str, attr: str
+    ) -> None:
+        """Zero one protective order id on a closed position document.
+
+        Persisted so the sweep converges: a document whose ids are all zero
+        contributes no suspects on the next process's history read, which is
+        what turns this from a recurring cost into a one-off cleanup.
+        """
+        try:
+            pos = await asyncio.to_thread(
+                _position_state.get_position, firebase_uid, signal_id
+            )
+            if int(getattr(pos, attr, 0) or 0) == 0:
+                return  # already clear — nothing to write
+            setattr(pos, attr, 0)
+            await asyncio.to_thread(_position_state.put_position, pos)
+        except Exception as exc:
+            # Losing the write only costs a repeat of this exact check on the
+            # next process boot, and the intersect makes that repeat a no-op.
+            log.debug(
+                "reconciler: could not clear {} on uid={} signal_id={} exc={}",
+                attr, firebase_uid, signal_id, exc,
+            )
+
     async def _fetch_open_algo_ids(
         self,
         firebase_uid: str,
@@ -738,6 +935,16 @@ class Reconciler:
                 firebase_uid,
             )
             return None
+        # Hand the WHOLE row to the exchange-position index before reducing it
+        # to positionAmt.  Every cycle used to fetch liquidationPrice,
+        # leverage, markPrice and Binance's own unRealizedProfit and throw all
+        # of them away — and liquidation price and leverage exist NOWHERE else
+        # (the ACCOUNT_UPDATE push does not carry them), so the position card
+        # could not show what Binance's own position row shows.  Nothing extra
+        # is requested here; this is the reader for a response we were already
+        # paying for.
+        from . import exchange_positions as _xp
+        _xp.apply_position_risk(firebase_uid, body)
         for entry in body:
             if not isinstance(entry, dict):
                 continue

@@ -138,6 +138,57 @@ async def _live_marks(get_engine: Optional[Callable[[], Any]]) -> tuple[dict, Op
     return prices, (float(stamped) if isinstance(stamped, (int, float)) else None)
 
 
+async def _exchange_book(
+    get_engine: Optional[Callable[[], Any]], firebase_uid: str
+) -> tuple[dict, Optional[float], str]:
+    """``({symbol: row}, stamped_at, state)`` — what BINANCE says this user
+    holds.
+
+    ``state`` is the part that matters, and it has three values because an
+    empty book has three causes with three different next moves:
+
+    * ``"reporting"`` — the engine is publishing and this is the account. An
+      empty book here really does mean no open positions.
+    * ``"not_reported"`` — the engine is publishing and has never heard
+      anything about this user: no worker running, or nothing since boot.
+    * ``"unavailable"`` — we could not read at all (engine stopped publishing,
+      Redis down, or an engine that predates the key).
+
+    Collapsing those renders a cold engine as a flat account, which is the
+    exact confusion this endpoint exists to end.
+    """
+    # Single-process mode: the index is in this process.
+    try:
+        from src.execution import exchange_positions as _xp
+
+        if _xp.get_generation() > 0:
+            return (_xp.for_user(firebase_uid), time.time(), "reporting")
+    except Exception:
+        log.debug("_exchange_book: in-process index unavailable", exc_info=True)
+
+    engine = get_engine() if get_engine is not None else None
+    reader = getattr(engine, "read_exchange_positions", None)
+    if reader is None:
+        return ({}, None, "unavailable")
+    try:
+        payload = await reader()
+    except Exception:
+        log.warning("_exchange_book: snapshot read failed", exc_info=True)
+        return ({}, None, "unavailable")
+    if not isinstance(payload, dict):
+        return ({}, None, "unavailable")
+    users = payload.get("users")
+    if not isinstance(users, dict):
+        return ({}, None, "unavailable")
+    stamped = payload.get("stamped_at")
+    book = users.get(firebase_uid)
+    return (
+        book if isinstance(book, dict) else {},
+        float(stamped) if isinstance(stamped, (int, float)) else None,
+        "reporting" if isinstance(book, dict) else "not_reported",
+    )
+
+
 def _unrealized(side: str, entry: float, mark: float, qty: float) -> tuple:
     """``(pnl_usd, pnl_pct)`` on the position, or ``(None, None)``.
 
@@ -759,24 +810,63 @@ def register(
             )
 
         marks, stamped_at = await _live_marks(get_engine)
+        exchange, ex_stamped_at, ex_state = await _exchange_book(
+            get_engine, firebase_uid
+        )
+        seen_symbols: set = set()
 
         rows = []
         for p in positions:
-            entry = (
-                p.entry_price_filled
-                if p.entry_price_filled > 0
-                else p.entry_price_target
-            )
-            # The size still on the exchange, not the size originally placed:
-            # a position that took TP1 carries a residual, and pricing the
-            # whole order would overstate what the user is holding.
-            open_qty = max(0.0, p.total_qty - p.closed_qty)
+            ex = exchange.get(p.symbol) or {}
+            seen_symbols.add(p.symbol)
+
+            # SIZE AND ENTRY COME FROM THE EXCHANGE when it has told us, and
+            # from the engine's own record only when it has not.  That order
+            # is the point of this endpoint: the document says what the engine
+            # SET UP, and after a partial fill, a manual close or the two-hour
+            # backstop that is not what the account holds.  ``qty_source``
+            # says which one answered, because a number whose origin the
+            # reader cannot see is one they cannot check.
+            ex_amount = ex.get("position_amount")
+            ex_open = bool(ex.get("is_open"))
+            if ex_open and isinstance(ex_amount, (int, float)):
+                open_qty = abs(float(ex_amount))
+                qty_source = "exchange"
+            else:
+                open_qty = max(0.0, p.total_qty - p.closed_qty)
+                qty_source = "engine"
+
+            ex_entry = ex.get("entry_price")
+            if isinstance(ex_entry, (int, float)) and ex_entry > 0:
+                entry = float(ex_entry)
+                entry_source = "exchange"
+            else:
+                entry = (
+                    p.entry_price_filled
+                    if p.entry_price_filled > 0
+                    else p.entry_price_target
+                )
+                entry_source = "engine"
+
             mark = marks.get(p.symbol)
             pnl_usd, pnl_pct = (
                 _unrealized(p.side, entry, mark, open_qty)
                 if mark is not None
                 else (None, None)
             )
+
+            # The divergence the owner was looking at: an ACTIVE signal on one
+            # tab over an empty Trade tab, with nothing anywhere joining the
+            # two.  Named here rather than left to be inferred from two nulls,
+            # and only asserted when the exchange is actually reporting — an
+            # engine that has said nothing is not evidence of anything.
+            divergence = None
+            if ex_state == "reporting":
+                if ex and not ex_open:
+                    divergence = "exchange_flat"
+                elif not ex:
+                    divergence = "exchange_silent"
+
             rows.append({
                 "signal_id": p.signal_id,
                 "symbol": p.symbol,
@@ -797,29 +887,85 @@ def register(
                 ),
                 # --- what Binance shows beside a position -------------------
                 "open_qty": open_qty,
+                "entry_price": entry or None,
                 "mark_price": mark,
                 "notional": (
                     round(mark * open_qty, 8) if mark is not None else None
                 ),
                 "unrealized_pnl": pnl_usd,
                 "unrealized_pnl_pct": pnl_pct,
-                # The position can be closed from the app; a state that has no
-                # size on the exchange yet cannot.  Sent as a fact rather than
-                # left for the client to infer from `state`, so the button and
-                # the engine agree on one rule.
+                # --- the exchange's own columns, from the exchange ----------
+                "liquidation_price": ex.get("liquidation_price"),
+                "leverage": ex.get("leverage"),
+                "margin_type": ex.get("margin_type"),
+                "exchange_unrealized_pnl": ex.get("exchange_unrealized_pnl"),
+                "exchange_push_age_sec": ex.get("push_age_sec"),
+                "exchange_flat_since_epoch": ex.get("flat_since_epoch"),
+                "qty_source": qty_source,
+                "entry_source": entry_source,
+                "divergence": divergence,
+                # Closeable only while the exchange still holds something, and
+                # only when it is actually reporting: a close against a flat
+                # position is a -2022 and a confusing snackbar.  Where the
+                # exchange is silent we defer to the engine rather than hiding
+                # the button on a position that may well be open.
                 "closeable": (
                     open_qty > 0
                     and p.state.value not in ("PENDING", "PENDING_ENTRY")
+                    and not (ex_state == "reporting" and ex and not ex_open)
                 ),
             })
 
+        # Positions BINANCE holds that the engine has no live record for.
+        # Never merged into ``positions`` — they carry no signal, no stop and
+        # no target, so every field a managed row renders is absent — and
+        # never dropped either: an unmanaged position on a subscriber's
+        # account is the most important thing this endpoint can say, and it
+        # was invisible on every surface we have.
+        unmanaged = []
+        if ex_state == "reporting":
+            for symbol, ex_row in exchange.items():
+                if symbol in seen_symbols or not ex_row.get("is_open"):
+                    continue
+                amount = float(ex_row.get("position_amount") or 0.0)
+                ex_mark = marks.get(symbol)
+                ex_px = float(ex_row.get("entry_price") or 0.0)
+                qty = abs(amount)
+                u_usd, u_pct = (
+                    _unrealized(str(ex_row.get("side") or ""), ex_px,
+                                ex_mark, qty)
+                    if ex_mark is not None and ex_px > 0
+                    else (None, None)
+                )
+                unmanaged.append({
+                    "symbol": symbol,
+                    "side": ex_row.get("side"),
+                    "open_qty": qty,
+                    "entry_price": ex_px or None,
+                    "mark_price": ex_mark,
+                    "unrealized_pnl": u_usd,
+                    "unrealized_pnl_pct": u_pct,
+                    "liquidation_price": ex_row.get("liquidation_price"),
+                    "leverage": ex_row.get("leverage"),
+                    "margin_type": ex_row.get("margin_type"),
+                    "exchange_push_age_sec": ex_row.get("push_age_sec"),
+                })
+
         return {
             "positions": rows,
+            "unmanaged": unmanaged,
             # About the READ, not about any row — see the docstring.
             "marks_stamped_at": stamped_at,
             "marks_age_sec": (
                 round(time.time() - stamped_at, 1)
                 if stamped_at is not None
+                else None
+            ),
+            # Three states, never two: see ``_exchange_book``.
+            "exchange_state": ex_state,
+            "exchange_age_sec": (
+                round(time.time() - ex_stamped_at, 1)
+                if ex_stamped_at is not None
                 else None
             ),
         }

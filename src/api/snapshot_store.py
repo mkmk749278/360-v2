@@ -62,6 +62,13 @@ KEY_DARK_PROMOTION = "snapshot:dark_promotion"  # promotion decide-counters — 
 #: paid for on 2026-07-30.  The engine already subscribes to exactly the
 #: symbols with open positions, so publishing them costs one small SET.
 KEY_POSITION_MARKS = "snapshot:position_marks"  # {symbol: price}  — written every ~15 s
+#: {uid: {symbol: exchange-position row}} — what BINANCE says each user
+#: holds, from the exchange's own ACCOUNT_UPDATE push plus the reconciler's
+#: positionRisk row. One key rather than one per user: the api container
+#: serves only the caller's slice, the whole book is a handful of rows, and
+#: N keys with N independent TTLs make "the engine stopped publishing" and
+#: "this user has nothing" indistinguishable per user.
+KEY_EXCHANGE_POSITIONS = "snapshot:exchange_positions"  # {uid: {symbol: row}}
 KEY_CMD_SET_MODE   = "snapshot:cmd:set_mode"   # str "off|paper|live"     — consumed once
 KEY_CMD_RESET_SIGNALS = "snapshot:cmd:reset_signals"  # set to "1" by API; consumed once by engine
 TTL_CMD_RESET = 120  # 2-min TTL — engine consumes before this; if engine is down, client must retry
@@ -123,6 +130,11 @@ TTL_DARK_PROMOTION  = _TTL_FEED
 #: PnL on a live position, which reads as fact.  Expiring lets the app
 #: say "no live mark" instead of quoting a price from ten minutes ago.
 TTL_POSITION_MARKS = 90
+#: Same 90s reasoning as the marks above, and for the same reason: a stale
+#: LIST is merely old, a stale POSITION reads as a holding the user does not
+#: have. Expiring lets the card say "the engine stopped reporting" instead
+#: of drawing a position from ten minutes ago as though it were current.
+TTL_EXCHANGE_POSITIONS = 90
 TTL_ALERTS       = _TTL_FEED
 TTL_CMD          = 60  # command expires if engine is down; client must retry
 
