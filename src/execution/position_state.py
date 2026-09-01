@@ -255,6 +255,52 @@ class Position:
 
 
 # ---------------------------------------------------------------------------
+# Protective orders — what has to be swept when a position goes terminal
+# ---------------------------------------------------------------------------
+
+#: Order-id fields naming an order that RESTS on Binance protecting an open
+#: position: the stop in each of its forms, and every take-profit leg.
+#:
+#: DERIVED from the dataclass, not typed out again.  Two hand-kept copies of
+#: this list already existed (``signal_dispatch._PROTECTIVE_ORDER_ATTRS`` and
+#: the per-site ``if position.tpN_order_id`` chains in ``position_fsm``), and
+#: they disagreed — which is exactly how the TP ladder came to be left resting
+#: after a close.  A field added to :class:`Position` is covered here the day
+#: it is added; a NON-protective order id has to be named in the exclusion set
+#: below, which is a deliberate act somebody has to justify in a diff.
+_NON_PROTECTIVE_ORDER_ATTRS: frozenset = frozenset(
+    {
+        # The entry itself.  Filled or cancelled long before terminal; it
+        # protects nothing.
+        "entry_order_id",
+        # The pre-TP partial close is a REGULAR reduce-only LIMIT on the book
+        # (``/fapi/v1/order``), not an algo order — Binance really does sweep
+        # those when the position flattens, and it would need ``cancel_order``
+        # rather than ``cancel_algo_order`` anyway.  Named here so its absence
+        # reads as a decision rather than an oversight.
+        "pretp_order_id",
+    }
+)
+
+
+def _derive_protective_order_attrs() -> tuple:
+    """Every ``*_order_id`` field on :class:`Position` bar the excluded ones."""
+    from dataclasses import fields as _dc_fields
+
+    return tuple(
+        f.name
+        for f in _dc_fields(Position)
+        if f.name.endswith("_order_id")
+        and f.name not in _NON_PROTECTIVE_ORDER_ATTRS
+    )
+
+
+#: The sweep set, resolved once at import.  ``position_fsm`` and
+#: ``signal_dispatch`` both read THIS — neither keeps its own copy.
+PROTECTIVE_ORDER_ATTRS: tuple = _derive_protective_order_attrs()
+
+
+# ---------------------------------------------------------------------------
 # Client-order-id convention — single source of truth
 # ---------------------------------------------------------------------------
 

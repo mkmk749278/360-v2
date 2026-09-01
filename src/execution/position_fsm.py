@@ -41,6 +41,134 @@ from src.utils import get_logger
 log = get_logger("execution.position_fsm")
 
 
+# ---------------------------------------------------------------------------
+# Orphan sweep — the protective orders a terminal close leaves resting
+# ---------------------------------------------------------------------------
+#
+# Every terminal handler below closes the POSITION and, until 2026-09-01, left
+# the rest of the bracket RESTING on Binance.  ``_apply_sl_fill`` is the plain
+# case: the stop fires, the position goes flat, and TP1/TP2/TP3 stay parked.
+#
+# The design rested on one sentence in ``order_placer.place_pretp_trail`` —
+# *"TP orders have reduceOnly=true and Binance auto-cancels reduce-only orders
+# when the position is closed by another order"*.  Half of that is true and the
+# half that matters is not: Binance sweeps reduce-only orders resting on the
+# ORDER BOOK.  Every SL and TP here is an ALGO order (``/fapi/v1/algoOrder``,
+# ``algoType=CONDITIONAL``), which sits untriggered in the conditional engine
+# and is not swept.  Binance's own UI files them apart, and that is how this
+# surfaced: owner screenshot 2026-09-01, **Positions (0) / Open Orders →
+# Conditional (24)**, the oldest 15 hours old, every one a reduce-only
+# TAKE_PROFIT_MARKET against a position that no longer existed.
+#
+# ``signal_dispatch.close_fsm_positions_for_signal`` already knew — it sweeps
+# the same set before its market close, and its comment already says the
+# auto-cancel claim is false.  The knowledge simply never reached the fill
+# handlers, which are where most closes actually happen.  A seam, in this
+# repo's usual shape: two halves that each look complete.
+#
+# Why it is not merely untidy.  A reduce-only order cannot open a position, so
+# an orphan books no loss on its own — but it is not inert either:
+#   * it holds a slot against Binance's per-symbol open-order cap, and the
+#     account carried orphans on both sides of the same symbol (FETUSDT had a
+#     resting Sell TP and a resting Buy TP simultaneously);
+#   * the NEXT position on that symbol inherits it, and a stale level from a
+#     trade 15 hours ago closes a live trade at a price nobody chose;
+#   * a resting ``closePosition`` stop is what Binance answers -4130 to, which
+#     is the documented way the trail governor's handover becomes impossible.
+#
+# The sweep is keyed on the position going terminal rather than on a list of
+# handlers, so a handler added later is covered without anybody remembering to
+# add it — and the attr set is derived from the dataclass in ``position_state``
+# rather than typed out a third time.
+
+#: ``parse_coid`` phase → the order-id attr that phase's order was filed under.
+#: The order that FIRED is already gone, so cancelling it would spend a round
+#: trip to be told -2011.  Absent phases ("entry", "close", …) simply sweep the
+#: whole set.
+_PHASE_ORDER_ATTR: dict = {
+    "sl": "sl_order_id",
+    "sl_be": "sl_be_order_id",
+    "tp1": "tp1_order_id",
+    "tp2": "tp2_order_id",
+    "tp3": "tp3_order_id",
+}
+
+#: Sweep outcomes since boot, for the ops X-ray.  ``cancelled`` is the count
+#: that mattered: while the bug was live this would have run at roughly the
+#: rate of closed positions, so a persistent ZERO here on a busy engine is the
+#: signal that the sweep has stopped running — which is exactly the state that
+#: was invisible before.
+_SWEEP_COUNTS: dict = {"swept": 0, "cancelled": 0, "failed": 0, "nothing_to_do": 0}
+
+
+def sweep_counts() -> dict:
+    """Snapshot of :data:`_SWEEP_COUNTS` for the diagnostic surface."""
+    return dict(_SWEEP_COUNTS)
+
+
+async def cancel_protective_orders(
+    position: "_position_state.Position",
+    placer: "_order_placer.OrderPlacer",
+    *,
+    site: str,
+    skip_attr: Optional[str] = None,
+) -> int:
+    """Cancel every protective order still filed against ``position``.
+
+    Returns the number actually cancelled.  Zeroes each id as it goes, so the
+    position document that gets persisted afterwards no longer claims an order
+    that is gone — a retry (or the reconciler) then has nothing to re-cancel.
+
+    **Never raises.**  This runs on the terminal path: the position is already
+    flat and the close is already booked, so a cancel that fails must degrade
+    to a logged, counted orphan rather than abort a transition that has
+    otherwise succeeded.  ``cancel_algo_order`` already swallows "already gone"
+    (-2011 / -20121), so a failure counted here is a real one.
+
+    ``skip_attr`` names the order whose own fill triggered this sweep.
+    """
+    cancelled = 0
+    failed = 0
+    for attr in _position_state.PROTECTIVE_ORDER_ATTRS:
+        if attr == skip_attr:
+            # It just filled.  Forget the id so nothing tries later.
+            setattr(position, attr, 0)
+            continue
+        order_id = int(getattr(position, attr, 0) or 0)
+        if not order_id:
+            continue
+        try:
+            await placer.cancel_algo_order(
+                symbol=position.symbol, algo_id=order_id
+            )
+            setattr(position, attr, 0)
+            cancelled += 1
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            failed += 1
+            # The id is deliberately KEPT on a failure: it is the only record
+            # that an order is still out there, and the reconciler's own sweep
+            # reads the same fields.
+            log.warning(
+                "{}: orphan cancel FAILED uid={} signal_id={} symbol={} "
+                "{}={} exc={} — order may still rest on Binance",
+                site, position.firebase_uid, position.signal_id,
+                position.symbol, attr, order_id, exc,
+            )
+    _SWEEP_COUNTS["swept"] += 1
+    _SWEEP_COUNTS["cancelled"] += cancelled
+    _SWEEP_COUNTS["failed"] += failed
+    if cancelled == 0 and failed == 0:
+        _SWEEP_COUNTS["nothing_to_do"] += 1
+    elif cancelled:
+        log.info(
+            "{}: swept {} orphaned protective order(s) uid={} signal_id={} "
+            "symbol={} close_reason={}",
+            site, cancelled, position.firebase_uid, position.signal_id,
+            position.symbol, position.close_reason,
+        )
+    return cancelled
+
+
 # Per-process cache of (firebase_uid, symbol) pairs already confirmed on
 # CROSSED margin this session.  Binance's POST /fapi/v1/marginType is
 # idempotent but a wire round-trip per signal is wasteful — once a symbol is
@@ -268,6 +396,25 @@ class PositionFSM:
                 "position_fsm: unrecognised phase: {}", phase
             )
             return
+
+        # The position is flat the moment a handler above marks it terminal —
+        # and every OTHER order in its bracket is still parked on Binance.
+        # Swept HERE, at the one point every transition passes through, rather
+        # than inside each handler: a handler added later is covered without
+        # anyone remembering, which is the failure mode that produced the 24
+        # orphans in the first place (see ``cancel_protective_orders``).
+        #
+        # Before ``put_position`` deliberately, so the document persisted at
+        # the end of this call already carries the zeroed ids.  Persisting
+        # first and sweeping after leaves a window where a crash strands a
+        # document that claims live orders which are gone.
+        if _position_state.is_terminal(position.state):
+            await cancel_protective_orders(
+                position,
+                self._order_placer_factory(self.firebase_uid),
+                site=f"position_fsm:{phase}",
+                skip_attr=_PHASE_ORDER_ATTR.get(phase),
+            )
 
         position.last_event_at = datetime.now(timezone.utc)
         try:

@@ -217,7 +217,7 @@ class Reconciler:
                 continue
             if abs(actual_amt) < 1e-9:
                 # Flat on Binance → manual/external close.  Heal FSM state.
-                self._diff_and_heal(fsm_position, binance_positions)
+                await self._diff_and_heal(fsm_position, binance_positions)
             else:
                 # Still open on Binance → check the stale-position ceiling.
                 # This is the last-resort backstop behind the JTOUSDT
@@ -237,7 +237,7 @@ class Reconciler:
                         fsm_position, open_ids
                     )
 
-    def _diff_and_heal(
+    async def _diff_and_heal(
         self,
         fsm_position: _position_state.Position,
         binance_positions: Dict[str, float],
@@ -246,6 +246,13 @@ class Reconciler:
 
         binance_positions: {symbol -> position_amount}.  positionAmt
         sign matters: 0 = flat, positive = LONG, negative = SHORT.
+
+        Async since 2026-09-01: a position Binance shows flat has a bracket
+        that Binance does NOT show flat.  This is the catch-all close path —
+        every exit the FSM did not book itself lands here (a missed
+        user-data-stream event, a native fill we never saw, the user closing
+        on Binance) — so it was the widest of the three orphan producers and
+        the only one with no cancel of any kind.
         """
         symbol = fsm_position.symbol
         actual_amt = binance_positions.get(symbol, 0.0)
@@ -264,6 +271,17 @@ class Reconciler:
             fsm_position.closed_at = datetime.now(timezone.utc)
             if not fsm_position.close_reason:
                 fsm_position.close_reason = "MANUAL"
+            # Retire the bracket before persisting, so the document we write
+            # does not claim orders that no longer exist.  Binance being flat
+            # says nothing about the conditional orders still parked on the
+            # symbol — that is the whole finding (see
+            # ``position_fsm.cancel_protective_orders``).
+            from src.execution import position_fsm as _fsm
+            await _fsm.cancel_protective_orders(
+                fsm_position,
+                self._order_placer_factory(fsm_position.firebase_uid),
+                site="reconciler:external_close",
+            )
             fsm_position.last_event_at = datetime.now(timezone.utc)
             _position_state.put_position(fsm_position)
             from src.execution import pretp_dispatcher as _pd
@@ -412,6 +430,17 @@ class Reconciler:
             remaining = fsm_position.total_qty
         try:
             placer = self._order_placer_factory(fsm_position.firebase_uid)
+            # Cancel the bracket BEFORE the market close, exactly as
+            # ``close_fsm_positions_for_signal`` does: a resting SL that fires
+            # in the same instant as our close would over-reduce, and a TP left
+            # parked outlives the position (owner screenshot 2026-09-01 —
+            # Positions 0, Conditional orders 24).  This path is the single
+            # largest producer of those orphans: it fired on 39 of 140 matched
+            # positions in the 24 Aug – 1 Sep window and cancelled nothing.
+            from src.execution import position_fsm as _fsm
+            await _fsm.cancel_protective_orders(
+                fsm_position, placer, site="reconciler:stale_close",
+            )
             await placer.place_market_close(
                 signal_id=fsm_position.signal_id,
                 symbol=fsm_position.symbol,

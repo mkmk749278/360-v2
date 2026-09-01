@@ -175,6 +175,21 @@ class MarkPriceFeed:
         callers reading occasionally rather than reacting to ticks."""
         return self._prices.get(symbol.upper())
 
+    def all_prices(self) -> Dict[str, float]:
+        """A COPY of every mark this feed is currently holding.
+
+        Added 2026-09-01 for the per-user position card: the api container has
+        no feed of its own, so the engine publishes this to Redis and the card
+        prices open positions from it rather than fetching a price itself and
+        printing it beside engine state on a different clock.
+
+        A copy rather than the live dict, because the WS consumer writes into
+        it between ticks and a caller iterating the original would see it
+        change underneath — and because a reader that can mutate the feed's
+        state is a bug waiting for its first careless line.
+        """
+        return dict(self._prices)
+
     def get_funding_info(self, symbol: str) -> Optional[tuple[float, int]]:
         """Return ``(funding_rate, next_funding_time_ms)`` for ``symbol``
         or None if no update has been seen yet.

@@ -2810,6 +2810,18 @@ def build_app(
         identity_dep=user_claims,
     )
 
+    # ---- User closes their OWN position (2026-09-01) ----
+    # POST /api/auto-trade/close.  Not flag-gated: it is the exit half of a
+    # capability that already ships, and a switch that can leave a user able
+    # to open a position and unable to close it is not a safety control.
+    from . import close_position_route as _close_position_route
+    _close_position_route.register(
+        app,
+        engine=engine,
+        auth=auth,
+        identity_dep=user_claims,
+    )
+
     # ---- Manual trade builder (server-side, chart-set entry/SL/TP) ----
     # POST /api/manual-trade/take — dark behind MANUAL_TRADE_BUILDER_ENABLED.
     from . import manual_trade_route as _manual_trade_route

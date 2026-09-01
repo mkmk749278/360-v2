@@ -3469,8 +3469,31 @@ RECONCILER_AUTO_CLOSE_ORPHANS: bool = _safe_bool(
 # 5h09m (-2.15%) because nothing closed it.  The engine-wide TradeMonitor
 # expiry (MAX_SCALP_HOLD = 3600s) only covers signals in its own book; an
 # orphaned per-user FSM position with no live signal needs this independent
-# ceiling.  Default 7200s (2h) — comfortably beyond any legitimate scalp
-# hold (doctrine: 5-60 min) so it never clips a healthy position.
+# ceiling.  Default 7200s (2h).
+#
+# **This is a routine exit, not a backstop, and the comment here said the
+# opposite for three months.**  It read "comfortably beyond any legitimate
+# scalp hold (doctrine: 5-60 min) so it never clips a healthy position".
+# Measured against the owner's own Binance position history, 24 Aug - 1 Sep
+# 2026: **39 of 140 matched positions (28%) closed at 120-121 minutes** — every
+# one of them here, none by a TP or a stop.  Nothing in that window survived
+# past 121.4 minutes.  The premise died when SIGNAL_EXPIRY_ENABLED went False
+# (2026-06-26): signals stopped expiring and now run for hours, while the
+# positions under them keep being closed at two.
+#
+# The number itself is NOT obviously wrong, and the obvious fix is worse than
+# the defect.  Scoring those 39 against what their signal went on to do:
+# 15 would have finished better, 23 worse, net **+0.48 USD over 38 trades** —
+# i.e. nothing.  Raising the ceiling buys no money and lengthens the window in
+# which an uncovered position can ride, which is what this exists to bound.
+#
+# What it costs is COHERENCE, and that is a surface problem: the app's Signals
+# tab showed five ACTIVE signals over a Trade tab showing zero positions, with
+# nothing anywhere saying the two are on different clocks (owner, 2026-09-01).
+# Closes here stamp close_reason=STALE_EXPIRY, which the app now names in
+# words on the signal card rather than printing the token.  Revisit the VALUE
+# only with a fresh window that measures it; do not raise it because the
+# mismatch looks wrong.
 RECONCILER_MAX_POSITION_AGE_SEC: int = _safe_int(
     "RECONCILER_MAX_POSITION_AGE_SEC", "7200"
 )

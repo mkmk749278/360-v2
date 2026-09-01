@@ -54,6 +54,14 @@ KEY_DATA_INTAKE    = "snapshot:data_intake"    # data-intake X-ray         — w
 KEY_ROUTER_DELIVERY = "snapshot:router_delivery"  # router drop census     — written every ~15 s
 KEY_TRAIL_GOVERNOR = "snapshot:trail_governor"  # live trail-governor X-ray — written every ~15 s
 KEY_DARK_PROMOTION = "snapshot:dark_promotion"  # promotion decide-counters — written every ~15 s
+#: {symbol: mark_price} for every symbol the engine is currently marking,
+#: plus ``__stamped_at__``.  The api container has no mark-price feed of
+#: its own (and no signing socket), so without this a per-user position
+#: card either shows no live PnL at all or fetches a price ITSELF and
+#: prints it beside engine state on a different clock — the defect ops
+#: paid for on 2026-07-30.  The engine already subscribes to exactly the
+#: symbols with open positions, so publishing them costs one small SET.
+KEY_POSITION_MARKS = "snapshot:position_marks"  # {symbol: price}  — written every ~15 s
 KEY_CMD_SET_MODE   = "snapshot:cmd:set_mode"   # str "off|paper|live"     — consumed once
 KEY_CMD_RESET_SIGNALS = "snapshot:cmd:reset_signals"  # set to "1" by API; consumed once by engine
 TTL_CMD_RESET = 120  # 2-min TTL — engine consumes before this; if engine is down, client must retry
@@ -110,6 +118,11 @@ TTL_DATA_INTAKE  = _TTL_FEED
 TTL_ROUTER_DELIVERY = _TTL_FEED
 TTL_TRAIL_GOVERNOR  = _TTL_FEED
 TTL_DARK_PROMOTION  = _TTL_FEED
+#: Deliberately SHORTER than _TTL_FEED.  A stale feed renders a stale
+#: list, which is merely old; a stale mark renders a WRONG unrealized
+#: PnL on a live position, which reads as fact.  Expiring lets the app
+#: say "no live mark" instead of quoting a price from ten minutes ago.
+TTL_POSITION_MARKS = 90
 TTL_ALERTS       = _TTL_FEED
 TTL_CMD          = 60  # command expires if engine is down; client must retry
 

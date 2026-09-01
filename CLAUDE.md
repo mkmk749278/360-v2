@@ -1957,3 +1957,75 @@ python -m src.main
     ships with both written down: if restarts continue at the same ~15-minute
     period, check `heartbeat_progress_writes` before forming a new theory — and
     a quiet hour proves nothing about a ~15-minute period.
+
+- **A vendor's auto-cleanup is a property of the ORDER TYPE, and the docstring
+  claimed it for the wrong one.** `order_placer.place_pretp_trail` read *"TP
+  orders have `reduceOnly=true` and Binance auto-cancels reduce-only orders
+  when the position is closed by another order"*, and the whole bracket-cleanup
+  design rested on that sentence. Binance sweeps reduce-only orders resting on
+  the **order book**; every SL and TP this engine places is an **algo** order
+  (`/fapi/v1/algoOrder`, `algoType=CONDITIONAL`) sitting untriggered in the
+  conditional engine, which is not swept. So *nothing* retired a bracket at a
+  terminal close: `_apply_sl_fill` is the plain case — the stop fires, the
+  position goes flat, and TP1/TP2/TP3 stay parked. Owner screenshot 2026-09-01:
+  **Positions (0) / Open Orders → Conditional (24)**, oldest 15h old, FETUSDT
+  carrying a resting Sell TP and a resting Buy TP at once.
+
+  The tell was in Binance's own UI, which files the two under separate tabs —
+  *exercise a vendor seam once before shipping it*, the depth-stream rule
+  (2026-08-05) at the order layer. And the knowledge already existed in this
+  repo: `close_fsm_positions_for_signal` sweeps the same set and its comment
+  says the auto-cancel claim is false. It never reached the fill handlers,
+  where most closes actually happen. A **seam**, in the usual shape — nothing
+  crashed, nothing was empty, and a reduce-only orphan books no loss of its
+  own, which is why it ran for months.
+
+  Three habits. **Sweep at the choke point, not per handler**: the FSM now
+  cancels once, keyed on `is_terminal(position.state)` after the phase
+  dispatch, so a handler added later is covered without anyone remembering —
+  and the attr set is *derived* from the dataclass in `position_state` rather
+  than typed out a third time (two hand-kept copies already existed and
+  disagreed). **Zero the id before persisting, not after**, or a crash strands
+  a document claiming orders that are gone. And **keep the id on a failed
+  cancel**: it is the only record that an order is still out there, and the
+  reconciler reads the same fields.
+
+- **Two surfaces on different clocks BY DESIGN still need somebody to price the
+  divergence.** `SIGNAL_EXPIRY_ENABLED` went False on 2026-06-26 so signals run
+  to TP or SL and never expire mid-move — deliberate, owner-decided, and its
+  config comment explicitly notes *"the 2h auto-trade reconciler stale-close
+  safety net is unaffected"*. Both halves were known. Nobody asked what the
+  pair produces: **39 of 140 matched positions (28%) closed at 120–121 minutes**
+  in the owner's 24 Aug – 1 Sep Binance history, none by a TP or a stop, with
+  nothing in the window surviving past 121.4 minutes — while the signals above
+  them ran a median 2.4h longer (max 46.6h). That is the app showing five
+  ACTIVE signals over a Trade tab reading zero positions.
+
+  **And the obvious fix is wrong, which is the part worth keeping.** Raising
+  the ceiling so positions match signals: scoring those 39 against what their
+  signal went on to do gives **15 better, 23 worse, +0.48 USD over 38 trades**.
+  The backstop costs no money; it costs *coherence*, so the repair is on the
+  surface (name `STALE_EXPIRY` in words on the signal card, tell the reader the
+  two tabs answer different questions) and not on the number. *Check the
+  direction of every recommendation, not only its premise* — the premise was
+  right and the lever was somewhere else.
+
+  Corollary: `RECONCILER_MAX_POSITION_AGE_SEC`'s comment read *"comfortably
+  beyond any legitimate scalp hold … so it never clips a healthy position"*.
+  It clipped 28% of them. **A constant asserting a property it does not have,
+  checkable in one query against data the owner already had** — the seventh
+  recurrence in these two repos, and the first where the query needed the
+  *exchange's* record rather than ours. Where a claim is about what actually
+  happened on the account, the engine's own ledger cannot settle it.
+
+- **"Some signals don't trade" was 88% a working system and 12% one gate with
+  a name.** Joining the delivered feed to the Binance position history over the
+  same window: **140 of 159 delivered signals placed**. The 19 that did not are
+  not scattered — BTC, ETH, LTC, AAVE, LINK, BCH and FF **never traded once**,
+  which at a ~$10 notional is the `NotionalTooSmall` refusal
+  (`_compute_qty_split` returns zeros when the LOT_SIZE floor cannot clear
+  MIN_NOTIONAL even after the one-step snap-up). The engine had recorded every
+  one of them with actionable copy since the path shipped. **Before diagnosing
+  a fan-out, join the two ledgers and count** — the shape of the miss list is
+  the diagnosis, and "some signals" turned out to name one filter and one
+  setting rather than a fault.
