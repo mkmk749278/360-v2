@@ -280,6 +280,8 @@ class SnapshotWriter:
             await self._write_router_delivery()
         with self._timing("dark_promotion"):
             await self._write_dark_promotion()
+        with self._timing("position_marks"):
+            await self._write_position_marks()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             with self._timing("activity"):
                 await self._write_activity()
@@ -495,6 +497,50 @@ class SnapshotWriter:
     def _build_tickers(self) -> list:
         from src.api.snapshot import build_tickers
         return [i.model_dump(mode="json") for i in build_tickers(self._engine)]
+
+    async def _write_position_marks(self) -> None:
+        """Publish the engine's live marks so the api container can price a
+        user's open position.
+
+        Why this exists.  ``GET /api/auto-trade/positions`` runs in the api
+        container, which has no mark-price feed and no signing socket — so the
+        Trade tab could show a position's ENTRY and never what it is worth
+        now.  The two alternatives were both worse: the app fetching a price
+        itself puts a live number beside engine state on a clock the page
+        supplies (the defect ops paid for on 2026-07-30), and a signed
+        positionRisk call per app poll is a per-request vendor round trip on a
+        path every subscriber hits.
+
+        The engine is already subscribed to exactly these symbols — the
+        mark-price feed exists to drive the pre-TP dispatcher — so this reads
+        an in-memory dict and writes one small key.  No new subscription, no
+        new network call, nothing added to a hot loop.
+
+        ``__stamped_at__`` rides along because a mark is only honest beside
+        something that can say how old it is.
+        """
+        try:
+            from src.execution import mark_price_feed as _mpf
+
+            feed = _mpf.get_instance()
+            if feed is None:
+                return
+            marks = {
+                sym: price
+                for sym, price in feed.all_prices().items()
+                if isinstance(price, (int, float)) and price > 0
+            }
+            if not marks:
+                # Nothing open, nothing subscribed.  Write anyway: an absent
+                # key must mean "the engine is not publishing", never "no
+                # position is open" — different faults, different fixes.
+                marks = {}
+            marks["__stamped_at__"] = time.time()
+            await self._set(
+                _store.KEY_POSITION_MARKS, marks, _store.TTL_POSITION_MARKS,
+            )
+        except Exception:
+            log.exception("snapshot_writer: failed to write position marks")
 
     async def _write_engine_state(self) -> None:
         try:

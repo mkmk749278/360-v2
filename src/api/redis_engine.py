@@ -572,6 +572,32 @@ class RedisEngineFacade:
         await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
         return True
 
+    async def enqueue_close_position(
+        self, *, request_id: str, uid: str, signal_id: str
+    ) -> bool:
+        """LPUSH a "close my own position" envelope (kind="close_position").
+
+        Shares the take queue and result key — one consumer, one bridge, and
+        the consumer routes on ``kind``.  Returns False when Redis is down so
+        the route can 503 rather than telling a user their position is closed
+        when nothing was ever asked to close it.
+        """
+        if not self._redis.available:
+            log.warning(
+                "redis_engine.enqueue_close_position: Redis unavailable — "
+                "refusing close uid={} signal_id={}", uid, signal_id,
+            )
+            return False
+        envelope = json.dumps({
+            "kind": "close_position",
+            "request_id": request_id,
+            "uid": uid,
+            "signal_id": signal_id,
+            "ts": time.time(),
+        })
+        await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
+        return True
+
     async def enqueue_manual_trade(
         self, *, request_id: str, uid: str, payload: dict
     ) -> bool:
@@ -641,6 +667,28 @@ class RedisEngineFacade:
             log.warning(
                 "redis_engine.read_manual_take_result: malformed result "
                 "request_id={} raw={!r}", request_id, raw,
+            )
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    async def read_position_marks(self) -> Optional[dict]:
+        """Return ``{symbol: mark_price, "__stamped_at__": epoch}`` or ``None``.
+
+        ``None`` means the api could not read the key — an engine that has
+        stopped publishing, or Redis being down.  An empty MAPPING means the
+        engine is publishing and marking nothing.  The two must not collapse:
+        one is a fault, the other is a quiet account.
+        """
+        if not self._redis.available:
+            return None
+        raw = await self._redis.client.get(_store.KEY_POSITION_MARKS)
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            log.warning(
+                "redis_engine.read_position_marks: malformed payload",
             )
             return None
         return parsed if isinstance(parsed, dict) else None

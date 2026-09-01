@@ -599,9 +599,25 @@ class OrderPlacer:
 
         ``closePosition=true`` covers the ENTIRE remaining position
         (including any TP2 residual after a partial TP1 fill) without
-        needing an explicit quantity.  This is safe because TP orders have
-        ``reduceOnly=true`` and Binance auto-cancels reduce-only orders
-        when the position is closed by another order.
+        needing an explicit quantity.
+
+        **This paragraph used to end "...which is safe because TP orders have
+        reduceOnly=true and Binance auto-cancels reduce-only orders when the
+        position is closed by another order."  That sentence is false for
+        these orders, and the whole bracket-cleanup design rested on it.**
+        Binance sweeps reduce-only orders resting on the ORDER BOOK.  Every SL
+        and TP this module places is an ALGO order (``/fapi/v1/algoOrder``,
+        ``algoType=CONDITIONAL``) which sits untriggered in the conditional
+        engine and is not swept — Binance's own UI files them under a separate
+        "Conditional" tab for exactly that reason.  Owner screenshot
+        2026-09-01: **Positions (0), Open Orders → Conditional (24)**, oldest
+        15h old, every one a reduce-only TAKE_PROFIT_MARKET against a position
+        that no longer existed.
+
+        The engine retires them itself now —
+        :func:`position_fsm.cancel_protective_orders`, called at every
+        terminal transition and by both reconciler close paths.  Nothing here
+        may go back to assuming the exchange does it.
 
         Uses ``coid_sl_be`` suffix (same as BE-SL) so the FSM's existing
         ``_apply_sl_be_fill`` handler transitions the position to CLOSED

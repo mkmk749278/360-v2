@@ -53,6 +53,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.execution import position_state as _ps
 from src.utils import get_logger
 
 log = get_logger("execution.signal_dispatch")
@@ -124,18 +125,11 @@ _consec_insufficient_margin: Dict[str, int] = defaultdict(int)
 #:
 #: A list of names excludes exactly the orders somebody already thought of and
 #: is silent by construction on the next one — the ``is_tradfi_perp`` rule, at
-#: the cleanup layer.  ``tests/test_trail_governor_cleanup.py`` asserts this set
-#: against the dataclass's own fields, so a seventh protective order fails CI
-#: rather than leaking quietly.
-_PROTECTIVE_ORDER_ATTRS: Tuple[str, ...] = (
-    "sl_order_id",
-    "sl_be_order_id",
-    "trail_order_id",
-    "trail_stop_order_id",
-    "tp1_order_id",
-    "tp2_order_id",
-    "tp3_order_id",
-)
+#: the cleanup layer.  So it is no longer a list: ``position_state`` DERIVES it
+#: from the dataclass's own fields and both this module and ``position_fsm``
+#: read that one tuple.  A test asserting a hand-kept copy against the
+#: dataclass catches the drift; not keeping the copy is what prevents it.
+_PROTECTIVE_ORDER_ATTRS: Tuple[str, ...] = _ps.PROTECTIVE_ORDER_ATTRS
 
 _CANCEL_BOUND_REGIMES: frozenset = frozenset({"RANGING", "QUIET"})
 
@@ -1788,6 +1782,7 @@ async def close_fsm_positions_for_signal(
     direction: str,
     reason: str,
     excluded_modes: Optional[frozenset] = None,
+    only_uid: Optional[str] = None,
 ) -> int:
     """Cancel native SL/TP orders + place a MARKET close for every user
     who has a non-terminal FSM position for ``signal_id``.
@@ -1802,6 +1797,19 @@ async def close_fsm_positions_for_signal(
     invalidation path (reason="invalidated") to let loose-mode users
     ride to their native SL/TP rather than being closed by the
     engine's regime/EMA/momentum kill.
+
+    ``only_uid``: restrict the fan-out to ONE user.  This is what the app's
+    "Close position" button reaches (2026-09-01, owner: *"user can close that
+    trade from our app too without visiting binance"*), and it is a parameter
+    rather than a second function on purpose — everything below it is the
+    hardened close: cancel the bracket first so a resting stop cannot fire
+    against our own market order, tolerate -2022 because Binance may have
+    flattened us a millisecond earlier, mark terminal so the monitor stops
+    re-attempting.  A second implementation would be a second thing to keep
+    correct, and this repo has paid for that in every measurement lane that
+    grew its own resolver.  Note the scope: it closes the user's POSITION and
+    leaves the signal in the engine's book, which is the honest split — one
+    subscriber exiting early is not the setup being invalidated for everyone.
 
     Returns the count of users whose positions were actually closed
     (i.e. the MARKET close order was accepted OR the position was
@@ -1821,6 +1829,13 @@ async def close_fsm_positions_for_signal(
         return 0
 
     uids = _active_uids()
+    if only_uid is not None:
+        # Deliberately NOT intersected with ``_active_uids()``: that set is
+        # the auto-trade fan-out roster, and a user who has since turned
+        # auto-trade off still owns any position it opened.  Refusing to
+        # close it because they are no longer on the roster would strand a
+        # real position behind a button that says it closes it.
+        uids = [only_uid]
     if not uids:
         return 0
 

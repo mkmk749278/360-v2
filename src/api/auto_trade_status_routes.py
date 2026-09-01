@@ -81,6 +81,80 @@ def invalidate_runtime_cache(firebase_uid: str) -> None:
     _runtime_cache.pop(firebase_uid, None)
 
 
+# ---------------------------------------------------------------------------
+# Marking an open position — where the live price comes from
+# ---------------------------------------------------------------------------
+
+
+async def _live_marks(get_engine: Optional[Callable[[], Any]]) -> tuple[dict, Optional[float]]:
+    """``({symbol: price}, stamped_at_epoch | None)`` for pricing open rows.
+
+    Two sources, one meaning.  In single-process mode the mark-price feed is
+    in this process.  In isolated mode (live on the VPS) it is not — the api
+    container has no feed and no signing socket — so the engine publishes its
+    marks to ``snapshot:position_marks`` and this reads them.
+
+    ``stamped_at`` is returned rather than assumed, and the caller puts it on
+    the wire.  A mark with no age beside it is the defect ops paid for on
+    2026-07-30: a live-looking price printed next to state from another clock,
+    under the word "now".  An empty mapping is a legitimate answer — nothing
+    open, nothing subscribed — and is not the same as a failure to read, which
+    returns an empty mapping with ``None`` for the stamp and makes every row
+    render its mark as unknown rather than as absent.
+    """
+    # In-process first: it is the freshest thing available and needs no hop.
+    try:
+        from src.execution import mark_price_feed as _mpf
+
+        feed = _mpf.get_instance()
+        if feed is not None:
+            prices = {
+                sym: float(px)
+                for sym, px in feed.all_prices().items()
+                if isinstance(px, (int, float)) and px > 0
+            }
+            if prices:
+                return prices, time.time()
+    except Exception:
+        log.debug("_live_marks: in-process feed unavailable", exc_info=True)
+
+    engine = get_engine() if get_engine is not None else None
+    reader = getattr(engine, "read_position_marks", None)
+    if reader is None:
+        return {}, None
+    try:
+        payload = await reader()
+    except Exception:
+        log.warning("_live_marks: snapshot read failed", exc_info=True)
+        return {}, None
+    if not isinstance(payload, dict):
+        return {}, None
+    stamped = payload.get("__stamped_at__")
+    prices = {
+        sym: float(px)
+        for sym, px in payload.items()
+        if sym != "__stamped_at__" and isinstance(px, (int, float)) and px > 0
+    }
+    return prices, (float(stamped) if isinstance(stamped, (int, float)) else None)
+
+
+def _unrealized(side: str, entry: float, mark: float, qty: float) -> tuple:
+    """``(pnl_usd, pnl_pct)`` on the position, or ``(None, None)``.
+
+    ``pnl_pct`` is the move on the ENTRY PRICE — the same thing Binance's own
+    position row calls the price change, and the same thing the signal card
+    beside it shows.  It is deliberately NOT divided by the stop distance:
+    this engine sizes at a fixed notional, so R equalises nothing here and
+    would put a number on screen that disagrees with both Binance and the
+    feed (see the repo's "PnL % leads; R is the bridge" rule).
+    """
+    if entry <= 0 or mark <= 0 or qty <= 0:
+        return (None, None)
+    direction = 1.0 if str(side).upper() == "LONG" else -1.0
+    pct = direction * (mark - entry) / entry * 100.0
+    return (round(direction * (mark - entry) * qty, 8), round(pct, 4))
+
+
 def register(
     app: FastAPI,
     *,
@@ -628,9 +702,25 @@ def register(
             }
 
         Closed positions are excluded — the Live-tab card is meant to
-        show what's *open right now*.  Historical PnL flows through
-        the trade-records endpoint (TBD) which preserves terminal-state
-        rows past their close.
+        show what's *open right now*.  What each of them CLOSED as is
+        ``/api/auto-trade/signal-outcomes``, which joins the terminal
+        position document to the dispatch event by signal id.
+
+        **Marked live since 2026-09-01** (owner: *"there we have to show
+        exactly how live open traded position shows in binance"*).  Until
+        then this returned the entry price and the geometry and nothing about
+        what the position is worth now, so the Trade tab could not render what
+        the Binance app renders and the user had to leave to find out.  Each
+        row now carries ``mark_price``, ``unrealized_pnl``,
+        ``unrealized_pnl_pct`` and ``notional`` — priced by the ENGINE (see
+        ``_live_marks``), never by the caller, so the price and the position
+        state are on one clock.
+
+        ``marks_stamped_at`` / ``marks_age_sec`` ride the envelope rather than
+        the rows, because they describe the read and not any one position, and
+        a row whose symbol the engine is not marking has ``mark_price: null``
+        — a real state (the feed dropped the symbol) that must not read as a
+        price of zero.
         """
         from src.execution import position_state as _ps
 
@@ -668,29 +758,70 @@ def register(
                 detail="Could not reach the position store. Please retry.",
             )
 
+        marks, stamped_at = await _live_marks(get_engine)
+
+        rows = []
+        for p in positions:
+            entry = (
+                p.entry_price_filled
+                if p.entry_price_filled > 0
+                else p.entry_price_target
+            )
+            # The size still on the exchange, not the size originally placed:
+            # a position that took TP1 carries a residual, and pricing the
+            # whole order would overstate what the user is holding.
+            open_qty = max(0.0, p.total_qty - p.closed_qty)
+            mark = marks.get(p.symbol)
+            pnl_usd, pnl_pct = (
+                _unrealized(p.side, entry, mark, open_qty)
+                if mark is not None
+                else (None, None)
+            )
+            rows.append({
+                "signal_id": p.signal_id,
+                "symbol": p.symbol,
+                "side": p.side,
+                "state": p.state.value,
+                "entry_price_target": p.entry_price_target,
+                "entry_price_filled": p.entry_price_filled,
+                "sl_price": p.sl_price,
+                "tp1_price": p.tp1_price,
+                "total_qty": p.total_qty,
+                "filled_qty": p.filled_qty,
+                "realized_pnl_total": p.realized_pnl_total,
+                "pretp_fired": p.pretp_fired,
+                "created_at": (
+                    p.created_at.isoformat()
+                    if p.created_at is not None
+                    else None
+                ),
+                # --- what Binance shows beside a position -------------------
+                "open_qty": open_qty,
+                "mark_price": mark,
+                "notional": (
+                    round(mark * open_qty, 8) if mark is not None else None
+                ),
+                "unrealized_pnl": pnl_usd,
+                "unrealized_pnl_pct": pnl_pct,
+                # The position can be closed from the app; a state that has no
+                # size on the exchange yet cannot.  Sent as a fact rather than
+                # left for the client to infer from `state`, so the button and
+                # the engine agree on one rule.
+                "closeable": (
+                    open_qty > 0
+                    and p.state.value not in ("PENDING", "PENDING_ENTRY")
+                ),
+            })
+
         return {
-            "positions": [
-                {
-                    "signal_id": p.signal_id,
-                    "symbol": p.symbol,
-                    "side": p.side,
-                    "state": p.state.value,
-                    "entry_price_target": p.entry_price_target,
-                    "entry_price_filled": p.entry_price_filled,
-                    "sl_price": p.sl_price,
-                    "tp1_price": p.tp1_price,
-                    "total_qty": p.total_qty,
-                    "filled_qty": p.filled_qty,
-                    "realized_pnl_total": p.realized_pnl_total,
-                    "pretp_fired": p.pretp_fired,
-                    "created_at": (
-                        p.created_at.isoformat()
-                        if p.created_at is not None
-                        else None
-                    ),
-                }
-                for p in positions
-            ],
+            "positions": rows,
+            # About the READ, not about any row — see the docstring.
+            "marks_stamped_at": stamped_at,
+            "marks_age_sec": (
+                round(time.time() - stamped_at, 1)
+                if stamped_at is not None
+                else None
+            ),
         }
 
 

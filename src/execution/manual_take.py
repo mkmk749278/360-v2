@@ -103,6 +103,9 @@ class ManualTakeConsumer:
         if _kind == "close":
             await self._process_close(envelope, raw)
             return
+        if _kind == "close_position":
+            await self._process_close_position(envelope, raw)
+            return
         request_id = str(envelope.get("request_id") or "")
         uid = str(envelope.get("uid") or "")
         signal_id = str(envelope.get("signal_id") or "")
@@ -167,6 +170,64 @@ class ManualTakeConsumer:
                 "ManualTakeConsumer: result write failed request_id={} "
                 "(order outcome itself is recorded in dispatch_log)",
                 request_id,
+            )
+
+    async def _process_close_position(
+        self, envelope: Dict[str, Any], raw: str
+    ) -> None:
+        """Handle a user closing their OWN position (kind="close_position").
+
+        Distinct from ``kind="close"`` beside it, which is the owner closing a
+        SIGNAL for everybody.  Same queue, same result key, different blast
+        radius — so they are different kinds rather than one with a flag.
+
+        No staleness gate, and that is the difference from a take.  Firing a
+        market ENTRY minutes after the user tapped enters at a price they
+        never saw; closing late still does the thing they asked for, and the
+        case where the request sits is precisely the case where they most want
+        out.
+        """
+        request_id = str(envelope.get("request_id") or "")
+        uid = str(envelope.get("uid") or "")
+        signal_id = str(envelope.get("signal_id") or "")
+        if not (request_id and uid and signal_id):
+            log.warning(
+                "ManualTakeConsumer: dropping incomplete close_position "
+                "envelope {!r}", raw,
+            )
+            return
+        log.info(
+            "ManualTakeConsumer: close_position uid={} signal_id={}",
+            uid, signal_id,
+        )
+        try:
+            result: Dict[str, Any] = await self._engine.close_position_for_user(
+                uid, signal_id,
+            )
+        except Exception as exc:
+            log.exception(
+                "ManualTakeConsumer: close_position crashed uid={} "
+                "signal_id={}", uid, signal_id,
+            )
+            result = {
+                "outcome": "rejected",
+                "reject_class": type(exc).__name__,
+                "reject_detail": str(exc),
+                "signal_id": signal_id,
+            }
+        try:
+            await self._redis.client.set(
+                _store.KEY_TAKE_RESULT_PREFIX + request_id,
+                json.dumps(result, default=str),
+                ex=_store.TTL_TAKE_RESULT,
+            )
+        except Exception:
+            # The close itself is already durable in position_state; losing
+            # the ephemeral answer only degrades the app to "check Recent
+            # Activity".  It must never read as the close having failed.
+            log.exception(
+                "ManualTakeConsumer: close_position result write failed "
+                "request_id={} (the close itself is recorded)", request_id,
             )
 
     async def _process_close(self, envelope: Dict[str, Any], raw: str) -> None:

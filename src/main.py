@@ -1134,6 +1134,132 @@ class CryptoSignalEngine:
             log.exception("close_signal_admin failed for %s", signal_id)
             return {"closed": False, "signal_id": signal_id, "reason": f"error: {exc}"}
 
+    async def close_position_for_user(
+        self, firebase_uid: str, signal_id: str
+    ) -> Dict[str, Any]:
+        """Close ONE user's own live position at market (app "Close" button).
+
+        Owner, 2026-09-01: *"user can close that trade from our app too
+        without visiting binance to close signals manually"*.
+
+        **Scope, and it is the whole design.**  This closes the caller's
+        POSITION.  It does not touch the signal, which stays in the engine's
+        book for every other subscriber — one person taking their money off
+        the table is not the setup being invalidated.  ``close_signal_admin``
+        beside it is the other thing, is owner-gated, and closes everyone.
+
+        Reuses ``close_fsm_positions_for_signal`` scoped to one uid rather
+        than growing a second close path: cancel the bracket first so a
+        resting stop cannot fire against our own market order, tolerate -2022
+        (Binance may have flattened us a millisecond earlier), mark terminal
+        so the monitor stops re-attempting.  Every one of those was paid for.
+
+        Returns the shape the app's Recent Activity card already renders:
+        ``outcome`` ∈ {"closed", "rejected"} plus reject fields.  A business
+        refusal is an OUTCOME, not a transport error — the route answers 200.
+        """
+        from src.execution import position_state as _ps
+
+        firebase_uid = str(firebase_uid or "").strip()
+        signal_id = str(signal_id or "").strip()
+        if not (firebase_uid and signal_id):
+            return {
+                "outcome": "rejected",
+                "reject_class": "MissingArgument",
+                "reject_detail": "A user and a signal are both required.",
+                "signal_id": signal_id,
+            }
+        if not _ps.is_initialised():
+            return {
+                "outcome": "rejected",
+                "reject_class": "PositionStoreOffline",
+                "reject_detail": (
+                    "The position store is not reachable right now. Your "
+                    "position is untouched — try again in a moment."
+                ),
+                "signal_id": signal_id,
+            }
+        try:
+            pos = await asyncio.to_thread(
+                _ps.get_position, firebase_uid, signal_id
+            )
+        except _ps.PositionNotFoundError:
+            return {
+                "outcome": "rejected",
+                "reject_class": "PositionNotFound",
+                "reject_detail": (
+                    "No position of yours is open on this signal."
+                ),
+                "signal_id": signal_id,
+            }
+        except Exception as exc:
+            log.exception(
+                "close_position_for_user: read failed uid=%s signal_id=%s",
+                firebase_uid, signal_id,
+            )
+            return {
+                "outcome": "rejected",
+                "reject_class": type(exc).__name__,
+                "reject_detail": str(exc),
+                "signal_id": signal_id,
+            }
+        if _ps.is_terminal(pos.state):
+            # Already closed — by a TP, a stop, the 2h backstop, or a tap the
+            # user made twice.  Naming the reason matters: "already closed"
+            # with no cause reads as the button being broken.
+            return {
+                "outcome": "rejected",
+                "reject_class": "PositionAlreadyClosed",
+                "reject_detail": (
+                    f"This position already closed "
+                    f"({pos.close_reason or pos.state.value})."
+                ),
+                "signal_id": signal_id,
+                "close_reason": pos.close_reason,
+                "symbol": pos.symbol,
+            }
+
+        from src.execution import signal_dispatch as _sd
+        closed = await _sd.close_fsm_positions_for_signal(
+            signal_id,
+            symbol=pos.symbol,
+            direction=pos.side,
+            reason="USER_CLOSE",
+            only_uid=firebase_uid,
+        )
+        if not closed:
+            return {
+                "outcome": "rejected",
+                "reject_class": "CloseFailed",
+                "reject_detail": (
+                    "Binance did not accept the close. Your position is "
+                    "unchanged and its stop is still in place — try again, "
+                    "or close it in the Binance app."
+                ),
+                "signal_id": signal_id,
+                "symbol": pos.symbol,
+            }
+        log.info(
+            "close_position_for_user: closed uid=%s signal_id=%s symbol=%s",
+            firebase_uid, signal_id, pos.symbol,
+        )
+        return {
+            "outcome": "closed",
+            "signal_id": signal_id,
+            "symbol": pos.symbol,
+            "side": pos.side,
+            "close_reason": "USER_CLOSE",
+            # Said explicitly because the app renders the signal card right
+            # beside this: the signal is still live for everyone else, and a
+            # user who reads "closed" over an ACTIVE card deserves to know
+            # which of the two it means.
+            "signal_still_active": True,
+            "detail": (
+                "Position closed at market. The signal stays in the feed — "
+                "you have exited it, not cancelled it."
+            ),
+        }
+
     async def build_manual_trade_for_user(
         self, firebase_uid: str, payload: Dict[str, Any]
     ) -> Dict[str, Any]:

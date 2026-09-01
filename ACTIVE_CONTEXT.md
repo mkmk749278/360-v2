@@ -4,6 +4,78 @@
 
 ---
 
+## SESSION 135 2026-09-01 — the account and the feed, reconciled against Binance's own record
+
+Owner sent his Binance Futures position history (143 closed positions, 24 Aug –
+1 Sep), three app screenshots, and four complaints. Joining that CSV to the
+delivered-signal record settled all four, and two of them the opposite way round
+from how they looked.
+
+**What the join says.** 159 delivered signals in the window; **140 placed on the
+account (88%)**. So the fan-out is not broken. The 19 that did not place
+concentrate on BTC / ETH / LTC / AAVE / LINK / BCH / FF, none of which traded
+once all week — the `NotionalTooSmall` refusal at a ~$10 notional, already
+recorded per-signal with actionable copy. Nothing to fix in the engine; the
+answer is the owner's position size, and it is already on the card.
+
+**1. The 24 orphaned conditional orders — a real defect, and a vendor seam.**
+`Positions (0)` beside `Open Orders → Conditional (24)`. Every terminal path
+left the bracket resting: the FSM's fill handlers cancel nothing, the
+reconciler's 2h stale close cancels nothing, and `_diff_and_heal` — the
+catch-all every exit the FSM did not book itself lands in — cancels nothing. The
+design rested on one sentence in `order_placer.place_pretp_trail` claiming
+Binance auto-cancels reduce-only orders on close. It sweeps reduce-only orders
+on the **book**; these are **algo/CONDITIONAL** orders and are not swept.
+`close_fsm_positions_for_signal` already knew and already swept — the knowledge
+never reached the three paths where most closes happen. Fixed at the FSM's one
+terminal choke point (so a future handler is covered without anyone remembering)
+plus both reconciler paths, with the attr set derived from the dataclass rather
+than typed out a third time. Counted in `position_fsm.sweep_counts()`.
+
+**2. "Signals shows 5 open, Trade tab shows nothing" — measured, and NOT fixed
+by the obvious change.** `SIGNAL_EXPIRY_ENABLED=false` (owner, 2026-06-26) means
+signals run to TP or SL; `RECONCILER_MAX_POSITION_AGE_SEC=7200` means positions
+are force-closed at 2h. **39 of 140 (28%) closed at 120–121 min**, nothing past
+121.4. Scoring those against what their signal went on to do: **15 better, 23
+worse, +0.48 USD over 38 trades.** The backstop costs no money, so the ceiling
+stays; what it costs is coherence. The false comment on it ("never clips a
+healthy position") is corrected in place with the measurement, and the app now
+names `STALE_EXPIRY` in words on the signal card instead of printing the token.
+
+**3. Closing from the app.** `POST /api/auto-trade/close`, over the existing
+manual-command bridge (`kind="close_position"`) because the api container has no
+signing socket. Scoped to ONE user's position via a new `only_uid` on
+`close_fsm_positions_for_signal` rather than a second close path — everything in
+that function (cancel the bracket first, tolerate -2022, mark terminal) was paid
+for once already. The signal stays in the book for everyone else and the
+response says so.
+
+**4. Positions that read like Binance's.** `/api/auto-trade/positions` now
+carries `mark_price`, `unrealized_pnl`, `unrealized_pnl_pct`, `notional`,
+`open_qty` and `closeable`, priced from a new `snapshot:position_marks` key the
+engine publishes from the mark-price feed it already runs. The app could fetch a
+price itself — Charts does — and that is the ops #108 defect: a live number
+beside engine state on a clock the page supplies. TTL 90s, deliberately shorter
+than the feed keys, so a stalled engine surfaces as "no mark" rather than as a
+confident wrong PnL.
+
+Also: the app's track record fired 2–3 uncached ~0.8s round trips on every chip,
+month step and day tap ("always laggy"). `SwrCache.read` is the one-shot sibling
+of `watch`; keys carry their arguments, TTL matches the `max-age=60` the engine
+already advertises, and `invalidatePrefix` keeps pull-to-refresh reaching the
+network.
+
+No scoring, gate, routing or emission behaviour changed. No flag was armed. The
+one money-path behaviour change is that a terminal close now cancels the orders
+it was already supposed to have cancelled.
+
+**Open:** the ops guest tier cannot POST `/diagnostics/console/run` on the
+deployed build — `GUEST_ACTION_ROUTES` carries it in the repo, so ops is behind
+`main`. Not investigated; it blocked reading the live dispatch funnel this
+session and the join was done from the two exports instead.
+
+---
+
 ## SESSION 134 2026-08-31 — two clock assumptions, both latent, both host/date dependent
 
 PR #986's CI was red. Neither failure was in the feature code it shipped; both were
