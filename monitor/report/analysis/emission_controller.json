@@ -27,7 +27,7 @@
       },
       "LIQUIDITY_SWEEP_REVERSAL": {
         "suppress_negative": false,
-        "min_samples": null
+        "min_samples": 20
       },
       "MOVER_AVWAP_SCALP": {
         "suppress_negative": false,
@@ -234,9 +234,10 @@
       "QUIET_COMPRESSION_BREAK|suppress_negative": 848,
       "TREND_PULLBACK_EMA|min_samples": 1365,
       "FAILED_AUCTION_RECLAIM|min_samples": 1745,
-      "SR_FLIP_RETEST|min_samples": 1759
+      "SR_FLIP_RETEST|min_samples": 1759,
+      "LIQUIDITY_SWEEP_REVERSAL|min_samples": 1855
     },
-    "cycle": 1835
+    "cycle": 1879
   },
   "ledger": [
     {
@@ -1446,6 +1447,32 @@
       "ev_per_suppression_r": null,
       "n": 15,
       "routable": true
+    },
+    {
+      "strategy": "LIQUIDITY_SWEEP_REVERSAL",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=21)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 21,
+      "routable": true
+    },
+    {
+      "strategy": "LIQUIDITY_SWEEP_REVERSAL",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=21)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 21,
+      "routable": true
     }
   ],
   "pending": [],
@@ -1470,7 +1497,8 @@
       "suppress_negative": false
     },
     "LIQUIDITY_SWEEP_REVERSAL": {
-      "suppress_negative": false
+      "suppress_negative": false,
+      "min_samples": 20
     },
     "MOVER_AVWAP_SCALP": {
       "suppress_negative": false
