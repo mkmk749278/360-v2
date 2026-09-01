@@ -101,11 +101,27 @@ _DEFAULT_INTERVAL_S = 60.0
 # again.
 _ORPHAN_SWEEP_HISTORY_LIMIT = 50
 
-# Cancels attempted per user per cycle.  A bound you cannot compute in advance
-# is a blast-radius cap and it is counted: the backlog is drained over several
-# cycles rather than in one burst against an account that has been IP-banned
-# for hammering before.  Residue carries to the next cycle.
-_ORPHAN_SWEEP_MAX_CANCELS = 12
+# ITEMS examined per user per cycle — not cancels.
+#
+# **This bound was written as a cancel budget and that was a live outage.**
+# Decremented only when an id came back CONFIRMED OPEN, it never bound the
+# path that dominates a real account: an id Binance no longer lists is already
+# gone, took the un-budgeted branch, and the loop ran on.  A user with 50
+# closed positions carries up to 350 order-id fields, nearly all long filled,
+# so one cycle could spend a signed ``algoOpenOrders`` GET per DISTINCT SYMBOL
+# (this account has traded 79) plus a Firestore read and write per gone id —
+# every cycle, against an IP-whitelisted box.  Binance rate-limits by IP, so
+# every subsequent order placement failed ``OrderPlacementUnreachable``:
+# auto-trade was down for hours (owner screenshots 2026-09-01), and the comment
+# that used to sit here said the cap existed because this account "has been
+# IP-banned for hammering before".
+#
+# A budget that does not decrement on the common path is not a budget.  It now
+# decrements once per ITEM EXAMINED, before any work, so it bounds the
+# exchange calls, the Firestore round trips and the cancels together — the
+# three costs that actually exist.  Residue carries to the next cycle, so a
+# large backlog drains over minutes instead of arriving as a burst.
+_ORPHAN_SWEEP_MAX_ITEMS = 12
 
 # Order healing skips positions with FSM activity in this window so a
 # reconcile cycle can never race an in-flight cancel→replace transition
@@ -544,6 +560,12 @@ class Reconciler:
             )
 
     async def _sweep_orphan_backlog_inner(self, firebase_uid: str) -> None:
+        # Default OFF since the 2026-09-01 incident — see
+        # RECONCILER_ORPHAN_SWEEP_ENABLED. Read per call rather than cached at
+        # construction so the owner can arm it with a restart and nothing more.
+        from config import RECONCILER_ORPHAN_SWEEP_ENABLED as _sweep_on
+        if not _sweep_on:
+            return
         pending = self._orphan_pending.get(firebase_uid) or []
 
         if not pending and firebase_uid not in self._orphan_history_read:
@@ -588,7 +610,7 @@ class Reconciler:
         placer = self._order_placer_factory(firebase_uid)
         # One algoOpenOrders fetch per distinct symbol, cached for this cycle.
         open_ids_cache: Dict[str, Optional[Set[int]]] = {}
-        budget = _ORPHAN_SWEEP_MAX_CANCELS
+        budget = _ORPHAN_SWEEP_MAX_ITEMS
         carried: List[tuple] = []
 
         for item in pending:
@@ -596,6 +618,11 @@ class Reconciler:
             if budget <= 0:
                 carried.append(item)
                 continue
+            # Spent HERE, before any work, so every path below is bounded —
+            # the symbol fetch, the Firestore clear and the cancel alike.
+            # Decrementing only on the cancel left the common path (an id
+            # Binance no longer lists) unbounded and took auto-trade down.
+            budget -= 1
             if symbol not in open_ids_cache:
                 open_ids_cache[symbol] = await self._fetch_open_algo_ids(
                     firebase_uid, client, symbol
@@ -614,7 +641,6 @@ class Reconciler:
                 await self._clear_orphan_id(firebase_uid, signal_id, attr)
                 continue
             self.orphan_counts["confirmed_open"] += 1
-            budget -= 1
             try:
                 await placer.cancel_algo_order(symbol=symbol, algo_id=order_id)
             except Exception as exc:

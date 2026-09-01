@@ -2083,3 +2083,35 @@ python -m src.main
   `None` from that fetch ("we could not ask") is kept strictly apart from an
   empty set ("Binance confirmed nothing is open"), because conflating them
   clears every id and declares a dirty account clean.
+
+- **A budget that does not decrement on the common path is not a budget —
+  and the test that only exercises the uncommon path will pass.** The orphan
+  sweep's per-cycle cap was written as a CANCEL budget and spent only when an
+  id came back CONFIRMED OPEN. On a real account almost every historical
+  protective order has long since filled, so the id is *already gone*, takes
+  that branch, and costs nothing — leaving the loop to run over all ~350 of a
+  user's closed-position order-id fields: one signed `algoOpenOrders` GET per
+  DISTINCT SYMBOL (this account has traded 79) plus a Firestore read and write
+  per gone id, every cycle. Binance rate-limits by IP and the engine is
+  whitelisted to one box, so **every subsequent order failed
+  `OrderPlacementUnreachable` and auto-trade was down for hours**
+  (owner-caught 2026-09-01, hours after I deployed it).
+
+  The comment sitting directly above that cap said it existed because this
+  account "has been IP-banned for hammering before". I wrote the sentence and
+  the defect in the same commit.
+
+  Three habits. **Spend the budget at the TOP of the iteration, before any
+  work** — then it bounds every path, including the ones added later, rather
+  than the single path whoever wrote it was picturing. **Ask which branch is
+  the common one in production**, not which one the feature is named after:
+  here the feature is "cancel orphans" and the common branch is "nothing to
+  cancel". And **a bound needs a test on the path that does NOT do the work** —
+  mine covered the cancel path only, so it passed against code that was
+  unbounded in the case that actually runs.
+
+  Corollary on the remedy: a cleanup feature that has cost live trades ships
+  **default OFF** afterwards, and the default is the incident report. Nothing
+  depended on it — the orphans are reduce-only conditional orders that book no
+  loss of their own, and the terminal-close sweep prevents new ones regardless
+  — so leaving it armed bought nothing and risked the money path twice.
