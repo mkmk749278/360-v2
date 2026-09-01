@@ -56,6 +56,17 @@ def _closed(signal_id: str, symbol: str = "BTCUSDT", **ids):
     return position_state.Position(**base)
 
 
+@pytest.fixture(autouse=True)
+def _arm_sweep(monkeypatch):
+    """The sweep defaults OFF after the 2026-09-01 incident.
+
+    Armed here so the behaviour below is exercised; the OFF default is pinned
+    by its own test rather than by every other test silently depending on it.
+    """
+    import config
+    monkeypatch.setattr(config, "RECONCILER_ORPHAN_SWEEP_ENABLED", True)
+
+
 @pytest.fixture
 def store(monkeypatch):
     docs: dict = {}
@@ -180,7 +191,7 @@ async def test_the_cap_drains_the_backlog_rather_than_dropping_it(
     await r._sweep_orphan_backlog("fb-o")
 
     first = placer.cancel_algo_order.await_count
-    assert first == reconciler_mod._ORPHAN_SWEEP_MAX_CANCELS
+    assert first == reconciler_mod._ORPHAN_SWEEP_MAX_ITEMS
     assert r._orphan_pending["fb-o"]  # the rest is carried
 
     await r._sweep_orphan_backlog("fb-o")
@@ -233,3 +244,91 @@ async def test_the_sweep_never_raises_into_reconciliation(store, monkeypatch):
     )
     r, _ = _reconciler(open_ids=set(), store=store)
     await r._sweep_orphan_backlog("fb-o")  # no exception = pass
+
+
+# ---------------------------------------------------------------------------
+# The 2026-09-01 incident: a budget that did not bind
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_budget_bounds_ITEMS_not_just_cancels(store, _patch_history):
+    """The defect that took auto-trade down, pinned.
+
+    The budget used to decrement only when an id came back CONFIRMED OPEN. An
+    id Binance no longer lists — the overwhelmingly common case on a real
+    account, where most protective orders long since filled — took the
+    ``already_gone`` branch and never spent a thing. So the loop ran over
+    EVERY pending item: one signed ``algoOpenOrders`` GET per distinct symbol
+    and a Firestore read+write per gone id, every cycle. Binance rate-limits
+    by IP and the engine is whitelisted to one box, so every subsequent order
+    failed ``OrderPlacementUnreachable`` for hours.
+
+    Here every id is already gone — nothing is cancellable — so under the old
+    code the budget would have been untouched and all 20 symbols fetched.
+    """
+    rows = [_closed(f"sig-{n}", symbol=f"SYM{n}USDT", tp1_order_id=9000 + n)
+            for n in range(20)]
+    _patch_history["rows"] = rows
+    r, placer = _reconciler(closed=rows, open_ids=set(), store=store)
+
+    fetched: list = []
+
+    async def _counting_fetch(uid, client, symbol):  # noqa: ARG001
+        fetched.append(symbol)
+        return set()
+
+    r._fetch_open_algo_ids = _counting_fetch  # type: ignore[assignment]
+
+    await r._sweep_orphan_backlog("fb-o")
+
+    # Bounded by the ITEM budget even though not one cancel was possible.
+    assert len(fetched) == reconciler_mod._ORPHAN_SWEEP_MAX_ITEMS
+    placer.cancel_algo_order.assert_not_awaited()
+    # And the remainder is carried, not dropped.
+    assert len(r._orphan_pending["fb-o"]) == 20 - reconciler_mod._ORPHAN_SWEEP_MAX_ITEMS
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_also_spends_budget(store, _patch_history):
+    """The other un-budgeted branch. A symbol whose fetch fails carried the
+    item and spent nothing, so a broken key or a rate-limited box would spin
+    the whole backlog every cycle — turning one problem into a hammering
+    loop that guarantees the next call fails too."""
+    rows = [_closed(f"sig-{n}", symbol=f"SYM{n}USDT", tp1_order_id=9000 + n)
+            for n in range(20)]
+    _patch_history["rows"] = rows
+    r, _placer = _reconciler(closed=rows, open_ids=None, store=store)
+
+    calls: list = []
+
+    async def _failing_fetch(uid, client, symbol):  # noqa: ARG001
+        calls.append(symbol)
+        return None
+
+    r._fetch_open_algo_ids = _failing_fetch  # type: ignore[assignment]
+
+    await r._sweep_orphan_backlog("fb-o")
+
+    assert len(calls) == reconciler_mod._ORPHAN_SWEEP_MAX_ITEMS
+    # Nothing lost: every item is still owed a look.
+    assert len(r._orphan_pending["fb-o"]) == 20
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_is_off_by_default(store, _patch_history, monkeypatch):
+    """A cleanup feature that has already cost live trades does not re-arm
+    itself on deploy. Nothing depends on it: the orphans it clears are
+    reduce-only conditional orders that book no loss of their own, and the
+    terminal-close sweep prevents new ones whatever this flag says."""
+    import config
+    monkeypatch.setattr(config, "RECONCILER_ORPHAN_SWEEP_ENABLED", False)
+
+    _patch_history["rows"] = [_closed("sig-1", tp1_order_id=3001)]
+    r, placer = _reconciler(closed=[], open_ids={3001}, store=store)
+
+    await r._sweep_orphan_backlog("fb-o")
+
+    placer.cancel_algo_order.assert_not_awaited()
+    # Not even the history read: OFF means it costs nothing at all.
+    assert r.orphan_counts["history_reads"] == 0

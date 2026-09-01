@@ -4,6 +4,54 @@
 
 ---
 
+## SESSION 137 2026-09-01 — INCIDENT: my orphan sweep took auto-trade down
+
+Owner screenshots, ~12:30 UTC: every order for an hour reading *"Order could not
+be placed — Binance could not be reached with your key just now"* (CRVUSDT 1m,
+STARUSDT 30m, LITUSDT 31m, ENAUSDT 57m, UNIUSDT 1h). Last successful placement
+~07:30 UTC; failures begin ~08:30. **My engine deploy was 08:07–08:09.**
+
+**Cause, and it is mine.** `_sweep_orphan_backlog`'s per-cycle cap was written
+as a CANCEL budget and decremented only when an id came back CONFIRMED OPEN.
+An id Binance no longer lists — the overwhelmingly common case on a real
+account, where most protective orders long since filled — took the
+`already_gone` branch and spent nothing. So the loop ran over every pending
+item: 50 closed positions x 7 order-id fields = up to 350, costing one signed
+`algoOpenOrders` GET per DISTINCT SYMBOL (this account has traded 79) plus a
+Firestore read and write per gone id, every cycle. Binance rate-limits by IP
+and the engine is whitelisted to one box, so every subsequent order placement
+failed `OrderPlacementUnreachable`.
+
+The comment I wrote directly above that cap said it existed because this
+account "has been IP-banned for hammering before". **A budget that does not
+decrement on the common path is not a budget** — and the test I wrote for it
+only exercised the confirmed-open path, so it passed.
+
+**Fix.** The budget spends once per ITEM EXAMINED, before any work, so it
+bounds the exchange calls, the Firestore round trips and the cancels together.
+Two tests pin it, both verified to fail against the old placement: one where
+every id is already gone (no cancel possible, so the old code was wholly
+unbounded) and one where every fetch fails (the second un-budgeted branch,
+which turned a rate-limited box into a hammering loop guaranteeing the next
+call also failed).
+
+**And it now defaults OFF** (`RECONCILER_ORPHAN_SWEEP_ENABLED=false`). A
+cleanup feature that has cost live trades does not re-arm itself on deploy.
+Nothing depends on it: the orphans are reduce-only conditional orders that book
+no loss of their own, and `position_fsm`'s terminal-close sweep prevents new
+ones whatever this flag says. Arm it once the account is healthy and watch
+`orphan_counts` for a cycle.
+
+**Not established:** that the burst is definitely what Binance refused on. The
+ops guest grant had expired, so I could read neither the engine's counters nor
+the breaker state, and the diagnosis rests on the code defect plus the timing.
+The fix is correct either way, and defaulting OFF removes the sweep as a
+suspect so a remaining failure is unambiguously something else.
+
+8908 passed, ruff clean.
+
+---
+
 ## SESSION 136 2026-09-01 — the exchange was describing the position all along
 
 Owner on #992/#150: *"screenshot are fine implement it fully production grade

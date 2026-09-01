@@ -3505,6 +3505,25 @@ RECONCILER_STALE_CLOSE_ENABLED: bool = _safe_bool(
     "RECONCILER_STALE_CLOSE_ENABLED", "true"
 )
 
+# Orphan-backlog sweep — cancels protective orders left resting by positions
+# that closed before the terminal-close sweep existed.
+#
+# **Defaults OFF, and the default is the incident report.**  Shipped ON on
+# 2026-09-01 with a budget that only decremented on a confirmed-open id, so it
+# never bound the common path; the resulting burst of signed Binance requests
+# per cycle took auto-trade down for hours with every order failing
+# `OrderPlacementUnreachable`.  The bound is fixed (it now spends once per item
+# examined), but a cleanup feature that has already cost live trades does not
+# get to re-arm itself on deploy: the owner turns it on once the account is
+# healthy, watches `orphan_counts` for a cycle, and leaves it on.
+#
+# Nothing depends on it.  The orphans it clears are reduce-only conditional
+# orders that book no loss on their own; the terminal-close sweep in
+# `position_fsm` prevents new ones regardless of this flag.
+RECONCILER_ORPHAN_SWEEP_ENABLED: bool = _safe_bool(
+    "RECONCILER_ORPHAN_SWEEP_ENABLED", "false"
+)
+
 # Defensive resync interval (seconds) for the engine's in-memory live-
 # position index.  The index is maintained write-through by put_position /
 # delete_position (the same sole-writer invariant behind the write-generation
