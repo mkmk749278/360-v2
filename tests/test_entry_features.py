@@ -353,6 +353,12 @@ class TestFeatureRegistry:
             "uses_1h_trend",       # a flag, not a magnitude
             "funding_rate",        # deliberately unsigned — see capture()
             "liq_clusters_n",
+            # Measured non-monotonic on the 90-day delivered book (2026-09-02):
+            # legs 2-4 are the best of the book at +0.10 to +0.32%/trade, leg 1
+            # is the worst at -0.04%, and leg 5 dips again. Neither direction is
+            # a hypothesis, and asserting one would invent a shape the data does
+            # not have. The split table shows both sides regardless.
+            "campaign_leg_index",
         }
         for setup in ef.PATH_FEATURES:
             for feature in ef.features_for(setup):
@@ -378,6 +384,12 @@ _LOWER_IS_BETTER = {
     "leg_move_pct",
     "avwap_touches_in_leg",
     "edge_touches",
+    # Hours since the previous leg on this campaign closed: FRESHER is better.
+    # Measured, the continuation effect lives inside ~6h (+1.41% at 0-2h and
+    # +1.42% at 2-6h, both intervals excluding zero) and is gone beyond it
+    # (-0.03% at 6-24h, +0.06% past a day, both spanning zero). Keeping the high
+    # half would keep the stale rows and read as the effect not existing.
+    "campaign_prev_age_h",
 }
 
 

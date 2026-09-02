@@ -4,6 +4,225 @@
 
 ---
 
+## OPEN — one ops write the owner has to make, and it is not a PR
+
+**`entry_quality_session_quality_live` is ON and its measured direction is
+against it.** The tunable was set True in the 2026-08-29 flip; the code default
+is and always was `live_default=False`, so **no code change can undo it** — the
+value lives in `control/runtime_tunables` and only an ops write clears it.
+Control → Signal gating → *Entry quality · Low-liquidity clock window — apply
+live* → OFF.
+
+What it does at 0.8: removes **61%** of the delivered book. What the delivered
+book says about the rows it removes:
+
+| | n | win | net/trade |
+|---|---|---|---|
+| rows the rule KEEPS | 594 | 35.0% | +0.079% |
+| rows the rule DROPS | 917 | 39.8% | +0.044% |
+
+On the live book (retired paths excluded) it is worse: keeps **+0.119%**, drops
+**+0.136%** — the point estimate is against the rule, CI95 [−0.297, +0.264].
+The engine's own entry-features panel agrees from its own data: the rows it
+would remove average **+0.47%** against a book of +0.40%.
+
+The scale's assumed ordering does not match measured outcomes. OVERLAP (1.0,
+kept) is −0.016%/trade and LONDON (0.80, kept) is −0.086% — the worst session in
+the book — while **OFF_HOURS (0.30, dropped) is +0.214% at 53% win over n=287**,
+the second-best. Measured ranking: NY > OFF_HOURS > OVERLAP > ASIA > LONDON.
+
+**It is currently inert by accident, not by design.** `entry_quality_effective`
+reads `167 evaluated, 0 suppressed, 167 shadow-rejected; live rules:
+profile_reject`, and the ops panel shows `253 held back by the cap` — a rule
+wanting ~60% rejection permanently trips the 0.35 blast-radius cap, so the gate
+has degraded to shadow. The moment that window recovers it starts halving the
+feed. The rule's own docstring calls it *"a discovery, not a repair"*; that
+reading was right and the flip was not.
+
+Do **not** act on the suppression audit's KEEP (+0.30 R/suppression) for this
+gate: it forward-measures suppressed candidates as a TP1-vs-SL counterfactual,
+which is optimistic (~0.38R on this system's own measurement) and R-denominated
+on a fixed-notional book. The delivered, realised measurement is the one to
+believe.
+
+---
+
+## SESSION 139 2026-09-02 — a signal-quality audit, and the one discriminator that reproduced
+
+Owner: *"concentrate on signal quality, not only depends on code base only,
+reality of crypto market, our paths, our pairs and are we doing all really good
+and is there anything to improve"*. Read through the ops guest session: 1,511
+delivered closed signals (25 Jun → 2 Sep), 1,924 resolved dark rows, 3,755
+resolved trailing arms, 401 joined entry-feature stamps, plus the gate audit,
+liveness probes, pairs census and router-drop counters.
+
+### Where the book actually stands
+
+- **90 days: +0.058%/trade net**, campaign-clustered CI95 **[−0.083, +0.203]** —
+  statistically zero.
+- **Last 30 days, live book: +0.444%/trade, CI95 [+0.114, +0.743]** — the first
+  window that excludes zero. The August retirements took effect: no MVRTP short
+  and no VSB has closed since the week of 10 Aug.
+- **Not one individual path has an interval excluding zero.** MVRTP reads
+  +0.210% [−0.098, +0.528] and is **76% of the last-30-day feed**.
+- Fees take **35%** of gross on the live book, 55% on the whole book.
+- The post-flip window (112 signals since 29 Aug) is −0.292%/trade, CI95
+  **[−0.831, +0.246]**. That spans zero. It is not evidence the flip hurt.
+  **Refutation condition, stated in advance:** if the next ~300 delivered
+  signals keep the point estimate negative with a CI still excluding zero on the
+  *upside*, the flip is implicated; a quiet four days proves nothing either way.
+
+### The three findings that carry weight
+
+1. **The confidence score does not rank outcomes.** Spearman **+0.012** over
+   1,924 dark rows; +0.008 within MVRTP; +0.041 within TPE. On the delivered
+   book the score bands are non-monotonic (65–70 +0.46%, 70–75 −0.04%, 75–80
+   +0.53%, 80+ +0.39%). Every context-emission relaxation, `min_confidence` and
+   the channel floor spend that number as currency. Range restriction attenuates
+   a correlation, but the observed range is 65→101 and the 80–85 band is
+   *negative*, which restriction does not produce. **Next step is decomposition,
+   not a floor change** — stamp the six scoring dimensions separately.
+2. **MVRTP pays as a continuation, not as an entry** — see `campaign_state.py`.
+3. **Neither trailing exit beats the FSM.** Paired against the same delivered
+   signals: ATR-trail 15m **−1.128%/trade, CI95 [−1.630, −0.615]**; ATR 5m
+   −0.308%, SAR 15m −0.307%, SAR 5m −0.156%, all spanning zero. TP1-full also
+   loses by 19.0% over 484 rows. Arm coverage is 98.7%, so this is no longer the
+   winner-enriched subset that made the August reading unusable. **The decision
+   open since 2026-08-09 closes: do not adopt.** Governor stays OFF, both lanes
+   keep measuring.
+
+### Two readings that inverted on the second look
+
+- **The retired MVRTP SHORT reads +0.191%/trade net in the dark lane** and I was
+  one step from proposing the retirement be re-read. Its **held-to-stop arm on
+  the same 368 rows reads −0.259%**. The walk stops at the first TP1-or-SL touch
+  and flatters every path in that column. **Retirement stands.** Same shape for
+  `LIQUIDITY_SWEEP_REVERSAL` (+0.381% walk, −0.218% held).
+- **"We capture only 15% of MFE"** looks like an exit failure until MAE is read
+  beside it: dark MVRTP mean MFE 1.96% against mean MAE 1.66%. Near-symmetric.
+  There is no favourable skew to harvest, which is *why* the trailing arms lose.
+
+### Shipped
+
+**`src/campaign_state.py`** — what the last trade on this `(symbol,
+setup_class, direction)` did, stamped onto every entry-feature row.
+Observe-only; nothing gates on it.
+
+The measurement behind it, on the 90-day delivered book:
+
+| MVRTP, previous leg on the same symbol × side | n | camps | net/trade | CI95 |
+|---|---|---|---|---|
+| won | 145 | 66 | **+0.969%** | **[+0.440, +1.506]** |
+| first entry | 261 | 261 | −0.136% | [−0.502, +0.248] |
+| break-even / expiry | 116 | 59 | −0.112% | [−0.858, +0.564] |
+| stopped out | 153 | 84 | −0.304% | [−0.769, +0.182] |
+
+MVRTP's entire positive contribution is the first row. Two checks that changed
+the shape of what shipped:
+
+- **It does not generalise.** Off MVRTP the same split reads +0.017% after a
+  winner against +0.123% after a stop. So the module stamps on every path and
+  gates on none, and says so in its own docstring — the `entry_features`
+  generalisation already cost a session to the opposite assumption.
+- **It is a window, not a state.** Splitting by hours since that winner closed:
+  +1.409% at 0–2h and +1.423% at 2–6h, **both CIs excluding zero**; −0.027% at
+  6–24h and +0.056% beyond, both spanning it. A stamp carrying the outcome
+  without the clock would have pooled a live continuation with last Tuesday, so
+  `campaign_prev_age_h` is not optional.
+
+Three features (`campaign_leg_index`, `campaign_prev_won`,
+`campaign_prev_age_h`) plus two descriptive keys, `entry_features.SCHEMA` 3 → 4
+with `ADDITIVE_FROM_SCHEMAS = {2, 3}`. Written at the terminal-outcome path on
+the same key `_cooldown_key_for` already builds (pinned by a test that drives
+the real `Scanner._cooldown_key_for`); read in `stamp`, which re-derives
+`missing` over the merged row because the campaign facts arrive after
+`capture`'s accounting has run — the `stack_sep_pct` shape. Loader is called at
+scanner construction, pinned by an AST test on the *call site*.
+
+**What is deliberately absent: any rule.** The hypothesis was formed on the
+delivered book before the column existed and is now being confirmed forward on
+rows that had no part in forming it. That order is what separates it from a cell
+found by drawing twenty-one of them, and the ops copy says so.
+
+### Open — MEAN_REVERT, and the split is per regime
+
+The `mean_revert_emission` probe is violating: **63 detections since the last
+emission, `emitted_total=3`**. It has two separate causes and only one has an
+armed mechanism.
+
+**Pre-scoring, and it is one regime token.** `setup_compat:regime_WEAK_TREND`
+is **56% of MEAN_REVERT's 617 audited suppressions**. Split the dark rows by the
+gate that diverted them:
+
+| gate | n | walk | held to stop | win |
+|---|---|---|---|---|
+| `setup_compat:regime_WEAK_TREND` | 77 | **+0.245%** | **+0.449%** | 41.6% |
+| `setup_compat:regime_STRONG_TREND` | 37 | −0.649% | −0.507% | 16.2% |
+
+**WEAK minus STRONG on the walk: +0.894%, CI95 [+0.292, +1.472] — excludes
+zero.** STRONG_TREND on its own is −0.649%, CI95 [−1.094, −0.184] — also
+excluding zero, so **that half of the doctrine is measured correct**: fading a
+strong trend loses. WEAK_TREND on its own spans zero in both columns, so the
+claim is *"the two regimes are measurably different and only one block has
+evidence"*, never *"opening it makes money"*. The gate audit agrees
+independently: `setup_compat:regime_WEAK_TREND` is the only setup_compat bucket
+with negative EV (n=198, TUNE, 94.6R missed against 87.0R saved) while every
+other reads KEEP at +0.25 to +0.44.
+
+`REGIME_SETUP_COMPATIBILITY` allows MEAN_REVERT in both range states, breakout
+expansion and volatile, and blocks both trend states — one set, one decision,
+and the measurement says the two halves of it differ.
+
+**The mechanism to act with is `dark_promotion`, not a matrix edit** — armed and
+un-armed in one click, keeps measuring after promotion, and the rows are already
+enrolled in the dark lane under exactly that gate. The rule, with the fields the
+rows actually carry:
+
+- path `MEAN_REVERT`; gate `setup_compat:regime_WEAK_TREND`
+- **regimes `TRENDING_UP`, `TRENDING_DOWN`** — *not* "WEAK_TREND". The 77 rows
+  are stamped 61 / 16 under those two labels; `WEAK_TREND` is a `MarketState`
+  token and would match nothing, which is the near-miss trap the promotions
+  page was built to expose.
+- direction **`*`** — MEAN_REVERT is a fade, so `with_trend` would exclude the
+  whole population by construction.
+- cap 5/day to start.
+
+Money-path, evaluator-path: **owner sign-off**. Refutation condition: if the
+first 40 promoted rows do not hold a positive point estimate on realised PnL,
+un-arm — one click, and the dark measurement continues either way.
+
+**Post-scoring is a second, disjoint blockage** and the probe's `+0.38R over
+n=772` is correctly scoped to it: `_stamp_prescoring_suppressed` sets
+`pre_scoring=True`, which `suppression_audit.feeds_edge_matrix` refuses, so no
+setup_compat row can reach the matrix that number is read from. Which of the
+remaining 7 gates holds the other ~44% is not answerable from the pooled
+per-gate table; the per-setup breakdown is the read still owed.
+
+### Also open, not acted on
+
+- **Mover ignition promotes pairs that are not moving.** The held set carries
+  $6.4M–$16M 24h volume admitted on ±1.8% to ±4.6% moves, several refused on
+  every scan by `pair_quality_spread`. 40% of mover-promoted delivered signals
+  came from sub-10% "ignitions", and both populations agree that bucket is the
+  weak one (delivered +0.142% n=34 against +1.199% / +0.920% at 10–20%; dark
+  walk −0.244% / held −1.510% on n=159).
+- **`SR_FLIP_RETEST:LONG`** — n=27, −0.875%/trade, 19% win, against the same
+  path's SHORT at n=167, +0.098%, 50% win. Same standard the August retirements
+  used, one entry in a list that already exists.
+- **Scan cycle breaching**: `9 warn / 3 kill in the last 20 cycles`, worst
+  238.97s; snapshot writer 122s per cycle with 147 overruns of 323. For 5m/15m
+  triggers that is a signal-quality problem, and it contaminates every window
+  above.
+- **Three switches read ON in Control while an engine probe reports them dark**
+  (`dark_promotion_enabled` vs *"master switch off"* beside 88 promotion-stamped
+  dark rows; `setup_tf_correction_live` vs *"correction dark"*; two entry-quality
+  rules vs `live rules: profile_reject`). Most likely the API container reading a
+  registry the engine writes — the `INDEX COLD` shape — but zero is also what a
+  correctly-armed rule reads before it fires, so the wrong number is
+  indistinguishable from the right one. One console read each settles it.
+
+---
+
 ## SESSION 138 2026-09-02 — the switch nobody fixed, and the reads that scale with subscribers
 
 Owner, with two screenshots: *"still not resolved global kill switch and auto
