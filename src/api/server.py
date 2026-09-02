@@ -2476,29 +2476,78 @@ def build_app(
 
     # ---- Global kill switch (OWNER_BRIEF B18 emergency halt) ----
     #
-    # Telegram was the only manual control for the global kill switch.
-    # With Telegram unavailable (banned in-region, 2026-06-20), the ops
-    # control plane needs an HTTP surface.  The kill-switch client is
-    # initialised in THIS process (api/main.py:99 isolated, bootstrap.py
-    # single-process) and is Firestore-backed with 5s-TTL write-through,
-    # so a flip here is visible to every engine reader within ~5s — no
-    # facade bridge needed (mirrors how auto_trade_status_routes already
-    # READS the switch in-process).
+    # Telegram was the only manual control for the global kill switch, so the
+    # ops control plane needs an HTTP surface.  (The "banned in-region" reason
+    # once given here was false and is corrected in both CLAUDE.mds; the
+    # decision stands on ops being the audited, owner-gated surface.)
+    #
+    # This block used to end "no facade bridge needed", on the reasoning that
+    # the kill-switch client is initialised in THIS process.  It is — under a
+    # STRICTER precondition than the engine's own boot path, so on 2026-09-02
+    # the api container was blind to Firestore, every flip 503'd, and B18's
+    # five-second requirement was unmeetable from the control plane while the
+    # engine traded normally with a working client.  A bridge is exactly what
+    # was needed; ``_switch_bridge`` is it, and the precondition is fixed in
+    # ``src/api/main.py`` as well, because a fallback that is always taken is
+    # a defect wearing a fix's clothes.
+
+    def _switch_bridge():
+        """The engine-side flip path, or ``None`` when there is no hop.
+
+        Present only in isolated mode, where the api container serves the
+        route and the engine container holds the Firestore client.  In
+        single-process mode the handler holds the client itself.
+        """
+        return getattr(engine, "flip_safety_switch", None)
 
     def _kill_switch_state() -> KillSwitchState:
         from src.execution import kill_switch as _ks
+        bridge = _switch_bridge()
+        # Branch on the SAME predicate the flip branches on. Reading the state
+        # through one accessor and writing through another is how a page ends
+        # up describing a world the button is not in — the defect class this
+        # whole change is repairing, one layer up.
         if not _ks.is_initialised():
-            return KillSwitchState(engaged=False, reason=None, initialised=False)
+            # Not readable here. Whether it is THROWABLE is a separate
+            # question and the control plane needs both: a page that grades
+            # its button on readability hides a working emergency stop.
+            return KillSwitchState(
+                engaged=False,
+                reason=None,
+                initialised=False,
+                availability=_ks.AVAIL_NOT_CONFIGURED,
+                detail=None,
+                throwable=bridge is not None,
+                source="engine" if bridge is not None else "local",
+            )
         try:
             client = _ks.get_client()
             engaged = bool(client.is_global_engaged())
             reason = client.global_reason() if hasattr(
                 client, "global_reason") else None
             return KillSwitchState(
-                engaged=engaged, reason=reason, initialised=True)
-        except Exception:
+                engaged=engaged,
+                reason=reason,
+                initialised=True,
+                availability=_ks.AVAIL_OK,
+                throwable=True,
+                source="local",
+            )
+        except Exception as exc:
             log.exception("/api/kill-switch state read failed")
-            return KillSwitchState(engaged=False, reason=None, initialised=False)
+            # `engaged=False` here is NOT a reading, and `availability` is what
+            # says so. It stays False because the field is typed bool and a
+            # surface must not render a guess as an engagement; the honest
+            # value is carried beside it.
+            return KillSwitchState(
+                engaged=False,
+                reason=None,
+                initialised=False,
+                availability=_ks.AVAIL_READ_FAILED,
+                detail=f"{type(exc).__name__}: {exc}",
+                throwable=True,
+                source="local",
+            )
 
     @app.get(
         "/api/kill-switch",
@@ -2518,15 +2567,40 @@ def build_app(
     )
     async def kill_switch_set(req: KillSwitchSetRequest) -> KillSwitchState:
         from src.execution import kill_switch as _ks
+        reason = req.reason or "ops control plane"
         if not _ks.is_initialised():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="kill switch not initialised (no Firestore/GCP creds)",
+            # This process is blind. Before 2026-09-02 that was a 503 and the
+            # owner could not halt auto-trade at all, while the engine
+            # container held a working client the whole time.
+            bridge = _switch_bridge()
+            if bridge is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        "kill switch not initialised in this process and no "
+                        "engine bridge is available (single-process mode with "
+                        "no Firestore/GCP creds)"
+                    ),
+                )
+            out = await bridge("kill_switch", bool(req.engaged), reason)
+            if not out.get("ok"):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=str(out.get("error") or "engine refused the flip"),
+                )
+            return KillSwitchState(
+                engaged=bool(req.engaged),
+                reason=reason if req.engaged else None,
+                initialised=False,
+                availability=_ks.AVAIL_NOT_CONFIGURED,
+                detail="applied by the engine container",
+                throwable=True,
+                source="engine",
             )
         client = _ks.get_client()
         try:
             if req.engaged:
-                client.engage_global(reason=req.reason or "ops control plane")
+                client.engage_global(reason=reason)
             else:
                 client.disengage_global()
         except Exception as exc:
@@ -2542,22 +2616,41 @@ def build_app(
     # The `/auto_trade_global` Telegram command flipped
     # ``auto_trade_globally_enabled`` on the kill-switch Firestore doc —
     # distinct from the kill-switch ``engaged`` flag: disabling halts NEW
-    # order placement engine-wide (existing positions untouched). Same
-    # in-process Firestore-backed client as the kill switch, so no facade
-    # bridge. Owner-gated flip; GET reports initialised=false when unbooted.
+    # order placement engine-wide (existing positions untouched). Owner-gated
+    # flip, with the same engine bridge behind it as the kill switch: this
+    # flag and that switch went unavailable together on 2026-09-02, because
+    # they are one document read by one client.
 
     def _auto_trade_global_state() -> AutoTradeGlobalState:
         from src.execution import kill_switch as _ks
+        bridge = _switch_bridge()
         if not _ks.is_initialised():
-            return AutoTradeGlobalState(enabled=False, initialised=False)
+            return AutoTradeGlobalState(
+                enabled=False,
+                initialised=False,
+                availability=_ks.AVAIL_NOT_CONFIGURED,
+                detail=None,
+                throwable=bridge is not None,
+                source="engine" if bridge is not None else "local",
+            )
         try:
             return AutoTradeGlobalState(
                 enabled=bool(_ks.get_client().is_globally_enabled()),
                 initialised=True,
+                availability=_ks.AVAIL_OK,
+                throwable=True,
+                source="local",
             )
-        except Exception:
+        except Exception as exc:
             log.exception("/api/auto-trade-global state read failed")
-            return AutoTradeGlobalState(enabled=False, initialised=False)
+            return AutoTradeGlobalState(
+                enabled=False,
+                initialised=False,
+                availability=_ks.AVAIL_READ_FAILED,
+                detail=f"{type(exc).__name__}: {exc}",
+                throwable=True,
+                source="local",
+            )
 
     @app.get(
         "/api/auto-trade-global",
@@ -2580,9 +2673,28 @@ def build_app(
     ) -> AutoTradeGlobalState:
         from src.execution import kill_switch as _ks
         if not _ks.is_initialised():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="kill switch not initialised (no Firestore/GCP creds)",
+            bridge = _switch_bridge()
+            if bridge is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        "kill switch not initialised in this process and no "
+                        "engine bridge is available"
+                    ),
+                )
+            out = await bridge("auto_trade_global", bool(req.enabled), "")
+            if not out.get("ok"):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=str(out.get("error") or "engine refused the flip"),
+                )
+            return AutoTradeGlobalState(
+                enabled=bool(req.enabled),
+                initialised=False,
+                availability=_ks.AVAIL_NOT_CONFIGURED,
+                detail="applied by the engine container",
+                throwable=True,
+                source="engine",
             )
         client = _ks.get_client()
         try:
@@ -2598,6 +2710,7 @@ def build_app(
                 detail=f"global auto-trade flip failed: {exc}",
             )
         return _auto_trade_global_state()
+
 
     # ---- Signal-expiry backstop toggle (ops control plane, 2026-06-26) ----
     # When disabled (default), signals run to TP/SL only — the max-hold

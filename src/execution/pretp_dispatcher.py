@@ -37,6 +37,7 @@ from typing import Callable, Dict, List, Optional, Set
 from config import BE_SHIFT_TRIGGER_PCT as _BE_SHIFT_TRIGGER_PCT
 
 from src.execution import be_policy as _be_policy
+from src import firestore_reads as _reads
 from src.utils import get_logger
 
 from . import mark_price_feed as _mark_price_feed
@@ -257,7 +258,9 @@ def _query_open_positions(symbol: str) -> List[_position_state.Position]:
         .where("state", "==", "OPEN")
     )
     out: List[_position_state.Position] = []
+    _docs = 0
     for snap in query.stream():
+        _docs += 1
         data = snap.to_dict() or {}
         try:
             out.append(_position_state._from_firestore_dict(data))
@@ -265,6 +268,11 @@ def _query_open_positions(symbol: str) -> List[_position_state.Position]:
             log.exception(
                 "pretp_dispatcher: failed to parse position doc"
             )
+    # The read that wrote the Cost Discipline section: uncached, this query ran
+    # on every mark-price tick and drove ₹4,552/month in Firestore reads (#609).
+    # It is generation-gated now; counting it is how the next regression is
+    # visible in the census rather than on a bill.
+    _reads.record("pretp.positions_for_symbol", max(_docs, 1))
     return out
 
 

@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
+from src import firestore_reads as _reads
 from src.utils import get_logger
 
 log = get_logger("execution.position_state")
@@ -578,7 +579,9 @@ def enable_position_index() -> None:
         )
         fresh: dict[str, dict[str, "Position"]] = {}
         hydrated = 0
+        _docs = 0
         for snap in query.stream():
+            _docs += 1
             data = snap.to_dict() or {}
             try:
                 pos = _from_firestore_dict(data)
@@ -597,6 +600,12 @@ def enable_position_index() -> None:
             "activated; readers continue on the Firestore path"
         )
         return
+    finally:
+        # Counted whether or not the hydration succeeded: a query that raised
+        # part-way still billed for every document it had already returned,
+        # and a census that only counts successes under-reports exactly the
+        # failing loop somebody is hunting.
+        _reads.record("position_state.index_hydrate", max(_docs, 1))
     with _lock:
         # Merge any writes that landed during the (lock-free) hydration scan
         # on top of the freshly-read set, then activate.  Live writes win.
@@ -630,7 +639,9 @@ def resync_index() -> None:
             "state", "in", list(_NON_TERMINAL_STATE_VALUES)
         )
         fresh: dict[str, dict[str, "Position"]] = {}
+        _docs = 0
         for snap in query.stream():
+            _docs += 1
             data = snap.to_dict() or {}
             try:
                 pos = _from_firestore_dict(data)
@@ -639,6 +650,7 @@ def resync_index() -> None:
             if is_terminal(pos.state):
                 continue
             fresh.setdefault(pos.firebase_uid, {})[pos.signal_id] = pos
+        _reads.record("position_state.index_resync", max(_docs, 1))
     except Exception:
         log.exception("resync_index: rebuild query failed — keeping current index")
         return
@@ -782,6 +794,7 @@ def get_position(firebase_uid: str, signal_id: str) -> Position:
             if bucket is not None and signal_id in bucket:
                 return bucket[signal_id]
     snap = _doc_ref(firebase_uid, signal_id).get()
+    _reads.record("position_state.get_position", 1)
     if not snap.exists:
         raise PositionNotFoundError(
             f"no position for uid={firebase_uid} signal_id={signal_id}"
@@ -854,7 +867,9 @@ def list_positions_for_user(
             "state", "in", list(_NON_TERMINAL_STATE_VALUES)
         ).stream()
     out: list[Position] = []
+    _docs = 0
     for doc in docs:
+        _docs += 1
         data = doc.to_dict()
         if not data:
             continue
@@ -869,6 +884,7 @@ def list_positions_for_user(
         if not include_closed and is_terminal(pos.state):
             continue
         out.append(pos)
+    _reads.record("position_state.list_for_user", max(_docs, 1))
     return out
 
 
@@ -945,7 +961,9 @@ def list_recent_closed_positions_for_user(
         raise
 
     out: list[Position] = []
+    _docs = 0
     for doc in docs:
+        _docs += 1
         data = doc.to_dict()
         if not data:
             continue
@@ -961,6 +979,7 @@ def list_recent_closed_positions_for_user(
         if not is_terminal(pos.state):
             continue
         out.append(pos)
+    _reads.record("position_state.list_recent_closed", max(_docs, 1))
     return out
 
 

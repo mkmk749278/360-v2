@@ -441,6 +441,7 @@ class Bootstrap:
             OTP_MAX_ISSUES_PER_HOUR,
             OTP_TTL_SECONDS,
             OWNER_PHONE_E164,
+            CONTROL_INDEX_REBUILD_SEC,
             POSITION_INDEX_RESYNC_SEC,
         )
         if API_ENABLED:
@@ -669,6 +670,53 @@ class Bootstrap:
                         )
                     )
 
+                # Control-index rebuild (2026-09-02).  Two indexes replaced
+                # reads that grew linearly with subscribers — the active-key
+                # roster (was a collection_group scan once a MINUTE, ~1.44M
+                # reads/day projected at the 1,000-member target) and the
+                # auto-disabled uid set (was one document per user per order).
+                #
+                # Both are amended in place by their writers, so this loop is
+                # not how they stay correct in the ordinary case; it is what
+                # bounds drift from anything that ever writes the underlying
+                # field directly.  An index over a SAFETY gate that could
+                # drift indefinitely would be worse than the reads it saves.
+                #
+                # Runs once at boot and then slowly.  Cost is one scan plus
+                # one small query per interval, against the per-minute scan it
+                # replaces.
+                from src.execution import kill_switch as _ks_idx
+                from src.security import firestore_keystore as _fk_idx
+
+                async def _control_index_rebuild_loop() -> None:
+                    while True:
+                        try:
+                            n = await asyncio.to_thread(
+                                _fk_idx.rebuild_active_roster
+                            )
+                            log.info("active-key roster rebuilt: {} uids", n)
+                        except Exception:
+                            log.exception("active-key roster rebuild failed")
+                        try:
+                            if _ks_idx.is_initialised():
+                                d = await asyncio.to_thread(
+                                    _ks_idx.get_client().rebuild_disabled_mirror
+                                )
+                                log.info(
+                                    "auto-disabled mirror rebuilt: {} uids", d
+                                )
+                        except Exception:
+                            log.exception("auto-disabled mirror rebuild failed")
+                        await asyncio.sleep(CONTROL_INDEX_REBUILD_SEC)
+
+                if CONTROL_INDEX_REBUILD_SEC > 0:
+                    tasks.append(
+                        asyncio.create_task(
+                            _control_index_rebuild_loop(),
+                            name="control_index_rebuild",
+                        )
+                    )
+
             # Mark-price feed + pre-TP dispatcher — always started when
             # the execution stack is active (firebase_project_id set).
             # The feed is a public WS stream (no auth); the dispatcher
@@ -801,6 +849,32 @@ class Bootstrap:
                         "Manual-take consumer NOT started "
                         "(AUTO_TRADE_MANUAL_TAKE_ENABLED=false)"
                     )
+
+                # Safety-switch consumer — the engine end of
+                # POST /api/kill-switch when the api container has no
+                # Firestore client of its own.
+                #
+                # DELIBERATELY NOT FLAG-GATED, unlike the take consumer beside
+                # it.  A flag on the emergency stop is a switch that can turn
+                # the switch off, and the whole point of this channel is that
+                # the owner can always halt auto-trade.  It is inert until
+                # something is queued (a server-side BRPOP costs nothing while
+                # idle), and what it can do is bounded by a four-name dispatch
+                # table rather than by a toggle.
+                from src.execution.safety_switch_bridge import (
+                    SafetySwitchConsumer,
+                )
+                _ssc = SafetySwitchConsumer(engine._redis_client)
+                tasks.append(
+                    asyncio.create_task(
+                        _ssc.start(), name="safety_switch_consumer",
+                    )
+                )
+                log.info(
+                    "Safety-switch consumer started — the kill switch is "
+                    "throwable from the control plane even if the api "
+                    "container loses its Firestore client"
+                )
             else:
                 # Default: single-process mode — API shares the engine's event loop.
                 tasks.append(

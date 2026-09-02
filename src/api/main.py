@@ -151,14 +151,37 @@ async def _run() -> None:
             log.warning(
                 "Firebase Admin init failed (falling back to HS256 path): {}", exc
             )
-        # Firestore keystore + kill switch — same service account, same client.
-        # Required so auto_trade_status_routes can check binance_key_connected
-        # (keystore) and engine_wide_enabled (kill switch) in this process.
-        # Mirrors bootstrap.py:477-488 — one Firestore client shared between both.
+    else:
+        log.info("Firebase Admin skipped (env vars not set)")
+
+    # ── Firestore: keystore, kill switch, tunables, dispatch log ──────
+    #
+    # Gated on the PROJECT alone with ADC as the credential fallback — the
+    # engine's own precondition (``bootstrap.py``).  This block used to sit
+    # INSIDE the Firebase-Admin conditional above and therefore required BOTH
+    # env vars, which is not a deployment detail: it meant the api container
+    # could be blind to Firestore while the engine traded perfectly, and every
+    # surface the owner and the subscriber read is served by the blind one.
+    #
+    # On 2026-09-02 that rendered as "kill switch never initialised" on
+    # /control, "Trading briefly paused for everyone — trading resumes
+    # automatically" in the Lumin app, and a 503 on the emergency stop, against
+    # B18's five-second requirement.
+    #
+    # Kept structurally the same shape as the engine's boot path rather than
+    # merely equivalent, so the next credential change cannot make the two
+    # diverge again without somebody seeing that there are two.
+    if firebase_project_id:
+        # One Firestore client shared by the keystore, the kill switch, the
+        # runtime tunables and the dispatch log — sharing keeps the connection
+        # budget tidy and pools the gRPC stubs, exactly as bootstrap.py does.
         try:
             from src.security import firestore_keystore as _fk
             from src.execution import kill_switch as _ks
-            _fk.init_keystore(service_account_path=firebase_sa_path)
+            # ``or None`` is the ADC fallback: the keystore takes an
+            # optional path and builds a default-credentials client without
+            # one.  Passing "" would have been a credentials error.
+            _fk.init_keystore(service_account_path=firebase_sa_path or None)
             if _fk._db is not None:
                 _ks.init_kill_switch(_fk._db)
                 log.info("Kill switch client initialised")
@@ -188,7 +211,12 @@ async def _run() -> None:
                 "false, and Recent Activity will be empty): {}", exc
             )
     else:
-        log.info("Firebase Admin skipped (env vars not set)")
+        log.info(
+            "Firestore skipped (FIREBASE_PROJECT_ID not set) — the kill "
+            "switch is not readable in this process. /api/kill-switch routes "
+            "the flip to the engine container over Redis, and refuses loudly "
+            "if that is unreachable too."
+        )
 
     # ── Cloud KMS (B18 connect flow) ──────────────────────────────────
     # Independent of the Firebase-Admin conditional above (exactly like

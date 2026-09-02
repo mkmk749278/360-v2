@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from src import firestore_reads as _reads
 from src.utils import get_logger
 
 log = get_logger("execution.dispatch_log")
@@ -359,6 +360,10 @@ def list_recent_events(
             # without explicit ordering, sort client-side.
             query = coll.limit(limit)
         snaps = list(query.stream())
+        # Per-user, bounded by ``limit``, and read once per Trade-tab refresh:
+        # small today and linear in subscribers, which is exactly the shape
+        # that has to be visible in the census before it is a bill.
+        _reads.record("dispatch_log.recent_events", max(len(snaps), 1))
     except Exception:
         log.exception(
             "dispatch_log.list_recent_events read failed: uid=%s",

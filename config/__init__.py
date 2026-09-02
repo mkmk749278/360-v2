@@ -3532,6 +3532,23 @@ RECONCILER_ORPHAN_SWEEP_ENABLED: bool = _safe_bool(
 # (5 min).  Set 0 to disable the resync loop entirely (write-through only).
 POSITION_INDEX_RESYNC_SEC: int = _safe_int("POSITION_INDEX_RESYNC_SEC", "300")
 
+# How often the control INDEXES are rebuilt from the fields they index
+# (2026-09-02).  Two of them: ``control/active_uids`` (who has a connected
+# Binance key) and ``control/disabled_uids`` (who the breaker has tripped).
+#
+# Both replaced reads that grew linearly with subscribers — the roster was a
+# ``collection_group`` scan run once a MINUTE by ``worker_manager``, which
+# projects to ~1.44 million Firestore reads a day at the 1,000-member
+# auto-trade target, thirty times the 50,000/day free allowance, to notice a
+# new subscriber.  The indexes are amended in place by their writers, so this
+# is not how they stay correct; it bounds drift from anything that ever writes
+# the underlying field directly, which matters because one of them gates a
+# safety check.
+#
+# 30 minutes: 48 rebuilds a day against the 1,440 scans it replaces.  Set 0 to
+# disable the loop entirely (the indexes still self-heal on a cache miss).
+CONTROL_INDEX_REBUILD_SEC: int = _safe_int("CONTROL_INDEX_REBUILD_SEC", "1800")
+
 # ---------------------------------------------------------------------------
 # Margin-mode enforcement — 2026-06-01 (VTHOUSDT isolated-margin incident)
 # ---------------------------------------------------------------------------

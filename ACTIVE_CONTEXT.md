@@ -4,6 +4,97 @@
 
 ---
 
+## SESSION 138 2026-09-02 — the switch nobody fixed, and the reads that scale with subscribers
+
+Owner, with two screenshots: *"still not resolved global kill switch and auto
+trade / we don't want to generate any bills in Google cloud keep them in limit
+and look at today and yesterday's PRs / keep it in mind our target users for
+auto trade is about 1000 members"*.
+
+**He is right that it was not resolved, and the PRs are why.** 2026-09-02 landed
+two changes about this: ops **#198 is CLAUDE.md only — 33 lines, zero code** —
+and engine **#995** touched `kill_switch.py` for six lines of read counting.
+Both bodies describe the fault exactly. Neither changed the behaviour. The
+session wrote §9 of *Shipping Onto a Live Book* and shipped the receipt.
+
+### What was actually broken
+
+`src/api/main.py:150` gated the keystore, kill switch, tunables and dispatch log
+on **both** `FIREBASE_PROJECT_ID` and `FIREBASE_SERVICE_ACCOUNT_PATH`;
+`bootstrap.py:539` needs only the project and falls back to ADC. So the api
+container — which serves `/control`, `/api/kill-switch` and the app's Trade tab
+— could be blind while the engine traded normally.
+
+### The 53k reads, accounted
+
+`MONITOR_POLL_INTERVAL` is **5.0s** and the kill-switch TTL was **5.0s**: the
+entry expired one tick before every read, so the cache could never hit. Three
+documents nobody edits:
+
+| Document | Reader | Reads/day |
+|---|---|---|
+| `kill_switch/global` | order path + trail governor | ~17,280 |
+| `kill_switch/global` (2nd `.get()`, own cache slot) | `trade_monitor` 5s poll | ~17,280 |
+| `control/runtime_tunables` | scanner every cycle | ~17,280 (at 5s) |
+
+≈ **51,840 against a 50,000 allowance.** #995's own account — "~8,600/day per
+open Trade tab" — was **inferred, not measured**: `grep Timer.periodic lib/` in
+`lumin-app` shows no runtime-status poll at all. Its cut was right; the number
+was a story. And the census shipped that morning to answer *where did the reads
+go* instrumented **9 of 18 sites**, blind to `position_state` (both
+`collection_group` queries), `dispatch_log` and `pretp_dispatcher`.
+
+### Shipped
+
+1. **The api container's precondition mirrors the engine's** (project alone, ADC
+   fallback), pinned by an AST test comparing the two guard sets.
+2. **`src/control_generation.py`** — the Redis generation this file's own Cost
+   Discipline section had named as the end state and nobody had built. TTLs are
+   floors (300s); the monitor's 5s loop MGETs four integers and invalidates only
+   on a real change. B18's five seconds is met by construction and *faster*.
+   Three-document reads fall ~60x.
+3. **`src/execution/safety_switch_bridge.py`** — `POST /api/kill-switch` falls
+   back to the engine over Redis when this process is blind. Not flag-gated (a
+   flag on the emergency stop is a switch that turns the switch off); bounded by
+   a four-name dispatch table; 30s stale window; BRPOP, not the 15s writer cycle.
+4. **`KillSwitchState.availability`** — `ok` / `not_configured` / `read_failed`,
+   plus `throwable` and `source`, so no surface invents a cause again.
+5. **`control/active_uids`** replaces the `collection_group` roster scan.
+   `worker_manager._tick` ran that scan **once a minute**: 1,440 reads/day today,
+   **1.44M/day at 1,000 members**, ~30x the whole allowance.
+6. **`control/disabled_uids`** replaces one document read per user per order on
+   the disable gate. Both indexes: writers amend, a 30-min rebuild bounds drift,
+   and an absent index falls back rather than answering "nobody".
+7. **Census completed** (18/18 sites) plus `read.firestore_projection` —
+   today's reads scaled to 1,000 members, split into per-user and flat, priced
+   on the excess over the free tier at both Firestore location tiers.
+
+### Projected effect at 1,000 members
+
+Per-user reads/day go from **~2.9M** (roster scan + disable gate alone) to
+**~2,900**. Flag reads go from ~52k to ~900. The design target is to stay inside
+the 50,000/day free allowance at 1,000 members rather than to pay a bill.
+
+### Open / to watch after deploy
+
+- **Watch `read.firestore_projection` and `read.control_generation` within the
+  hour.** `bumps` climbing with `polls` at zero means readers are not listening
+  and every flip is on the 300s floor.
+- **Throw the kill switch once from ops and disengage it**, to exercise the
+  bridge on the real box — the vendor-seam rule applied to our own Redis hop.
+- **Refutation condition, stated in advance:** if `/control` still reads
+  unavailable after the deploy, the api container's `FIREBASE_PROJECT_ID` is
+  itself unset, and the fix is env, not code. `throwable` should read true
+  regardless via the engine bridge.
+- The 30-minute index rebuild (`CONTROL_INDEX_REBUILD_SEC`) is a new background
+  loop. It is NOT default-off — it reads two documents and writes two, and
+  disabling it is what would let a safety index drift — but it is the thing to
+  watch first if reads do not fall.
+
+Engine: 8,965 passed, ruff clean on `src/ config/`, mypy 123 (baseline 127).
+
+---
+
 ## SESSION 137 2026-09-01 — INCIDENT: my orphan sweep took auto-trade down
 
 Owner screenshots, ~12:30 UTC: every order for an hour reading *"Order could not

@@ -372,8 +372,17 @@ def register(
                 return _payload
 
         # Reuse the per-user-status logic for the two kill-switch flags.
+        # Readability travels WITH the value.  These two booleans are False
+        # for three different worlds — the store was never initialised in this
+        # process, the Firestore read raised, or the flag is honestly off — and
+        # the app rendered all three as "a safety pause is active for all
+        # accounts … trading resumes automatically", telling a user whose key
+        # IS connected to go and connect one (owner screenshot 2026-09-02).
+        # Two of those worlds never resume and neither is a safety pause.
         globally_enabled = False
         user_disabled = False
+        flags_readable = False
+        key_readable = False
         if _kill_switch.is_initialised():
             try:
                 ks = _kill_switch.get_client()
@@ -386,6 +395,7 @@ def register(
                 user_disabled = bool(
                     await asyncio.to_thread(ks.is_user_disabled, firebase_uid)
                 )
+                flags_readable = True
             except Exception:
                 log.exception(
                     "runtime_status: kill switch read failed uid={}",
@@ -403,16 +413,23 @@ def register(
                     # Presence only — this field answers "does a key
                     # document exist", never "give me the key".  It used to
                     # call get_key_blob, fetching (and discarding) an
-                    # encrypted secret once per 10s per polling user: ~8,600
-                    # Firestore reads a day from one open Trade tab, which is
-                    # a sixth of the free-tier allowance the 2026-09-02 outage
-                    # ran out of.  has_key caches the boolean and every writer
-                    # invalidates it, so a fresh connect still shows at once.
+                    # encrypted secret on every poll.  has_key caches the
+                    # boolean and every writer invalidates it, so a fresh
+                    # connect still shows at once.
+                    #
+                    # The "~8,600 reads a day from one open Trade tab" figure
+                    # first written here was INFERRED from an assumed 10s poll
+                    # and is wrong: grep for Timer.periodic in lumin-app finds
+                    # no runtime-status poll at all — the Trade tab fetches on
+                    # open and pull-to-refresh behind a 60s SWR cache.  Right
+                    # cut, invented number.
                     binance_key_connected = bool(
                         await asyncio.to_thread(_fk.has_key, firebase_uid)
                     )
+                    key_readable = True
                 except _fk.KeyBlobNotFoundError:
                     binance_key_connected = False
+                    key_readable = True
         except Exception:
             log.exception(
                 "runtime_status: keystore read failed uid={}", firebase_uid,
@@ -600,6 +617,12 @@ def register(
 
         result = {
             "auto_trade_globally_enabled": globally_enabled,
+            # Whether we could OBSERVE the two fields above.  False means the
+            # value beside it is a default, not an answer — the app must not
+            # promise an automatic resume it cannot see coming, and must not
+            # tell a user to connect a key it could not check for.
+            "global_flags_readable": bool(flags_readable),
+            "binance_key_readable": bool(key_readable),
             "auto_trade_user_disabled": user_disabled,
             "binance_key_connected": binance_key_connected,
             "user_mode": user_mode,
