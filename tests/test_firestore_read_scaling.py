@@ -355,3 +355,38 @@ def test_the_projection_scales_the_per_member_sites_and_not_the_flat_ones():
     assert by_site["kill_switch.global_doc"]["projected_per_day"] == (
         by_site["kill_switch.global_doc"]["per_day"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Readability travels with the value, on the field a subscriber reads
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_status_publishes_whether_it_could_read_the_flags():
+    """`auto_trade_globally_enabled: false` carried three worlds and the app
+    rendered all three as *"a safety pause is active for all accounts … trading
+    resumes automatically"*, while telling a user whose key WAS connected to go
+    and connect one (owner screenshot 2026-09-02).
+
+    Pinned as a CROSS-REPO CONTRACT on the producing side: `lumin-app` reads
+    these two key names, and a rename here would empty the app's honest copy
+    silently rather than failing loudly.
+    """
+    import ast
+    import inspect
+
+    from src.api import auto_trade_status_routes as routes
+
+    src = inspect.getsource(routes)
+    keys = {
+        n.value
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+    assert "global_flags_readable" in keys
+    assert "binance_key_readable" in keys
+    # And they must sit beside the values they qualify, not somewhere else in
+    # the module — a readability field one payload away from its value is the
+    # zone_distance_atr failure with the path wrong.
+    assert '"global_flags_readable": bool(flags_readable),' in src
+    assert '"binance_key_readable": bool(key_readable),' in src
