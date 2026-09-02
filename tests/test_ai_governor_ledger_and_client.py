@@ -8,7 +8,6 @@ test that drives the real serializer.**
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import tempfile
@@ -139,7 +138,7 @@ SECRET = "AIzaSyTOTALLY-SECRET-KEY-VALUE-0123456789"
 
 @pytest.mark.parametrize("provider,env", [("google", "GEMINI_API_KEY"),
                                           ("anthropic", "ANTHROPIC_API_KEY")])
-def test_the_key_never_appears_in_a_transport_error(monkeypatch, provider, env):
+async def test_the_key_never_appears_in_a_transport_error(monkeypatch, provider, env):
     """Treated exactly as the Binance secret is: never logged, never written,
     never surfaced in an error trace."""
     monkeypatch.setenv(env, SECRET)
@@ -157,7 +156,7 @@ def test_the_key_never_appears_in_a_transport_error(monkeypatch, provider, env):
             return False
 
     monkeypatch.setattr(cli, "_get_session", lambda: _done(_Boom()))
-    res = asyncio.run(cli.complete_json(system="s", user="u", schema={}))
+    res = await (cli.complete_json(system="s", user="u", schema={}))
     assert res.status in (llm_client.TRANSPORT_ERROR, llm_client.TIMEOUT)
     assert SECRET not in res.detail
     assert SECRET not in json.dumps(res.__dict__, default=str)
@@ -167,20 +166,20 @@ async def _done(value):
     return value
 
 
-def test_an_unset_key_is_a_named_state_not_a_failure(monkeypatch):
+async def test_an_unset_key_is_a_named_state_not_a_failure(monkeypatch):
     """An unconfigured lane is a decision nobody has taken yet. Rendering it as
     a failure sends the owner to debug something that is not broken."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     cli = llm_client.LLMClient(provider="google", model="gemini-3.7-flash")
-    res = asyncio.run(cli.complete_json(system="s", user="u", schema={}))
+    res = await (cli.complete_json(system="s", user="u", schema={}))
     assert res.status == llm_client.NOT_CONFIGURED
     assert not res.ok
 
 
-def test_an_unknown_provider_is_refused_never_defaulted(monkeypatch):
+async def test_an_unknown_provider_is_refused_never_defaulted(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", SECRET)
     cli = llm_client.LLMClient(provider="acme", model="m")
-    res = asyncio.run(cli.complete_json(system="s", user="u", schema={}))
+    res = await (cli.complete_json(system="s", user="u", schema={}))
     assert res.status == llm_client.UNKNOWN_PROVIDER
 
 

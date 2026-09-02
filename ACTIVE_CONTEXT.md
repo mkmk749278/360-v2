@@ -66,6 +66,23 @@ Also caught: I invented a config key (`MIN_SL_DISTANCE_PCT`) that does not
 exist, and my first test fixture omitted the `open` array — the real
 collaborator refused it immediately, which is what driving the real one buys.
 
+3. **Sixteen `asyncio.run` calls in my new tests broke three unrelated tests**,
+   and I nearly shipped the claim that they were pre-existing. `asyncio_mode`
+   is `auto` here, so `asyncio.run` creates a loop, closes it, and leaves the
+   main thread with none — and the next test anywhere in the session that calls
+   `get_event_loop()` raises. Every file passed in isolation on both branches,
+   so "my tests pass" was true and meaningless; the failure exists only in the
+   ordering the full suite produces, and it lands in somebody else's file,
+   which makes "not mine" the natural and wrong reading. **The full suite on
+   `main` is what settled it: 8,966 passed, zero failures, against three on the
+   branch.** Now `async def` + `await` throughout, and the lesson is in
+   `CLAUDE.md`.
+
+   And the commit message for the first push said **"9,044 passed"** when the
+   run read `3 failed, 9004 passed` — a total that never happened, quietly
+   dropping three failures in the one artifact a reviewer reads to decide
+   whether a change is safe. Corrected here and in the follow-up commit.
+
 ### Provider
 
 **Gemini 3.7 Flash** (owner). ~$5.54/mo at design volume; the 31 Dec 2026 promo
@@ -94,8 +111,8 @@ Settings look. If Gemini goes via Vertex, separate project.
 - Under `STATISTICAL_CHANGE_POLICY` the shadow window is one to four months
   (§11.1). Nothing gets armed before that.
 
-Engine: 9,044 passed, ruff clean on `src/ config/`, mypy 134 (baseline 134 —
-zero added).
+Engine: see the follow-up commit for the verified suite count; ruff clean on
+`src/ config/`, mypy 134 against a baseline of 134 — zero added.
 
 ---
 
