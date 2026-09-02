@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+from src import runtime_tunables
 from src.runtime_tunables import RuntimeTunables
 from src.strategy_edge import StrategyEdgeStore, StrategyOutcome
 
@@ -71,6 +72,17 @@ class _Clock:
         return self.t
 
 
+# Derived from the module rather than restated here.  These two tests read
+# "past the 5s TTL" and advanced the clock by a hardcoded 10.0s; when the TTL
+# was raised to 30s on 2026-09-02 (a 5s TTL on a continuously-touched document
+# is 17,280 Firestore reads a day, 35% of the free-tier allowance the outage
+# that morning ran out of) they silently stopped exercising expiry at all —
+# they would have gone on passing while testing the cache-hit path.  What they
+# are actually about is stale-serve and single-flight refresh, neither of which
+# depends on the number.
+_PAST_TTL = runtime_tunables._CACHE_TTL_S * 2 + 1.0
+
+
 def _make(values=None):
     db = _FakeFirestore(values if values is not None else {"market_context_enabled": False})
     clock = _Clock()
@@ -95,7 +107,7 @@ class TestTunablesNeverBlockTheLoop:
     def test_ttl_expiry_serves_stale_and_spawns_single_flight(self):
         rt, db, clock, spawned = _make()
         rt._doc_values()
-        clock.t += 10.0  # past the 5s TTL
+        clock.t += _PAST_TTL  # past the cache TTL, whatever it is set to
         db.values = {"market_context_enabled": True}
         # Stale value served immediately — the caller never waits.
         assert rt._doc_values() == {"market_context_enabled": False}
@@ -112,12 +124,13 @@ class TestTunablesNeverBlockTheLoop:
     def test_failed_refresh_keeps_last_known_values(self):
         rt, db, clock, spawned = _make()
         rt._doc_values()
-        clock.t += 10.0
+        clock.t += _PAST_TTL
         db.fail = True
         assert rt._doc_values() == {"market_context_enabled": False}
         rt._refresh()  # fails
         # Still last-known (an owner-set flag must survive a Firestore blip),
         # and the next expiry re-spawns a retry.
+        clock.t += _PAST_TTL
         assert rt._doc_values() == {"market_context_enabled": False}
         assert len(spawned) == 2
 

@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from src import firestore_reads as _reads
 from src.utils import get_logger
 
 log = get_logger("execution.kill_switch")
@@ -259,6 +260,7 @@ class KillSwitchClient:
             .document(_GLOBAL_KILL_DOC[1])
             .get()
         )
+        _reads.record("kill_switch.global_doc", 1)
         if not doc.exists:
             return (False, False)
         data = doc.to_dict() or {}
@@ -337,6 +339,7 @@ class KillSwitchClient:
             .document(_GLOBAL_KILL_DOC[1])
             .get()
         )
+        _reads.record("kill_switch.signal_expiry", 1)
         if not doc.exists:
             return default
         data = doc.to_dict() or {}
@@ -357,6 +360,7 @@ class KillSwitchClient:
             .document(_GLOBAL_KILL_DOC[1])
             .get()
         )
+        _reads.record("kill_switch.play_billing", 1)
         if not doc.exists:
             return default
         data = doc.to_dict() or {}
@@ -433,6 +437,7 @@ class KillSwitchClient:
             .document(firebase_uid)
             .get()
         )
+        _reads.record("kill_switch.self_reenable", 1)
         if not doc.exists:
             return None
         data = doc.to_dict() or {}
@@ -457,6 +462,7 @@ class KillSwitchClient:
             .document(firebase_uid)
             .get()
         )
+        _reads.record("kill_switch.user_disabled", 1)
         if not doc.exists:
             return False
         data = doc.to_dict() or {}

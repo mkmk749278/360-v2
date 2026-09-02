@@ -24,17 +24,65 @@ the cache is invalidated so the engine sees the change within one TTL.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from src import firestore_reads as _reads
 from src.utils import get_logger
 
 log = get_logger("runtime_tunables")
 
+def _ttl_from_env() -> float:
+    """Cache TTL in seconds, env-overridable, floored at 1s.
+
+    Env-overridable so the owner can trade reads against propagation delay
+    without a deploy; floored rather than clamped both ways because a longer
+    TTL is only ever a cost/latency choice, while a sub-second one would put
+    a Firestore read back on a hot loop.
+    """
+    raw = os.environ.get("RUNTIME_TUNABLES_CACHE_TTL_SEC", "").strip()
+    if not raw:
+        return 30.0
+    try:
+        return max(float(raw), 1.0)
+    except (TypeError, ValueError):
+        log.warning(
+            "RUNTIME_TUNABLES_CACHE_TTL_SEC={!r} is not a number — using 30s",
+            raw,
+        )
+        return 30.0
+
+
 _DOC_PATH = ("control", "runtime_tunables")
-_CACHE_TTL_S = 5.0
+
+# Cache TTL for the tunables doc.
+#
+# This was 5.0s, and 5s is not a cost anyone priced.  The read refreshes
+# LAZILY on access and the scanner touches tunables continuously (14 call
+# sites in ``scanner/__init__.py`` alone), so the TTL is not a bound on
+# staleness — it is a floor on SPEND: one Firestore read every five seconds,
+# forever, whether or not a single value has changed.  That is **17,280 reads
+# a day on one document**, 35% of Firestore's 50,000/day no-cost allowance,
+# against a project writing 25 documents a day in total.  On 2026-09-02 that
+# allowance ran out at 00:41 UTC and took auto-trade down for every user.
+#
+# 30s costs 2,880 reads a day instead, and what it buys back is propagation
+# delay on OPS KNOBS: a value the owner sets from the control panel reaches
+# the engine within 30s rather than 5s.  Nothing in the money path reads its
+# gate from here — the kill switch and the global enable flag live on the
+# kill-switch document with their own 5s cache, and that has NOT been touched.
+#
+# The proper fix is an explicit invalidation signal rather than a longer
+# guess, exactly as ``CLAUDE.md``'s Cost Discipline section requires ("gate
+# the cache on an explicit invalidation signal ... never rely on a TTL alone")
+# — a Redis generation counter the ops write path bumps, which would make
+# propagation FASTER than today's 5s while costing ~25 reads a day.  That
+# needs cross-process plumbing and is the follow-up; this is the number.
+_CACHE_TTL_S = _ttl_from_env()
+
 # Warn (throttled to its own interval) once the served cache is this stale —
 # it means the background Firestore refresh keeps failing.
 _STALE_WARN_S = 60.0
@@ -1602,6 +1650,7 @@ class RuntimeTunables:
             doc = (
                 self._db.collection(_DOC_PATH[0]).document(_DOC_PATH[1]).get()
             )
+            _reads.record("runtime_tunables.doc", 1)
             values = dict(doc.to_dict() or {}) if getattr(doc, "exists", False) else {}
         except Exception:
             log.exception(
