@@ -128,6 +128,94 @@ Never push to `claude/general-session-*` or harness-assigned long-lived branches
 
 ---
 
+## Shipping Onto a Live Book — the gate a money-path PR passes
+
+Written 2026-09-02, after the day this repo would least like to repeat.
+2026-09-01 landed **three** PRs on `main` — a bracket-retirement sweep, an
+exchange-position reader, and an incident fix for the first of them — and the
+middle of that sequence took **auto-trade down for every paid user for roughly
+four hours**. Every guard in this file held except the ones nobody had written
+down, and the thing that noticed was **the owner, from his phone**.
+
+The lessons already sit in § Conventions as the incidents that bought them.
+This section is the forward-looking half: the checks that run *before* a merge,
+not the story told after one.
+
+**1. Count the vendor calls and the Firestore round trips, not the actions.**
+The orphan sweep's budget was named for what it *does* (cancel) and the common
+production path does nothing — so it spent nothing, ran unbounded, and got the
+box rate-limited off Binance. Before merging anything that loops over user
+state, state the worst-case number of exchange calls, Firestore reads and
+Firestore writes **per cycle** in the PR body, and spend the budget at the TOP
+of the iteration so it bounds the branch that does no work. A test on the
+do-nothing path is not optional: it is the path production takes.
+
+**2. A new background loop, sweep, or reconciler ships DEFAULT OFF.** It is
+armed by the owner after one watched cycle, with the counter to watch named in
+the PR body. This costs a day and is the only thing that reliably keeps a
+cleanup feature from spending a trading session. Corollary: **a feature that
+has once cost live trades never re-arms itself on deploy** — the default is the
+incident report.
+
+**3. Name the blast radius in one sentence, in the PR body, before the design
+summary.** *"If this is wrong, what stops working for a paying user, and which
+switch turns it off?"* A change that cannot answer the second half is not ready
+to merge. The answer is also the thing to watch after the deploy — see 4.
+
+**4. Watch the deploy you just shipped.** The 2026-09-01 deploy was 08:07;
+placements began failing ~08:30; it was reported ~12:30. Auto-deploy on `main`
+takes ~45s and reaches real capital, so a money-path merge is not finished at
+the merge — check the money path itself within the hour (placements, the
+dispatch funnel, the breaker) and say in the session notes what you looked at.
+**A green CI run is evidence about the code, never about the book.**
+
+**5. Three merges to `main` in one day on one subsystem is the warning, not the
+achievement.** Each of yesterday's three was individually defensible and the
+third existed only because of the first. On a live book, prefer one change,
+watched, over a sequence that outruns the evidence — and when a session has
+already shipped a money-path PR, the bar for the second one that day is the
+owner's, not mine.
+
+**6. The owner is not the monitoring system.** If the only way a failure
+surfaces is a screenshot from a phone, the change was unfinished — whatever its
+tests said. Ship the counter, the probe, or the ops row that would have caught
+it *in the same PR*, and prefer a probe keyed on the population that would be
+harmed (paid users whose orders stopped) over one keyed on the subsystem that
+happens to be convenient.
+
+**7. Unknown is not a value, and on the money path it must never wear a
+value's caption.** This file has recorded that rule for panels seven times; on
+2026-09-02 it turned up on the **user's** screen. `/api/auto-trade/runtime-
+status` returns `auto_trade_globally_enabled: False` and
+`binance_key_connected: False` for three different worlds — the store was never
+initialised in this process, the Firestore read raised, or the flag is honestly
+off — and publishes no field distinguishing them, so the Lumin app tells a
+subscriber *"a safety pause is active … trading resumes automatically"* and
+tells a user whose key **is** connected to go and connect one. Two of those
+three worlds never resume, and neither is a safety pause. **Any money-path
+field a subscriber reads carries its own readability**: the value, and whether
+we could observe it. Same rule as the ops caption, one repo further out, with a
+paying user at the end of it.
+
+**8. Ask which process holds the state, every time — it is not a deployment
+detail.** In isolated mode `src/api/main.py` initialises the keystore and kill
+switch **separately from `src/bootstrap.py`, under a stricter precondition**
+(both `FIREBASE_PROJECT_ID` and `FIREBASE_SERVICE_ACCOUNT_PATH`, where the
+engine needs only the project and falls back to ADC). So the api container can
+be blind to Firestore while the engine trades perfectly — and every surface the
+owner and the subscriber read is served by the blind one. `INDEX COLD` and the
+promotion-census `{}` were this same defect on diagnostic pages; here it
+reaches the app and the kill switch.
+
+**9. A safety control that cannot be operated is a Tier-0 fault, and it fails
+silently.** `POST /api/kill-switch` returns 503 when this process has no
+Firestore client, so B18's *"kill switch takes effect in under 5 seconds"* is
+unmeetable from the control plane with nothing red anywhere to say so. Check
+that the switches can still be *thrown*, not merely read, whenever a
+credential, container, or deployment-mode change lands.
+
+---
+
 ## Re-check Before You Test, Not After
 
 **A test proves the code does what you wrote. Nothing in the suite proves what
@@ -181,6 +269,9 @@ wrong" is not evidence about what happens when you change it.
 - **Never log a Binance API secret at any level. Never write it to disk. Never surface it in errors.**
 - **Never accept a Binance key with withdraw permission enabled. Auto-reject, no override.**
 - **Never disable or weaken blast-radius caps.**
+- **Never ship a new background sweep, reconciler, or cleanup loop armed by default** — default OFF, armed by the owner after one watched cycle (2026-09-01: a default-ON sweep cost every paid user ~4h of auto-trade).
+- **Never spend a loop's budget on the branch that does the work.** Spend it per item examined, before any exchange call, Firestore read, or cancel — a budget that only decrements on success is a retry storm on the path production actually takes.
+- **Never render an unreadable money-path flag to a subscriber as though it were readable.** `False` because we could not ask and `False` because the answer is no are different facts; publish which one, or say nothing.
 - **Never let a position sit OPEN without a stop.**
 - **Never add an uncached Firestore / network read (or write) to a per-tick, per-scan, or per-order hot loop.** Cache it and gate the cache on an invalidation signal.
 - **Never boolean-test candle/series arrays** (`arr or []`, `if not arr`) — the data store holds numpy arrays and truthiness raises; use `is None` / `len()` checks. Enforced by `tests/test_no_numpy_truthiness_regression.py` (2026-07-14: 8 features died silently to this).
@@ -198,7 +289,10 @@ Cloud cost is part of "production-grade." Every change is reviewed for cost the 
 **Rules:**
 - **Before adding/changing anything, ask: does this add reads, writes, or egress on a hot path?** Hot paths here: scanner (15s × 75 pairs), mark-price ticks (~1/sec/symbol), per-order, per-signal-dispatch. If yes → cache it, and gate the cache on an explicit invalidation signal (e.g. `position_state.get_write_generation()`), with a defensive TTL bound. Never rely on a TTL alone in a real-money path.
 - **Firestore bills under the "App Engine" line in GCP.** Datastore-mode reads/writes/storage roll up under the "App Engine" service grouping — so an "App Engine" charge with **zero App Engine services deployed** is almost always Firestore. Don't chase a phantom App Engine deployment; check **Billing → group by SKU** and **Firestore → Usage** first.
-- **Reads dominate.** The keystore (`firestore_keystore`) and kill-switch reads are already cached (30s / 5s). Any *new* per-loop reader must follow the same pattern — see `pretp_dispatcher._default_positions_for_symbol` as the reference implementation.
+- **Reads dominate, and the read budget is a HARD CEILING, not a bill.** Firestore's no-cost tier is **50,000 document reads/day**, resetting at midnight Pacific. Past it a project whose billing account is not in good standing gets `RESOURCE_EXHAUSTED: Quota exceeded.` — not a charge. On 2026-09-02 that allowance ran out at 00:41 UTC on **53k reads against 25 writes**, and every Firestore-backed path failed together: the keystore (so `list_active_uids` returned empty and every signal fanned out to **zero users**), the kill switch (so `POST /api/kill-switch` 503'd — the emergency stop and the thing it stops fail together), runtime tunables, and the dispatch log. **Count reads per day against 50,000 before merging anything that reads Firestore on a timer or a poll**, and read `read.firestore_reads` on the diag console rather than estimating — it counts *documents* per call site, per process, because a `collection_group` query is one call and N reads.
+- **A TTL on a continuously-touched document is a spend floor, not a staleness bound.** `runtime_tunables` refreshes lazily on access and the scanner touches it every cycle, so its 5s TTL meant **17,280 reads/day on one document** — 35% of the entire allowance for ops knobs nobody flips hourly. It is 30s now (`RUNTIME_TUNABLES_CACHE_TTL_SEC`). Ask of every cache: *how often is this touched, and therefore what does the TTL cost per day?* The right end state is an explicit invalidation signal (a Redis generation the ops write path bumps), which is both cheaper and faster than any TTL.
+- **Cache the question the caller actually asked.** `/api/auto-trade/runtime-status` answered `binance_key_connected` — an existence check — by calling `get_key_blob`, fetching and discarding an encrypted secret once per 10s per polling user: ~8,600 reads/day from one open Trade tab. `has_key` caches the boolean (invalidated by every writer) and key material is still read through, because caching a secret to save reads on a path that runs a few times a day is the wrong trade in both directions.
+- **This section said the opposite for months.** It read *"the keystore (`firestore_keystore`) and kill-switch reads are already cached (30s / 5s)"*. The keystore had **no cache at all** — the 30s was `signal_dispatch._ACTIVE_UIDS_TTL_S`, a different module — and that sentence is why nobody looked here. **A constant asserting a property it does not have, checkable in one command**, for the eighth time in these two repos, and the first time it was in the Cost Discipline section itself. Any *new* per-loop reader must be cached and invalidation-gated — see `pretp_dispatcher._default_positions_for_symbol` as the reference implementation.
 - **Auth is not the cost.** Phone Auth / SMS verification is free at tester volume and sits under "Authentication", not "App Engine". If the bill spikes, look at the server-side execution Firestore layer, not auth.
 - **Diagnose on real billing data first** (mirrors Real-Data-First Diagnosis): Billing SKU report + Firestore Usage dashboard *before* theorising about a cause or touching code.
 

@@ -177,6 +177,23 @@ def _scan_executor(ctx: Ctx) -> Dict[str, Any]:
     }
 
 
+def _firestore_reads(ctx: Ctx) -> Dict[str, Any]:
+    """Which call sites are spending the Firestore daily read allowance.
+
+    Documents, not calls — Firestore bills per document returned, so a
+    collection-group query is not one read.  ``per_day`` extrapolates from this
+    process's uptime against the 50,000/day no-cost quota that ran out at
+    00:41 UTC on 2026-09-02 and took auto-trade down for every user.
+
+    Reports which PROCESS it describes: in isolated mode the engine and the api
+    container keep separate counters, and the api one serves every surface the
+    owner reads.
+    """
+    from src import firestore_reads as _fsr
+
+    return _fsr.snapshot()
+
+
 def _edge_store_internals(ctx: Ctx) -> Dict[str, Any]:
     """What is actually inside an edge-store cell, and what does it cost to write?
 
@@ -352,6 +369,10 @@ for _e in (
     Entry("read.scan_executor", "Scan executor queue", "read",
           "Worker count, live threads and queued work — tells a GIL-bound loop "
           "from an I/O-bound one.", _scan_executor),
+    Entry("read.firestore_reads", "Firestore read census", "read",
+          "Document reads per call site against the 50k/day no-cost quota — "
+          "which loop is spending the allowance, and in which process.",
+          _firestore_reads),
     Entry("read.edge_store", "Edge store internals", "read",
           "Cell count, record counts and the biggest cells — where the 39 MB "
           "of serialisation cost lives.", _edge_store_internals),

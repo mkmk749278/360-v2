@@ -400,9 +400,17 @@ def register(
             from src.security import firestore_keystore as _fk
             if _fk.is_initialised():
                 try:
-                    # Blocking Firestore read — thread it off the loop.
-                    await asyncio.to_thread(_fk.get_key_blob, firebase_uid)
-                    binance_key_connected = True
+                    # Presence only — this field answers "does a key
+                    # document exist", never "give me the key".  It used to
+                    # call get_key_blob, fetching (and discarding) an
+                    # encrypted secret once per 10s per polling user: ~8,600
+                    # Firestore reads a day from one open Trade tab, which is
+                    # a sixth of the free-tier allowance the 2026-09-02 outage
+                    # ran out of.  has_key caches the boolean and every writer
+                    # invalidates it, so a fresh connect still shows at once.
+                    binance_key_connected = bool(
+                        await asyncio.to_thread(_fk.has_key, firebase_uid)
+                    )
                 except _fk.KeyBlobNotFoundError:
                     binance_key_connected = False
         except Exception:

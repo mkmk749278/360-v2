@@ -42,10 +42,12 @@ from __future__ import annotations
 
 import base64
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from src import firestore_reads as _reads
 from src.utils import get_logger
 
 log = get_logger("security.firestore_keystore")
@@ -209,11 +211,76 @@ def put_key_blob(
             "last_validated_at": now,
         }
     )
+    _invalidate_has_key(uid)
     log.info(
         "Stored encrypted Binance key blob: uid={}, key_id_prefix={}",
         uid,
         api_key_full[:8],
     )
+
+
+# ---------------------------------------------------------------------------
+# Key-presence cache (2026-09-02)
+# ---------------------------------------------------------------------------
+#
+# ``CLAUDE.md``'s Cost Discipline section said "the keystore ... reads are
+# already cached (30s)".  That was never true of this module: the 30s belongs
+# to ``signal_dispatch._ACTIVE_UIDS_TTL_S``, and ``get_key_blob`` was a bare
+# ``.get()`` on every call.  ``/api/auto-trade/runtime-status`` calls it once
+# per 10s per polling user purely to answer ``binance_key_connected`` — a
+# question about whether the document EXISTS — so an app left open on the Trade
+# tab bought ~8,600 reads a day, each one fetching an encrypted secret it threw
+# away.
+#
+# So the presence answer is cached and the blob is not.  Caching the blob would
+# hold key material in memory for a TTL to save reads on a path that runs a few
+# times a day; caching a boolean costs nothing and removes the whole poll.  The
+# order path keeps calling ``get_key_blob`` and keeps reading through.
+#
+# Every writer invalidates, so a connect or disconnect is visible immediately
+# rather than after a TTL — a user who has just linked a key must not be told
+# for another minute that they have not.
+
+_HAS_KEY_TTL_S: float = 60.0
+_has_key_cache: dict[str, tuple[bool, float]] = {}
+
+
+def _set_has_key(uid: str, present: bool) -> None:
+    """Record what a real read just proved about *uid*'s key document."""
+    with _lock:
+        _has_key_cache[uid] = (bool(present), time.monotonic())
+
+
+def _invalidate_has_key(uid: str) -> None:
+    """Drop the cached presence answer — called by every writer."""
+    with _lock:
+        _has_key_cache.pop(uid, None)
+
+
+def has_key(uid: str) -> bool:
+    """True iff *uid* has a connected Binance key document.
+
+    The cheap question behind ``binance_key_connected``.  Cached for
+    :data:`_HAS_KEY_TTL_S`; invalidated by every writer, so the TTL bounds only
+    how long a change made OUTSIDE this process stays unseen.
+
+    Raises :class:`FirestoreKeystoreNotInitialisedError` if the keystore is not
+    wired, rather than answering False — "we could not ask" and "the user has
+    no key" are different facts, and today the app told a subscriber whose key
+    IS connected to go and connect one because they were rendered the same.
+    """
+    with _lock:
+        if _db is None:
+            raise FirestoreKeystoreNotInitialisedError(
+                "Firestore keystore not initialised — call init_keystore at boot"
+            )
+        cached = _has_key_cache.get(uid)
+        if cached is not None and (time.monotonic() - cached[1]) < _HAS_KEY_TTL_S:
+            return cached[0]
+    present = bool(_doc_ref(uid).get().exists)
+    _reads.record("keystore.has_key", 1)
+    _set_has_key(uid, present)
+    return present
 
 
 def get_key_blob(uid: str) -> UserKeyBlob:
@@ -226,8 +293,11 @@ def get_key_blob(uid: str) -> UserKeyBlob:
     flow.
     """
     snap = _doc_ref(uid).get()
+    _reads.record("keystore.get_key_blob", 1)
     if not snap.exists:
+        _set_has_key(uid, False)
         raise KeyBlobNotFoundError(f"no key blob for uid={uid}")
+    _set_has_key(uid, True)
     data = snap.to_dict() or {}
     return UserKeyBlob(
         uid=uid,
@@ -269,7 +339,9 @@ def list_active_uids() -> list[str]:
     try:
         query = db.collection_group("binance_key")
         uids: list[str] = []
+        _query_docs = 0
         for snap in query.stream():
+            _query_docs += 1
             # snap.id is the doc id within binance_key; only
             # 'current' is our convention.  snap.reference.parent.parent
             # is the user document.
@@ -279,6 +351,7 @@ def list_active_uids() -> list[str]:
             if user_ref is None:
                 continue
             uids.append(user_ref.id)
+        _reads.record("keystore.list_active_uids", max(_query_docs, 1))
         return uids
     except Exception as exc:
         log.warning("list_active_uids failed: {}", exc)
@@ -294,6 +367,7 @@ def delete_key_blob(uid: str) -> None:
 
     Idempotent — no error if the document doesn't exist.
     """
+    _invalidate_has_key(uid)
     _doc_ref(uid).delete()
     log.info("Deleted encrypted Binance key blob: uid={}", uid)
 
@@ -313,3 +387,4 @@ def reset_for_test() -> None:
     global _db
     with _lock:
         _db = None
+        _has_key_cache.clear()
