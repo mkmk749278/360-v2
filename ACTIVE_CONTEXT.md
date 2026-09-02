@@ -75,6 +75,36 @@ Per-user reads/day go from **~2.9M** (roster scan + disable gate alone) to
 **~2,900**. Flag reads go from ~52k to ~900. The design target is to stay inside
 the 50,000/day free allowance at 1,000 members rather than to pay a bill.
 
+### Two corrections after the deploy, both from owner screenshots
+
+**1. I shipped the defect inside the fix for it** (ops #200). Minutes after
+#199 deployed, `/control` read *"⚠ STATE UNREADABLE — Firestore refused the
+read … Engine said: ResourceExhausted: 429 Quota exceeded."* and, one line
+below in **green**, *"✓ Disengaged — auto-trade allowed."* The banner was the
+new work; the green line was the exact thing the banner exists to remove. The
+guard went on the TILE and the card BODY stayed unconditional, and every test I
+wrote asserted the tile. An unreadable state now renders **no verdict** and
+offers **both** controls — a lone Engage button is the verdict smuggled back in
+as a control. Three of five new tests fail against the template that was live.
+
+**2. My account of WHY the quota refuses was wrong, and the console says so.**
+I wrote (and this repo's Cost Discipline section already said) that the
+refusal hits *"a project whose billing account is not in good standing"*. The
+owner's Firebase console: **Blaze plan, billing working, ₹0.58 charged for
+September, and the only billed line is storage + bandwidth — never reads.** On
+Blaze, exceeding the no-cost tier normally *charges*; ours was refused, and 53k
+reads never reached the bill. Something caps this project at the free tier.
+
+**Standing hypothesis, not a measurement:** an **App Engine daily spending
+limit** (Datastore-mode usage rolls up under App Engine, which this file
+already records). One look in GCP → App Engine → Settings settles it; nobody
+has taken it.
+
+**Do not raise the cap.** The owner's requirement is *"we don't want to
+generate any bills in Google cloud"*, and the cap is what enforces it — it
+converts a bill into an outage, which is the trade he chose. Staying below the
+ceiling is the engineering answer; raising it is his call.
+
 ### Open / to watch after deploy
 
 - **Watch `read.firestore_projection` and `read.control_generation` within the
@@ -82,10 +112,19 @@ the 50,000/day free allowance at 1,000 members rather than to pay a bill.
   and every flip is on the 300s floor.
 - **Throw the kill switch once from ops and disengage it**, to exercise the
   bridge on the real box — the vendor-seam rule applied to our own Redis hop.
-- **Refutation condition, stated in advance:** if `/control` still reads
-  unavailable after the deploy, the api container's `FIREBASE_PROJECT_ID` is
-  itself unset, and the fix is env, not code. `throwable` should read true
-  regardless via the engine bridge.
+- **Refutation condition, stated in advance — and it RESOLVED.** The prediction
+  was that `/control` reading unavailable after deploy would mean the api
+  container's `FIREBASE_PROJECT_ID` is unset. It did not resolve that way: the
+  page rendered `read_failed` with Firestore's own `429`, which means the client
+  IS wired and the read was refused — the precondition fix landed and the quota
+  was the remaining cause. `throwable` read true and the buttons rendered, so
+  the bridge is doing its job.
+- **The read reduction is NOT yet measured.** The quota reset at 07:00 UTC, two
+  minutes before the owner's console screenshot, so `Reads 0 / 50k` there is
+  console lag and a fresh day, not evidence. First honest reading is the same
+  console tomorrow, or `/system/firestore` after an hour of engine uptime. Do
+  not declare this fixed off a window shorter than a day — the 2026-08-19
+  51-minute claim is the standing example.
 - The 30-minute index rebuild (`CONTROL_INDEX_REBUILD_SEC`) is a new background
   loop. It is NOT default-off — it reads two documents and writes two, and
   disabling it is what would let a safety index drift — but it is the thing to
