@@ -111,8 +111,17 @@ Settings look. If Gemini goes via Vertex, separate project.
 - Under `STATISTICAL_CHANGE_POLICY` the shadow window is one to four months
   (§11.1). Nothing gets armed before that.
 
-Engine: see the follow-up commit for the verified suite count; ruff clean on
-`src/ config/`, mypy 134 against a baseline of 134 — zero added.
+Engine: **9,009 passed, 58 skipped, 0 failed** (summary line, copied). Against
+`main`'s 8,966 that is +43, reconciled exactly: 41 new governor tests plus **2
+the diag catalog's DERIVED guards added on their own** —
+`test_no_entry_can_reach_the_money_path[read.ai_governor]` and
+`test_no_entry_shells_out_or_evals[read.ai_governor]`. Nobody edited a list; the
+new catalog entry was audited for money-path reachability and for
+`subprocess`/`eval` because the requirement is derived from the tree. That is
+the pattern this repo keeps reaching for, working unprompted on the first entry
+added after it shipped.
+
+ruff clean on `src/ config/`; mypy 134 against a baseline of 134 — zero added.
 
 ---
 
