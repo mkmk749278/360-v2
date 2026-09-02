@@ -130,6 +130,11 @@ def _build_registry() -> Dict[str, Tunable]:
     # test overrides of config values are honoured.
     from config import (
         ACTIVE_DUP_GUARD_ENABLED,
+        AI_GOV_APPLY_ENABLED,
+        AI_GOV_ARMS_ENABLED,
+        AI_GOV_MEASURE_ENABLED,
+        AI_GOV_MODEL,
+        AI_GOV_PROVIDER,
         ALLOCATOR_RECOMMEND_ENABLED,
         BE_ARM_NOISE_MULT,
         BE_ARM_R_MULT,
@@ -374,6 +379,76 @@ def _build_registry() -> Dict[str, Tunable]:
             type="str",
             default=TRAIL_GOVERNOR_TIMEFRAME,
             choices=("5m", "15m"),
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="ai_gov_measure_enabled",
+            label="AI Trade Governor — measurement",
+            description=(
+                "Ask the model about every open signal on its own bar clock "
+                "and record the verdict. ON by default: a measurement shipped "
+                "off produces an empty panel and a decision that keeps being "
+                "deferred. This changes no order on its own — the effect "
+                "switch below is what does."
+            ),
+            type="bool",
+            default=AI_GOV_MEASURE_ENABLED,
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="ai_gov_apply_enabled",
+            label="AI Trade Governor — APPLY verdicts to real orders",
+            description=(
+                "Let a verdict move a take-profit, tighten a stop, or close a "
+                "position. OFF until a measured window says it beats TP1-full "
+                "net of fees. Which arms may act is set separately below, and "
+                "the panic arm additionally refuses while its position ceiling "
+                "is unset."
+            ),
+            type="bool",
+            default=AI_GOV_APPLY_ENABLED,
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="ai_gov_arms_enabled",
+            label="AI Trade Governor — armed arms",
+            description=(
+                "Comma set of arms allowed to act: tp, sl, panic. TP alone by "
+                "default — it is the only arm fully decidable from the closed "
+                "signal record, because it moves the target nearer only and "
+                "max favourable excursion settles it with no ordering "
+                "ambiguity."
+            ),
+            type="str",
+            default=AI_GOV_ARMS_ENABLED,
+            choices=("tp", "tp,sl", "tp,sl,panic", "sl", "panic", ""),
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="ai_gov_provider",
+            label="AI Trade Governor — provider",
+            description=(
+                "Which vendor answers. Neither consumer subscription can serve "
+                "the engine; this needs the provider's own API key, and the "
+                "lane reports 'not configured' as a named state until one is "
+                "set."
+            ),
+            type="str",
+            default=AI_GOV_PROVIDER,
+            choices=("google", "anthropic"),
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="ai_gov_model",
+            label="AI Trade Governor — model",
+            description=(
+                "The alias we ask for. Every ledger row stamps the version the "
+                "provider says it actually SERVED, so a silently rotated alias "
+                "shows up as a population split rather than as drift nobody "
+                "can see."
+            ),
+            type="str",
+            default=AI_GOV_MODEL,
             category="Stops & exits",
         ),
         Tunable(

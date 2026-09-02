@@ -930,6 +930,56 @@ async def _park(
     return True
 
 
+async def park_external_level(
+    position: Any,
+    level: float,
+    *,
+    placer: Any,
+    source: str,
+) -> bool:
+    """Park a stop chosen by ANOTHER module, through this module's guards.
+
+    Added 2026-09-02 for `src/execution/ai_governor.py`. The AI governor's
+    ADJUST_SL arm needs a stop moved; what it must not do is move one itself.
+
+    This module is not "the SAR module" — it is the **stop-placement engine**,
+    and six sessions bought its guards: the -4130 collision that made every
+    handover impossible for a month, the place-then-cancel ordering that never
+    leaves a position naked, ``reduceOnly`` with the position's own quantity,
+    the zero-quantity refusal, and the explicit cancel-on-terminal sweep. A
+    second module that moves a resting stop would re-buy every one of them, and
+    the two would then disagree about which order is authoritative.
+
+    Three things this does NOT inherit from `step_position`, on purpose:
+
+    * **No mechanism.** The level arrives from the caller; nothing here
+      computes SAR or a chandelier.
+    * **No bar-keyed idempotence.** That guard exists because re-asking the
+      exchange for the same *level* on the same bar cannot get a different
+      answer. A caller-supplied level is not derived from the bar, so the guard
+      would key on the wrong thing — the caller owns its own repetition.
+    * **No handover.** `handover=False` always: a handover is the moment a
+      mechanism takes over the exit, and this arm is a one-off tightening that
+      leaves ownership exactly where it was.
+
+    ``source`` is counted separately so an AI-sourced park and a
+    mechanism-sourced one never pool. A governor that degraded the trail lane's
+    numbers while looking healthy itself is the shape `sar_live_shadow`'s
+    health-lane split already exists to prevent.
+    """
+    if not tightens(position.side, float(getattr(position, "sl_price", 0.0) or 0.0), float(level)):
+        # Widening a stop on a live position is unbounded loss. Refused here as
+        # well as at the caller, because an invariant that holds only because
+        # of how a collaborator happens to behave is one refactor from not
+        # holding.
+        _refuse(REFUSE_NOT_ONSIDE)
+        _count(f"external_refused:{source}")
+        return False
+    ok = await _park(position, float(level), placer=placer, handover=False)
+    _count(f"external_{'parked' if ok else 'failed'}:{source}")
+    return ok
+
+
 def remaining_qty(position: Any) -> float:
     """How much of the position a stop must still cover.
 
