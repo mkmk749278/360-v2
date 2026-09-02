@@ -583,15 +583,44 @@ class AutoModeResumeMineResponse(BaseModel):
 class KillSwitchState(BaseModel):
     """Global kill-switch state (OWNER_BRIEF B18 emergency halt).
 
-    ``engaged`` True = ALL auto-trade is halted engine-wide until
-    manually disengaged.  ``initialised`` False means the kill-switch
-    client never booted (no Firestore / GCP creds) — the control plane
-    renders an "unavailable" state rather than a misleading "off".
+    ``engaged`` True = ALL auto-trade is halted engine-wide until manually
+    disengaged.
+
+    ``availability`` carries WHY, and it exists because ``initialised`` did
+    not.  That one boolean stood for three different worlds — this process
+    never wired Firestore, the read raised, or the flag is honestly off — and
+    ops turned it into the confident sentence *"no Firestore / GCP creds in
+    this deployment"*, a cause no surface could observe, printed over a control
+    the owner could not operate (2026-09-02).  Two of the three never recover
+    on their own and neither is a safety pause:
+
+    * ``ok`` — the value beside it is a value.
+    * ``not_configured`` — no client in the serving process.  A deployment
+      fact; it will not fix itself.
+    * ``read_failed`` — Firestore refused or failed, and ``detail`` carries
+      what it said.  On 2026-09-02 that was the daily read quota, which resets
+      at midnight Pacific.
+
+    ``throwable`` is the question the control plane actually needs answered,
+    and it is NOT the same as ``availability == "ok"``: when this process
+    cannot reach Firestore the flip is routed to the engine container over
+    Redis, so the switch can be un-readable here and still perfectly
+    throwable.  A page must grade the button on this field, never on
+    ``initialised``.
+
+    ``initialised`` is retained so an older ops build keeps rendering.
     """
 
     engaged: bool
     reason: Optional[str] = None
     initialised: bool = True
+    availability: str = "ok"
+    detail: Optional[str] = None
+    throwable: bool = True
+    #: Which process answered — "local" (this one holds the client) or
+    #: "engine" (routed over Redis).  A surface that cannot say where a safety
+    #: reading came from repeats the INDEX COLD defect on the switch itself.
+    source: str = "local"
 
 
 class KillSwitchSetRequest(BaseModel):
@@ -620,6 +649,11 @@ class AutoTradeGlobalState(BaseModel):
 
     enabled: bool
     initialised: bool = True
+    #: Same three-state reading as :class:`KillSwitchState.availability`.
+    availability: str = "ok"
+    detail: Optional[str] = None
+    throwable: bool = True
+    source: str = "local"
 
 
 class AutoTradeGlobalSetRequest(BaseModel):

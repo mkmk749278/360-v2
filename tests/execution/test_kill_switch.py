@@ -134,17 +134,48 @@ def test_cache_ttl_within_window_skips_firestore_read() -> None:
     assert kill_doc.get.call_count == 1
 
 
-def test_cache_ttl_expires_after_window() -> None:
-    """After 5s the cache is stale; next read re-fetches.  This is
-    what bounds the kill-switch SLA at 5s — operator flips, all
-    readers see the new value within one TTL."""
+def test_the_defensive_ttl_still_expires() -> None:
+    """The TTL is a FLOOR now, not the mechanism, and this test's premise moved
+    with it (2026-09-02).
+
+    It used to read *"after 5s the cache is stale ... this is what bounds the
+    kill-switch SLA at 5s"*.  That was true and it was also the most expensive
+    sentence in the project: ``MONITOR_POLL_INTERVAL`` is 5.0s, so the entry
+    expired exactly one tick before every read and the cache could never hit —
+    ~17,280 reads a day on this one document, twice over, which with
+    ``runtime_tunables`` was the whole 50,000/day allowance.  It ran out at
+    00:41 UTC and took auto-trade down for every user.
+
+    B18's five seconds is met by :mod:`src.control_generation` now — the flip
+    bumps a Redis generation and the monitor's own 5s poll drops the cache on
+    the next tick, which is faster than waiting for a lapse.  What remains here
+    is the bound that converges a deployment with no Redis, and it must still
+    actually expire: a cache with no floor at all would never notice a dropped
+    bump.
+    """
     client, _, doc_map, clock = _make_client_with_clock()
     kill_doc = doc_map[("kill_switch", "global")]
     kill_doc.get.return_value = SimpleNamespace(
         exists=True, to_dict=lambda: {"engaged": False}
     )
     client.is_global_engaged()
-    clock[0] = 5.1  # advance past TTL
+    clock[0] = kill_switch._CACHE_TTL_S + 0.1
+    client.is_global_engaged()
+    assert kill_doc.get.call_count == 2
+
+
+def test_the_generation_and_not_the_ttl_is_what_meets_the_five_second_sla() -> None:
+    """An invalidation from the other container drops the cache immediately,
+    without waiting for the floor above."""
+    client, _, doc_map, clock = _make_client_with_clock()
+    kill_doc = doc_map[("kill_switch", "global")]
+    kill_doc.get.return_value = SimpleNamespace(
+        exists=True, to_dict=lambda: {"engaged": False}
+    )
+    client.is_global_engaged()
+    assert kill_doc.get.call_count == 1
+    clock[0] = 1.0                      # well inside the defensive TTL
+    client.invalidate_global()          # what the generation listener calls
     client.is_global_engaged()
     assert kill_doc.get.call_count == 2
 

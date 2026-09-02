@@ -439,6 +439,72 @@ class RedisEngineFacade:
         except Exception:
             return {"ok": False, "error": "unreadable result envelope"}
 
+    # ------------------------------------------------------------------
+    # Safety switches — throw them in the engine when this process cannot
+    # ------------------------------------------------------------------
+
+    async def flip_safety_switch(
+        self, switch: str, value: bool, reason: str = "", timeout_s: float = 6.0
+    ) -> dict:
+        """Ask the ENGINE container to flip a safety flag; wait for the answer.
+
+        Used when this process has no Firestore client of its own.  Before
+        2026-09-02 that case returned 503 and the owner simply could not halt
+        auto-trade from the control plane — B18's five-second requirement
+        unmeetable, with nothing red anywhere to say so.
+
+        The wait is bounded and its expiry is REPORTED, never rendered as a
+        failed flip: "the engine did not answer" and "the engine refused" send
+        an operator to different places, and on an emergency stop the
+        difference is the whole message.  The consumer BRPOPs, so the normal
+        answer is sub-second.
+        """
+        import json
+        import time
+        import uuid
+
+        from src.api import snapshot_store as _store
+
+        if not self._redis.available:
+            return {
+                "ok": False,
+                "switch": switch,
+                "error": "Redis unavailable — cannot reach the engine container",
+            }
+        req_id = uuid.uuid4().hex
+        env = {
+            "request_id": req_id,
+            "switch": switch,
+            "value": bool(value),
+            "reason": reason,
+            "ts": time.time(),
+        }
+        await self._redis.client.lpush(_store.KEY_CMD_SWITCH, json.dumps(env))
+        deadline = time.monotonic() + timeout_s
+        key = _store.KEY_SWITCH_RESULT_PREFIX + req_id
+        while time.monotonic() < deadline:
+            raw = await self._redis.client.get(key)
+            if raw is not None:
+                try:
+                    return json.loads(raw)
+                except Exception:
+                    return {
+                        "ok": False,
+                        "switch": switch,
+                        "error": "unreadable result envelope from the engine",
+                    }
+            await asyncio.sleep(0.1)
+        return {
+            "ok": False,
+            "switch": switch,
+            "error": (
+                f"the engine did not answer within {timeout_s:.0f}s — the flip "
+                f"may still be applied when it drains the queue; check the "
+                f"switch state before trying again"
+            ),
+            "timed_out": True,
+        }
+
     def get_auto_execution_status(self) -> dict:
         return dict(self._state.get("auto_execution_status", {
             "mode": self._current_auto_mode,

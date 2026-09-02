@@ -18,6 +18,12 @@ You are CTE — Chief Technical Engineer and business partner. Full technical ow
 
 **The chain:** profitable signals → subscriber trust → retention → revenue → growth.
 
+**Scale target (owner, 2026-09-02): 1,000 auto-trade members.** That is the number
+every per-user cost is sized against, not today's handful — a Firestore read, a
+Binance call or a Redis key that is free at one user and linear in members is a
+bug the moment it ships, and it is invisible in every instrument until the
+subscribers arrive. See **Cost Discipline** and `read.firestore_projection`.
+
 Ask before every code change: **"How does this make signals more profitable for paid subscribers?"** If unmeasurable — defer.
 
 ---
@@ -274,6 +280,16 @@ wrong" is not evidence about what happens when you change it.
 - **Never render an unreadable money-path flag to a subscriber as though it were readable.** `False` because we could not ask and `False` because the answer is no are different facts; publish which one, or say nothing.
 - **Never let a position sit OPEN without a stop.**
 - **Never add an uncached Firestore / network read (or write) to a per-tick, per-scan, or per-order hot loop.** Cache it and gate the cache on an invalidation signal.
+- **Never let a Firestore read scale with the SUBSCRIBER COUNT.** The auto-trade
+  target is **1,000 members** (owner, 2026-09-02). A `collection_group` scan bills
+  one read *per document returned*, and a per-user document read on a gate bills
+  one per user — so both are invisible at one user and are millions of reads a day
+  at the target. Answer the question from an **index document** (`control/active_uids`,
+  `control/disabled_uids`), maintained by the writers and rebuilt on a slow timer.
+  Before merging, read `read.firestore_projection` on the diag console: it scales
+  today's measured reads to 1,000 and prices the excess.
+- **Never set a cache TTL at or below the period of the loop that reads it.** That
+  is not a cache, it is a rename of the read — see Cost Discipline.
 - **Never boolean-test candle/series arrays** (`arr or []`, `if not arr`) — the data store holds numpy arrays and truthiness raises; use `is None` / `len()` checks. Enforced by `tests/test_no_numpy_truthiness_regression.py` (2026-07-14: 8 features died silently to this).
 - **Never swallow an exception silently in a data/measurement path.** Every fail-open `except` calls `fail_open.record(site, exc)` — behavior stays fail-open, but the failure counts, WARNs, and pages via the feature-liveness watchdog.
 - **Never admit a symbol to the scan universe on a name list alone.** Every admission path calls `symbol_filters.crypto_perp_admission`, which is **fail-closed** on Binance's own `contractType`. A hand-maintained ticker list cannot see next week's listing, and the owner must never be the process by which we notice one.
@@ -290,8 +306,24 @@ Cloud cost is part of "production-grade." Every change is reviewed for cost the 
 - **Before adding/changing anything, ask: does this add reads, writes, or egress on a hot path?** Hot paths here: scanner (15s × 75 pairs), mark-price ticks (~1/sec/symbol), per-order, per-signal-dispatch. If yes → cache it, and gate the cache on an explicit invalidation signal (e.g. `position_state.get_write_generation()`), with a defensive TTL bound. Never rely on a TTL alone in a real-money path.
 - **Firestore bills under the "App Engine" line in GCP.** Datastore-mode reads/writes/storage roll up under the "App Engine" service grouping — so an "App Engine" charge with **zero App Engine services deployed** is almost always Firestore. Don't chase a phantom App Engine deployment; check **Billing → group by SKU** and **Firestore → Usage** first.
 - **Reads dominate, and the read budget is a HARD CEILING, not a bill.** Firestore's no-cost tier is **50,000 document reads/day**, resetting at midnight Pacific. Past it a project whose billing account is not in good standing gets `RESOURCE_EXHAUSTED: Quota exceeded.` — not a charge. On 2026-09-02 that allowance ran out at 00:41 UTC on **53k reads against 25 writes**, and every Firestore-backed path failed together: the keystore (so `list_active_uids` returned empty and every signal fanned out to **zero users**), the kill switch (so `POST /api/kill-switch` 503'd — the emergency stop and the thing it stops fail together), runtime tunables, and the dispatch log. **Count reads per day against 50,000 before merging anything that reads Firestore on a timer or a poll**, and read `read.firestore_reads` on the diag console rather than estimating — it counts *documents* per call site, per process, because a `collection_group` query is one call and N reads.
-- **A TTL on a continuously-touched document is a spend floor, not a staleness bound.** `runtime_tunables` refreshes lazily on access and the scanner touches it every cycle, so its 5s TTL meant **17,280 reads/day on one document** — 35% of the entire allowance for ops knobs nobody flips hourly. It is 30s now (`RUNTIME_TUNABLES_CACHE_TTL_SEC`). Ask of every cache: *how often is this touched, and therefore what does the TTL cost per day?* The right end state is an explicit invalidation signal (a Redis generation the ops write path bumps), which is both cheaper and faster than any TTL.
-- **Cache the question the caller actually asked.** `/api/auto-trade/runtime-status` answered `binance_key_connected` — an existence check — by calling `get_key_blob`, fetching and discarding an encrypted secret once per 10s per polling user: ~8,600 reads/day from one open Trade tab. `has_key` caches the boolean (invalidated by every writer) and key material is still read through, because caching a secret to save reads on a path that runs a few times a day is the wrong trade in both directions.
+- **A TTL AT the period of the loop reading it is not a cache — it is a rename of the read.** This is the sharpest form of the rule below, and it is what actually spent the allowance. `MONITOR_POLL_INTERVAL` is **5.0s** and the kill-switch cache TTL was **5.0s**, so the entry expired exactly one tick before every read and *could never hit*. Three documents, none of which anybody was editing, on 2026-09-02:
+
+  | Document | Reader | Reads/day |
+  |---|---|---|
+  | `kill_switch/global` | order path + trail governor | ~17,280 |
+  | `kill_switch/global` *(a SECOND `.get()` on the same doc, own cache slot)* | `trade_monitor`, 5s poll | ~17,280 |
+  | `control/runtime_tunables` | scanner, every cycle | ~17,280 (at the old 5s) |
+
+  ≈ **51,840 — the entire 50,000/day allowance**, which is why it ran out at 00:41 UTC. **The end state named in this section was already the right one and nobody had built it**: `src/control_generation.py` is that Redis generation. A write bumps it; the monitor's own 5s loop MGETs four tiny integers (free, local, not Firestore) and drops the cache only when one has moved. TTLs are now **floors** (300s), and B18's five seconds is met *by construction* rather than by the accident of a reader re-asking Firestore on the same period — and met faster. Reads on those three documents fall ~60×.
+
+- **Fold every flag on one document into ONE cached read.** `signal_expiry` had its own cache slot and `play_billing` read straight through, so four accessors could take four reads of the same document within a second. Ask of any new flag: does it live on a document something already fetches?
+
+- **A TTL on a continuously-touched document is a spend floor, not a staleness bound.** Ask of every cache: *how often is this touched, and therefore what does the TTL cost per day?*
+- **Cache the question the caller actually asked.** `/api/auto-trade/runtime-status` answered `binance_key_connected` — an existence check — by calling `get_key_blob`, fetching and discarding an encrypted secret. `has_key` caches the boolean (invalidated by every writer) and key material is still read through, because caching a secret to save reads on a path that runs a few times a day is the wrong trade in both directions.
+
+  **The number attached to that cut was a story, and it took one grep to falsify.** It was written here as *"~8,600 reads/day from one open Trade tab"*, inferred from an assumed 10s poll — and `grep -rn "Timer.periodic" lib/` in `lumin-app` returns **no runtime-status poll at all**: the Trade tab fetches on open and on pull-to-refresh behind a 60s SWR cache. Right fix, invented figure, in a section whose own rule is *diagnose on real data first*. **An unlabelled inference reads exactly like a measurement** — and this one was published in a merged PR body the same morning.
+
+- **The census that answers "where did the reads go" must cover every read.** The first cut instrumented **9 of 18** sites and was blind to `position_state` — which holds the two `collection_group` queries that scale with the open book — plus `dispatch_log` and `pretp_dispatcher`, the module whose uncached query wrote this whole section in #609. A census with holes points confidently at whatever it *can* see. `grep -c "_reads.record"` against `grep -c "\.get()\|\.stream()"`, per file, is the check.
 - **This section said the opposite for months.** It read *"the keystore (`firestore_keystore`) and kill-switch reads are already cached (30s / 5s)"*. The keystore had **no cache at all** — the 30s was `signal_dispatch._ACTIVE_UIDS_TTL_S`, a different module — and that sentence is why nobody looked here. **A constant asserting a property it does not have, checkable in one command**, for the eighth time in these two repos, and the first time it was in the Cost Discipline section itself. Any *new* per-loop reader must be cached and invalidation-gated — see `pretp_dispatcher._default_positions_for_symbol` as the reference implementation.
 - **Auth is not the cost.** Phone Auth / SMS verification is free at tester volume and sits under "Authentication", not "App Engine". If the bill spikes, look at the server-side execution Firestore layer, not auth.
 - **Diagnose on real billing data first** (mirrors Real-Data-First Diagnosis): Billing SKU report + Firestore Usage dashboard *before* theorising about a cause or touching code.
@@ -421,6 +453,9 @@ Telegram are both acceptable paging paths.
 | Path retirement — remove a `(setup, side)` from the live feed by **diverting** it, never deleting | `src/path_retirement.py` |
 | Dark → live promotion, under owner-set per-path conditions | `src/dark_promotion.py` |
 | **Diagnostic catalog** — named engine reads + reversible actions, driven from ops. Never a shell | `src/diag_catalog.py` |
+| **Cross-process invalidation** for the control documents — the Redis generation that replaced the 5s TTLs | `src/control_generation.py` |
+| **Safety-switch bridge** — the engine end of the kill switch, so the stop is throwable when the api container is blind | `src/execution/safety_switch_bridge.py` |
+| Firestore read census + cost-at-N-members projection | `src/firestore_reads.py` |
 | Host resources — CPU against the cgroup **quota**, memory, disk, and the config the running process is using | `src/host_resources.py` |
 
 ---
@@ -2209,3 +2244,103 @@ python -m src.main
   depended on it — the orphans are reduce-only conditional orders that book no
   loss of their own, and the terminal-close sweep prevents new ones regardless
   — so leaving it armed bought nothing and risked the money path twice.
+
+- **Writing the defect down is not fixing it, and a CLAUDE.md-only PR reads
+  like a fix in the log.** 2026-09-02 shipped two PRs about the kill switch
+  being inoperable: ops `#198` was **33 lines of this file's sibling and zero
+  lines of code**, and engine `#995` touched `kill_switch.py` for six lines of
+  read-counting. Both PR bodies describe the fault precisely — *"a safety
+  control that cannot be operated is a Tier-0 fault"* — and the owner's next
+  screenshot was identical, because `POST /api/kill-switch` still returned 503
+  and `src/api/main.py` still gated on a stricter precondition than
+  `bootstrap.py`. The session that wrote §9 of *Shipping Onto a Live Book*
+  spent itself writing §9.
+
+  This file exists to stop a lesson being re-learned; it is not where a fault
+  gets repaired. **When a session diagnoses a live fault, the deliverable is
+  the code — the entry here is the receipt, and shipping only the receipt is
+  worse than shipping nothing**, because the next reader finds the defect
+  already documented and assumes it was handled. Two habits: a doc-only PR
+  about a *live* fault names, in its own body, the PR that carries the fix; and
+  when a session ends with a fault still live, that goes at the TOP of
+  `ACTIVE_CONTEXT.md` as open, never in the past tense.
+
+- **A safety control needs a path that survives the container it is served
+  from.** `POST /api/kill-switch` had exactly one implementation: read the
+  Firestore client in the process serving the route, 503 if there is none. In
+  isolated mode that process is the **api** container, so a credentials or
+  deploy change there makes the emergency stop inoperable while the engine
+  places orders normally with a perfectly good client — which is the state the
+  owner was in, with the ops page reporting it in the typeface it uses for
+  footnotes.
+
+  The precondition is fixed (`api/main.py` now mirrors `bootstrap.py` exactly,
+  pinned by a test that compares the two guard sets on the **AST**, because the
+  failure was one token stricter in one of two places). But the fix that
+  matters is that the flip now **falls back to the engine over Redis**
+  (`src/execution/safety_switch_bridge.py`), so the api container going blind
+  can no longer take the stop with it. Four properties worth copying:
+  - **A switch NAME, never a command**, mapped by a literal dispatch table a
+    reviewer can read — and a test derives the accepted set from that table's
+    own AST, because a name the queue accepts and the table does not handle is
+    a silent no-op *reported as applied* on an emergency stop.
+  - **BRPOP, not the SnapshotWriter's 15s cycle.** An emergency stop must not
+    wait on a telemetry loop; blocking server-side costs nothing while idle.
+  - **The stale window is TIGHTER than the diagnostic channel's** (30s vs 60s).
+    An operator who gave up waiting has taken another action; applying their
+    flip minutes later, from an engine that has just come back, is worse than
+    refusing it.
+  - **No feature flag.** A flag on the emergency stop is a switch that can turn
+    the switch off. What it may do is bounded by the dispatch table instead,
+    and the absence of a gate is asserted by walking bootstrap's enclosing
+    conditions — a substring check would have been satisfied by the take
+    consumer's flag sitting six lines above it.
+
+  Corollary, and it is `initialised`'s whole problem: **"can I read it" and
+  "can I throw it" are different questions and a page must grade the button on
+  the second.** `KillSwitchState.throwable` is published apart from
+  `availability`, because a switch that is un-readable here and perfectly
+  throwable via the engine renders as broken under the old boolean.
+
+- **Read and write must branch on the SAME predicate.** My first cut of
+  `_kill_switch_state` decided its world from `availability()` while
+  `kill_switch_set` decided from `is_initialised()`. Two accessors answering
+  one question is how a page describes a world the button is not in — the
+  defect this entire change was repairing, reintroduced one layer up in the fix
+  for it, and caught only because an existing test patched the two separately.
+
+- **A test that pins a COUNT catches what a review cannot.**
+  `worker_manager._tick` called an uncached `collection_group` scan **once a
+  minute** for months, in a repo with a Cost Discipline section, because
+  nothing anywhere counted it: at one connected user it is 1,440 reads a day
+  and looks free, and at the 1,000-member target it is **1.44 million**, thirty
+  times the allowance, to notice a new subscriber. Reading that line tells you
+  nothing; asserting `docs_returned == 1` over a thousand-member roster tells
+  you everything. Every read on a per-user path now has a test that counts
+  documents the way Firestore bills them.
+
+  And the first test written against the new invalidation channel found a live
+  defect in it before the code ever ran: an ABSENT Redis key was skipped rather
+  than read as generation zero, so on a fresh or flushed Redis the first poll
+  recorded nothing, the first bump moved 0→1, and the poll after it saw a first
+  sighting and declined to invalidate. **The first kill-switch flip after a
+  Redis restart would have been swallowed** — silently, because the defensive
+  TTL converges minutes later and nothing looks broken.
+
+- **An index over a safety gate needs a rebuild, and its failure direction is
+  the design.** `auto_trade_disabled` is now mirrored onto one document so the
+  gate costs one read instead of one per member. Two things make that
+  admissible rather than clever: the per-user field stays the **record of
+  record** (it carries the reason and the timestamp) with the mirror rebuilt
+  from a real query on a slow timer, so a write that bypasses `disable_user`
+  cannot hide forever; and **a mirror that was never written must not read as
+  "nobody is disabled"** — an absent document, or one whose list field is
+  missing, falls back to the per-user read it replaced. Reading the first as
+  the second would silently un-disable every tripped user. Same rule for the
+  key roster, where an empty answer means every signal fans out to zero users,
+  which is the 2026-09-02 blackout signature exactly.
+
+  Corollary on ordering: `disable_user` writes the durable field first and the
+  index second; `enable_user` does the reverse. **Both orderings fail toward
+  the user staying disabled**, which is the safe direction, and that is the
+  reason they differ rather than an inconsistency.

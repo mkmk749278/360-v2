@@ -41,6 +41,7 @@ happens in the connect flow handler (PR-2).
 from __future__ import annotations
 
 import base64
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -136,6 +137,17 @@ def init_keystore(service_account_path: Optional[str] = None) -> None:
             "Firestore keystore initialised: service_account={}",
             service_account_path or "ADC",
         )
+    # Cross-process invalidation for the roster.  Registered outside the lock
+    # because ``control_generation`` takes its own.
+    try:
+        from src import control_generation as _gen
+
+        _gen.register(_gen.DOC_ACTIVE_UIDS, invalidate_roster)
+    except Exception:  # pragma: no cover - defensive
+        log.exception(
+            "keystore: could not register roster generation listener — a "
+            "connect in the other container converges on the defensive TTL"
+        )
 
 
 def is_initialised() -> bool:
@@ -212,6 +224,7 @@ def put_key_blob(
         }
     )
     _invalidate_has_key(uid)
+    _roster_apply(uid, present=True)
     log.info(
         "Stored encrypted Binance key blob: uid={}, key_id_prefix={}",
         uid,
@@ -226,11 +239,18 @@ def put_key_blob(
 # ``CLAUDE.md``'s Cost Discipline section said "the keystore ... reads are
 # already cached (30s)".  That was never true of this module: the 30s belongs
 # to ``signal_dispatch._ACTIVE_UIDS_TTL_S``, and ``get_key_blob`` was a bare
-# ``.get()`` on every call.  ``/api/auto-trade/runtime-status`` calls it once
-# per 10s per polling user purely to answer ``binance_key_connected`` — a
-# question about whether the document EXISTS — so an app left open on the Trade
-# tab bought ~8,600 reads a day, each one fetching an encrypted secret it threw
-# away.
+# ``.get()`` on every call.  ``/api/auto-trade/runtime-status`` called it purely
+# to answer ``binance_key_connected`` — a question about whether the document
+# EXISTS — fetching an encrypted secret it then threw away.
+#
+# The figure first written here, "~8,600 reads a day from one open Trade tab",
+# was INFERRED from an assumed 10s poll and is wrong: ``grep -rn Timer.periodic
+# lib/`` in ``lumin-app`` returns no runtime-status poll at all — the Trade tab
+# fetches on open and on pull-to-refresh behind a 60s SWR cache.  The cut is
+# still right (an existence check must not fetch a secret) but the number
+# attached to it was a story, and this repo already carries the rule that
+# reading code produces a hypothesis about behaviour, never a measurement of
+# it.  What these reads actually cost is counted per call site now.
 #
 # So the presence answer is cached and the blob is not.  Caching the blob would
 # hold key material in memory for a TTL to save reads on a path that runs a few
@@ -312,31 +332,149 @@ def get_key_blob(uid: str) -> UserKeyBlob:
     )
 
 
-def list_active_uids() -> list[str]:
-    """Return every firebase_uid that currently has a connected
-    Binance key blob.
+# ---------------------------------------------------------------------------
+# The active-key roster (2026-09-02) — the read that grew with subscribers
+# ---------------------------------------------------------------------------
+#
+# ``list_active_uids`` is a ``collection_group`` scan, and Firestore bills per
+# DOCUMENT RETURNED: at the 1,000-member auto-trade target one call costs 1,000
+# reads.  ``worker_manager._tick`` called it uncached every 60 seconds — 1,440
+# calls a day — so that one loop alone projects to **1.44 million reads a day
+# at 1,000 users**, roughly thirty times the entire free-tier allowance, for a
+# roster that changes only when somebody connects or disconnects a key.
+#
+# So the answer is maintained on ONE document instead of recomputed by scanning
+# every user.  The blobs stay the record of record; this is an index over them,
+# amended by the same two functions that write a blob and rebuilt from a real
+# scan at boot and on a slow timer, so it cannot drift indefinitely.
+#
+# **The failure direction is the whole design.**  An empty roster means every
+# signal fans out to zero users — the 2026-09-02 blackout signature exactly —
+# so "the index does not exist" and "the index says nobody" must never be the
+# same answer.  A missing document, or one whose list field is absent or is not
+# a list, falls back to the scan it replaced and repairs itself on the way
+# past.  Absence of knowledge is not permission.
 
-    Implementation: collection-group query on the ``binance_key``
-    subcollection, filtered to documents named ``current`` (our
-    naming convention from PR-1).  Returns the parent user's uid
-    for each match.
+_ROSTER_DOC = ("control", "active_uids")
+_ROSTER_FIELD = "uids"
 
-    Cost: one Firestore query per call.  Caller should cache the
-    result for a short TTL (~30s) rather than enumerating on every
-    signal — there's no need for sub-second freshness here (a
-    newly-connected user can wait one cycle for the engine to
-    notice them, and disconnection takes effect immediately on
-    blob delete via the engine's own action).
 
-    Returns an empty list if the keystore isn't initialised so the
-    signal-dispatch path no-ops cleanly in dev contexts that
-    haven't booted the full server-side execution stack.
+def _roster_ttl_from_env() -> float:
+    """Defensive TTL for the roster cache.  Cross-process freshness arrives on
+    the generation signal; this only bounds a dropped bump."""
+    raw = os.environ.get("KEYSTORE_ROSTER_CACHE_TTL_SEC", "").strip()
+    if not raw:
+        return 300.0
+    try:
+        return max(float(raw), 5.0)
+    except (TypeError, ValueError):
+        return 300.0
+
+
+_ROSTER_TTL_S = _roster_ttl_from_env()
+#: ``(uids, read_at_monotonic)`` or ``None``.  A ``uids`` of ``None`` means the
+#: roster document was absent or unusable — never that the roster is empty.
+_roster_cache: Optional[tuple] = None
+
+
+def invalidate_roster() -> None:
+    """Drop the cached roster — the generation listener's entry point."""
+    global _roster_cache
+    with _lock:
+        _roster_cache = None
+
+
+def _read_roster() -> Optional[list]:
+    """One document read.  ``None`` = no usable index, fall back to the scan."""
+    global _roster_cache
+    with _lock:
+        cached = _roster_cache
+        if cached is not None and (time.monotonic() - cached[1]) < _ROSTER_TTL_S:
+            return cached[0]
+        db = _db
+    if db is None:
+        return None
+    try:
+        snap = db.collection(_ROSTER_DOC[0]).document(_ROSTER_DOC[1]).get()
+        _reads.record("keystore.roster_doc", 1)
+        raw = (snap.to_dict() or {}).get(_ROSTER_FIELD) if snap.exists else None
+        uids = [str(u) for u in raw] if isinstance(raw, list) else None
+    except Exception as exc:
+        log.warning("keystore: roster read failed ({}) — falling back to scan", exc)
+        return None
+    with _lock:
+        _roster_cache = (uids, time.monotonic())
+    return uids
+
+
+def _write_roster(uids) -> None:
+    """Persist the index and tell the other container that it moved."""
+    global _roster_cache
+    with _lock:
+        db = _db
+    if db is None:
+        return
+    ordered = sorted({str(u) for u in uids})
+    try:
+        db.collection(_ROSTER_DOC[0]).document(_ROSTER_DOC[1]).set(
+            {_ROSTER_FIELD: ordered, "updated_at": datetime.now(timezone.utc)},
+            merge=True,
+        )
+    except Exception:
+        log.exception("keystore: roster write failed — readers stay on the scan")
+        return
+    with _lock:
+        _roster_cache = (ordered, time.monotonic())
+    try:
+        from src import control_generation as _gen
+
+        _gen.bump(_gen.DOC_ACTIVE_UIDS)
+    except Exception:  # pragma: no cover - never break a key write
+        log.exception("keystore: roster generation bump failed")
+
+
+def _roster_apply(uid: str, *, present: bool) -> None:
+    """Add or remove one uid without a scan.
+
+    A roster we could not read is left alone rather than rewritten from a
+    guess: amending an index we failed to load would replace a full roster
+    with a one-element one and take every other subscriber off the fan-out.
+    """
+    current = _read_roster()
+    if current is None:
+        return
+    amended = set(current)
+    if present:
+        amended.add(uid)
+    else:
+        amended.discard(uid)
+    if amended != set(current):
+        _write_roster(amended)
+
+
+def rebuild_active_roster() -> int:
+    """Rebuild ``control/active_uids`` from a real scan and persist it.
+
+    Costs one ``collection_group`` scan — the expensive call, now run at boot
+    and on a slow timer instead of once a minute.  Returns the roster size.
+    """
+    uids = _scan_active_uids()
+    _write_roster(uids)
+    return len(uids)
+
+
+def _scan_active_uids() -> list[str]:
+    """The original ``collection_group`` enumeration.
+
+    One Firestore read per document RETURNED, which is why this must never sit
+    on a loop.  Kept as the roster's source of truth and its fallback.
     """
     with _lock:
         if _db is None:
             return []
         db = _db
     try:
+
         query = db.collection_group("binance_key")
         uids: list[str] = []
         _query_docs = 0
@@ -354,8 +492,36 @@ def list_active_uids() -> list[str]:
         _reads.record("keystore.list_active_uids", max(_query_docs, 1))
         return uids
     except Exception as exc:
-        log.warning("list_active_uids failed: {}", exc)
+        log.warning("list_active_uids scan failed: {}", exc)
         return []
+
+
+def list_active_uids() -> list[str]:
+    """Return every firebase_uid that currently has a connected Binance key.
+
+    Answered from the one-document roster — a single read whatever the
+    subscriber count — falling back to the ``collection_group`` scan when that
+    index has never been written, and repairing it on the way past.
+
+    Returns an empty list if the keystore isn't initialised so the
+    signal-dispatch path no-ops cleanly in dev contexts that haven't booted the
+    full server-side execution stack.  Callers still cache: this is a Firestore
+    read, cheap rather than free, and ``signal_dispatch`` keeps its 30s TTL.
+    """
+    with _lock:
+        if _db is None:
+            return []
+    roster = _read_roster()
+    if roster is not None:
+        return list(roster)
+    uids = _scan_active_uids()
+    # Self-healing: the first boot after this shipped has no index, so the
+    # first caller pays for one scan and every caller after it does not.
+    # Writing an EMPTY roster from a scan that returned nothing is deliberate —
+    # that is a real answer about a project with no connected keys, and the
+    # fallback above is what keeps it distinct from an index nobody wrote.
+    _write_roster(uids)
+    return uids
 
 
 def delete_key_blob(uid: str) -> None:
@@ -369,6 +535,11 @@ def delete_key_blob(uid: str) -> None:
     """
     _invalidate_has_key(uid)
     _doc_ref(uid).delete()
+    # Amend the roster AFTER the delete lands.  A crash between the two leaves
+    # a uid on the roster whose blob is gone, which dispatch already handles
+    # (the per-user path finds no key and skips); the opposite ordering would
+    # drop a user who still has one, which is a silent loss of service.
+    _roster_apply(uid, present=False)
     log.info("Deleted encrypted Binance key blob: uid={}", uid)
 
 
@@ -384,7 +555,8 @@ def update_last_validated(uid: str) -> None:
 
 def reset_for_test() -> None:
     """Test-only: drop the singleton so the next test starts uninitialised."""
-    global _db
+    global _db, _roster_cache
     with _lock:
         _db = None
         _has_key_cache.clear()
+        _roster_cache = None

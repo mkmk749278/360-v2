@@ -266,6 +266,12 @@ def _tick() -> None:
     if not _fk.is_initialised():
         return
 
+    # Roster-backed since 2026-09-02.  This line ran once a MINUTE against a
+    # ``collection_group`` scan that Firestore bills per document returned, so
+    # at the 1,000-member target it alone projected to ~1.44 million reads a
+    # day — thirty times the free-tier allowance, to notice a new subscriber.
+    # ``list_active_uids`` now answers from one document; the scan behind it
+    # runs at boot and on the slow rebuild timer.
     uids = _fk.list_active_uids()
     for uid in uids:
         try:

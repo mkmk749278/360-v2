@@ -964,12 +964,42 @@ class TradeMonitor:
         log.info("Trade monitor started")
         while self._running:
             try:
+                await self._poll_control_generation()
                 await self._check_all()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 log.error("Monitor error: %s", exc)
             await asyncio.sleep(MONITOR_POLL_INTERVAL)
+
+    async def _poll_control_generation(self) -> None:
+        """Pick up control-document changes made in the api container.
+
+        This loop's period IS the kill switch's SLA: B18 requires a flip to
+        take effect in under five seconds, and ``MONITOR_POLL_INTERVAL`` is
+        5.0s.  Until 2026-09-02 that was met by the flags being cached for
+        exactly 5s, which is to say by re-reading Firestore on every single
+        poll — a cache that could never hit, and one of the three documents
+        that spent the entire daily read allowance and took auto-trade down.
+
+        This is a Redis ``MGET`` of four tiny integers: not a Firestore read,
+        not billed, and it invalidates only when a generation has actually
+        moved.  The SLA is now met by construction rather than by accident,
+        and it is met FASTER — the re-read happens on the tick after the
+        write instead of on the tick after the cache lapsed.
+
+        Runs in a thread: the sync Redis client is a blocking call, and this
+        loop is the money path's clock.
+        """
+        try:
+            from src import control_generation as _gen
+
+            moved = await asyncio.to_thread(_gen.poll)
+        except Exception:  # pragma: no cover - never break the monitor
+            log.exception("monitor: control-generation poll failed")
+            return
+        if moved:
+            log.info("monitor: control documents changed, caches dropped: {}", moved)
 
     async def stop(self) -> None:
         self._running = False

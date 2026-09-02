@@ -56,10 +56,21 @@ def _install_fake_db() -> MagicMock:
     return fake_doc
 
 
-def _capture_doc_path() -> list[str]:
-    """Helper — returns the path components passed through the
-    chain so tests can assert the exact ``users/{uid}/binance_key/current``
-    structure."""
+def _capture_doc_paths() -> list[list[str]]:
+    """Helper — returns EVERY document path the write touched.
+
+    Was ``_capture_doc_path``, returning one flat list, and it broke the day
+    ``delete_key_blob`` grew a second write: the active-key roster
+    (``control/active_uids``), which replaced the per-minute
+    ``collection_group`` scan that projected to 1.44M Firestore reads a day at
+    the 1,000-member target.  Flattening two chains into one list made the
+    assertion read as path drift when nothing about the key path had moved.
+
+    Chains are kept apart so the assertion below still pins exactly what the
+    Firestore security rules pin, and a future third write is visible rather
+    than silently appended to the thing being asserted.
+    """
+    chains: list[list[str]] = []
     path: list[str] = []
     fake_doc = MagicMock(name="doc_ref")
 
@@ -76,7 +87,11 @@ def _capture_doc_path() -> list[str]:
         return m
 
     def collection_1(name: str) -> MagicMock:
-        path.append(name)
+        # A top-level collection starts a new chain.
+        nonlocal path
+        if path:
+            chains.append(path)
+        path = [name]
         coll = MagicMock()
         coll.document.side_effect = document_1
         return coll
@@ -86,7 +101,9 @@ def _capture_doc_path() -> list[str]:
     firestore_keystore._db = fake_db
     # Trigger the chain via a no-op delete to capture the path.
     firestore_keystore.delete_key_blob("test-uid")
-    return path
+    if path:
+        chains.append(path)
+    return chains
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +163,8 @@ def test_doc_path_is_users_uid_binance_key_current() -> None:
     """The Firestore security rules we'll wire in PR-3 will pin this
     exact path; any drift here silently bypasses the rules.  Worth a
     test."""
-    path = _capture_doc_path()
-    assert path == ["users", "test-uid", "binance_key", "current"]
+    chains = _capture_doc_paths()
+    assert ["users", "test-uid", "binance_key", "current"] in chains, chains
 
 
 # ---------------------------------------------------------------------------

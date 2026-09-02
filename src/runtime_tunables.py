@@ -9,9 +9,19 @@ Design (mirrors the kill-switch ``signal_expiry_enabled`` pattern):
 
 - **Firestore-persisted** on one doc (``control/runtime_tunables``) so values
   survive engine restarts and are shared across the engine + api containers.
-- **5s whole-doc cache** — consumers call :func:`get` from scan / monitor hot
-  paths, so reads must never hit Firestore per-signal (Cost Discipline).  One
-  read per TTL covers every tunable.
+- **Generation-gated whole-doc cache** — consumers call :func:`get` from scan
+  and monitor hot paths, so reads must never hit Firestore per-signal (Cost
+  Discipline).  One read covers every tunable, and it is taken when the ops
+  write path bumps the document's generation
+  (:mod:`src.control_generation`) rather than on a timer.
+
+  The TTL behind it was 5s, then 30s, and is now a 300s FLOOR — what converges
+  a deployment with no Redis, not what carries every read.  At 5s the scanner
+  touching this doc every cycle bought 17,280 reads a day, 35% of the entire
+  free-tier allowance, for knobs nobody flips hourly; on 2026-09-02 that was
+  one of the three documents that spent the day's quota by 00:41 UTC and took
+  auto-trade down with it.  A write is still visible immediately, because a
+  write bumps the generation.
 - **Env boot defaults** — each tunable falls back to its config env default
   when the doc/field is absent or Firestore isn't wired (single-process mode,
   tests, dev boots).  ``get`` never raises.
@@ -45,15 +55,15 @@ def _ttl_from_env() -> float:
     """
     raw = os.environ.get("RUNTIME_TUNABLES_CACHE_TTL_SEC", "").strip()
     if not raw:
-        return 30.0
+        return 300.0
     try:
-        return max(float(raw), 1.0)
+        return max(float(raw), 5.0)
     except (TypeError, ValueError):
         log.warning(
-            "RUNTIME_TUNABLES_CACHE_TTL_SEC={!r} is not a number — using 30s",
+            "RUNTIME_TUNABLES_CACHE_TTL_SEC={!r} is not a number — using 300s",
             raw,
         )
-        return 30.0
+        return 300.0
 
 
 _DOC_PATH = ("control", "runtime_tunables")
@@ -1719,8 +1729,26 @@ class RuntimeTunables:
         with self._lock:
             self._cache = {**(self._cache or {}), **coerced}
             self._cache_read_at = self._clock()
+        # Tell the OTHER container.  Ops writes through the api process while
+        # the scanner and monitor read in the engine one, so without this the
+        # only thing that ever carried a change across the boundary was the
+        # TTL — which is exactly why the TTL could not be raised before.
+        _bump()
         log.info("runtime_tunables updated: {}", coerced)
         return coerced
+
+    def invalidate(self) -> None:
+        """Mark the cache due for refresh — the generation listener's entry.
+
+        Ages the entry rather than clearing it, so the next reader is served
+        the last-known values while a background thread re-reads.  Clearing
+        would force a cold INLINE fetch on whichever loop asked first, which
+        blocks the event loop in single-process mode (the 2026-07-13 incident
+        class this class already carries a comment about).
+        """
+        with self._lock:
+            if self._cache is not None:
+                self._cache_read_at = 0.0
 
 
 def _coerce(tun: Tunable, raw: Any) -> Any:
@@ -1759,10 +1787,30 @@ def registry() -> Dict[str, Tunable]:
         return _registry
 
 
+def _bump() -> None:
+    """Signal that ``control/runtime_tunables`` changed."""
+    try:
+        from src import control_generation as _gen
+
+        _gen.bump(_gen.DOC_RUNTIME_TUNABLES)
+    except Exception:  # pragma: no cover - never break an ops write
+        log.exception("runtime_tunables: generation bump failed")
+
+
 def init_runtime_tunables(firestore_client: Any) -> None:
     global _client
     with _lock:
         _client = RuntimeTunables(firestore_client)
+        client = _client
+    try:
+        from src import control_generation as _gen
+
+        _gen.register(_gen.DOC_RUNTIME_TUNABLES, client.invalidate)
+    except Exception:  # pragma: no cover - defensive
+        log.exception(
+            "runtime_tunables: could not register generation listener — an "
+            "ops write converges on the defensive TTL only"
+        )
     log.info("runtime_tunables initialised (Firestore-backed)")
 
 

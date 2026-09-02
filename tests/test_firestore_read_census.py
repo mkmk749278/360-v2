@@ -161,14 +161,24 @@ def test_tunables_ttl_env_override_and_floor(monkeypatch):
 
     monkeypatch.setenv("RUNTIME_TUNABLES_CACHE_TTL_SEC", "0.01")
     importlib.reload(runtime_tunables)
-    assert runtime_tunables._CACHE_TTL_S == 1.0, "a sub-second TTL is a hot-loop read"
+    # The floor moved 1.0 -> 5.0 on 2026-09-02 with the rest of the read
+    # repair.  One second was still a hot-loop read against a scanner cycling
+    # every 15s and a monitor polling every 5 — 86,400 reads a day on one
+    # document if anybody ever set it.  Cross-process freshness comes from the
+    # generation signal now, so there is no reason for a value this low to be
+    # reachable at all.
+    assert runtime_tunables._CACHE_TTL_S == 5.0, "a sub-5s TTL is a hot-loop read"
 
     monkeypatch.setenv("RUNTIME_TUNABLES_CACHE_TTL_SEC", "not-a-number")
     importlib.reload(runtime_tunables)
-    assert runtime_tunables._CACHE_TTL_S == 30.0
+    assert runtime_tunables._CACHE_TTL_S == 300.0
 
     monkeypatch.delenv("RUNTIME_TUNABLES_CACHE_TTL_SEC", raising=False)
     importlib.reload(runtime_tunables)
+    # An unparseable value and an unset one must land on the SAME default, or a
+    # typo in the env quietly buys a different read budget from the one the
+    # code documents.
+    assert runtime_tunables._CACHE_TTL_S == 300.0
 
 
 # ---------------------------------------------------------------------------

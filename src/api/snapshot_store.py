@@ -103,6 +103,31 @@ KEY_DIAG_RESULT_PREFIX = "snapshot:diag_result:"  # + request_id → JSON outcom
 TTL_DIAG_RESULT = 180   # outlives the API's poll window comfortably
 DIAG_CMD_STALE_S = 60   # the engine rejects envelopes older than this
 
+# ── Safety-switch command channel (2026-09-02) ────────────────────────────
+#
+# ``POST /api/kill-switch`` returned 503 whenever THIS process had no Firestore
+# client, so the owner could not halt auto-trade from the control plane at all
+# — against B18's "a flip takes effect in under five seconds" — while the
+# engine container was trading normally with a perfectly good client.  A safety
+# control that cannot be thrown is a Tier-0 fault, and it failed silently: the
+# ops page rendered it in the grey it uses for footnotes.
+#
+# Same request/response shape as the take and diag queues, and deliberately NOT
+# the fire-and-forget mode-change key beside them: the operator must be told
+# whether the switch actually moved, and a flip nobody confirmed is worse than
+# a refusal.
+#
+# The payload carries a named SWITCH and a boolean, never a command. The engine
+# side maps the name to one of four ``KillSwitchClient`` methods and refuses
+# anything else, so this channel can reach the safety flags and nothing else.
+KEY_CMD_SWITCH = "snapshot:cmd:switch"              # Redis LIST of JSON envelopes
+KEY_SWITCH_RESULT_PREFIX = "snapshot:switch_result:"  # + request_id → JSON
+TTL_SWITCH_RESULT = 120
+# Deliberately shorter than the diag channel's 60s.  An emergency stop the
+# operator gave up waiting on must not be applied minutes later by an engine
+# that has just come back — by then they have taken another action.
+SWITCH_CMD_STALE_S = 30
+
 KEY_CMD_TAKE = "snapshot:cmd:take"                # Redis LIST of JSON envelopes
 KEY_TAKE_RESULT_PREFIX = "snapshot:take_result:"  # + request_id → JSON outcome
 TTL_TAKE_RESULT = 120   # result outlives the API's ~8s poll window comfortably

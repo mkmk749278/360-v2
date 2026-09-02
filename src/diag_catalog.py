@@ -194,6 +194,54 @@ def _firestore_reads(ctx: Ctx) -> Dict[str, Any]:
     return _fsr.snapshot()
 
 
+def _firestore_projection(ctx: Ctx) -> Dict[str, Any]:
+    """What today's reads cost at the 1,000-member auto-trade target.
+
+    Every per-user read is invisible at one user.  ``worker_manager``'s roster
+    scan cost 1,440 reads a day on this account and 1.44 MILLION at the target,
+    and nothing in the console, the bill or the census said so — a cost model
+    that only describes today cannot stop the bill it exists to stop.
+
+    Arithmetic on a measurement, not a measurement.  Each site is marked
+    ``scales_with_members`` from what the CODE does, and an unrecognised site is
+    assumed to scale, which is the safe direction: a flat site wrongly scaled
+    overstates a bill somebody then checks, while a per-user site wrongly called
+    flat is invisible until the subscribers arrive.
+
+    ``current_members`` defaults to 1.  Pass the real connected-key count for a
+    reading that is not an upper bound.
+    """
+    from src import firestore_reads as _fsr
+
+    try:
+        members = int(ctx.args.get("members") or _fsr.TARGET_MEMBERS)
+    except (TypeError, ValueError):
+        members = _fsr.TARGET_MEMBERS
+    try:
+        current = int(ctx.args.get("current_members") or 1)
+    except (TypeError, ValueError):
+        current = 1
+    return _fsr.project(members=members, current_members=current)
+
+
+def _control_generation(ctx: Ctx) -> Dict[str, Any]:
+    """Is the cross-process invalidation channel alive?
+
+    The three control documents are no longer re-read on a TTL; a write bumps a
+    Redis generation and every reader drops its cache on the next tick.  That
+    makes a dead channel invisible in the ordinary case — the defensive TTL
+    still converges, just minutes late — so the counters are the only thing
+    that can say the kill switch is converging on the slow path.
+
+    ``bumps`` climbing with ``polls`` at zero means the readers are not
+    listening; ``poll_failures`` climbing means Redis is refusing, and every
+    flip is then bounded by the TTL rather than by the tick.
+    """
+    from src import control_generation as _gen
+
+    return _gen.stats()
+
+
 def _edge_store_internals(ctx: Ctx) -> Dict[str, Any]:
     """What is actually inside an edge-store cell, and what does it cost to write?
 
@@ -373,6 +421,14 @@ for _e in (
           "Document reads per call site against the 50k/day no-cost quota — "
           "which loop is spending the allowance, and in which process.",
           _firestore_reads),
+    Entry("read.firestore_projection", "Firestore cost at 1,000 members", "read",
+          "Today's measured reads scaled to the auto-trade target, split into "
+          "the sites that grow with subscribers and the ones that do not, "
+          "against the 50k/day free allowance.", _firestore_projection),
+    Entry("read.control_generation", "Control invalidation channel", "read",
+          "Bumps, polls and failures on the Redis generation that replaced the "
+          "5s TTLs — says whether a kill-switch flip converges on the tick or "
+          "on the slow defensive bound.", _control_generation),
     Entry("read.edge_store", "Edge store internals", "read",
           "Cell count, record counts and the biggest cells — where the 39 MB "
           "of serialisation cost lives.", _edge_store_internals),
