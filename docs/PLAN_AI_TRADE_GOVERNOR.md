@@ -25,24 +25,29 @@ exists before the code:
 
 ## 0. Executive summary
 
-The brief is buildable and it is worth building. Three things in it, read
-literally, would sink it, and all three are architectural rather than a matter of
-prompt quality:
+The brief is buildable and it is worth building. Four things decide whether it is
+safe and affordable, and all four are architectural rather than a matter of prompt
+quality:
 
-1. **"Spawn a task dedicated to that trade" is the wrong unit.** One *signal* fans
-   out to N *positions*. At the owner's 1,000-member target that is the same
-   question asked 1,000 times a tick. Governing the **signal** instead of the
-   position is a ~200,000× reduction in calls on identical information (§2).
-2. **A 15–30s wall-clock loop is the wrong clock.** The mechanism this repo already
+1. **The AI runs per SIGNAL; the FSM fans out to users** (owner, 2026-09-02). One
+   verdict per signal per bar, event-gated: ~120 model calls/day, **the same number
+   at one member and at a thousand** (§2.1).
+2. **The APPLY path is the one that scales with members, and it is the real risk**
+   (§2.2). One `PANIC_CLOSE` at 1,000 members is ~1,000 Firestore reads and ~5,000
+   signed Binance calls in a burst, from an IP that has been rate-limited before —
+   the 2026-09-01 shape exactly. `MAINTAIN` must cost nothing, the apply path
+   carries its own exchange-call budget separate from the model budget, and the one
+   verdict that cannot be paced gets a hard position ceiling instead.
+3. **A 15–30s wall-clock loop is the wrong clock.** The mechanism this repo already
    validated parks a level *knowable before the bar trades*; a timer-driven verdict
    describes a market state that is gone by the time it lands (§4).
-3. **An LLM that emits prices is unbounded; an LLM that picks from a menu is
+4. **An LLM that emits prices is unbounded; an LLM that picks from a menu is
    bounded by the menu.** The engine computes and pre-validates candidate levels;
    the model returns a **choice key**, never a float (§5).
 
-With those three corrections the whole thing costs **$0.68–$37/month** depending
-on model tier (§9) — one to two Auto subscribers at ₹2,000/mo — and the cost question
-stops being interesting. What remains interesting is whether it makes money, and
+The model bill is then **~$5.50/month** on the chosen tier (§9) — a quarter of one
+Auto subscriber at ₹2,000/mo — so cost is not what decides this. What decides it is
+whether it makes money, and
 this repo's own history says the prior is **negative**: the real pre-TP +
 invalidation exit machinery netted **−25.79%** across 494 live signals while a plain
 TP1-full exit netted **−6.65%** on the same signals, a **+19.14%** gap
@@ -78,43 +83,45 @@ geometry editor on scalps is not."* The governor is that idea moved past the fil
 where a veto is a **close** rather than a suppression.
 
 **Reuse, not a second client.** The critic bridge specifies `ANTHROPIC_API_KEY`,
-prompt caching on a frozen doctrine prefix, and the Batch API. Both lanes want the
-same client, the same secret handling and the same rate table. `src/llm_client.py`
-is therefore a shared module (§6) and the critic bridge, when it is built, consumes
-it. Two vendor clients for two lanes is the drift this repo has paid for under
-several names.
+prompt caching on a frozen doctrine prefix, and the Batch API — this lane is on
+Gemini (§9), so the two disagree on vendor and that is exactly why the shared
+module is provider-neutral. Both lanes want the same client, the same secret
+handling and the same rate table; `src/llm_client.py` is that module (§6), and
+whoever builds the critic picks its vendor then rather than inheriting this one by
+accident. Two bespoke vendor clients for two lanes is the drift this repo has paid
+for under several names.
 
 ---
 
-## 2. The unit of work is the SIGNAL, not the position
+## 2. Two fan-outs, and only one of them is the LLM
 
-This is the single decision that determines whether the feature is affordable.
+**Owner, 2026-09-02: *"AI works per signals, FSM calls users."*** That is the
+design and it was never in doubt; this section records it and then spends its
+length on the fan-out that *does* scale with members, because that is the one
+that can take the book down.
+
+### 2.1 The AI is per signal — flat in members
 
 **[verified]** `config/__init__.py:2817` — `MAX_CONCURRENT_SIGNALS_PER_CHANNEL`
 caps `360_SCALP` at **5**; `MAX_SAME_DIRECTION_GLOBAL` is **3**. The live book
 carries a handful of distinct theses at any moment.
-
-**[verified]** `src/execution/signal_dispatch.py:660` —
-`dispatch_signal_to_active_users()` fans **one signal to every active uid**. At the
-owner's stated target of 1,000 auto-trade members (`CLAUDE.md`, owner 2026-09-02)
-that is ~5 concurrent theses expressed as ~5,000 concurrent positions.
 
 Everything in the brief's Reality Feed — order-book imbalance, CVD, BTC context, the
 wall in front of TP — is a fact about the **symbol**, not about the user. The only
 per-user facts are quantity and which exit profile the user opted into (B17), and
 those are deterministic filters applied *after* the verdict, never inputs to it.
 
-| Design | Calls/day at 1,000 members | Note |
-|---|---|---|
-| Per-position, 15s (brief as written) | **28,800,000** | 5 × 1,000 × 4/min × 1,440 |
-| Per-position, 30s | 14,400,000 | |
-| **Per-signal**, 30s timer | **14,400** | identical information |
-| **Per-signal, event-gated**, ≤8 calls/position | **~120** | §4 |
-| + macro batching (all open signals in one call) | **~50–90** | |
+So one verdict per signal per bar, event-gated: **~120 calls/day**
+**[inferred, from the caps above and ~16 delivered signals/day]**, and that number
+is **the same at one member and at a thousand**. §9 prices it.
 
-**[inferred, from the caps above and ~16 delivered signals/day]** the gated figure
-is ~120 calls/day. The first row and the fourth differ by a factor of ~240,000 on
-the same information. Nothing else in this document matters as much.
+The rule is worth writing down only because the alternative is easy to reach for
+by accident: the brief's *"spawn a background task dedicated specifically to that
+trade"* describes a governor per **position**, and a position is per user. That
+reading costs 28.8M calls/day at 1,000 members against ~120 for identical
+information. Nobody is building it — the point is that a future session must not
+re-derive it, so the arm is keyed by `signal_id` and there is no per-position arm
+anywhere in this design.
 
 **Corollary — the arm outlives the user.** A verdict is stamped once per signal and
 applied to every eligible position. A user who joins mid-trade inherits the standing
@@ -122,6 +129,54 @@ verdict; a user whose position closes early drops out. The governor's lifetime i
 the **signal's**, not any one position's — which is #835's lesson (*a measurement
 that rides another subsystem's loop inherits that subsystem's lifetime*) applied
 before it can be paid for again.
+
+### 2.2 The APPLY path is per user — linear in members, and it is the real risk
+
+This is where 1,000 members actually bites, and it has nothing to do with tokens.
+
+**[verified]** `src/execution/signal_dispatch.py:1830` —
+`close_fsm_positions_for_signal` loops `for uid in _active_uids()`, takes a
+Firestore `get_position` **per uid**, then cancels the bracket and places a MARKET
+close **per uid**. `trail_governor.sweep` likewise iterates governed positions, and
+each `_park` is a place plus a cancel.
+
+So one verdict costs, at N members:
+
+| Verdict | Firestore reads | Signed Binance calls | At N=1,000 |
+|---|---|---|---|
+| `MAINTAIN` | 0 | 0 | free — and it is most of them |
+| `ADJUST_TP` | in-process index | 2 per user (cancel + re-place) | ~2,000 calls |
+| `ADJUST_SL` | in-process index | 2 per user (place-then-cancel) | ~2,000 calls |
+| `PANIC_CLOSE` | 1 per user | ~5 per user (bracket cancels + MARKET) | ~1,000 reads + ~5,000 calls |
+
+**[inferred, from the loop shapes above and the bracket size]**
+
+Binance rate-limits **by IP**, the engine is whitelisted to one box, and a burst of
+that size is precisely the 2026-09-01 incident: a per-user loop making exchange
+calls got the box rate-limited and **took auto-trade down for every paid user for
+roughly four hours**. The governor would be adding a *second* and *third* fan-out
+per signal on top of the entry fan-out that already exists.
+
+Four consequences, and they are design constraints rather than cautions:
+
+1. **`MAINTAIN` must cost nothing.** No Firestore read, no exchange call, no
+   position walk — it is ~most of every window and any per-user work on it is
+   pure waste multiplied by the member count.
+2. **The apply path carries its own budget, separate from the LLM budget**, spent
+   per **position** examined at the top of the loop. The §4 budget bounds calls to
+   the model; this one bounds calls to the exchange, and the 2026-09-01 lesson is
+   that they are not the same bound.
+3. **Non-urgent verdicts are paced.** A TP adjustment is not time-critical to the
+   second — it is a resting LIMIT — so it is spread across users under a rate
+   ceiling rather than fired as a burst.
+4. **`PANIC_CLOSE` cannot be paced, and that is the honest tension.** Pacing an
+   emergency close over ten minutes defeats the reason for having one. So its
+   fan-out is bounded a different way: it is the arm with the strictest trigger,
+   the strictest evidence bar (§11.1), and a hard ceiling on how many positions one
+   verdict may close before the rest are refused and named rather than queued.
+   That ceiling is a blast-radius cap in the B18 sense and is owner-set.
+
+**This is the section to re-read before wiring the apply path**, not §9.
 
 ---
 
@@ -601,91 +656,101 @@ governor's outcomes.
 
 ## 9. Provider and cost
 
-### The subscriptions do not apply
+**Decided by the owner, 2026-09-02: Gemini 3.7 Flash.** This section records the
+facts behind that and the two traps that come with it.
+
+### Neither subscription can serve the engine
 
 **[documented]** A paid **Claude Pro** subscription does not include Claude API
 usage; the subscription and the API/Console are separately billed products.
-**[documented]** **Google AI Pro / Gemini Advanced** is a consumer chat subscription
-(~100 Pro prompts/day in the app); Gemini API usage bills through Google Cloud
-Billing, independently.
+**[documented]** **Google AI Pro / Gemini Advanced** is a consumer chat
+subscription; Gemini API usage bills through Google Cloud Billing, independently.
 
-So neither existing subscription can serve the engine. This needs a new API account,
-a new secret in the engine container, and a new billing line — and anything that
-*did* work by driving a consumer subscription programmatically would carry no rate
-SLA and no pinned model version, which for a measurement ledger is disqualifying
-before the terms of service are even reached.
+So this needs its own API account and its own secret regardless of which vendor
+wins. Anything that *did* work by driving a consumer subscription programmatically
+would carry no rate SLA and no pinned model version, which for a measurement ledger
+is disqualifying before the terms of service are even reached.
 
-### Cost, at the design volume of §2
+### The Google credits — what they do and do not cover
+
+The owner asked whether existing Google credit is useful here.
+
+- **[documented]** The **$300 Google Cloud free-trial credit is explicitly excluded
+  from Gemini API usage via AI Studio** (from March 2026). It does not pay for this
+  on the AI Studio path.
+- **[documented]** Credits *may* apply to Gemini consumed through **Vertex AI**,
+  which bills as an ordinary GCP service.
+- **[documented]** The **Gemini free tier is rate-limited at roughly 1,000
+  requests/day** — which genuinely covers our ~120 — but free-tier content is used
+  to improve Google's products. The prompt carries `setup_class`, entry geometry and
+  gate provenance, so **the free tier is disqualified for the real prompt.**
+
+**The trap is specific to us, and it is not about Gemini.** `lumin-app`'s GCP
+project is capped at the Firestore free tier by something nobody has identified:
+reads were *refused* at 53k/day on a Blaze account that bills normally, and the
+standing hypothesis (App Engine daily spending limit) is one console look nobody
+has taken. The owner's requirement is *"we don't want to generate any bills in
+Google cloud"*, and that cap is what enforces it.
+
+So: **if Gemini is consumed via Vertex, it goes on a SEPARATE GCP project from
+`lumin-app`**, and the App Engine → Settings look happens first. Putting a paid,
+bursty API on the billing account that is currently refusing our reads risks
+either the bill the owner ruled out or an interaction with whatever is doing the
+refusing — and both would surface as an engine outage rather than as an invoice.
+
+### Cost, at the design volume of §2.1
 
 ~120 calls/day × ~1,300 input / ~150 output tokens = ~4.68M input / 0.54M output per
-month **[inferred from §2 and the prompt shape in §5]**. At published list rates
-**[documented, read 2026-09-02]**:
+month **[inferred]**. At published list rates **[documented, read 2026-09-02]**:
 
 | Model | In / Out per MTok | Est. $/month |
 |---|---|---|
-| Gemini 2.5 Flash-Lite | $0.10 / $0.40 | **$0.68** |
-| Gemini 2.5 Flash | $0.30 / $2.50 | **$2.75** |
-| Gemini 3.7 Flash | $0.75 / $3.75 *(promo to 31 Dec 2026, then $1.50/$7.50)* | **$5.54** → $11.07 |
-| Claude Haiku 4.5 | $1 / $5 | **$7.38** |
-| Gemini 2.5 Pro | $1.25 / $10 | **$11.25** |
-| Claude Sonnet 5 | $2 / $10 | **$14.76** |
-| Gemini 3.1 Pro Preview | $2 / $12 | **$15.84** |
-| Claude Opus 5 | $5 / $25 | **$36.90** |
+| Gemini 2.5 Flash-Lite | $0.10 / $0.40 | $0.68 |
+| Gemini 2.5 Flash | $0.30 / $2.50 | $2.75 |
+| **Gemini 3.7 Flash — chosen** | **$0.75 / $3.75** *(promo to 31 Dec 2026, then $1.50/$7.50)* | **$5.54** → $11.07 |
+| Claude Haiku 4.5 | $1 / $5 | $7.38 |
+| Gemini 2.5 Pro | $1.25 / $10 | $11.25 |
+| Claude Sonnet 5 | $2 / $10 | $14.76 |
+| Claude Opus 5 | $5 / $25 | $36.90 |
 
-The whole spread is **$0.68 to $37/month**. At ₹2,000/mo (~$23) that is **one Auto
-subscriber at every tier except Opus 5, which needs two** — and at the 1,000-member
-target the most expensive row on that table is under 0.2% of revenue.
-For contrast, the per-position design of §2 at 1,000 members is **~$82,000/month on
-the cheapest model on that table**.
+**Note the promo expiry is a dated liability, not a price.** The bill doubles on
+1 Jan 2027 with no change on our side; `AI_GOV_MAX_USD_PER_DAY` (§12) is what makes
+that a visible degradation rather than a surprise.
 
-**So price does not decide this.** Gate correctly and buy the better model; the
-expensive mistake is a wrong `PANIC_CLOSE`, not a token rate.
+For contrast, the per-position reading of the brief at 1,000 members would be
+**~$82,000/month on the cheapest model on that table** — which is why §2.1 records
+the rule even though nobody is building it.
 
-Prompt caching is worth wiring and not worth optimising: at ~5 calls/hour a 5-minute
-cache mostly misses and a 1-hour cache saves roughly half the static prefix
-**[inferred from the published cache multipliers and the call rate]**.
+### What the choice costs us, and the mitigation
 
-### The decision, and how it gets revisited
+The argument against Gemini for this lane was never price; it was **ledger
+stability**. This is a measurement an adoption decision reads over months, and a
+silently rotated model alias redefines every row with no diff in our repo — the
+additive-vs-redefining schema problem with the redefinition arriving from the
+vendor. Anthropic publishes dated snapshots and a formal deprecation page;
+Gemini rotates through `-preview` aliases faster.
 
-Three things actually differ for this use case:
+**[documented]** The mitigation is cheap and sufficient: the Gemini API returns a
+`modelVersion` field on every response. So the ledger stamps the **served** version
+rather than the alias we asked for, and a rotation shows up as a population split on
+the ops page instead of as drift nobody can see. A row whose `modelVersion` differs
+from the configured alias is rendered under its own heading, never pooled.
 
-1. **Model-version stability — decisive.** This lane is a ledger an adoption
-   decision reads over months. A silent model change redefines every row and arrives
-   with no diff in our repo: the additive-vs-redefining schema problem with the
-   redefinition coming from the vendor. Anthropic publishes dated snapshots and a
-   formal deprecation page **[documented]**.
-2. **Data terms.** Gemini's free tier states content is used to improve Google's
-   products; the paid tier opts out **[documented]**. The prompt carries
-   `setup_class`, entry geometry and gate provenance — the proprietary part of the
-   engine — so **the free tier is disqualified for the real prompt**, which removes
-   Gemini's most attractive property (a zero-cost shadow window).
-3. **Latency and region.** Near-irrelevant here: the loop is fire-and-forget on a
-   bar clock (§6) and a 2–5s round trip is absorbed by queue-and-apply-next-tick.
-   Do not let it decide anything.
+`AI_GOV_PROVIDER` and `AI_GOV_MODEL` are config, and `src/llm_client.py` is
+provider-neutral, so this is a reversible decision rather than a fork in the code.
+Note that `LLM_SIGNAL_CRITIC_BRIDGE` names Anthropic for its own lane; the shared
+client is what keeps both possible, and whoever builds the critic decides then
+rather than inheriting this choice by accident.
 
-**Ship one provider**, behind `src/llm_client.py`, with the exact model string
-stamped in every ledger row. Two vendors on day one is two secrets, two rate-limit
-behaviours, two deprecation calendars and two failure modes in the lane whose entire
-job is to be trustworthy.
-
-**Start on Claude Sonnet 5** ($14.76/mo at design volume) — version stability, no
-free-tier data ambiguity, and it is the tier where being wrong costs a market-order
-round trip. This also matches `LLM_SIGNAL_CRITIC_BRIDGE`'s existing choice
-(`ANTHROPIC_API_KEY`, `claude-opus-4-8` **[verified]**), so one secret and one client
-serve both lanes.
-
-**Then settle it with data.** Because the lane is dark and the volume is tiny, run a
-**dual-model arm** on a sampled subset: stamp a second model's verdict against the
-*same* snapshot, in its own column, **never blended** — the two-arms pattern
-`sar_live_shadow` and `structural_snap` already use. Total ≈ $18/month, and the
-window ends with a measured verdict-agreement rate instead of an argument. If the
-cheap model agrees on routine triage, downgrade tier 1 and keep the strong model for
-`PANIC_CLOSE` escalation only. **That is a measurable decision, so it is made from
-the ledger, not from this document.**
+**The dual-model arm (§10) still earns its keep**, and costs ~$3/month more: stamp
+a second model's verdict against the *same* snapshot on a sampled subset, in its own
+column, never blended. It is what turns "is Flash good enough for this" from an
+argument into a measured verdict-agreement rate — and if it is not, the config line
+changes and the ledger says exactly when.
 
 ### Secret handling
 
-`ANTHROPIC_API_KEY` is treated exactly as the Binance secret is: deploy-injected,
+The provider key is treated exactly as the Binance secret is: deploy-injected,
 **never logged at any level, never written to disk, never surfaced in an error or a
 traceback** (`OWNER_BRIEF` §1.4). The client scrubs it from every exception path, and
 a test asserts the key never appears in a rendered error.
@@ -698,8 +763,9 @@ a test asserts the key never appears in a rendered error.
 
 `temperature = 0` does not make an LLM deterministic. So:
 
-- **Every row stamps the exact model version string, the prompt hash, and
-  `PROMPT_SCHEMA`.** A model change is then visible as a population split rather
+- **Every row stamps the SERVED model version** — Gemini's own `modelVersion`
+  from the response, not the alias we configured — plus the prompt hash and
+  `PROMPT_SCHEMA`. A model change is then visible as a population split rather
   than as a drift nobody can see.
 - **The snapshot is stored with the verdict.** A row that cannot be re-scored from
   its own contents is not evidence.
@@ -834,17 +900,21 @@ concurrently with another exit change destroys attribution for both. Queue them.
 AI_GOV_MEASURE_ENABLED        bool   default TRUE   # measurement flag — ON when it ships
 AI_GOV_APPLY_ENABLED          bool   default FALSE  # user-visible effect — owner sign-off to arm
 AI_GOV_ARMS_ENABLED           str    default "tp"   # comma set of arms allowed to APPLY: tp,sl,panic
-AI_GOV_PROVIDER               str    default "anthropic"
-AI_GOV_MODEL                  str    default "claude-sonnet-5"   # exact version, stamped per row
+AI_GOV_PROVIDER               str    default "google"
+AI_GOV_MODEL                  str    default "gemini-3.7-flash"  # alias asked for; SERVED modelVersion is stamped per row
 AI_GOV_MODEL_SHADOW           str    default ""     # dual-model arm; "" = off
 AI_GOV_SHADOW_SAMPLE_PCT      int    default 25
 AI_GOV_MAX_CALLS_PER_SIGNAL   int    default 8      # lifetime, per signal
 AI_GOV_MAX_CALLS_PER_HOUR     int    default 30     # global rolling
 AI_GOV_MAX_USD_PER_DAY        float  default 0      # 0 = unset; see below
+# --- the OTHER budget (§2.2): calls to the EXCHANGE, not to the model ---
+AI_GOV_APPLY_MAX_POS_PER_MIN  int    default 60     # paced fan-out for TP/SL adjustments
+AI_GOV_PANIC_MAX_POSITIONS    int    default 0      # 0 = unset; hard ceiling per PANIC_CLOSE verdict,
+                                                    # owner-set blast-radius cap (B18 sense)
 AI_GOV_VERDICT_MAX_AGE_SEC    float  default 10.0   # older than one tick → refused
 AI_GOV_REQUEST_TIMEOUT_SEC    float  default 20.0
 AI_GOV_MIN_SECONDS_BETWEEN    float  default 300.0  # per-signal cooldown floor
-ANTHROPIC_API_KEY             secret deploy-injected; never logged (OWNER_BRIEF §1.4)
+GEMINI_API_KEY                secret deploy-injected; never logged (OWNER_BRIEF §1.4)
 ```
 
 **`AI_GOV_MAX_USD_PER_DAY` is deliberately unset at ship**, and P0/P1 run on the
@@ -856,6 +926,16 @@ property nobody measured, checkable in one command, which cost a day of restarts
 Shape the cap like the Firestore allowance the owner just chose: **it converts a
 bill into a degradation, not a charge.** Past the cap the governor returns
 `MAINTAIN`, counted and named on the panel.
+
+**The two apply-path bounds are a different kind of thing and must not be tuned
+together with the model bounds.** `AI_GOV_APPLY_MAX_POS_PER_MIN` protects the
+Binance IP budget on a fan-out that is linear in members (§2.2); exceeding it
+defers the remaining positions to the next tick, which is safe for a TP or SL
+adjustment because the existing protection stays exactly where it is.
+`AI_GOV_PANIC_MAX_POSITIONS` cannot defer — a queued emergency close is not an
+emergency close — so over that ceiling the remaining positions are **refused and
+named on the panel**, and the ceiling is owner-set because it is a blast-radius cap
+in the B18 sense rather than a performance knob.
 
 `AI_GOV_ARMS_ENABLED` is a **choices-validated** tunable
 (`runtime_tunables.Tunable.choices`, which renders a `<select>` in ops), and the
@@ -875,6 +955,12 @@ repo's actual defects, so they are not optional:
   fires on nothing and asserts the per-signal budget still decremented. Session
   137's bound passed its own test because that test only exercised the branch that
   did work.
+- **The apply path is bounded at N=1,000, tested that way.** A test drives one
+  `PANIC_CLOSE` verdict against a thousand-member roster and asserts the ceiling
+  held and the refusals were counted — the `worker_manager` lesson (*a test that
+  pins a COUNT catches what a review cannot*), applied to exchange calls instead of
+  Firestore reads. A second asserts `MAINTAIN` issues **zero** Firestore reads and
+  **zero** exchange calls over the same roster.
 - **Verdict schema round-trip against the REAL client.** Never hand-write the
   provider's response shape in a fixture — a mock whose keys you chose asserts your
   assumption back at you and goes green over dead code (`classify_pending` /
@@ -926,18 +1012,34 @@ repo's actual defects, so they are not optional:
 
 ## 15. Open questions for the owner
 
-These are decisions, not unknowns — each needs an answer before the phase it gates:
+These are decisions, not unknowns — each needs an answer before the phase it gates.
 
-1. **§11.1(a) or (b) for `PANIC_CLOSE`** — permanently shadow, or activated on a
+**Settled by the owner on 2026-09-02** and recorded here so they are not re-asked:
+the AI is keyed per signal and the FSM fans out (§2.1); all four arms ship dark
+together (§8); the model returns a menu key, never a price (§5); the model is
+**Gemini 3.7 Flash** (§9).
+
+Still open:
+
+1. **`AI_GOV_PANIC_MAX_POSITIONS`** — the hard ceiling on how many positions one
+   `PANIC_CLOSE` verdict may close before the rest are refused. This is a
+   blast-radius cap in the B18 sense, it cannot be derived from a shadow window
+   (nothing is being closed during one), and it is the single number standing
+   between a macro veto and the 2026-09-01 rate-limit shape. *Gates P3, and it is
+   the one open item that is genuinely urgent.*
+2. **§11.1(a) or (b) for `PANIC_CLOSE`** — permanently shadow, or activated on a
    short window under a recorded policy override? *Gates P3.*
-2. **Does the depth/aggTrade universe get widened** to cover the mover book
+3. **Does Gemini go on a separate GCP project** (§9), and does anyone take the
+   App Engine → Settings look that would explain why `lumin-app` is being refused
+   at the Firestore free tier? *Gates P1 — the first paid call.*
+4. **Does the depth/aggTrade universe get widened** to cover the mover book
    (`docs/PRICE_ACTION_PROGRAM.md` §4 stream budget)? Without it, a large share of
    governed signals are book-blind and flow-blind. *Gates how much §3's blindness
    rate matters.* Out of scope for this document either way.
-3. **Is there an appetite for the deterministic P4 harvest**, or is a standing LLM
+5. **Is there an appetite for the deterministic P4 harvest**, or is a standing LLM
    in the loop the intended end state? The doctrine says the former; the brief reads
    like the latter. *Gates whether P4 is the goal or a nice-to-have.*
-4. **`AI_GOV_MAX_USD_PER_DAY`** — set from the first week's ledger (§12), confirmed
+6. **`AI_GOV_MAX_USD_PER_DAY`** — set from the first week's ledger (§12), confirmed
    by the owner then.
 
 ---
@@ -958,11 +1060,12 @@ depth/aggTrade caps, reconciler age); `src/execution/trail_governor.py` (`decide
 `docs/STATISTICAL_CHANGE_POLICY.md`.
 
 **Vendor [documented], read 2026-09-02:**
+- Gemini API pricing (the chosen tier, and the 31 Dec 2026 promo expiry): https://ai.google.dev/gemini-api/docs/pricing
+- Gemini API billing — separate from consumer subscriptions: https://ai.google.dev/gemini-api/docs/billing
+- Google AI plans — the consumer subscription this does NOT use: https://ai.google.dev/gemini-api/docs/google-ai-plans
+- Google Cloud free-trial credits and what they exclude: https://docs.cloud.google.com/free/docs/free-cloud-features
 - Anthropic — subscription vs API billing: https://support.claude.com/en/articles/9876003-i-have-a-paid-claude-subscription-pro-max-team-or-enterprise-plans-why-do-i-have-to-pay-separately-to-use-the-claude-api-and-console
-- Claude API pricing: https://platform.claude.com/docs/en/about-claude/pricing
-- Gemini API pricing: https://ai.google.dev/gemini-api/docs/pricing
-- Google AI plans: https://ai.google.dev/gemini-api/docs/google-ai-plans
-- Gemini API billing: https://ai.google.dev/gemini-api/docs/billing
+- Claude API pricing (the comparison table only): https://platform.claude.com/docs/en/about-claude/pricing
 
 Prices and free-tier terms change. Re-read both pricing pages before quoting a
 figure, and treat §9's table as of its date rather than as a constant.
