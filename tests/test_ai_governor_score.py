@@ -427,29 +427,51 @@ def test_snapshot_readability_names_the_reason_not_only_the_bool():
     assert built.blind_fraction() == pytest.approx(1.0)
 
 
-def test_a_failing_scorecard_never_takes_the_ledger_flush_with_it():
-    """`main.py` builds this payload as the `extra` of `flush(force=True)`, so a
-    raise here would stop the ledger being written at all — and an idle-looking
-    lane is a fault this repo has misdiagnosed before. A missing scorecard is a
-    missing panel; a missing flush is a lost window."""
-    class _Exploding:
-        def rows(self):
-            raise RuntimeError("boom")
+def test_build_diag_does_not_carry_the_scorecard():
+    """The light entry must not do the heavy entry's I/O.
 
-    out = gov._safe_scorecard(_Exploding())
-    assert "error" in out and "RuntimeError" in out["error"]
-
-
-def test_build_diag_still_returns_a_payload_when_the_scorer_fails(monkeypatch):
-    monkeypatch.setattr(
-        sc, "build", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("nope"))
-    )
+    Folded into `build_diag`, the record parse made `read.ai_governor` blow its
+    25s budget in production while every other catalog entry answered in 0.0s —
+    and `build_diag` is also the `extra` of `flush(force=True)`, so anything
+    slow there is charged to the ledger's HEARTBEAT. This test fails against
+    the tree that shipped it.
+    """
     led.reset_ledger(led.GovernorLedger(path=""))
     try:
         diag = gov.build_diag()
     finally:
         led.reset_ledger(None)
-    assert "scorecard" in diag and "error" in diag["scorecard"]
-    # Everything else must still be there — one broken block is not a broken page.
+    assert "scorecard" not in diag, "the record parse must not ride the light entry"
     for key in ("measure_enabled", "bounds", "health", "blindness"):
         assert key in diag
+
+
+def test_build_diag_does_no_file_io_at_all(monkeypatch):
+    """Pinned as a COUNT, not a review: reading the line tells you nothing,
+    asserting the loader was never called tells you everything."""
+    calls = []
+    monkeypatch.setattr(sc, "load_records", lambda *a, **k: calls.append(1) or ([], None))
+    led.reset_ledger(led.GovernorLedger(path=""))
+    try:
+        gov.build_diag()
+    finally:
+        led.reset_ledger(None)
+    assert calls == [], "build_diag touched the closed-signal record"
+
+
+def test_a_failing_scorecard_returns_a_named_error_rather_than_raising():
+    """"The scorecard failed" and "the scorecard is empty" send a reader to
+    different places, so the failure is a rendered state, never an exception."""
+    monkey = led.GovernorLedger(path="")
+    led.reset_ledger(monkey)
+    try:
+        import src.ai_governor_score as _sc
+        real = _sc.build
+        _sc.build = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            out = gov.build_scorecard()
+        finally:
+            _sc.build = real
+    finally:
+        led.reset_ledger(None)
+    assert "error" in out and "RuntimeError" in out["error"]

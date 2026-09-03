@@ -1410,17 +1410,30 @@ def blindness(sample: int = 200) -> Dict[str, Any]:
     }
 
 
-def _safe_scorecard(ledger: Any) -> Dict[str, Any]:
-    """The scorecard, or a named reason it is absent — never a raise.
+def build_scorecard() -> Dict[str, Any]:
+    """The scorecard, as its OWN diagnostic read — never folded into `build_diag`.
 
-    Returns a block the page can render either way, because "the scorecard
-    failed" and "the scorecard is empty" send a reader to different places.
+    It was folded in on the first cut and the production deploy said no: with
+    every other catalog entry answering in 0.0s, `read.ai_governor` blew its 25s
+    budget, because this is the only part of that payload that parses the
+    closed-signal record off disk. A heavy read and a light one are different
+    questions and belong in different entries — the arms, bounds and refusals
+    must stay readable when the record is large, slow, or absent.
+
+    It is also why `build_diag` no longer calls this at all: its one production
+    caller is `main.py`'s maintenance loop, which builds that payload as the
+    `extra` of `flush(force=True)`, so anything slow or raising there is charged
+    to the ledger's HEARTBEAT. A missing panel is a missing panel; a stalled
+    flush is a lost window.
+
+    Returns a block the page can render either way — "the scorecard failed" and
+    "the scorecard is empty" send a reader to different places.
     """
     try:
-        return _score.build(ledger.rows())
+        return _score.build(get_ledger().rows())
     except Exception as exc:  # noqa: BLE001
-        fail_open.record("ai_governor.build_diag:scorecard", exc)
-        return {"error": f"{type(exc).__name__}: {exc}" or type(exc).__name__}
+        fail_open.record("ai_governor.build_scorecard", exc)
+        return {"error": f"{type(exc).__name__}: {exc}".strip() or type(exc).__name__}
 
 
 def build_diag() -> Dict[str, Any]:
@@ -1468,17 +1481,6 @@ def build_diag() -> Dict[str, Any]:
         # surface could say whether a verdict was informed or blind — which
         # makes every verdict on the page uninterpretable in either direction.
         "blindness": blindness(),
-        # Graded against the closed-signal record the engine already writes. No
-        # resolver: every lane in this repo that grew one cost a session.
-        #
-        # Guarded on its own rather than trusting the caller's try/except: the
-        # ONE caller in production is `main.py`'s maintenance loop, which builds
-        # this payload as the `extra` of `flush(force=True)` — so an exception
-        # here would take the ledger's HEARTBEAT down with it, and an idle-looking
-        # lane is exactly the fault this repo has misdiagnosed before. A
-        # scorecard that cannot be computed is a missing panel; a flush that
-        # cannot run is a lost window.
-        "scorecard": _safe_scorecard(ledger),
     }
 
 
