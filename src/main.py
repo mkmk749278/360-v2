@@ -517,6 +517,10 @@ class CryptoSignalEngine:
         self.monitor._level_getter = (
             lambda symbol: self._scanner.level_book.get_levels(symbol)
         )
+        # And the pair universe, for the instrument X-ray: the 24h move and
+        # quote volume Binance already sends, so the governor can tell a $29M
+        # meme up 48% from an $8.4B major. No vendor and no symbol mapping.
+        self.monitor._pair_getter = lambda symbol: self.pair_mgr.pairs.get(symbol)
         # Share mutable state with scanner
         self._scanner.paused_channels = self._paused_channels
         self._scanner.confidence_overrides = self._confidence_overrides

@@ -113,6 +113,11 @@ class Snapshot:
     price: Readable
 
     macro: Mapping[str, Any] = field(default_factory=dict)
+    #: What KIND of instrument this is — liquidity band, 24h move, parabolic
+    #: flag — from `instrument_xray`, which reads `pair_manager` and calls no
+    #: vendor. Stamped and consumed by nothing: identifying the instrument is a
+    #: measurement, and what to do about it is what a scored window decides.
+    instrument: Mapping[str, Any] = field(default_factory=dict)
     menu: Optional[Menu] = None
 
     def as_dict(self) -> Dict[str, Any]:
@@ -124,6 +129,7 @@ class Snapshot:
             "entry_regime": self.entry_regime,
             "trigger_tf": self.trigger_tf,
             "as_of_bar_ms": self.as_of_bar_ms,
+            "instrument": dict(self.instrument or {}),
             "dist_to_tp1_pct": round(self.dist_to_tp1_pct, 4),
             "dist_to_sl_pct": round(self.dist_to_sl_pct, 4),
             "r_multiple_now": round(self.r_multiple_now, 4),
@@ -216,6 +222,7 @@ def build_snapshot(
     book_getter: Any = None,
     flow_getter: Any = None,
     macro: Optional[Mapping[str, Any]] = None,
+    instrument: Optional[Mapping[str, Any]] = None,
     now: Optional[float] = None,
 ) -> Snapshot:
     """Assemble one snapshot from a signal plus injected context getters.
@@ -282,6 +289,7 @@ def build_snapshot(
         else Readable.unknown(WHY_NOT_SUBSCRIBED),
         price=price,
         macro=dict(macro or {}),
+        instrument=dict(instrument or {}),
     )
 
 

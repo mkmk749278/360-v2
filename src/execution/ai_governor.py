@@ -701,6 +701,7 @@ async def sweep(
     macro_moved: bool = False,
     task_factory: Any = None,
     level_getter: Any = None,
+    pair_getter: Any = None,
 ) -> Dict[str, Any]:
     """Advance every armed SIGNAL by at most one bar. Never blocks on the model.
 
@@ -790,6 +791,7 @@ async def sweep(
             last_price=price,
             menu=menu,
             macro=macro or {},
+            instrument=_instrument_for(sig, pair_getter),
             now=now,
         )
         snapshot = _snap.with_menu(snapshot, menu)
@@ -1334,6 +1336,21 @@ def _build_menu_for(
         round_price=rounder,
         book_levels=_book_levels_for(sig, level_getter),
     )
+
+
+def _instrument_for(sig: Any, pair_getter: Any) -> Dict[str, Any]:
+    """The instrument X-ray block for this signal's symbol.
+
+    Reads `pair_manager` through an injected getter — no vendor, no network,
+    no symbol-to-coin-id mapping that could describe the wrong asset. An
+    unavailable pair produces a NAMED unknown rather than an absent block: a
+    missing row would read as an ordinary instrument, which is the reading that
+    made a $29M meme up 48% look like an $8.4B major to this lane.
+    """
+    from src import instrument_xray as _xray
+
+    symbol = str(getattr(sig, "symbol", "") or "")
+    return _xray.from_getter(symbol, pair_getter).as_dict()
 
 
 def _book_levels_for(sig: Any, level_getter: Any) -> Optional[List[Any]]:
