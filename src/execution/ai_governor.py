@@ -1413,18 +1413,26 @@ def blindness(sample: int = 200) -> Dict[str, Any]:
 def build_scorecard() -> Dict[str, Any]:
     """The scorecard, as its OWN diagnostic read — never folded into `build_diag`.
 
-    It was folded in on the first cut and the production deploy said no: with
-    every other catalog entry answering in 0.0s, `read.ai_governor` blew its 25s
-    budget, because this is the only part of that payload that parses the
-    closed-signal record off disk. A heavy read and a light one are different
-    questions and belong in different entries — the arms, bounds and refusals
-    must stay readable when the record is large, slow, or absent.
+    **The reason first given for this split was wrong, and is corrected here
+    rather than quietly dropped.** It was split out after `read.ai_governor`
+    timed out at 25s in production while sibling entries answered in 0.0s, and
+    the record parse was blamed. Measured on the deployed engine immediately
+    afterwards: this entry — the one that parses the record — answers in
+    **0.145s**, while the light entry still timed out at 17 seconds of uptime
+    and then answered in **0.001s** a few minutes later. So the record parse was
+    never the cause; **engine warm-up was**, and the siblings are too trivial to
+    show it. The standing hypothesis, labelled as one because nobody has
+    instrumented it: `build_diag` reads five `runtime_tunables` values, which are
+    Firestore-backed and uncached on a cold process, while this function touches
+    none.
 
-    It is also why `build_diag` no longer calls this at all: its one production
-    caller is `main.py`'s maintenance loop, which builds that payload as the
-    `extra` of `flush(force=True)`, so anything slow or raising there is charged
-    to the ledger's HEARTBEAT. A missing panel is a missing panel; a stalled
-    flush is a lost window.
+    The split is kept on its own merits, which do not depend on that mistake: a
+    read that parses a file off disk does not belong on the entry an operator
+    hits during an incident, and `build_diag` is also the `extra` of
+    `flush(force=True)` on the maintenance loop, so anything slow or raising
+    there is charged to the ledger's HEARTBEAT. A missing panel is a missing
+    panel; a stalled flush is a lost window. Both are precautions, and neither
+    is a diagnosis.
 
     Returns a block the page can render either way — "the scorecard failed" and
     "the scorecard is empty" send a reader to different places.

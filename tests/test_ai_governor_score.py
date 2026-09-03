@@ -430,11 +430,13 @@ def test_snapshot_readability_names_the_reason_not_only_the_bool():
 def test_build_diag_does_not_carry_the_scorecard():
     """The light entry must not do the heavy entry's I/O.
 
-    Folded into `build_diag`, the record parse made `read.ai_governor` blow its
-    25s budget in production while every other catalog entry answered in 0.0s —
-    and `build_diag` is also the `extra` of `flush(force=True)`, so anything
-    slow there is charged to the ledger's HEARTBEAT. This test fails against
-    the tree that shipped it.
+    `build_diag` is the `extra` of `flush(force=True)` on the maintenance loop,
+    so anything slow or raising there is charged to the ledger's HEARTBEAT, and
+    it is the entry an operator hits during an incident. Neither reason is the
+    one first given — the record parse was blamed for a 25s timeout that
+    measurement later pinned on engine warm-up (0.145s for the parsing entry,
+    0.001s for this one once settled). The property is worth pinning anyway;
+    the story attached to it was not.
     """
     led.reset_ledger(led.GovernorLedger(path=""))
     try:
