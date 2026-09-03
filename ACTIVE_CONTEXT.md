@@ -43,6 +43,68 @@ connector works outward: `#lumin-signals` (`C0BUB9R8WCX`) created, scorecard and
 packet spec posted. Binance public REST 451s from non-whitelisted IPs; OKX and
 CoinGecko answer keyless and supplied every market figure above.
 
+### D0 SHIPPED — all four items, merged and verified in production
+
+`#1005` blindness columns + the scoring harness · `#1006`/`#1007` the split and
+its retraction · `#1008` the Level Book menu and the instrument X-ray ·
+`360ce-ops#207` the two panels. Confirmed rendering on
+`/signals/ai-governor` at 18:0x UTC, and read back through the diag console.
+
+**The headline is the blindness column, and it is worse than the gaps predicted.**
+`fully_blind: 54 of 54`, `avg_unknown_frac: 1.0`, with
+`book_reasons: {not_subscribed: 18}` and `flow_reasons: {not_subscribed: 18}` on
+the rows carrying the split (the 36 written before it are counted apart —
+a missing stamp is not a pass). **Every governor verdict ever issued was made
+with no order book and no CVD.** The cause is a stream-budget decision, not a
+fault: `DEPTH_MAX_SYMBOLS` and `AGGTRADE_MAX_SYMBOLS` are both **40** while much
+of the delivered book is promoted movers. Whether to widen them is the owner's,
+and it is now backed by a measurement rather than an argument.
+
+**The scorecard's first real read**: 54 verdict rows → **19 theses** → **15
+graded**. *Selection, not effect*: "governor wanted to act" 3 signals, 3/0,
++1.87% net; "left alone" 12 signals, 3/9, +0.28% net; 3 signals flip-flopped and
+are their own state. `ADJUST_TP` — the one decidable arm — has **0** theses, so
+there is still no effect estimate of anything, which is the honest position and
+the page says so.
+
+**The token-budget fix is holding.** Session 141's window was 20 calls / 20
+failures / 0 verdicts / 0 rows. The ledger now carries **54 rows** with
+`provider_failures: []`. The refutation condition stated before that deploy — a
+next window still ~100% failing — did not fire.
+
+**One published diagnosis was wrong and is retracted in code (`#1007`).** After
+`#1005` deployed, `read.ai_governor` timed out at 25s while siblings answered in
+0.0s; I concluded my scorecard's file parse was the cause and shipped `#1006` to
+split it out, writing that story into a merged PR body, two docstrings, a
+catalog entry and two test docstrings. Measured on the deployed engine
+afterwards: the *parsing* entry answers in **0.145s**, and the non-parsing one
+still timed out at 17s uptime then returned **0.001s** once settled. **Engine
+warm-up, not the parse.** The remaining explanation — `build_diag` reads five
+Firestore-backed tunables and `build_scorecard` reads none — is labelled a
+hypothesis, because the sibling entries used to rule out a restart are too
+trivial to touch what `build_diag` touches.
+
+### Every CI and deploy constant in these repos was wrong, and two of them cost this session
+
+`360-v2#1009`, `360ce-ops#208`, `lumin-app#155`. Measured 2026-09-03: this
+repo's `test` job **4m54s–7m31s** (said ~8 min) and its deploy **1m18s–2m17s**
+(said ~45s); ops CI **6m52s–10m15s** (said ~4 min) and its deploy
+**5m30s–7m58s** (said ~60s); `lumin-app`'s APK **7–11.5 min** (said ~16 min).
+
+Only this repo's own figure was close. "~4 min" sent me to poll a check run less
+than half way through — the exact thing that paragraph exists to prevent — and
+"~60s" had me read an ops page for a change that was still building and conclude
+its panels had not shipped. Ops CI had also outgrown its own
+`timeout-minutes: 10`, cancelling a run at 10m15s: a red that meant nothing, now
+20. And `lumin-app`'s number hid the useful fact — its unit tests run **inside**
+the APK job with every later step skipped on failure, so a red run there is
+readable at **~1m35s**, not at the full build time.
+
+The ninth recurrence of *a constant asserting a property it does not have,
+checkable in one command nobody ran*. Each table therefore ships with its
+measurement date, its sample size, and the `gh run list` invocation that
+regenerates it — a fresher guess would only reset the clock.
+
 ### OPEN — not resolved by this session
 
 - **The Slack wake test is unrun and gates every event-driven variant**: does the
