@@ -4,30 +4,41 @@
 
 ---
 
-## OPEN — the AI governor is live and has produced ZERO verdicts
+## RESOLVED 2026-09-03 — the governor's calls now succeed
 
-**Every model call it has made has failed.** Read off `/signals/ai-governor`
-2026-09-03: **1,955 sweeps, 22 triggers, 3 open arms, 20 model calls, 20
-failures, 0 verdicts, 0 ledger rows** — `bad_json` 9, `timeout` 5, `empty` 3,
-`http_error` 3, $0.0072 spent. The lane is working up to the call: the key
-reached the container, arms open on real signals, the cooldown throttle has
-fired 749 times. **Nothing is accumulating**, so the shadow window has not
-started and the adoption decision cannot be taken.
+The block that stood here said **every model call had failed** — 20 calls, 20
+failures, 0 verdicts, 0 ledger rows — and that the fault was LIVE until #1002
+deployed. It did, and the fault is closed. Measured after the deploy:
 
-Standing hypothesis, **labelled as one**: `max_output_tokens` was `150 x batch`
-— ample for the answer and the whole budget a thinking-class model reasons in
-before writing it. PR #1002 ships the instrument that settles it
-(`finish_reason`, thinking tokens, a ring of the vendor's own words) and raises
-the budget behind `AI_GOV_OUTPUT_TOKEN_FLOOR`. **Refutation condition stated
-before deploy:** if the next window still reads ~100% failure with
-`finish_reason` anything other than `MAX_TOKENS`, the budget was not the cause.
+| | before | after |
+|---|---|---|
+| provider outcomes | `bad_json` 9 · `timeout` 5 · `empty` 3 · `http_error` 3 | **`ok` 4** |
+| calls → verdicts | 20 → **0** | 4 → **5** |
+| ledger rows | 0 | 5 |
 
-Until #1002 and ops #203 are merged and deployed, this fault is LIVE.
+The starved output budget was the cause; `AI_GOV_OUTPUT_TOKEN_FLOOR` fixed it.
+The failure ring stands at 0 rows, which is what the refutation condition asked
+for. **The shadow window is now accumulating for the first time** — under
+`STATISTICAL_CHANGE_POLICY` it runs one to four months and nothing is armed
+before it closes.
 
-**Two owner decisions still outstanding, neither derivable from a shadow
-window:** `AI_GOV_PANIC_MAX_POSITIONS` (0 = the panic arm refuses, which is safe
-and is not a decision) and `AI_GOV_MAX_USD_PER_DAY` (unset by design — it comes
-from the first week of the ledger, which does not exist yet).
+Kept rather than deleted because the *numbers* are the baseline any later
+reading of this lane is compared against, and because a resolved fault deleted
+outright reads as one that never happened.
+
+Early cost signal, **labelled as one**: $0.0031 over 4 calls is ~$0.0008/call,
+so roughly **$2.80/mo** at the design volume of ~120 calls/day against the
+$5.54 the plan budgeted. Four calls is not a week. Latency moved 1.3s → 8.8s
+as the model started actually using its budget, against a 20s request timeout —
+comfortable, and worth watching rather than acting on.
+
+**Two owner decisions remain, neither derivable from a shadow window:**
+`AI_GOV_PANIC_MAX_POSITIONS` (0 = the panic arm refuses, which is safe and is
+not a decision) and `AI_GOV_MAX_USD_PER_DAY` (unset by design — it comes from
+the first week of the ledger, which now exists but is four calls long). Both
+are env vars on the VPS plus a redeploy, **not** ops tunables — only
+`ai_gov_measure_enabled`, `ai_gov_apply_enabled`, `ai_gov_arms_enabled`,
+`ai_gov_provider` and `ai_gov_model` are registered in `runtime_tunables`.
 
 ---
 
@@ -62,6 +73,38 @@ Engine **9045 passed, 58 skipped** against `main`'s **9034 passed, 58 skipped**
 (+11, zero failures either side); ruff clean. Ops **1867 passed**, 0 failed,
 compileall clean. 13 of the 15 new ops tests fail against the pre-fix tree; all
 11 engine tests do.
+
+
+### After the merges — three more, each found by reading the deployed page
+
+1. **The ops deploy had been failing silently since 01:17 UTC.** Runs 206–209
+   built and pushed images that never reached the box: an unauthenticated
+   `git pull` refused, `set -e`, and `docker compose pull` skipped. Three
+   merges reported success while production served the #202 image. Fixed in
+   ops #204; the owner added `GH_PAT` and run 210 deployed.
+2. **My diagnosis of that was wrong and the fix's own error path corrected
+   it** (#205). Not "a private repo whose credential is gone" — GitHub is
+   *throttling anonymous downloads*. Nothing about the repo changed, which is
+   why a deploy that ran green for months failed three times with no diff to
+   blame. Both refusals are now recorded, because a future reader meets
+   whichever one GitHub is serving.
+3. **Ops gave up at 10s while the engine's diag bridge polls to 25s** (#206),
+   so every answer taking 10–25s was abandoned and rendered as a failure:
+   **2 of 6 loads**, both at ~10.8s. After the fix, 6 of 6 render and four of
+   them took *longer than the old ceiling* (19.7 / 20.6 / 13.0 / 10.2s).
+
+   That third one is only visible because of the first day's work: before
+   #203, an abandoned call rendered as *"the engine has no read.ai_governor
+   catalog entry — a deploy question"*. **The instrument found the defect
+   underneath the one it was built for**, which is the argument for shipping
+   instruments first.
+
+**Open, and measured rather than argued:** those reads run 6.5–20.6s against
+the engine's own 25s deadline, so the headroom is thinner than the success
+rate suggests. If the engine's diag drain slows further, reads will start
+hitting that ceiling and returning `READ FAILED` with the engine's own words.
+Nobody has looked at the drain cadence; a finding and a fix are separate
+deliverables and this is the finding.
 
 ---
 
