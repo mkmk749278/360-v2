@@ -4,6 +4,61 @@
 
 ---
 
+## SESSION 142 2026-09-03 — the deep lane, designed; and the first scored thesis
+
+Owner asked what the AI implementation actually does, then directed it toward
+what he wants it to do: an agent that independently investigates a delivered
+signal — chart structure, the instrument, the market, news — and cancels,
+adjusts, or hands a winner to a trail. `docs/PLAN_AI_TRADE_GOVERNOR_V2.md` is
+that design. v1 stays the design of record for the live fast lane and now points
+at v2; its "nothing is implemented" status line, true for exactly one day, is
+corrected rather than deleted.
+
+**The first scored thesis, and it is four rows.** A manual deep pass on the four
+open signals at 10:20 UTC, graded against the closed-signal record at 14:52:
+BULLA *"harvest ~+5%"* → `PROFIT_LOCKED` **+7.31%**; SUI *"hold"* → `SL_HIT`
+**−1.66%**; PENGU *"let the stop take it"* → `SL_HIT` **−1.11%** (right); LINK
+*"premise broken"* → `TP1_HIT` **+1.70%**. The engine's `MAINTAIN` book was
+**+4.24%**; the one recommendation would have made it **+1.93%**. BTC ran
+77,670 → 80,285 across the window and decided all four.
+
+**Owner's reading, and it is the correct one: four outcomes judge nothing.** The
+value is not the verdict, it is that a bad thesis was falsified in four hours by
+a join that already exists — so **the scoring harness is the first deliverable**,
+ahead of any deep analysis. Recorded in v2 §1 with that framing, not as a
+result.
+
+**Three verified gaps in the shipped lane** (v2 §3), each fixed in D0 before
+anything else: the snapshot carries **no** structure at all — no Level Book, no
+Volume Profile, no SMC, no patterns, while the engine computes all of them;
+`ai_governor_menu` runs a private pivot scan although v1's module map says it
+reads `level_book` (the eighth such recurrence); and v1 §3's `unknown_frac`
+blindness columns are absent from both the page and the payload, so **the 7
+`MAINTAIN`s cannot currently be read as informed or blind.**
+
+**Transport tested rather than assumed.** An engine cannot wake a Claude session
+directly — a session webhook was created and POSTed to from outside: **HTTP
+401**, sealed to the artifact service. Slack is the owner's choice and the
+connector works outward: `#lumin-signals` (`C0BUB9R8WCX`) created, scorecard and
+packet spec posted. Binance public REST 451s from non-whitelisted IPs; OKX and
+CoinGecko answer keyless and supplied every market figure above.
+
+### OPEN — not resolved by this session
+
+- **The Slack wake test is unrun and gates every event-driven variant**: does the
+  Claude Slack app respond to a webhook-posted (bot) message, or only a human?
+  Ten minutes, owner-side, and no D2 work starts before it answers.
+- `HAND_TO_TRAIL` per-signal vs per-user, and which mechanism — owner, gates D4.
+- Cancel semantics (retract-and-close vs veto-before-dispatch) — owner.
+- Signal geometry living in a third-party workspace — deliberate acceptance
+  required.
+- Still carried from Session 141: `AI_GOV_PANIC_MAX_POSITIONS` (0 = the arm
+  refuses, which is safe) and `AI_GOV_MAX_USD_PER_DAY`. v2 makes the deep lane's
+  own USD cap mandatory rather than optional — its passes cost 100–500× a fast
+  one.
+
+---
+
 ## RESOLVED 2026-09-03 — the governor's calls now succeed
 
 The block that stood here said **every model call had failed** — 20 calls, 20
