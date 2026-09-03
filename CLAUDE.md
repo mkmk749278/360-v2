@@ -122,15 +122,45 @@ money-path changes follow dark-first from here.
 - Paid-channel routing changes
 - Regime-per-exit design decisions (§3.2b — data research in progress)
 
-**Wait ~8 minutes before checking CI here.** That is what this repo's `test` job
-takes; ops is ~4 min and `lumin-app` ~16 min. Polling a check run that cannot
-have finished yet burns API calls and turns one wait into six — sleep the known
-duration first, *then* read the conclusion. Treat these as expected durations,
-not deadlines: a job still running at the mark gets another wait, and a job that
-finishes early is fine. If a repo's CI time drifts materially, update the number
-here rather than re-learning it every session.
+**Wait ~8 minutes before checking CI here, and ~2 more for the deploy.**
 
-Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Production phase: the app is LIVE on the Play Store** — a `main` deploy reaches real users, so money-path changes ship **dark + shadow-measured + owner sign-off to activate** per § Project Phase — measurement flag ON and visible in ops, user-visible flag OFF. Off-money-path work ships normally.
+Measured 2026-09-03 across all four repos, because every figure that stood here
+was wrong and two of them cost a session time on the day they were re-derived:
+
+| | This file used to say | Measured 2026-09-03 |
+|---|---|---|
+| This repo's `test` job | ~8 min | **4m54s – 7m31s** (n=5) |
+| This repo's deploy on `main` | ~45s | **1m18s – 2m17s** (n=10) |
+| `360ce-ops` CI | ~4 min | **6m52s – 10m15s** (n=4) |
+| `360ce-ops` deploy | ~60s (in its own file) | **5m30s – 7m58s** (n=7) |
+| `lumin-app` APK build | ~16 min | **7 – 11.5 min** (n=7) |
+
+Only this repo's own `test` figure was close. The ops numbers were out by 2x
+and 6x respectively, and both misled directly: "~4 min" sent a session to poll
+a check run less than half way through, and "~60s" had it read an ops page for
+a change that was still building and conclude the panels had not shipped. The
+ops suite had also grown past its own `timeout-minutes: 10`, cancelling a run
+at 10m15s — a red that meant nothing. And `lumin-app`'s figure hid something
+useful: its unit tests run **inside** the APK job and everything after them is
+skipped on failure, so a red run there is readable at **~1m35s** rather than at
+the full build time.
+
+Polling a check run that cannot have finished yet burns API calls and turns one
+wait into six — sleep the known duration first, *then* read the conclusion.
+Treat these as expected durations, not deadlines: a job still running at the
+mark gets another wait, and a job that finishes early is fine.
+
+**Re-derive rather than trust this table.** It is a constant asserting a
+property of a moving system — the shape this file records under several names —
+and it will go stale again. One command per workflow, `gh` or the GitHub MCP
+`actions_list` equivalent:
+
+```bash
+gh run list --workflow=ci.yml     --json startedAt,updatedAt,conclusion --limit 10
+gh run list --workflow=deploy.yml --json startedAt,updatedAt,conclusion --limit 10
+```
+
+Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in **1–2.5 minutes** (measured, see the table above). **Production phase: the app is LIVE on the Play Store** — a `main` deploy reaches real users, so money-path changes ship **dark + shadow-measured + owner sign-off to activate** per § Project Phase — measurement flag ON and visible in ops, user-visible flag OFF. Off-money-path work ships normally.
 
 ---
 
@@ -170,8 +200,8 @@ to merge. The answer is also the thing to watch after the deploy — see 4.
 
 **4. Watch the deploy you just shipped.** The 2026-09-01 deploy was 08:07;
 placements began failing ~08:30; it was reported ~12:30. Auto-deploy on `main`
-takes ~45s and reaches real capital, so a money-path merge is not finished at
-the merge — check the money path itself within the hour (placements, the
+takes a minute or two and reaches real capital, so a money-path merge is not
+finished at the merge — check the money path itself within the hour (placements, the
 dispatch funnel, the breaker) and say in the session notes what you looked at.
 **A green CI run is evidence about the code, never about the book.**
 
