@@ -1357,6 +1357,38 @@ python -m src.main
   book is affected* and is structurally incapable of answering *how much better
   it would be*. Pricing the correction needs a shadow gate chain; saying so is
   cheaper than a survivorship-biased number that looks like an answer.
+- **A budget two things share is a budget neither one owns — and the lane that
+  spent it looked healthy in every count on the page.** The AI governor's first
+  live window: **1,955 sweeps, 22 triggers, 20 model calls, 20 failures, 0
+  verdicts, 0 ledger rows** (`bad_json` 9, `timeout` 5, `empty` 3, `http_error`
+  3). Arms were opening on real signals and the cooldown throttle had fired 749
+  times, so everything up to the call was working and the shadow window was
+  accumulating **nothing**. `evaluate` asked for `max_output_tokens = 150 x
+  len(batch)` — ample for the ANSWER (a verdict is ~50 tokens) and the entire
+  budget a thinking-class model has to reason in *before* the first character of
+  JSON is written. A truncated object comes back `bad_json`, a wholly consumed
+  budget comes back `empty`, and 12 of the 20 were those two. **Ask what else
+  draws on a limit before sizing it for the thing it is named after.**
+
+  The instrument is the more expensive half. `LLMResult.detail` named every
+  failure precisely — *"content not JSON: Unterminated string…"*, the vendor's
+  own 400 body — and **never left the process**; ops published four counts, and
+  `bad_json` alone covers a truncation, a wrong-typed answer and an error
+  envelope, which have three different fixes. That is
+  `trail_governor.place_failed` verbatim — *a counter is not a cause on a path
+  that talks to a vendor* — recurring in code written the day before, by the
+  session that quoted the rule. What ships is a bounded ring of the vendor's own
+  words beside the unbounded count, plus `finish_reason` and a `thinking_tokens`
+  column: `MAX_TOKENS` with output at the ceiling is a budget fault whose fix is
+  a number, anything else is a prompt fault. **The fix for a failure and the
+  instrument that names it are separate deliverables, and the instrument goes
+  first** — the token change is a hypothesis until a row says which.
+
+  Refutation condition, stated before the deploy: if the next window still reads
+  ~100% failure with `finish_reason` anything other than `MAX_TOKENS`, the
+  budget was not the cause and the prompt or the schema is.
+
+
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

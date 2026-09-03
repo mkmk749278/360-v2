@@ -4,6 +4,67 @@
 
 ---
 
+## OPEN — the AI governor is live and has produced ZERO verdicts
+
+**Every model call it has made has failed.** Read off `/signals/ai-governor`
+2026-09-03: **1,955 sweeps, 22 triggers, 3 open arms, 20 model calls, 20
+failures, 0 verdicts, 0 ledger rows** — `bad_json` 9, `timeout` 5, `empty` 3,
+`http_error` 3, $0.0072 spent. The lane is working up to the call: the key
+reached the container, arms open on real signals, the cooldown throttle has
+fired 749 times. **Nothing is accumulating**, so the shadow window has not
+started and the adoption decision cannot be taken.
+
+Standing hypothesis, **labelled as one**: `max_output_tokens` was `150 x batch`
+— ample for the answer and the whole budget a thinking-class model reasons in
+before writing it. PR #1002 ships the instrument that settles it
+(`finish_reason`, thinking tokens, a ring of the vendor's own words) and raises
+the budget behind `AI_GOV_OUTPUT_TOKEN_FLOOR`. **Refutation condition stated
+before deploy:** if the next window still reads ~100% failure with
+`finish_reason` anything other than `MAX_TOKENS`, the budget was not the cause.
+
+Until #1002 and ops #203 are merged and deployed, this fault is LIVE.
+
+**Two owner decisions still outstanding, neither derivable from a shadow
+window:** `AI_GOV_PANIC_MAX_POSITIONS` (0 = the panic arm refuses, which is safe
+and is not a decision) and `AI_GOV_MAX_USD_PER_DAY` (unset by design — it comes
+from the first week of the ledger, which does not exist yet).
+
+---
+
+## SESSION 141 2026-09-03 — the lane was calling, and nothing was coming back
+
+Owner asked for the status of the AI implementation, then handed over a
+read-only ops code so the answer could come from the running system rather than
+from the tree. It changed the answer: session 139 closed with *"`GEMINI_API_KEY`
+is unset, so the lane reports `not_configured`"*, and #1001 fixed the delivery —
+so the lane is **MEASURING**, and failing 100% of its calls.
+
+**What the page could not say.** Four counts, no cause. `bad_json` alone covers
+a truncated answer, a wrong-typed one and an error envelope — three different
+fixes — and `LLMResult.detail` had named every one precisely and never left the
+process. `place_failed` verbatim, in code written the day before.
+
+**And the page's own first load was wrong.** It rendered *"NOT REPORTED — the
+engine has no `read.ai_governor` catalog entry … a deploy question"* over an
+engine that had the entry and was listing it in the console one tab away. Cause,
+read live through that console rather than guessed: ops' transport wrapper
+returns `{"endpoint": …, "error": ""}` on a timeout, because
+`str(httpx.ReadTimeout())` is the empty string — falsy, so it sailed past the
+unreachable branch and was graded on shape. `/system/firestore` had the same
+check and called it `empty`. Both fixed, and fixed at the writer too.
+
+**One retraction.** I reported that the diag console 403s every guest POST. It
+does not — `curl -L` re-issued the POST against the redirect target, and the
+refusal page named *that* path on screen. Using the console properly is what
+produced the payload above. Check the tool before blaming the system.
+
+Engine **9045 passed, 58 skipped** against `main`'s **9034 passed, 58 skipped**
+(+11, zero failures either side); ruff clean. Ops **1867 passed**, 0 failed,
+compileall clean. 13 of the 15 new ops tests fail against the pre-fix tree; all
+11 engine tests do.
+
+---
+
 ## OPEN — one ops write the owner has to make, and it is not a PR
 
 **`entry_quality_session_quality_live` is ON and its measured direction is

@@ -100,6 +100,13 @@ class LLMResult:
     latency_ms: int = 0
     usage: Dict[str, int] = field(default_factory=dict)
     detail: str = ""
+    #: Why the provider stopped generating, in its own words (Gemini
+    #: `finishReason`, Anthropic `stop_reason`). A truncated answer and a
+    #: malformed one both arrive as `bad_json`, and only this field separates
+    #: them: MAX_TOKENS means the budget was the fault and the fix is a number,
+    #: anything else means the model answered badly and the fix is the prompt.
+    #: Empty means the provider did not say, never that it stopped cleanly.
+    finish_reason: str = ""
 
     @property
     def ok(self) -> bool:
@@ -312,15 +319,17 @@ class LLMClient:
             served = str(payload.get("modelVersion") or "")
             usage = _google_usage(payload)
             inner = _google_text(payload)
+            finish = _google_finish_reason(payload)
         else:
             served = str(payload.get("model") or "")
             usage = _anthropic_usage(payload)
             inner = _anthropic_tool_input(payload)
+            finish = str(payload.get("stop_reason") or "")
 
         if inner is None:
             return LLMResult(
                 status=EMPTY, requested_model=self._model, served_model=served,
-                latency_ms=elapsed_ms, usage=usage,
+                latency_ms=elapsed_ms, usage=usage, finish_reason=finish,
                 detail="provider returned no content",
             )
         if isinstance(inner, dict):
@@ -331,18 +340,18 @@ class LLMClient:
             except Exception as exc:  # noqa: BLE001
                 return LLMResult(
                     status=BAD_JSON, requested_model=self._model, served_model=served,
-                    latency_ms=elapsed_ms, usage=usage,
+                    latency_ms=elapsed_ms, usage=usage, finish_reason=finish,
                     detail=_scrub(f"content not JSON: {exc}", key),
                 )
         if not isinstance(data, dict):
             return LLMResult(
                 status=BAD_JSON, requested_model=self._model, served_model=served,
-                latency_ms=elapsed_ms, usage=usage,
+                latency_ms=elapsed_ms, usage=usage, finish_reason=finish,
                 detail=f"content was {type(data).__name__}, expected object",
             )
         return LLMResult(
             status=OK, data=data, requested_model=self._model, served_model=served,
-            latency_ms=elapsed_ms, usage=usage,
+            latency_ms=elapsed_ms, usage=usage, finish_reason=finish,
         )
 
 
@@ -361,13 +370,46 @@ def _google_text(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _google_finish_reason(payload: Dict[str, Any]) -> str:
+    """Why generation stopped, from the first candidate that says.
+
+    Read even on the paths that already failed: `MAX_TOKENS` beside a
+    `bad_json` is the whole diagnosis (the budget truncated the JSON mid-object
+    and the fix is a number), and without it a truncation is indistinguishable
+    from a model that answered badly.
+    """
+    for cand in payload.get("candidates") or []:
+        reason = cand.get("finishReason")
+        if reason:
+            return str(reason)
+    return ""
+
+
 def _google_usage(payload: Dict[str, Any]) -> Dict[str, int]:
     meta = payload.get("usageMetadata") or {}
-    return {
+    out = {
         "input_tokens": int(meta.get("promptTokenCount") or 0),
         "output_tokens": int(meta.get("candidatesTokenCount") or 0),
         "cached_input_tokens": int(meta.get("cachedContentTokenCount") or 0),
     }
+    # Reasoning tokens are drawn from the SAME output budget as the answer on a
+    # thinking-class model, so a generous-looking `maxOutputTokens` can be spent
+    # entirely before the first character of JSON is written. Recorded under its
+    # own name rather than folded into `output_tokens`: the two have different
+    # fixes, and pooling them hides the one that truncates the answer.
+    #
+    # `cost_usd` deliberately does NOT add this to the billed output count.
+    # Whether the vendor already includes thoughts in `candidatesTokenCount`
+    # is a fact about their meter that this ledger has not yet observed, and
+    # both guesses are wrong in a way somebody would act on: adding it
+    # double-counts if they are included, omitting it under-counts if they are
+    # not. The first week of rows against the provider's own billing page
+    # settles it; until then the call-count bounds are what hold, and this
+    # column is what makes the question answerable at all.
+    thoughts = meta.get("thoughtsTokenCount")
+    if thoughts is not None:
+        out["thinking_tokens"] = int(thoughts or 0)
+    return out
 
 
 def _anthropic_tool_input(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
