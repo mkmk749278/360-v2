@@ -700,6 +700,7 @@ async def sweep(
     macro: Optional[Dict[str, Any]] = None,
     macro_moved: bool = False,
     task_factory: Any = None,
+    level_getter: Any = None,
 ) -> Dict[str, Any]:
     """Advance every armed SIGNAL by at most one bar. Never blocks on the model.
 
@@ -780,7 +781,7 @@ async def sweep(
             continue
 
         price = _safe_price(price_fn, sig)
-        menu = _build_menu_for(sig, series, price)
+        menu = _build_menu_for(sig, series, price, level_getter)
         snapshot = _snap.build_snapshot(
             signal=sig,
             trigger_tf=trigger_tf,
@@ -1296,7 +1297,23 @@ def _safe_price(price_fn: Any, sig: Any) -> Optional[float]:
         return None
 
 
-def _build_menu_for(sig: Any, series: Dict[str, Any], price: Optional[float]) -> _menu.Menu:
+def _build_menu_for(
+    sig: Any,
+    series: Dict[str, Any],
+    price: Optional[float],
+    level_getter: Any = None,
+) -> _menu.Menu:
+    """Assemble the candidate menu for one signal.
+
+    ``level_getter`` is injected from the monitor loop, which is handed the
+    scanner's own `LevelBook` in `main.py`. Injected rather than imported
+    because this module must not reach into the scanner, and **wired
+    end-to-end in the same change** rather than accepted and ignored: a
+    parameter no caller passes is the `build_channel_signal` defect, where a
+    structural snap sat behind `if candle_highs is not None` under a docstring
+    claiming every evaluator passed it, and `grep` matched only the parameter's
+    own definition.
+    """
     rounder = None
     try:
         from src.execution import symbol_filters as _sf
@@ -1315,7 +1332,25 @@ def _build_menu_for(sig: Any, series: Dict[str, Any], price: Optional[float]) ->
         closes=series.get("close"),
         last_price=float(price or 0.0),
         round_price=rounder,
+        book_levels=_book_levels_for(sig, level_getter),
     )
+
+
+def _book_levels_for(sig: Any, level_getter: Any) -> Optional[List[Any]]:
+    """The Level Book's levels for this symbol, or None if we cannot ask.
+
+    ``None`` means *unavailable*, which the menu treats as "no book candidates"
+    — never as "the book says there are none". The two are different facts and
+    only one of them is a finding; the counters on the menu say which.
+    """
+    if level_getter is None:
+        return None
+    try:
+        levels = level_getter(str(getattr(sig, "symbol", "") or ""))
+    except Exception as exc:  # noqa: BLE001 — a menu is never worth a raise
+        fail_open.record("ai_governor.level_getter", exc)
+        return None
+    return list(levels or [])
 
 
 def _bars_since_entry(arm: Arm, series: Dict[str, Any], timeframe: str, now: float) -> int:

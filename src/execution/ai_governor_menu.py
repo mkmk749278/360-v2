@@ -60,6 +60,12 @@ KIND_CURRENT = "current"        # the level the position already has
 KIND_SWING = "swing"            # a price the market traded and rejected
 KIND_BREAKEVEN = "breakeven"    # the entry fill — mechanical, always available
 KIND_LOCK = "lock"              # a fraction of the move already banked
+#: A level from the engine's own Level Book — multi-timeframe S/R with touch
+#: counts and a score, not a pivot this module found on the trigger series.
+#: Offered BESIDE the swing candidates rather than instead of them: a 1h/4h/1d
+#: level and a recent trigger-timeframe swing answer different questions, and
+#: collapsing them would hide which source the model is actually choosing.
+KIND_LEVEL = "level"
 
 #: How many structural candidates to offer per side, beyond `current`. Small on
 #: purpose: a menu of twelve invites twelve thresholds, and twelve cells against
@@ -155,6 +161,7 @@ def build_menu(
     closes: Optional[Sequence[float]],
     last_price: float,
     round_price: Optional[Any] = None,
+    book_levels: Optional[Sequence[Any]] = None,
 ) -> Menu:
     """Build both candidate sets, pre-validated.
 
@@ -162,7 +169,19 @@ def build_menu(
     so the caller decides whether a level is exchange-legal. A candidate that
     cannot be placed must never be offered — the model choosing an unplaceable
     level would be *our* defect surfacing as its mistake.
+
+    ``book_levels`` are `level_book.Level` objects — the engine's own
+    multi-timeframe S/R, which this module was documented as reading and did
+    not: v1's module map said it reads `level_book`, and it ran a private pivot
+    scan over the raw high/low arrays instead. Fixed here, and offered
+    **alongside** the pivots rather than replacing them, because a 1h/4h/1d
+    level and a recent trigger-timeframe swing are different facts. Their
+    fields are read **by name** off the real dataclass (`price`, `type`,
+    `source_tf`, `score`) — a reader that guesses at several possible shapes is
+    the `zone_distance_atr` defect, which was uncomputable from the day it
+    shipped because no producer carried any of the five keys it tried.
     """
+
     is_long = str(side).upper() == "LONG"
     if entry <= 0 or current_sl <= 0 or current_tp1 <= 0:
         return Menu(tp=(), sl=(), refusal=REFUSE_BAD_GEOMETRY)
@@ -231,6 +250,16 @@ def build_menu(
             fail_open.record("ai_governor_menu.swings", exc)
             refusal = refusal or REFUSE_BAD_GEOMETRY
 
+    # Level Book candidates, offered BESIDE the pivots above. Appended rather
+    # than merged so the swing candidates keep their nearest-first order and
+    # their keys, and so an all-`swing` menu reads as the Level Book being
+    # empty for this symbol rather than as this module having ignored it.
+    try:
+        tp.extend(_book_tps(book_levels, is_long, entry, cur_tp, _mk, len(tp)))
+        sl.extend(_book_sls(book_levels, is_long, cur_sl, _mk, len(sl)))
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("ai_governor_menu.book_levels", exc)
+
     # ── The last gate: placeability ─────────────────────────────────────────
     # A stop already through the mark is not a tight stop, it is an order
     # Binance rejects (-2021, "order would immediately trigger"). Offering one
@@ -286,6 +315,81 @@ def _swing_tps(swings: Dict[str, List[float]], is_long: bool, entry: float,
         if cand is None:
             continue
         seen.append(d)
+        out.append(cand)
+        if len(out) >= MAX_STRUCTURAL:
+            break
+    return out
+
+
+def _book_prices(book_levels: Optional[Sequence[Any]], want: str) -> List[Tuple[float, float]]:
+    """``(price, score)`` for Level Book levels of the wanted type.
+
+    Fields are read **by name** off `level_book.Level` — ``price``, ``type``,
+    ``score``. This module was documented as reading the Level Book and ran a
+    private pivot scan instead; the repair is worth nothing if the reader then
+    guesses at field names, which is how `zone_distance_atr` returned None on
+    every row for its whole life. A level whose shape does not match is skipped
+    and the menu simply carries fewer candidates — never a raise, and never a
+    silently invented price.
+    """
+    out: List[Tuple[float, float]] = []
+    for lv in book_levels or []:
+        try:
+            if str(getattr(lv, "type", "")) != want:
+                continue
+            price = float(getattr(lv, "price", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        try:
+            score = float(getattr(lv, "score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        out.append((price, score))
+    # Highest-scoring first: the Level Book already ranks by touches and age,
+    # and re-deriving that ordering here would be a second opinion about a
+    # question the book has already answered.
+    out.sort(key=lambda pair: pair[1], reverse=True)
+    return out
+
+
+def _book_tps(book_levels: Optional[Sequence[Any]], is_long: bool, entry: float,
+              current: Candidate, mk: Any, offset: int) -> List[Candidate]:
+    """Level Book targets **nearer than the current TP1**, nearer-only.
+
+    A long takes profit into resistance and a short into support, so the wanted
+    side flips with the trade — the same signing discipline the snapshot's
+    aligned features carry, and the reason `cvd_slope` scored every SHORT
+    backwards for a month before anyone noticed.
+    """
+    want = "resistance" if is_long else "support"
+    out: List[Candidate] = []
+    cur = current.dist_pct
+    for price, _score in _book_prices(book_levels, want):
+        d = _pct_from(entry, price, is_long)
+        if d <= 0 or d >= cur:
+            continue
+        cand = mk(f"{TP_PREFIX}{offset + len(out) + 1}", KIND_LEVEL, price)
+        if cand is None:
+            continue
+        out.append(cand)
+        if len(out) >= MAX_STRUCTURAL:
+            break
+    return out
+
+
+def _book_sls(book_levels: Optional[Sequence[Any]], is_long: bool,
+              current: Candidate, mk: Any, offset: int) -> List[Candidate]:
+    """Level Book stops **tighter than the current one**, tighter-only."""
+    want = "support" if is_long else "resistance"
+    out: List[Candidate] = []
+    for price, _score in _book_prices(book_levels, want):
+        if not _tightens(is_long, current.price, price):
+            continue
+        cand = mk(f"{SL_PREFIX}{offset + len(out) + 1}", KIND_LEVEL, price)
+        if cand is None:
+            continue
         out.append(cand)
         if len(out) >= MAX_STRUCTURAL:
             break
