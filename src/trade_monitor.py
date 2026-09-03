@@ -59,6 +59,7 @@ from src.channels.base import TERMINAL_STATUSES, Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
 from src.execution import be_policy as _be_policy
 from src.execution import runner_policy as _runner_policy
+from src.execution import ai_governor
 from src.execution import trail_governor
 from src import atr_trail_live, sar_live_shadow, trail_mechanisms
 from src import user_settings as _user_settings
@@ -1177,6 +1178,27 @@ class TradeMonitor:
             from src import fail_open
 
             fail_open.record("trade_monitor.trail_governor_sweep", exc)
+
+        # The AI Trade Governor.  Same clock, and deliberately AFTER the trail
+        # governor: when both could touch one stop the mechanism wins, because
+        # `park_external_level` refuses anything that is not a tightening and
+        # the AI arm skips a position carrying an exit mechanism outright.
+        #
+        # Keyed on SIGNALS, not positions (`docs/PLAN_AI_TRADE_GOVERNOR.md`
+        # §2.1): one verdict fans out to every user in the trade, so the model
+        # cost is flat in members while the apply path — which is not — carries
+        # its own separate budget.
+        #
+        # Never awaits the model: `sweep` spawns the call and the NEXT tick
+        # applies what came back, re-validated against state read fresh then.
+        try:
+            await ai_governor.sweep(
+                signals, self._store, price_fn=self._price_for
+            )
+        except Exception as exc:
+            from src import fail_open
+
+            fail_open.record("trade_monitor.ai_governor_sweep", exc)
 
     # Written next to the other data-volume status files (scanner heartbeat,
     # circuit_breaker_status.json) so the watchdog + liveness probe can read

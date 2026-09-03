@@ -4,6 +4,127 @@
 
 ---
 
+## SESSION 139 2026-09-02 — the AI Trade Governor, built dark
+
+Owner brief: an asynchronous AI layer that critiques a live position against the
+order book, CVD and BTC, and can adjust TP/SL or close at market. Then, on the
+design: *"why x1000 subscribers / AI works per signals FSM calls users"* and
+*"if Google flash 3.7 flash is fine for this continue with that"*.
+
+**He was right about the x1000, and checking where it DOES bite found something
+worse.** The doc led with the cost of a per-position design nobody is building.
+The per-signal design was never in doubt. But `close_fsm_positions_for_signal`
+loops over every active uid with a Firestore read each, then cancels the bracket
+and market-closes per uid — so one `PANIC_CLOSE` at 1,000 members is ~1,000
+reads and ~5,000 signed Binance calls in a burst, from the IP that got
+rate-limited on 2026-09-01. **The model bill is flat in members; the execution
+bill is linear and bursty.** That is now §2.2 and it drove four design
+constraints rather than a caution.
+
+### Shipped (PR #999 — doc + implementation)
+
+- `docs/PLAN_AI_TRADE_GOVERNOR.md` — design of record, every fact labelled
+  [verified] / [documented] / [inferred].
+- `src/llm_client.py` — provider-neutral transport, no retries (a bar-clocked
+  verdict has no use for a stale answer), every failure a NAMED result rather
+  than an exception, secret scrubbed from every error path, and a
+  version-stamped rate table so a vendor price change cannot rewrite what
+  historical rows cost.
+- `src/execution/ai_governor_menu.py` — the model picks a KEY from a
+  pre-validated menu, never emits a price. Nearer-only TPs, tighter-only SLs,
+  signed toward the trade, and a stop already through the mark is never offered
+  (Binance -2021 — offering one makes our defect surface as its mistake).
+- `src/execution/ai_governor_snapshot.py` — every field a `Readable`, so
+  "we could not ask" can never render as a value.
+- `src/ai_governor_ledger.py` + `src/execution/ai_governor.py` — arms keyed by
+  `signal_id`, bar-clocked, budget guard before any per-signal work, LLM never
+  awaited in the sweep, next tick applies after re-reading state.
+- Wired: config, five ops tunables, the monitor sweep, a forced flush in the
+  maintenance loop, two liveness probes, and `read.ai_governor` in the diag
+  catalog.
+
+**Flags: measurement ON, apply OFF, arms=tp.** The panic arm additionally
+refuses while `AI_GOV_PANIC_MAX_POSITIONS` is 0 — an owner-set blast-radius cap
+that falls back to unbounded is not a cap, and this is the one arm that cannot
+be paced.
+
+### Two defects found by re-reading my own diff, not by CI
+
+1. **A live-lock that would have hung the monitor loop.** `_requeue` puts a
+   paced verdict back on the queue the drain is reading, and the drain was
+   `while True`. It would pop it, find the pacing budget unchanged in the same
+   instant, requeue, pop again — forever, inside the tick that owns SL/TP
+   monitoring for every open position. The drain is now bounded by the depth at
+   entry. The regression test hangs against the pre-fix code, which is how it
+   was confirmed.
+2. **`cooldown` was counted as a refusal.** It means the lane found an arm it
+   was willing to evaluate and deliberately did not — positive evidence it is
+   working. Pooled with refusals it reads as a blocked governor; #816 from the
+   display side, in code I had just written while quoting the rule.
+
+Also caught: I invented a config key (`MIN_SL_DISTANCE_PCT`) that does not
+exist, and my first test fixture omitted the `open` array — the real
+collaborator refused it immediately, which is what driving the real one buys.
+
+3. **Sixteen `asyncio.run` calls in my new tests broke three unrelated tests**,
+   and I nearly shipped the claim that they were pre-existing. `asyncio_mode`
+   is `auto` here, so `asyncio.run` creates a loop, closes it, and leaves the
+   main thread with none — and the next test anywhere in the session that calls
+   `get_event_loop()` raises. Every file passed in isolation on both branches,
+   so "my tests pass" was true and meaningless; the failure exists only in the
+   ordering the full suite produces, and it lands in somebody else's file,
+   which makes "not mine" the natural and wrong reading. **The full suite on
+   `main` is what settled it: 8,966 passed, zero failures, against three on the
+   branch.** Now `async def` + `await` throughout, and the lesson is in
+   `CLAUDE.md`.
+
+   And the commit message for the first push said **"9,044 passed"** when the
+   run read `3 failed, 9004 passed` — a total that never happened, quietly
+   dropping three failures in the one artifact a reviewer reads to decide
+   whether a change is safe. Corrected here and in the follow-up commit.
+
+### Provider
+
+**Gemini 3.7 Flash** (owner). ~$5.54/mo at design volume; the 31 Dec 2026 promo
+expiry is recorded as a dated liability, not a price. Neither the Claude Pro nor
+the Google AI Pro subscription can serve the engine — both are consumer chat
+products billed separately from their APIs. The $300 GCP credit is excluded from
+Gemini via AI Studio, and the free tier trains on the prompt.
+
+**Open, and it is ours not Google's:** this project is already being *refused*
+at the Firestore free tier by something nobody has identified. A paid, bursty
+API must not land on that billing account before someone takes the App Engine →
+Settings look. If Gemini goes via Vertex, separate project.
+
+### Open / next
+
+- **`AI_GOV_PANIC_MAX_POSITIONS` needs an owner number.** It cannot be derived
+  from a shadow window — nothing is being closed during one. Until it is set the
+  panic arm refuses, which is the safe direction but is not a decision.
+- **The ops page does not exist yet.** Dark work must be observable, and the
+  engine publishes `read.ai_governor` — but `360ce-ops` has no page rendering
+  it. That is the paired PR and it is NOT done; a lane whose panel is missing
+  is the defect this repo has paid for repeatedly.
+- **`GEMINI_API_KEY` is unset**, so the lane reports `not_configured` and makes
+  no calls. That is a named state, not a failure — but no window accumulates
+  until the key is set.
+- Under `STATISTICAL_CHANGE_POLICY` the shadow window is one to four months
+  (§11.1). Nothing gets armed before that.
+
+Engine: **9,009 passed, 58 skipped, 0 failed** (summary line, copied). Against
+`main`'s 8,966 that is +43, reconciled exactly: 41 new governor tests plus **2
+the diag catalog's DERIVED guards added on their own** —
+`test_no_entry_can_reach_the_money_path[read.ai_governor]` and
+`test_no_entry_shells_out_or_evals[read.ai_governor]`. Nobody edited a list; the
+new catalog entry was audited for money-path reachability and for
+`subprocess`/`eval` because the requirement is derived from the tree. That is
+the pattern this repo keeps reaching for, working unprompted on the first entry
+added after it shipped.
+
+ruff clean on `src/ config/`; mypy 134 against a baseline of 134 — zero added.
+
+---
+
 ## SESSION 138 2026-09-02 — the switch nobody fixed, and the reads that scale with subscribers
 
 Owner, with two screenshots: *"still not resolved global kill switch and auto

@@ -2525,6 +2525,31 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Structural-snap flush error (fail-open): {}", exc)
 
+            # ── AI Trade Governor ledger ──────────────────────────────────
+            # force=True, same reason as every lane above: an idle governor
+            # that stops writing renders as STALE, and "no verdict was due"
+            # and "the lane stopped" are the two states an ops page cannot
+            # tell apart without a heartbeat.
+            #
+            # `get_ledger()` calls `load()`, so a deploy resumes the window
+            # instead of overwriting it — flush without load is worse than
+            # neither, and it destroyed four windows across two lanes before
+            # anyone noticed the row count going DOWN.
+            #
+            # The engine's own live state rides in the same payload, so the
+            # ops page reads bounds, budgets and refusals from the process
+            # that actually has them rather than from the api container, which
+            # has never evaluated a candidate (`INDEX COLD`).
+            try:
+                from src.execution import ai_governor as _aig
+                if _aig.measure_enabled():
+                    from src import ai_governor_ledger as _aigl
+                    _aigl.get_ledger().flush(force=True, extra={"diag": _aig.build_diag()})
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("AI-governor flush error (fail-open): {}", exc)
+
             # ── Structural veto ledger (price-action program, Phase 4) ─────
             # This was MISSING. `structural_veto.stamp` added rows to an
             # in-memory ring and nothing ever wrote them, so
@@ -5219,6 +5244,33 @@ class CryptoSignalEngine:
             fn=lambda: _pbr_liveness.paper_dispatch_health_check(
                 _paper_dispatch_state
             ),
+            min_streak=3,
+        ))
+
+        # ── AI Trade Governor ────────────────────────────────────────────
+        # Two probes, because "the lane stopped" and "the lane is answering
+        # about nothing" are different faults with different fixes.
+        #
+        # The rate probe watches verdicts against TRIGGERS, not against
+        # signals: the trigger ladder is supposed to fire rarely, so a quiet
+        # book is not a fault and grading on signal volume would page on a
+        # working lane.
+        from src.execution import ai_governor as _aig
+
+        fl.add_rate(RateProbe(
+            name="ai_governor_verdicts",
+            counter=lambda: float(_aig.health().get("verdicts", 0)),
+            upstream=lambda: float(_aig.health().get("triggers", 0)),
+            detail="triggers fired but no verdict came back",
+        ))
+        # Blindness is a fault in EITHER mode. The reasoning that an
+        # abstaining rule costs nothing while nothing is enforced is wrong:
+        # a shadow lane that never reads its context can never accumulate the
+        # evidence its own promotion depends on — a measurement flat-lining
+        # without paging.
+        fl.add_predicate(PredicateProbe(
+            name="ai_governor_blind",
+            fn=_aig.probe_blindness,
             min_streak=3,
         ))
         return fl

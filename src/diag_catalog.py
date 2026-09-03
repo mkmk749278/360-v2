@@ -302,6 +302,19 @@ def _loop_snapshot(ctx: Ctx) -> Dict[str, Any]:
     return {"loop_health": _loop_health(ctx.engine), "host_resources": _host_resources()}
 
 
+def _ai_governor(ctx: Ctx) -> Dict[str, Any]:
+    """The AI Trade Governor's live state — bounds, budgets, arms and refusals.
+
+    Read from the ENGINE process on purpose. The api container has never
+    evaluated a candidate and cannot see the arms or the position index, so a
+    version of this assembled there would report a healthy zero
+    (`INDEX COLD`, and the promotion census before it).
+    """
+    from src.execution import ai_governor as _aig
+
+    return _aig.build_diag()
+
+
 def _fail_open(ctx: Ctx) -> Dict[str, Any]:
     """Every fail-open exception site and its count — the silent-failure ledger."""
     from src import fail_open
@@ -429,6 +442,10 @@ for _e in (
           "Bumps, polls and failures on the Redis generation that replaced the "
           "5s TTLs — says whether a kill-switch flip converges on the tick or "
           "on the slow defensive bound.", _control_generation),
+    Entry("read.ai_governor", "AI Trade Governor", "read",
+          "Arms, verdict mix, refusals by name, spend against the daily cap, "
+          "and whether the panic arm's position ceiling is set — it refuses "
+          "while that is zero.", _ai_governor),
     Entry("read.edge_store", "Edge store internals", "read",
           "Cell count, record counts and the biggest cells — where the 39 MB "
           "of serialisation cost lives.", _edge_store_internals),

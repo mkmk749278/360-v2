@@ -4677,3 +4677,100 @@ TRACK_RECORD_DEFAULT_AMOUNT_USDT: float = _safe_float(
 TRACK_RECORD_DEFAULT_FEE_PCT: float = _safe_float(
     "TRACK_RECORD_DEFAULT_FEE_PCT", "0.07"
 )
+
+
+# ---------------------------------------------------------------------------
+# Post-emission AI Trade Governor (docs/PLAN_AI_TRADE_GOVERNOR.md)
+# ---------------------------------------------------------------------------
+#
+# TWO flags, and they are not the same flag (§ Project Phase). The MEASUREMENT
+# ships ON — a measurement shipped OFF produces an empty ops panel and a
+# decision that keeps being deferred, which is exactly what happened to the SAR
+# exit arm. The user-visible EFFECT ships OFF and is armed only after owner
+# sign-off on a measured window.
+
+#: Stamping and calling. ON: the lane measures from the moment it deploys, and
+#: is fully visible in ops the same day.
+AI_GOV_MEASURE_ENABLED: bool = _safe_bool("AI_GOV_MEASURE_ENABLED", "true")
+
+#: Whether a verdict may touch a real order. OFF until owner sign-off.
+AI_GOV_APPLY_ENABLED: bool = _safe_bool("AI_GOV_APPLY_ENABLED", "false")
+
+#: Which arms may APPLY once the effect flag is on, as a comma set of
+#: tp / sl / panic. Default is the TP arm alone: it is the only one fully
+#: decidable from the closed-signal record (the snap moves nearer only, so MFE
+#: settles it with no ordering ambiguity), and it is monotone-safe.
+AI_GOV_ARMS_ENABLED: str = os.getenv("AI_GOV_ARMS_ENABLED", "tp")
+
+AI_GOV_PROVIDER: str = _safe_choice(
+    "AI_GOV_PROVIDER", "google", frozenset({"google", "anthropic"})
+)
+
+#: The alias we ASK for. The ledger stamps the version the provider says it
+#: SERVED, because Gemini rotates aliases and a rotation would otherwise
+#: redefine every row with no diff in our repo.
+#:
+#: Promotional pricing runs to 2026-12-31 and doubles on 2027-01-01 with no
+#: change on our side — a dated liability, not a price. `AI_GOV_MAX_USD_PER_DAY`
+#: is what makes that a visible degradation rather than a surprise.
+AI_GOV_MODEL: str = os.getenv("AI_GOV_MODEL", "gemini-3.7-flash")
+
+#: Dual-model arm: a second model's verdict against the SAME snapshot, in its
+#: own column, never blended. Empty = off. It is what turns "is Flash good
+#: enough for this" from an argument into a measured agreement rate.
+AI_GOV_MODEL_SHADOW: str = os.getenv("AI_GOV_MODEL_SHADOW", "")
+
+# ---- Model budget. Bounds calls to the PROVIDER. ----
+AI_GOV_MAX_CALLS_PER_SIGNAL: int = _safe_int("AI_GOV_MAX_CALLS_PER_SIGNAL", "8")
+AI_GOV_MAX_CALLS_PER_HOUR: int = _safe_int("AI_GOV_MAX_CALLS_PER_HOUR", "30")
+AI_GOV_MIN_SECONDS_BETWEEN: float = _safe_float("AI_GOV_MIN_SECONDS_BETWEEN", "300.0")
+
+#: 0 = unset, and deliberately so at ship. The number comes from the FIRST WEEK
+#: OF THE LEDGER — measured calls/day x measured $/call x 3 headroom — not from
+#: a guess today. Inventing it now is the `_HEARTBEAT_MAX_AGE_SECONDS` mistake:
+#: a constant asserting a property nobody measured, which cost a day of
+#: restarts. Until it is set, the call-count bounds above are what hold.
+AI_GOV_MAX_USD_PER_DAY: float = _safe_float("AI_GOV_MAX_USD_PER_DAY", "0")
+
+# ---- The OTHER budget. Bounds calls to the EXCHANGE. ----
+#
+# The model bill is flat in members; the execution bill is linear and bursty
+# (§2.2). These are not the same bound, and tuning them together is how one
+# hides the other. One PANIC_CLOSE at 1,000 members is ~1,000 Firestore reads
+# and ~5,000 signed Binance calls in a burst, from an IP that has been
+# rate-limited before — the 2026-09-01 shape, which took auto-trade down for
+# every paid user for four hours.
+
+#: Positions a TP/SL adjustment may touch per minute. Over the cap the rest are
+#: DEFERRED to the next tick, which is safe because the existing protection
+#: stays exactly where it is while they wait.
+AI_GOV_APPLY_MAX_POS_PER_MIN: int = _safe_int("AI_GOV_APPLY_MAX_POS_PER_MIN", "60")
+
+#: Hard ceiling on how many positions ONE PANIC_CLOSE verdict may close.
+#:
+#: 0 = unset, and while it is unset **the panic arm refuses outright**. This is
+#: not a default of "unlimited": an owner-set blast-radius cap (B18 sense) that
+#: falls back to unbounded is not a cap, and this is the one arm that cannot be
+#: paced — a queued emergency close is not an emergency close. Over the ceiling
+#: the verdict is refused and named rather than truncated to the first N, since
+#: closing an arbitrary subset of a correlated book is a different action from
+#: the one that was asked for.
+AI_GOV_PANIC_MAX_POSITIONS: int = _safe_int("AI_GOV_PANIC_MAX_POSITIONS", "0")
+
+# ---- Clock and triggers ----
+#: A verdict older than one monitor tick is refused, never applied. The
+#: stale-envelope rule: the world has moved on, and applying a minutes-old exit
+#: decision from it is worse than doing nothing.
+AI_GOV_VERDICT_MAX_AGE_SEC: float = _safe_float("AI_GOV_VERDICT_MAX_AGE_SEC", "10.0")
+AI_GOV_REQUEST_TIMEOUT_SEC: float = _safe_float("AI_GOV_REQUEST_TIMEOUT_SEC", "20.0")
+
+#: How far the trade must move, in R, before the state counts as materially
+#: changed. Mechanical rather than fitted: it is the trade's own designed risk,
+#: not a number this window generated.
+AI_GOV_TRIGGER_R_BAND: float = _safe_float("AI_GOV_TRIGGER_R_BAND", "0.5")
+
+#: Distance to TP1 below which a wall in front of the target could matter at
+#: all. Outside this band the order book ahead of TP is not yet the question.
+AI_GOV_TRIGGER_TP_PROXIMITY_PCT: float = _safe_float(
+    "AI_GOV_TRIGGER_TP_PROXIMITY_PCT", "0.5"
+)

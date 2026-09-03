@@ -663,6 +663,33 @@ python -m src.main
   itself. **Do not signal "idle" or "disabled" by raising** inside a
   `PredicateProbe`: it converts to a `fail_open.record`, and filling that counter
   with non-failures is how a real one stops standing out — `return True, "…"`.
+- **`asyncio.run` in a test is not local to that test, and the damage is
+  invisible until the WHOLE suite runs.** `pyproject.toml` sets
+  `asyncio_mode = auto`, so an async test needs no decorator and pytest-asyncio
+  owns the loop. A test that calls `asyncio.run()` instead creates its own loop,
+  closes it, and leaves the main thread with **no current event loop** — so the
+  next test anywhere in the session that calls `asyncio.get_event_loop()` raises
+  `RuntimeError: There is no current event loop`. On 2026-09-02 sixteen
+  `asyncio.run` calls in three new governor test files broke
+  `test_raises_when_ccxt_not_installed` and both `TestStreamShardingCap` tests,
+  which touch none of the code under test.
+
+  Three things make this worth writing down. **Every file passed in isolation**,
+  on both branches, so "my tests pass" was true and meaningless — the failure
+  exists only in the ordering the full suite produces. **The failures land in
+  somebody else's file**, so the natural reading is "not mine, pre-existing",
+  which is exactly what I concluded until the comparison run said otherwise.
+  And **the comparison is the whole check**: `main` passed 8,966 with zero
+  failures while the branch had three, and nothing short of running both
+  settles it. Write `async def test_…` and `await`; reach for `asyncio.run`
+  only in a script.
+
+  Corollary on the count: the branch run read `3 failed, 9004 passed` and the
+  commit message said `9,044 passed`. That is not a typo worth shrugging at —
+  it states a total that never happened and silently drops the three failures,
+  in the one artifact a reviewer reads to decide whether the change is safe.
+  **Copy the summary line, do not retype it.**
+
 - **A field one repo reads and no repo writes fails silently and looks full.**
   `app/routes/performance.py` read `entry_regime` off closed-signal records from the
   day it was written; `SignalRecord` never carried it, so the per-regime table
