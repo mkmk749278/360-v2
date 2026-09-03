@@ -1382,6 +1382,19 @@ class Scanner:
         self._loss_streaks: Dict[tuple, int] = {}
         self._load_loss_streaks()
 
+        # Campaign state, on that same key (2026-09-02).  `get_registry` loads
+        # from disk on first use and this is the call that makes it happen at
+        # boot rather than at the first close — a flush with no load overwrites
+        # a file that looked healthy on disk, and *defining* a loader is not
+        # calling one (2026-08-06).  Written by `on_signal_lifecycle_outcome`,
+        # read by `entry_features.stamp`; observe-only, nothing gates on it.
+        try:
+            from src import campaign_state as _cs
+
+            _cs.get_registry()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("campaign-state load failed (non-fatal): {}", exc)
+
         # Per-symbol throttle for the promoted-mover candle re-seed
         # (``_refresh_stale_mover_candles``, 2026-07-10) — monotonic ts of
         # the last refresh ATTEMPT per symbol.
@@ -5224,6 +5237,29 @@ class Scanner:
         except Exception as exc:
             log.debug("loss-streak update failed (non-fatal): {}", exc)
             streak = 0
+        # Campaign state (2026-09-02): what this leg did, for the NEXT
+        # candidate on the same (symbol, setup_class, direction).  Same key as
+        # the cooldown above and the loss streak beside it — a fourth consumer
+        # of one key, not a fourth private dict.  Recorded here because this is
+        # where the outcome becomes true; the reader is
+        # `entry_features.stamp`, which runs inside an evaluator that cannot
+        # see this object.  Observe-only: nothing reads it to decide emission.
+        try:
+            from src import campaign_state as _cs
+
+            try:
+                _cs_pnl_val = float(getattr(sig, "pnl_pct", None))
+            except (TypeError, ValueError):
+                _cs_pnl_val = None
+            _cs.get_registry().record_outcome(
+                self._cooldown_key_for(sig),
+                outcome_label,
+                pnl_pct=_cs_pnl_val,
+            )
+        except Exception as exc:  # noqa: BLE001 — a stamp must never kill a close
+            from src import fail_open as _fo
+
+            _fo.record("scanner.campaign_state_record", exc)
         if extension_sec is None or extension_sec <= 0:
             return
         try:

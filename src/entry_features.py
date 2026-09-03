@@ -237,9 +237,16 @@ log = get_logger("entry_features")
 #: longer written by this build at all: pre-schema-3 rows keep theirs, and a
 #: reader that wants the real score finds nothing on them rather than a number
 #: that reads plausible and means something else. A missing stamp is not a pass.
-SCHEMA = 3
+SCHEMA = 4
 
 #: Older schemas this build reads unchanged.
+#:
+#: ``{3}`` since 2026-09-02: schema 4 only ADDS the ``campaign_*`` keys. No
+#: schema-3 field changes meaning, and a schema-3 row is most of the evidence
+#: every other feature on the page is measured on — dropping it would make the
+#: estimate smaller rather than cleaner ("filter, do not purge"). Rows without
+#: a campaign stamp bucket as their own population: the build that wrote them
+#: could not have known, which is not the same fact as a first entry.
 #:
 #: ``{2}`` since 2026-08-15: schema 3 only ADDS keys. No schema-2 field changes
 #: meaning — `confidence` on an old row means exactly what it always meant (the
@@ -252,7 +259,7 @@ SCHEMA = 3
 #: Before bumping SCHEMA, ask whether the change only ADDS fields; if so add the
 #: old number here, or the first flush after deploy silently destroys the ledger
 #: (`ledger_schema`, and the 371 SAR rows lost on 2026-08-09).
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({2})
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({2, 3})
 
 
 _DEFAULT_PATH: str = os.getenv("ENTRY_FEATURES_PATH", "data/entry_features_v1.json")
@@ -474,6 +481,13 @@ ROW_METADATA_KEYS: frozenset = frozenset({
     # it. These are None precisely when the feature is fine, so counting them
     # would mark every healthy row incomplete.
     reason_key("level_dist_r"), "cvd_source", "book_source",
+    reason_key("campaign_prev_won"),
+    # The label behind `campaign_prev_won`, and the size behind it. Both are
+    # descriptive — "SL_HIT" is not a measurement of this setup and `prev_pnl`
+    # is a fact about the PREVIOUS trade — so neither belongs in `missing`,
+    # which counts features this row failed to compute. Same treatment as
+    # `session` / `is_weekend` beside `session_quality`.
+    "campaign_prev_outcome", "campaign_prev_pnl_pct",
 })
 
 
@@ -1221,6 +1235,54 @@ def enabled() -> bool:
         return os.getenv("ENTRY_FEATURES_ENABLED", "true").strip().lower() != "false"
 
 
+def _campaign_block(sig: Any, now_ts: Optional[float] = None) -> Dict[str, Any]:
+    """What the previous trade on this symbol × setup × side did.
+
+    Read here rather than in :func:`capture` because it is a fact about the
+    signal, and ``capture`` is handed market inputs and never the signal. That
+    is the same "where does it become true" question ``entry_regime`` got wrong
+    one caller earlier (#850) — the difference is that here the answer is
+    ``stamp``, which is the first place ``sig`` exists.
+
+    Three features and two names for them:
+
+    * ``campaign_leg_index`` — closed legs before this one, inside the
+      registry's horizon. Never unknown (0 on a first entry), which makes it
+      the column a reader grades the other two's coverage against.
+    * ``campaign_prev_won`` — 1 / 0 / **None**, and the None is load-bearing:
+      51% of the delivered book is a first entry, and handing those a 0 would
+      say "the previous leg lost" about a campaign that has no previous leg.
+      Its absence carries a reason, because a blank needs a cause.
+    * ``campaign_prev_age_h`` — hours since that leg closed. Not optional and
+      not decoration: measured on 90 days of the delivered book the
+      continuation effect lives inside ~6 hours (+1.41% and +1.42% in the 0-2h
+      and 2-6h buckets, both intervals excluding zero) and is gone beyond it
+      (-0.03% and +0.06%, both spanning zero). A row carrying the outcome
+      without the clock pools a live continuation with last Tuesday.
+
+    Observe-only, on every path, and deliberately **not** a rule anywhere. The
+    effect that motivated it is MVRTP's alone — off that path the same split
+    reads +0.017% after a winner against +0.123% after a stop — so the stamp
+    is what keeps the non-effect re-checkable rather than the start of twelve
+    thresholds (``campaign_state``'s module docstring has the numbers).
+    """
+    try:
+        from src import campaign_state as _cs
+
+        read = _cs.read_for(sig, now=now_ts)
+    except Exception as exc:  # noqa: BLE001 — a stamp must never kill a scan
+        fail_open.record("entry_features.campaign_block", exc)
+        return {}
+    return {
+        "campaign_leg_index": float(read.leg_index),
+        "campaign_prev_won": read.prev_won,
+        "campaign_prev_age_h": read.prev_age_h,
+        "campaign_prev_outcome": read.prev_outcome,
+        "campaign_prev_pnl_pct": read.prev_pnl_pct,
+        reason_key("campaign_prev_won"): read.absence_reason,
+    }
+
+
 def stamp(
     sig: Any,
     features: Dict[str, Any],
@@ -1283,6 +1345,17 @@ def stamp(
                 "schema": SCHEMA,
             }
         )
+        row.update(_campaign_block(sig, now_ts))
+        # Re-derived over the MERGED row rather than trusted from `capture`.
+        # The campaign facts come off `sig`, which `capture` never sees, so
+        # they arrive after its accounting has already run — and "whether a
+        # value counts as a feature must not depend on where its line sits in
+        # a function" is the rule that cost `stack_sep_pct` a probe. The
+        # non-features are named in ROW_METADATA_KEYS, so recomputing here is
+        # the same computation over more keys, never a different one.
+        row["missing"] = sorted(
+            k for k, v in row.items() if v is None and k not in ROW_METADATA_KEYS
+        )
         return get_ledger().add(row)
     except Exception as exc:  # noqa: BLE001 — a measurement must never kill a scan
         fail_open.record("entry_features.stamp", exc)
@@ -1322,8 +1395,25 @@ _KEEP_ABOVE = frozenset(
         # trades. Same direction as `stack_sep_pct` beside it, which is the max
         # of this and the 1H fan — deliberately, so the pair is comparable.
         "sep_15m_pct",
+        # The previous leg on this campaign paid. This is the one direction on
+        # the page that is not a hypothesis about the market: it was measured
+        # on 90 days of the delivered book before the column existed.
+        "campaign_prev_won",
     }
 )
+
+#: `campaign_prev_age_h` is deliberately absent from the set above, and
+#: `campaign_leg_index` deliberately absent from both directions.
+#:
+#: Age: FRESHER is better, so the default "keep below the threshold" is already
+#: the right way round — hours since the previous close, kept low. Adding it to
+#: `_KEEP_ABOVE` would keep the stale half and read as the effect disappearing.
+#:
+#: Leg index: the measured relationship is not monotonic (legs 2-4 are the best
+#: of the book at +0.10 to +0.32%/trade, leg 1 is the worst at -0.04% and leg 5
+#: dips again), so neither direction is a hypothesis and the split table shows
+#: both sides anyway. Asserting one would be inventing a shape the data does
+#: not have.
 
 #: The core, true of every path by construction: geometry first (it bounds
 #: everything else), then the trigger bar, then the free order-flow reads.
@@ -1340,6 +1430,22 @@ CORE_FEATURES: Tuple[str, ...] = (
     # the one core feature that is never unknown, because its input is a clock
     # rather than an upstream that can go dark.
     "session_quality",
+    # Campaign state (2026-09-02). Core by this list's own definition: facts
+    # about the trade rather than readings of the market, so they are
+    # comparable across paths, and their input is our own closed-signal record
+    # rather than an upstream that can go dark — the same argument as
+    # `session_quality` above.
+    #
+    # Three more cells per path is three more chances at a spurious winner, and
+    # this list's docstring says so. What makes these different from a fishing
+    # expedition is the order of events: the hypothesis was measured on 90 days
+    # of the delivered book BEFORE the column existed, and the column exists to
+    # confirm it forward on rows that had no part in forming it. A feature
+    # discovered in the split table is not the same object as one being brought
+    # to it, and the page should say which it is looking at.
+    "campaign_leg_index",
+    "campaign_prev_won",
+    "campaign_prev_age_h",
 )
 
 #: What each path contributes on top, and why it is *that* path's question.
