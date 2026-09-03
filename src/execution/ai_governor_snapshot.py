@@ -151,6 +151,25 @@ class Snapshot:
         fields = (self.book_imbalance_aligned, self.cvd_slope_aligned)
         return sum(0 if f.readable else 1 for f in fields) / float(len(fields))
 
+    def readability(self) -> Dict[str, Any]:
+        """Per-field readability, beside the pooled fraction rather than instead.
+
+        ``blind_fraction`` pools book and flow into one number, and those two
+        have **different causes and different fixes**: an unsubscribed symbol is
+        a stream-budget decision (`DEPTH_MAX_SYMBOLS` / `AGGTRADE_MAX_SYMBOLS`
+        are both 40 while much of the delivered book is promoted movers), a
+        stale feed is an incident, and a disabled consumer flag is a switch
+        nobody threw. Pooling two states whose next moves differ is what this
+        repo has paid for under several names, so the pooled figure stays for
+        continuity and the split ships beside it.
+        """
+        return {
+            "book_readable": bool(self.book_imbalance_aligned.readable),
+            "book_reason": str(self.book_imbalance_aligned.reason or ""),
+            "flow_readable": bool(self.cvd_slope_aligned.readable),
+            "flow_reason": str(self.cvd_slope_aligned.reason or ""),
+        }
+
     def digest(self) -> str:
         """Stable hash of what the model saw, for the ledger.
 

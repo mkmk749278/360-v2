@@ -61,6 +61,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+from src import ai_governor_score as _score
 from src import fail_open, llm_client
 from src.ai_governor_ledger import get_ledger
 from src.execution import ai_governor_menu as _menu
@@ -898,6 +899,10 @@ async def evaluate(
             row = verdict.as_row()
             row["snapshot"] = snapshot.as_dict()
             row["unknown_frac"] = round(snapshot.blind_fraction(), 4)
+            # Beside the pooled fraction, never instead of it. Book-blind and
+            # flow-blind have different causes and different fixes, and the
+            # pooled number cannot say which — see `Snapshot.readability`.
+            row.update(snapshot.readability())
             ledger.add(row)
             _count("verdicts")
             _count_in("by_action", verdict.action)
@@ -1359,6 +1364,65 @@ def _open_positions_for(signal_id: str) -> Optional[List[Any]]:
 
 # ── Ops surface ─────────────────────────────────────────────────────────────
 
+def blindness(sample: int = 200) -> Dict[str, Any]:
+    """How much context the recent verdicts actually had.
+
+    `docs/PLAN_AI_TRADE_GOVERNOR.md` §3 specified this and nothing published it,
+    so the ledger carried the per-row stamp while every surface was silent on
+    it. A fail-open governor is *designed* to answer without book or flow — the
+    cost of that choice is that an inert lane reads exactly like a working one
+    on every count except this one, which is why it is a first-class block
+    rather than a footnote.
+
+    Reasons are counted separately from the totals because they have different
+    next moves: ``not_subscribed`` is a stream-budget decision, ``stale`` is an
+    incident, ``disabled`` is a switch nobody threw, and ``error`` is ours.
+    """
+    rows = get_ledger().rows()[-int(max(1, sample)):]
+    if not rows:
+        # Not a fault, and not zero blindness either: nothing has been asked
+        # yet. A caller that renders 0% here would report a healthy lane on an
+        # empty one.
+        return {"rows": 0, "measured": False}
+
+    def _count_reason(flag: str, reason: str) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for row in rows:
+            if row.get(flag) is False:
+                key = str(row.get(reason) or "unknown")
+                out[key] = out.get(key, 0) + 1
+        return out
+
+    stamped = [r for r in rows if "book_readable" in r]
+    fracs = [float(r.get("unknown_frac") or 0.0) for r in rows if r.get("unknown_frac") is not None]
+    return {
+        "rows": len(rows),
+        "measured": True,
+        # Rows written before the split shipped carry the pooled fraction only.
+        # Counted apart rather than folded in: a missing stamp is not a pass.
+        "rows_with_split": len(stamped),
+        "avg_unknown_frac": round(sum(fracs) / len(fracs), 4) if fracs else None,
+        "fully_blind": sum(1 for f in fracs if f >= 1.0),
+        "book_blind": sum(1 for r in stamped if r.get("book_readable") is False),
+        "flow_blind": sum(1 for r in stamped if r.get("flow_readable") is False),
+        "book_reasons": _count_reason("book_readable", "book_reason"),
+        "flow_reasons": _count_reason("flow_readable", "flow_reason"),
+    }
+
+
+def _safe_scorecard(ledger: Any) -> Dict[str, Any]:
+    """The scorecard, or a named reason it is absent — never a raise.
+
+    Returns a block the page can render either way, because "the scorecard
+    failed" and "the scorecard is empty" send a reader to different places.
+    """
+    try:
+        return _score.build(ledger.rows())
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("ai_governor.build_diag:scorecard", exc)
+        return {"error": f"{type(exc).__name__}: {exc}" or type(exc).__name__}
+
+
 def build_diag() -> Dict[str, Any]:
     """Everything the ops page needs, assembled in the ENGINE process.
 
@@ -1400,6 +1464,21 @@ def build_diag() -> Dict[str, Any]:
         "ledger_rows": ledger.count(),
         "ledger_evicted": ledger.evicted,
         "queue_depth": len(_queue),
+        # The per-row stamp has always existed and nothing aggregated it, so no
+        # surface could say whether a verdict was informed or blind — which
+        # makes every verdict on the page uninterpretable in either direction.
+        "blindness": blindness(),
+        # Graded against the closed-signal record the engine already writes. No
+        # resolver: every lane in this repo that grew one cost a session.
+        #
+        # Guarded on its own rather than trusting the caller's try/except: the
+        # ONE caller in production is `main.py`'s maintenance loop, which builds
+        # this payload as the `extra` of `flush(force=True)` — so an exception
+        # here would take the ledger's HEARTBEAT down with it, and an idle-looking
+        # lane is exactly the fault this repo has misdiagnosed before. A
+        # scorecard that cannot be computed is a missing panel; a flush that
+        # cannot run is a lost window.
+        "scorecard": _safe_scorecard(ledger),
     }
 
 
