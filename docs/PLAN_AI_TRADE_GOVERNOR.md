@@ -1,11 +1,22 @@
 # The Post-Emission AI Trade Governor
 
-**Status:** design of record. Written 2026-09-02, before any code. Nothing in this
-document is implemented.
+**Status:** design of record. Written 2026-09-02, before any code. **The fast lane
+described here SHIPPED and is live** — measuring, apply OFF, 7 ledger rows as of
+2026-09-03. The sentence that stood here ("nothing in this document is
+implemented") was true for one day and then quietly false, which is the stale
+assertion this repo has paid for eight times; it is corrected rather than
+deleted.
 **Owner request:** *"build an asynchronous AI Trade Governor… the deterministic
 system must execute the trade instantly to avoid slippage. The AI steps in
 immediately after the trade is live… Maintain / Adjust TP / Adjust SL / Panic
 Close… strictly formatted JSON that our FSM can instantly parse and execute."*
+**Superseded in part:** this document remains the design of record for the
+**fast lane** — the bar-clock classifier that is live and measuring, and which
+is described accurately below. The **deep lane** (agentic research, the Slack
+transport, the `HAND_TO_TRAIL` verdict, and the scoring harness) is
+`docs/PLAN_AI_TRADE_GOVERNOR_V2.md`, written 2026-09-03. Read v2 before
+changing anything here; §3 of it records three gaps between this document and
+the shipped code.
 **Companions:** `docs/LLM_SIGNAL_CRITIC_BRIDGE.md` (the pre-dispatch sibling — §1
 below), `docs/STATISTICAL_CHANGE_POLICY.md` (binds the rollout — §11),
 `docs/PRICE_ACTION_PROGRAM.md` (owns the reality-feed inputs — §3).
