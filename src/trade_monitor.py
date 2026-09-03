@@ -285,6 +285,17 @@ class TradeMonitor:
         strategy_edge_store: Optional[Any] = None,
     ) -> None:
         self._store = data_store
+        #: Returns the Level Book's levels for a symbol, or None when nothing
+        #: has been wired. `main.py` sets it once the scanner exists — the
+        #: monitor is constructed first, so this cannot be a constructor
+        #: argument. Left None, the governor's menu simply carries no Level
+        #: Book candidates and says so; it never invents one.
+        self._level_getter = None
+        #: Returns `pair_manager.PairInfo` for a symbol, or None. Set in
+        #: `main.py` once the pair manager exists; left None, the governor's
+        #: instrument X-ray reports a named unknown rather than an ordinary
+        #: instrument.
+        self._pair_getter = None
         self._send = send_telegram
         self._get_signals = get_active_signals
         # Monitor start wall-clock (monotonic) — the post-boot grace anchor
@@ -1193,7 +1204,18 @@ class TradeMonitor:
         # applies what came back, re-validated against state read fresh then.
         try:
             await ai_governor.sweep(
-                signals, self._store, price_fn=self._price_for
+                signals,
+                self._store,
+                price_fn=self._price_for,
+                # The scanner's own LevelBook, handed over in `main.py` once
+                # both objects exist. The governor's menu was documented as
+                # reading it and never did; passing it here is the half of that
+                # repair that makes the parameter real rather than decorative.
+                level_getter=self._level_getter,
+                # `pair_manager`'s PairInfo for the signal's symbol — the 24h
+                # move and quote volume Binance already sends us. Same wiring
+                # as the Level Book above, set in `main.py`.
+                pair_getter=self._pair_getter,
             )
         except Exception as exc:
             from src import fail_open

@@ -486,6 +486,14 @@ class CryptoSignalEngine:
         self._alert_subscribers: Set[str] = set()  # admin IDs subscribed to alerts
 
         # Scanner (dependency-injected)
+        # Hand the scanner's Level Book to the monitor, which passes it to the
+        # AI governor's menu builder. Done here because the monitor is built
+        # first (it cannot be a constructor argument) and because the
+        # alternative — the governor importing the scanner — would couple the
+        # monitor loop to the scan loop. `ai_governor_menu` was documented as
+        # reading `level_book` and ran a private pivot scan instead; this line
+        # is what makes that description true, and a test parses it out of this
+        # file so the wire cannot be quietly removed.
         self._scanner = Scanner(
             pair_mgr=self.pair_mgr,
             data_store=self.data_store,
@@ -502,6 +510,17 @@ class CryptoSignalEngine:
             onchain_client=self._onchain_client,
             order_flow_store=self._order_flow_store,
         )
+
+        # The wire the comment above describes. Same shape as the
+        # AlertService `level_book_getter` two blocks down — one accessor,
+        # read lazily, so neither object holds the other.
+        self.monitor._level_getter = (
+            lambda symbol: self._scanner.level_book.get_levels(symbol)
+        )
+        # And the pair universe, for the instrument X-ray: the 24h move and
+        # quote volume Binance already sends, so the governor can tell a $29M
+        # meme up 48% from an $8.4B major. No vendor and no symbol mapping.
+        self.monitor._pair_getter = lambda symbol: self.pair_mgr.pairs.get(symbol)
         # Share mutable state with scanner
         self._scanner.paused_channels = self._paused_channels
         self._scanner.confidence_overrides = self._confidence_overrides
