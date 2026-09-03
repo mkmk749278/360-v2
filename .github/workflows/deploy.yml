@@ -123,6 +123,19 @@ jobs:
               && sed -i "s|^NOWPAYMENTS_IPN_SECRET=.*|NOWPAYMENTS_IPN_SECRET=${{ secrets.NOWPAYMENTS_IPN_SECRET }}|" .env \
               || echo "NOWPAYMENTS_IPN_SECRET=${{ secrets.NOWPAYMENTS_IPN_SECRET }}" >> .env
 
+            # Gemini — the AI Trade Governor's provider (docs/PLAN_AI_TRADE_GOVERNOR.md).
+            # Same pattern, and the same reason: a GitHub repository secret does
+            # NOT reach the engine on its own.  The key was added to the repo's
+            # secrets on 2026-09-03 and would have sat there doing nothing until
+            # somebody noticed the ops page still reading NOT CONFIGURED.
+            #
+            # Empty secret is a supported state, not a failure: `llm_client`
+            # returns `not_configured`, the governor makes no call, and the ops
+            # page says so under its own name.
+            grep -q "^GEMINI_API_KEY=" .env \
+              && sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}|" .env \
+              || echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> .env
+
             # ── Rebuild and restart all containers ───────────────────────────
             # deploy.sh reads API_PROCESS_ISOLATED from .env and selects the
             # correct compose files / profile automatically (isolated mode adds
