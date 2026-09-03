@@ -52,10 +52,6 @@
       "FAILED_AUCTION_RECLAIM": {
         "suppress_negative": null,
         "min_samples": null
-      },
-      "FAILED_AUCTION_RECLAIM@FIXED": {
-        "suppress_negative": null,
-        "min_samples": 25
       }
     },
     "history": {
@@ -170,9 +166,9 @@
         "HOLD"
       ],
       "VOLUME_SURGE_BREAKOUT|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "VOLUME_SURGE_BREAKOUT|min_samples": [
         "HOLD",
@@ -180,9 +176,9 @@
         "HOLD"
       ],
       "WHALE_MOMENTUM|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "WHALE_MOMENTUM|min_samples": [
         "HOLD",
@@ -220,84 +216,6 @@
       ],
       "SHADOW_CASCADE_REVERSAL|min_samples": [
         "LOWER"
-      ],
-      "FAILED_AUCTION_RECLAIM@FIXED|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
-      ],
-      "FAILED_AUCTION_RECLAIM@FIXED|min_samples": [
-        "LOWER"
-      ],
-      "MOVER_AVWAP_SCALP@SAREXIT|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
-      ],
-      "MOVER_AVWAP_SCALP@SAREXIT|min_samples": [
-        "HOLD",
-        "HOLD",
-        "HOLD"
-      ],
-      "MOVER_TREND_PULLBACK@FIXED|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
-      ],
-      "MOVER_TREND_PULLBACK@FIXED|min_samples": [
-        "HOLD",
-        "HOLD",
-        "HOLD"
-      ],
-      "MOVER_TREND_PULLBACK@SAREXIT|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
-      ],
-      "MOVER_TREND_PULLBACK@SAREXIT|min_samples": [
-        "HOLD",
-        "HOLD",
-        "HOLD"
-      ],
-      "MOVER_TREND_PULLBACK@TUNED|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
-      ],
-      "MOVER_TREND_PULLBACK@TUNED|min_samples": [
-        "HOLD",
-        "HOLD",
-        "HOLD"
-      ],
-      "QUIET_COMPRESSION_BREAK@SAREXIT|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
-      ],
-      "QUIET_COMPRESSION_BREAK@SAREXIT|min_samples": [
-        "HOLD",
-        "HOLD",
-        "HOLD"
-      ],
-      "SHADOW_MEAN_REVERT|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
-      ],
-      "SHADOW_MEAN_REVERT|min_samples": [
-        "HOLD",
-        "HOLD",
-        "HOLD"
-      ],
-      "SHADOW_RANGE_FADE|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
-      ],
-      "SHADOW_RANGE_FADE|min_samples": [
-        "HOLD",
-        "HOLD",
-        "HOLD"
       ]
     },
     "last_change_cycle": {
@@ -317,10 +235,9 @@
       "TREND_PULLBACK_EMA|min_samples": 1365,
       "FAILED_AUCTION_RECLAIM|min_samples": 1745,
       "SR_FLIP_RETEST|min_samples": 1759,
-      "LIQUIDITY_SWEEP_REVERSAL|min_samples": 1855,
-      "FAILED_AUCTION_RECLAIM@FIXED|min_samples": 1924
+      "LIQUIDITY_SWEEP_REVERSAL|min_samples": 1855
     },
-    "cycle": 1925
+    "cycle": 1969
   },
   "ledger": [
     {
@@ -1569,6 +1486,32 @@
       "ev_per_suppression_r": null,
       "n": 15,
       "routable": false
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM@FIXED",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15,
+      "routable": false
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM@FIXED",
+      "param": "min_samples",
+      "old": 20,
+      "new": null,
+      "applied": true,
+      "status": "PRUNED",
+      "reason": "unroutable: the emission policy never looks this key up (measurement arm or shadow-only unit) — override was dead",
+      "verdict": "",
+      "ev_per_suppression_r": null,
+      "n": 0,
+      "routable": false
     }
   ],
   "pending": [],
@@ -1611,23 +1554,14 @@
     },
     "QUIET_COMPRESSION_BREAK": {
       "suppress_negative": false
-    },
-    "FAILED_AUCTION_RECLAIM@FIXED": {
-      "min_samples": 25
     }
   },
   "routability": {
-    "enforced": false,
+    "enforced": true,
     "routable_candidates": 0,
     "unroutable_candidates": 0,
-    "unroutable_strategies": [
-      "FAILED_AUCTION_RECLAIM@FIXED"
-    ],
-    "dead_overrides": {
-      "FAILED_AUCTION_RECLAIM@FIXED": {
-        "min_samples": 25
-      }
-    },
+    "unroutable_strategies": [],
+    "dead_overrides": {},
     "promoted_unroutable": [],
     "starved_routable": [],
     "pruned": [],
