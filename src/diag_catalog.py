@@ -315,6 +315,19 @@ def _ai_governor(ctx: Ctx) -> Dict[str, Any]:
     return _aig.build_diag()
 
 
+def _ai_governor_scorecard(ctx: Ctx) -> Dict[str, Any]:
+    """Every governor thesis against what the signal actually did.
+
+    Separate from `read.ai_governor` because it is the expensive half: it parses
+    the closed-signal record off disk, and folding it into the light entry made
+    that entry blow its 25s budget in production while every other entry
+    answered in 0.0s. Two questions, two costs, two entries.
+    """
+    from src.execution import ai_governor as _aig
+
+    return _aig.build_scorecard()
+
+
 def _fail_open(ctx: Ctx) -> Dict[str, Any]:
     """Every fail-open exception site and its count — the silent-failure ledger."""
     from src import fail_open
@@ -445,11 +458,21 @@ for _e in (
     Entry("read.ai_governor", "AI Trade Governor", "read",
           "Arms, verdict mix, refusals by name, spend against the daily cap, "
           "and whether the panic arm's position ceiling is set — it refuses "
-          "while that is zero. Carries `blindness` (how much context the recent "
+          "while that is zero. Carries `blindness` — how much context the recent "
           "verdicts actually had, book and flow counted apart because their "
-          "fixes differ) and `scorecard` (every thesis graded against the "
-          "closed-signal record, per arm, with the MAINTAIN baseline beside it "
-          "and no blended figure).", _ai_governor),
+          "fixes differ. Deliberately does NOT carry the scorecard: that parses "
+          "the closed-signal record off disk and belongs in its own entry, so "
+          "the arms and bounds stay readable when the record is large or slow.",
+          _ai_governor),
+    Entry("read.ai_governor_scorecard", "AI Governor scorecard", "read",
+          "Every governor thesis graded against the closed-signal record — one "
+          "thesis per signal, per arm, with the MAINTAIN baseline computed on "
+          "the same rows and the round trip charged to both sides. No blended "
+          "across-arm figure: while apply is off, only ADJUST_TP is an effect "
+          "estimate and the rest publish a named undecidable state. Reads and "
+          "parses `signal_performance.json`, so it is the SLOW entry of the "
+          "pair — kept apart from `read.ai_governor` for exactly that reason.",
+          _ai_governor_scorecard),
     Entry("read.edge_store", "Edge store internals", "read",
           "Cell count, record counts and the biggest cells — where the 39 MB "
           "of serialisation cost lives.", _edge_store_internals),
