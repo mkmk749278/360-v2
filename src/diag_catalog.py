@@ -318,10 +318,15 @@ def _ai_governor(ctx: Ctx) -> Dict[str, Any]:
 def _ai_governor_scorecard(ctx: Ctx) -> Dict[str, Any]:
     """Every governor thesis against what the signal actually did.
 
-    Separate from `read.ai_governor` because it is the expensive half: it parses
-    the closed-signal record off disk, and folding it into the light entry made
-    that entry blow its 25s budget in production while every other entry
-    answered in 0.0s. Two questions, two costs, two entries.
+    Separate from `read.ai_governor` because it parses the closed-signal record
+    off disk, and a read that touches the filesystem does not belong on the
+    entry an operator hits during an incident.
+
+    It is NOT separate because the parse was slow: measured on the deployed
+    engine, this entry answers in 0.145s while the light one timed out during
+    warm-up and answered in 0.001s once settled. That earlier claim was a
+    confident causal story written from two samples, and it is corrected in
+    `ai_governor.build_scorecard`'s docstring rather than deleted.
     """
     from src.execution import ai_governor as _aig
 
