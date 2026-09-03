@@ -445,7 +445,11 @@ for _e in (
     Entry("read.ai_governor", "AI Trade Governor", "read",
           "Arms, verdict mix, refusals by name, spend against the daily cap, "
           "and whether the panic arm's position ceiling is set — it refuses "
-          "while that is zero.", _ai_governor),
+          "while that is zero. Carries `blindness` (how much context the recent "
+          "verdicts actually had, book and flow counted apart because their "
+          "fixes differ) and `scorecard` (every thesis graded against the "
+          "closed-signal record, per arm, with the MAINTAIN baseline beside it "
+          "and no blended figure).", _ai_governor),
     Entry("read.edge_store", "Edge store internals", "read",
           "Cell count, record counts and the biggest cells — where the 39 MB "
           "of serialisation cost lives.", _edge_store_internals),

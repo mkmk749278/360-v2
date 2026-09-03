@@ -192,13 +192,28 @@ the sentence.
 
 ### 3.3 The blindness rate is specified and unpublished
 
+**Corrected 2026-09-03, during D0.** This section first read *"it is absent from
+the page and from the engine payload"*. That was imprecise in a way worth
+recording rather than quietly editing: the **per-row stamp has always existed**
+(`ai_governor.py` writes `unknown_frac` on every ledger row, and
+`probe_blindness` reads it correctly **[verified]**). What was absent is the
+**aggregate** — nothing in `build_diag()` reduced it and no surface rendered it,
+so the stamp was being written into a ledger nobody could read it out of. The
+fix is therefore an aggregator and a panel, not a stamp; had the section stood,
+a future reader would have gone looking for a missing write that was never
+missing. Same class as the claims this document exists to label.
+
 v1 §3 requires `unknown_frac` for book and flow on the ops panel, on the
 reasoning that a verdict issued blind is legitimate but must not be presented as
-fully-informed. It is absent from the page **and** from the engine payload
+fully-informed. No aggregate reached the page or `build_diag()`
 **[verified]**. `DEPTH_MAX_SYMBOLS` and `AGGTRADE_MAX_SYMBOLS` are both 40 while
 much of the delivered book is promoted movers **[verified, v1 §3]**, so a large
 share of verdicts are book- and flow-blind and **nothing on any surface says
-which**. The 7 `MAINTAIN`s cannot currently be read as informed or blind. That
+which**. D0 also splits the two: `blind_fraction` pools book and flow into one
+number, and an unsubscribed symbol (a stream-budget decision), a stale feed (an
+incident) and a disabled consumer flag (a switch nobody threw) have three
+different next moves. The pooled figure stays for continuity; the split and the
+reason mix ship beside it. The 7 `MAINTAIN`s cannot currently be read as informed or blind. That
 alone makes them uninterpretable, and it is fixed in the first PR of this
 program regardless of which other lane ships.
 

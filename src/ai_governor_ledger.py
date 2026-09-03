@@ -48,13 +48,25 @@ from src.utils import get_logger
 
 log = get_logger("ai_governor_ledger")
 
-SCHEMA = 1
+SCHEMA = 2
 
-#: Older schemas this build reads unchanged. Empty because there are none yet —
-#: stated out loud rather than defaulted, so the next bump has to decide.
-#: Before bumping SCHEMA, ask whether the change only ADDS fields: if so, put
-#: the old number here, or the first flush after deploy destroys the window.
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset()
+#: Older schemas this build reads unchanged.
+#:
+#: Schema 2 (2026-09-03) **adds** the per-field readability split
+#: (``book_readable`` / ``book_reason`` / ``flow_readable`` / ``flow_reason``)
+#: beside the pooled ``unknown_frac`` that schema-1 rows already carry. It
+#: redefines nothing, so every schema-1 row keeps its full standing: its pooled
+#: fraction still means what it always meant, and it simply has no split. That is
+#: why 1 is here rather than the window being dropped — the answer to a thin
+#: population is more evidence, and a purge makes an estimate smaller rather
+#: than cleaner.
+#:
+#: The distinction the next bump must make: *additive* (fields appear, existing
+#: ones keep their meaning) belongs here; *redefining* (a field means something
+#: else) does not, because then old and new rows disagree about what a column
+#: **is**. The schema number cannot tell those apart, so the decision is stated
+#: here rather than inferred.
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1})
 
 _DEFAULT_PATH = os.path.join("data", "ai_governor_v1.json")
 
