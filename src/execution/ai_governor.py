@@ -158,6 +158,16 @@ def _blank_health() -> Dict[str, Any]:
         # blocked one.
         "throttles": {},
         "provider_status": {},
+        # The counts above say HOW MANY calls failed and cannot say what the
+        # provider objected to. `bad_json` covers a truncated answer, a
+        # schema-shaped answer with the wrong types, and an error envelope;
+        # each has a different fix, and the vendor already told us which — in a
+        # `detail` string that never left this process. This is
+        # `trail_governor.place_failed` exactly: a counter is not a cause on a
+        # path that talks to a vendor. Bounded ring, newest last, published
+        # BESIDE the unbounded count so the newest few can never read as the
+        # whole population.
+        "provider_failures": [],
         "latency_ms_last": 0,
         "served_models": {},
     }
@@ -179,6 +189,44 @@ def _count_in(bucket: str, key: str, n: int = 1) -> None:
 
 def _refuse(reason: str) -> None:
     _count_in("refusals", reason)
+
+
+#: How many recent provider failures to keep. Small on purpose: this is a
+#: diagnosis aid, not a ledger, and the ledger of verdicts is elsewhere.
+_PROVIDER_FAILURE_RING = 20
+
+
+def _record_provider_failure(result: Any, now: float, *, max_output_tokens: int) -> None:
+    """Keep the provider's own words for the last few failures.
+
+    Called for every non-OK result. `detail` is scrubbed of the API key at the
+    point it is built (`llm_client._scrub`), so nothing here can leak a secret
+    onto a panel — but the scrub is asserted in this module's tests too,
+    because the guarantee matters at the surface that renders it, not only at
+    the surface that writes it.
+    """
+    with _health_lock:
+        ring = _health.setdefault("provider_failures", [])
+        usage = dict(getattr(result, "usage", None) or {})
+        ring.append({
+            "at": round(float(now), 3),
+            "status": str(getattr(result, "status", "") or ""),
+            "detail": str(getattr(result, "detail", "") or "")[:400],
+            # Empty means the provider did not say why it stopped — never that
+            # it stopped cleanly. MAX_TOKENS here beside a `bad_json` above is
+            # the whole diagnosis.
+            "finish_reason": str(getattr(result, "finish_reason", "") or ""),
+            "served_model": str(getattr(result, "served_model", "") or ""),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+            "thinking_tokens": int(usage.get("thinking_tokens") or 0),
+            # The ceiling we ASKED for, beside what was spent: `output_tokens`
+            # at the ceiling is a truncation, and the two numbers are only a
+            # diagnosis together.
+            "max_output_tokens": int(max_output_tokens),
+            "latency_ms": int(getattr(result, "latency_ms", 0) or 0),
+        })
+        if len(ring) > _PROVIDER_FAILURE_RING:
+            del ring[:-_PROVIDER_FAILURE_RING]
 
 
 def health() -> Dict[str, Any]:
@@ -787,6 +835,8 @@ async def evaluate(
     cacheable prefix, costs ~5x fewer calls, and lets the model see the
     correlation that ``MAX_SAME_DIRECTION_GLOBAL`` exists to bound.
     """
+    from config import AI_GOV_OUTPUT_TOKEN_FLOOR
+
     now = _now() if now is None else now
     cli = client or _client()
     try:
@@ -810,13 +860,23 @@ async def evaluate(
         _call_times.append(now)
         _count("calls")
 
+        # A FLOOR plus a per-signal allowance, not a per-signal allowance
+        # alone. The verdicts themselves are tiny (~50 tokens each), so 150 per
+        # signal was ample for the ANSWER — and on a thinking-class model the
+        # reasoning is drawn from this same budget before the answer is
+        # written, so the whole allowance can be spent producing nothing. The
+        # ceiling is not a reservation: unused tokens are not billed, and the
+        # per-hour call bound is what actually caps the spend.
+        budget = AI_GOV_OUTPUT_TOKEN_FLOOR + 150 * max(1, len(batch))
         result = await cli.complete_json(
             system=_SYSTEM_PROMPT,
             user=json.dumps(payload, separators=(",", ":")),
             schema=RESPONSE_SCHEMA,
-            max_output_tokens=150 * max(1, len(batch)),
+            max_output_tokens=budget,
         )
         _count_in("provider_status", result.status)
+        if result.status != llm_client.OK:
+            _record_provider_failure(result, now, max_output_tokens=budget)
         with _health_lock:
             _health["latency_ms_last"] = int(result.latency_ms)
         _record_spend(

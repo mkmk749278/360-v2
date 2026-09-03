@@ -4761,6 +4761,18 @@ AI_GOV_PANIC_MAX_POSITIONS: int = _safe_int("AI_GOV_PANIC_MAX_POSITIONS", "0")
 #: A verdict older than one monitor tick is refused, never applied. The
 #: stale-envelope rule: the world has moved on, and applying a minutes-old exit
 #: decision from it is worse than doing nothing.
+#: Output-token FLOOR added to the per-signal allowance on every request.
+#:
+#: The verdicts are tiny — roughly 50 tokens each — so the original per-signal
+#: 150 was ample for the ANSWER and nothing else. On a thinking-class model the
+#: reasoning is drawn from the same budget BEFORE the answer is written, so the
+#: whole allowance can be consumed producing either a truncated object
+#: (`bad_json`) or no content at all (`empty`), which is what the first live
+#: window recorded: 20 calls, 20 failures, 0 verdicts. The ceiling is not a
+#: reservation — unused tokens are not billed — and `AI_GOV_MAX_CALLS_PER_HOUR`
+#: is what actually bounds the spend.
+AI_GOV_OUTPUT_TOKEN_FLOOR: int = _safe_int("AI_GOV_OUTPUT_TOKEN_FLOOR", "1024")
+
 AI_GOV_VERDICT_MAX_AGE_SEC: float = _safe_float("AI_GOV_VERDICT_MAX_AGE_SEC", "10.0")
 AI_GOV_REQUEST_TIMEOUT_SEC: float = _safe_float("AI_GOV_REQUEST_TIMEOUT_SEC", "20.0")
 
