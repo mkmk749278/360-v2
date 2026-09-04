@@ -398,3 +398,105 @@ def test_the_bound_is_published_beside_the_age():
         float(AI_GOV_VERDICT_MAX_AGE_SEC)
     )
     assert "verdict_age" in diag["health"]
+
+
+# ── The staleness bound is DERIVED from the tick, never invented ────────────
+#
+# `AI_GOV_VERDICT_MAX_AGE_SEC`'s own comment read "a verdict older than one
+# monitor tick is refused" and the value was 10.0 against a monitor tick
+# measured live at 7-20s. So the constant asserted a property it did not have,
+# and 7 of 8 verdicts aged out by construction rather than by lateness — with
+# both `ADJUST_SL` verdicts in the window discarded. The tenth recurrence in
+# these repos of a constant checkable in one command that nobody ran.
+
+
+def test_the_bound_is_the_floor_until_a_tick_has_been_observed():
+    """One sweep is not an interval. An engine that has not swept twice reports
+    the configured floor rather than a number it has not measured."""
+    from config import AI_GOV_VERDICT_MAX_AGE_SEC
+
+    assert gov.observed_tick_sec() is None
+    assert gov.effective_verdict_max_age() == pytest.approx(float(AI_GOV_VERDICT_MAX_AGE_SEC))
+
+    gov._record_sweep_tick(1000.0)
+    assert gov.observed_tick_sec() is None, "the first sweep has no predecessor"
+
+
+def test_the_bound_follows_the_SLOWEST_recent_tick_not_the_mean():
+    """A verdict is drained one tick after it is issued, so the worst tick is
+    the one that decides whether it survives. A mean would pass the common case
+    and refuse exactly the slow cycles the bound exists for."""
+    for t in (1000.0, 1005.0, 1010.0, 1030.0, 1035.0):   # 5,5,20,5
+        gov._record_sweep_tick(t)
+    assert gov.observed_tick_sec() == pytest.approx(20.0)
+    # 20 * 1.5 = 30, above the 10s floor and below the 60s cap
+    assert gov.effective_verdict_max_age() == pytest.approx(30.0)
+
+
+def test_the_cap_stops_a_pathological_loop_widening_the_bound_without_limit():
+    """A bound that follows a bad tick upward for ever is not a bound."""
+    gov._record_sweep_tick(0.0)
+    gov._record_sweep_tick(200.0)     # 200s tick — real, not an outage
+    assert gov.effective_verdict_max_age() == pytest.approx(60.0)
+
+
+def test_an_outage_is_not_a_tick_and_is_counted_rather_than_used():
+    """A restart or a paused loop must not widen the staleness bound for
+    minutes afterwards on the strength of an outage."""
+    gov._record_sweep_tick(0.0)
+    gov._record_sweep_tick(10_000.0)  # way past the outlier ceiling
+    assert gov.observed_tick_sec() is None, "the outage never entered the ring"
+    assert gov.health()["tick"]["outlier"] == 1
+
+
+async def test_a_verdict_inside_the_DERIVED_bound_is_no_longer_refused(monkeypatch):
+    """The fix, stated as behaviour: at a 20s tick a 15s-old verdict is one tick
+    old and must survive. Against the pre-fix 10s constant it was refused."""
+    monkeypatch.setattr(gov, "apply_enabled", lambda: True)
+    monkeypatch.setattr(gov, "armed_arms", lambda: ("sl",))
+    monkeypatch.setattr(gov, "_open_positions_for", lambda sid: [])
+    for t in (0.0, 20.0):
+        gov._record_sweep_tick(t)
+
+    m, sn = _menu_and_snapshot()
+    choice = next(c.key for c in m.sl if c.key != "sl_0")
+    out = await (
+        gov.apply_verdict(_verdict(gov.ADJUST_SL, choice, issued_at=100.0), sn, m, now=115.0)
+    )
+    assert out != gov.REFUSE_STALE_VERDICT
+    assert gov.health()["verdict_age"]["stale_n"] == 0
+
+
+async def test_a_verdict_past_the_derived_bound_is_still_refused(monkeypatch):
+    """Widening is not disabling. The stale-envelope rule still protects the
+    money path — it is now measured against the loop rather than a guess."""
+    monkeypatch.setattr(gov, "apply_enabled", lambda: True)
+    for t in (0.0, 20.0):
+        gov._record_sweep_tick(t)
+
+    m, sn = _menu_and_snapshot()
+    out = await (
+        gov.apply_verdict(_verdict(gov.PANIC_CLOSE, None, issued_at=0.0), sn, m, now=1000.0)
+    )
+    assert out == gov.REFUSE_STALE_VERDICT
+
+
+def test_no_arm_is_armed_by_default():
+    """`ADJUST_TP` may move a target NEARER only, and on ops' MFE-aware
+    simulator over 562 closed signals no cap beats doing nothing: the engine's
+    real exits average +0.29% against -0.46% at a +2% cap and +0.14% at +5%.
+
+    Decidable is not the same property as safe to arm first, and the default
+    now takes no position on arming at all — which is an owner decision.
+    """
+    import config
+    assert config.AI_GOV_ARMS_ENABLED == ""
+    assert gov.armed_arms() == ()
+
+
+def test_both_bounds_are_published_so_a_reader_knows_which_one_binds():
+    diag = gov.build_diag()
+    b = diag["bounds"]
+    assert "verdict_max_age_sec" in b, "the configured floor"
+    assert "verdict_max_age_effective_sec" in b, "and what is actually enforced"
+    assert b["observed_tick_sec"] is None, "not measured yet is not zero"

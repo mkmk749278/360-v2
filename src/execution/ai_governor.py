@@ -212,6 +212,74 @@ _PROVIDER_FAILURE_RING = 20
 _VERDICT_AGE_RING = 20
 
 
+#: How many recent sweep intervals to keep. The bound is derived from the
+#: SLOWEST of them, so this is a memory of how bad the loop has recently been,
+#: not an average of how good it usually is.
+_TICK_RING = 20
+
+#: An interval longer than this is not a tick — it is a restart, a stall or a
+#: paused loop, and letting one into the ring would widen the staleness bound
+#: for minutes afterwards on the strength of an outage. Counted, never used.
+_TICK_OUTLIER_SEC = 300.0
+
+_tick_lock = threading.RLock()
+_tick_intervals: List[float] = []
+_last_sweep_at: Optional[float] = None
+
+
+def _record_sweep_tick(now: float) -> None:
+    """Measure the monitor loop's real period from the sweep's own cadence.
+
+    `sweep` is called once per monitor tick, so the gap between two calls IS
+    the tick — and it is the only place that number exists. `MONITOR_POLL_INTERVAL`
+    is the loop's *sleep*, not its period: the body walks every signal, both
+    trailing lanes, the trail governor and the ledger flushes first.
+    """
+    global _last_sweep_at
+    with _tick_lock:
+        prev = _last_sweep_at
+        _last_sweep_at = now
+        if prev is None:
+            return
+        gap = now - prev
+        if gap <= 0 or gap > _TICK_OUTLIER_SEC:
+            _count_in("tick", "outlier")
+            return
+        _tick_intervals.append(gap)
+        if len(_tick_intervals) > _TICK_RING:
+            del _tick_intervals[:-_TICK_RING]
+
+
+def observed_tick_sec() -> Optional[float]:
+    """The slowest recent tick, or None when the loop has not run twice yet."""
+    with _tick_lock:
+        return max(_tick_intervals) if _tick_intervals else None
+
+
+def effective_verdict_max_age() -> float:
+    """The staleness bound actually enforced — derived, clamped, never invented.
+
+    A verdict is queued in one tick and drained in the next, so its age at the
+    apply path is one tick by construction. A fixed bound smaller than the tick
+    therefore refuses everything, which is what 7-of-8 aged out meant. The
+    configured value survives as a FLOOR so the bound can never fall below the
+    stale-envelope rule's intent, and the cap is what stops a pathological loop
+    widening it without limit.
+    """
+    from config import (
+        AI_GOV_VERDICT_MAX_AGE_CAP_SEC,
+        AI_GOV_VERDICT_MAX_AGE_SEC,
+        AI_GOV_VERDICT_MAX_AGE_TICK_MULT,
+    )
+
+    floor = float(AI_GOV_VERDICT_MAX_AGE_SEC)
+    cap = float(AI_GOV_VERDICT_MAX_AGE_CAP_SEC)
+    tick = observed_tick_sec()
+    if tick is None:
+        return floor
+    return max(floor, min(cap, tick * float(AI_GOV_VERDICT_MAX_AGE_TICK_MULT)))
+
+
 def _record_verdict_age(action: str, age_sec: float, *, stale: bool) -> None:
     """Stamp how old one verdict was when the apply path reached it.
 
@@ -394,13 +462,16 @@ _apply_times: Deque[float] = deque(maxlen=8192)
 
 
 def reset_state_for_test() -> None:
-    global _spend_day, _spend_usd
+    global _spend_day, _spend_usd, _last_sweep_at
     with _arms_lock:
         _arms.clear()
     with _queue_lock:
         _queue.clear()
     _call_times.clear()
     _apply_times.clear()
+    with _tick_lock:
+        _tick_intervals.clear()
+        _last_sweep_at = None
     _spend_day = ""
     _spend_usd = 0.0
 
@@ -752,6 +823,9 @@ async def sweep(
     """
     now = _now() if now_ts is None else now_ts
     _count("cycles")
+    # Before the drain, so the bound the drain enforces reflects the interval
+    # that produced the verdicts it is about to look at.
+    _record_sweep_tick(now)
 
     # Applied FIRST, so a verdict lands on the tick after it arrives and is
     # re-validated against state read fresh in that same tick.
@@ -1016,9 +1090,8 @@ async def apply_verdict(
     Returns the outcome name. Every refusal is counted; there is no path that
     both declines to act and says nothing.
     """
-    from config import AI_GOV_VERDICT_MAX_AGE_SEC
-
     now = _now() if now is None else now
+    max_age = effective_verdict_max_age()
 
     # Measured first, and for every action. `stale_verdict` counted the event
     # and never the age, so nothing could say whether the bound is wrong or
@@ -1027,9 +1100,7 @@ async def apply_verdict(
     # arms that would have acted. Recording here gives that rate a
     # denominator.
     age_sec = now - verdict.issued_at
-    _record_verdict_age(
-        verdict.action, age_sec, stale=age_sec > float(AI_GOV_VERDICT_MAX_AGE_SEC)
-    )
+    _record_verdict_age(verdict.action, age_sec, stale=age_sec > max_age)
 
     # MAINTAIN costs NOTHING. Not a Firestore read, not a position walk, not an
     # exchange call. It is most of every window, and any per-user work here is
@@ -1038,7 +1109,7 @@ async def apply_verdict(
         _count_in("by_action", "applied:maintain")
         return MAINTAIN
 
-    if age_sec > float(AI_GOV_VERDICT_MAX_AGE_SEC):
+    if age_sec > max_age:
         # The stale-envelope rule the diag channel already uses: the world has
         # moved on, and applying a minutes-old exit decision from it is worse
         # than doing nothing.
@@ -1587,6 +1658,12 @@ def build_diag() -> Dict[str, Any]:
             # produced it. A duration with no threshold beside it is the
             # `stale_verdict` counter's own problem one layer up.
             "verdict_max_age_sec": float(AI_GOV_VERDICT_MAX_AGE_SEC),
+            # The floor above is not what is enforced. Both are published
+            # because a reader needs to know which one is binding — and an
+            # engine that has not swept twice yet reports the floor and a null
+            # tick rather than a number it has not measured.
+            "verdict_max_age_effective_sec": effective_verdict_max_age(),
+            "observed_tick_sec": observed_tick_sec(),
         },
         "health": health(),
         "arms": arms_snapshot(),

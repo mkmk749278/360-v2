@@ -152,13 +152,42 @@ arm, so activate it first" logic in v1 §11 and v2 §12 D4.
 **Stated limits of this simulation, because they cut one way.** It assumes a
 capped trade exits at the cap and that nothing else changes. It does **not**
 model losers that would have touched +X% *before* reversing and so would have
-been converted into small winners — the export carries no MFE column, so that
-half is unmeasured here. The true effect is therefore **less bad than −558%**,
-by an unknown amount. What is *not* sensitive to that caveat is §2: the tail
-concentration is arithmetic on realised outcomes, and it alone forbids trimming.
-The proper version of this simulation already exists in ops — `/exit-backtest`
-and the Profit tab price exit methods with MFE and MAE — and running the cap
-family through it is the first measurement of Phase 0 (§7).
+been converted into small winners — the export carries no MFE column.
+
+**P0 ran that proper version, and it confirms the direction while softening the
+magnitude exactly as predicted.** Ops' Profit-tab simulator prices a flat target
+from the engine's own recorded MFE/MAE, so it *does* count the rescued losers.
+Over **562 closed signals, 30 days [measured]**:
+
+| Exit | avg P/L | total |
+|---|---|---|
+| **the engine's real exits** | **+0.29%** | baseline |
+| flat cap at +1% | −0.80% | −451.99% |
+| flat cap at +1.5% | −0.63% | −351.40% |
+| flat cap at +2% | −0.46% | −256.37% |
+| flat cap at +3% | −0.15% | −86.98% |
+| flat cap at +5% | +0.14% | +79.33% |
+
+**No cap beats doing nothing at any threshold tested.** The stated refutation
+condition — that MFE flips the sign — did not fire. `ADJUST_TP` is de-armed in
+`config/__init__.py`, with this table in the constant's own comment.
+
+**And P0 turned up something larger that this document must record.** The same
+page reports the engine's real exits at **+86.03% against plain TP1-full's
++69.78% on the same 466 signals — the machinery is now +16.25 points AHEAD**
+**[measured]**. `OWNER_BRIEF` §3.2's founding finding was the reverse (TP1-full
+ahead by 19.14 points on 494 signals, Session 34). *That premise has flipped and
+nobody had re-run it.* It does not rescue `ADJUST_TP` — the table above is on
+the same window — because the engine's exits win by **letting winners run**
+(`PROFIT_LOCKED`, +1055% of the book's +88%), which is the opposite of moving a
+target nearer. What it does support is `HAND_TO_TRAIL`.
+
+Beside it, the 17,709-entry exit bake-off already on `/exit-backtest`
+**[verified]**: Parabolic SAR is the only method with a profit factor above 1
+(**1.16**, +480.5% total) and it **survives drop-top-3** (PF 1.15) — engine
+baseline 0.65, ATR-Chandelier 0.58, SuperTrend 0.71. Its own page's caveat
+stands (synthetic klines-only entries, so trust the ranking not the absolute),
+and it names the mechanism `HAND_TO_TRAIL` should hand to.
 
 ---
 
@@ -422,10 +451,10 @@ a measurement rather than by a date.
 
 | Phase | Ships | Gate to the next |
 |---|---|---|
-| **P0** | Run the cap family through the existing MFE-aware `/exit-backtest` and publish it beside §3's one-sided figure. De-arm `ADJUST_TP` pending the result. | The result. If MFE flips the sign, §3 is wrong and this document says so. |
+| ~~**P0**~~ **DONE** | The MFE-aware cap family, run and published in §3. No cap beats doing nothing; `ADJUST_TP` de-armed (`AI_GOV_ARMS_ENABLED` defaults to empty). | Complete — the refutation condition did not fire. |
 | **P1** | The veto lane, measure-only: `campaign_cold` consumed from the existing stamp, plus the two gates the watchdog says are already misfiring. Ops panel in the same PR. | 200+ stamped candidates in a fresh window (`STATISTICAL_CHANGE_POLICY` rule 1). |
 | **P2** | Unblind Layer B: on-arm depth/aggTrade subscription (bounded by the ~5 open signals, not the universe), and the structure serialisation into the snapshot. | `fully_blind` falls, and the two dead trigger rungs start firing. |
-| **P3** | Fix the verdict-age bound from the observed tick (#1011's instrument now measures it), and add `HAND_TO_TRAIL` in shadow against the held-to-stop arm that already walks that counterfactual. | The scorecard shows a per-arm estimate that is not `arm_undecidable_while_dark`. |
+| **P3** ½ done | The verdict-age bound is now **derived from the observed sweep cadence** — floor 10s, slowest recent tick x1.5, hard cap 60s — instead of a constant asserting a property it did not have. Still to come: `HAND_TO_TRAIL` in shadow against the held-to-stop arm that already walks that counterfactual, handing to **SAR** on the bake-off evidence in §3. | The scorecard shows a per-arm estimate that is not `arm_undecidable_while_dark`. |
 | **P4** | Arm **one** rule — the veto's `campaign_cold`, owner's account first — on a forward window that did not suggest it. | **Owner sign-off** against a scored out-of-sample window. |
 | **P5** | Layer C and Layer D, on the evidence from P1–P4. | Owner sign-off. |
 

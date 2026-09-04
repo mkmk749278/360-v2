@@ -4697,10 +4697,25 @@ AI_GOV_MEASURE_ENABLED: bool = _safe_bool("AI_GOV_MEASURE_ENABLED", "true")
 AI_GOV_APPLY_ENABLED: bool = _safe_bool("AI_GOV_APPLY_ENABLED", "false")
 
 #: Which arms may APPLY once the effect flag is on, as a comma set of
-#: tp / sl / panic. Default is the TP arm alone: it is the only one fully
-#: decidable from the closed-signal record (the snap moves nearer only, so MFE
-#: settles it with no ordering ambiguity), and it is monotone-safe.
-AI_GOV_ARMS_ENABLED: str = os.getenv("AI_GOV_ARMS_ENABLED", "tp")
+#: tp / sl / panic. **Default is EMPTY — no arm may apply.**
+#:
+#: It was `tp` on the reasoning that the TP arm is the only one fully decidable
+#: from the closed-signal record. That is true and it was the wrong reason:
+#: decidable is not the same property as safe to arm first, and this book cannot
+#: afford the TP arm. `ADJUST_TP` may move a target NEARER only, so on a book
+#: whose top 10 trades of 1,580 carry 105% of its net, the arm can only trim the
+#: thing that pays. Measured on ops' MFE-aware simulator over 562 closed signals
+#: — which does count the losers an earlier target would have rescued —
+#: capping every winner beats doing nothing at no threshold tested:
+#:
+#:     engine's real exits  +0.29% avg      (baseline)
+#:     cap at +1%           -0.80%   cap at +2%   -0.46%
+#:     cap at +3%           -0.15%   cap at +5%   +0.14%
+#:
+#: Arming is an owner decision and this default takes none: it is the state in
+#: which the lane measures and applies nothing, which is where the shadow window
+#: needs it. See `docs/PLAN_AI_TRADE_GOVERNOR_V3.md` §3.
+AI_GOV_ARMS_ENABLED: str = os.getenv("AI_GOV_ARMS_ENABLED", "")
 
 AI_GOV_PROVIDER: str = _safe_choice(
     "AI_GOV_PROVIDER", "google", frozenset({"google", "anthropic"})
@@ -4773,7 +4788,28 @@ AI_GOV_PANIC_MAX_POSITIONS: int = _safe_int("AI_GOV_PANIC_MAX_POSITIONS", "0")
 #: is what actually bounds the spend.
 AI_GOV_OUTPUT_TOKEN_FLOOR: int = _safe_int("AI_GOV_OUTPUT_TOKEN_FLOOR", "1024")
 
+#: The FLOOR of the staleness bound, not the bound itself. Its own comment said
+#: "older than one monitor tick is refused" and the monitor tick was measured at
+#: 7-20s against this 10s — so the constant asserted a property it did not have,
+#: and 7 of 8 verdicts aged out by construction rather than by lateness.
 AI_GOV_VERDICT_MAX_AGE_SEC: float = _safe_float("AI_GOV_VERDICT_MAX_AGE_SEC", "10.0")
+
+#: The bound is derived from the tick actually observed, never from a number
+#: invented here — that is the defect above, and re-inventing the constant would
+#: repeat it on a loop whose period moves with the open book. Multiplied against
+#: the SLOWEST recent tick rather than the mean, because a verdict is drained one
+#: tick after it is issued and the worst tick is the one that decides.
+AI_GOV_VERDICT_MAX_AGE_TICK_MULT: float = _safe_float(
+    "AI_GOV_VERDICT_MAX_AGE_TICK_MULT", "1.5"
+)
+
+#: And a hard ceiling on that derivation, because a bound that follows a
+#: pathological tick upward is not a bound. 60s keeps a verdict inside the bar
+#: it was issued for on every timeframe this engine trades; past it the
+#: stale-envelope rule applies unconditionally.
+AI_GOV_VERDICT_MAX_AGE_CAP_SEC: float = _safe_float(
+    "AI_GOV_VERDICT_MAX_AGE_CAP_SEC", "60.0"
+)
 AI_GOV_REQUEST_TIMEOUT_SEC: float = _safe_float("AI_GOV_REQUEST_TIMEOUT_SEC", "20.0")
 
 #: How far the trade must move, in R, before the state counts as materially
