@@ -237,7 +237,7 @@
       "SR_FLIP_RETEST|min_samples": 1759,
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 1855
     },
-    "cycle": 1969
+    "cycle": 2015
   },
   "ledger": [
     {

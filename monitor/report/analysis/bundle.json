@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-03T04:58:27.199318+00:00",
-  "generated_at_ts": 1788411507.1993182,
+  "generated_at": "2026-09-04T05:03:01.556324+00:00",
+  "generated_at_ts": 1788498181.5563238,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "98d2a054018dc8e8676aa152866077b3c277f434",
+  "git_sha": "b5766b998c217f2334ca17157bd9beb12ec1dab1",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 8645,
-    "strategy_matrix_scored_cells": 2155,
+    "strategy_matrix_cells": 8785,
+    "strategy_matrix_scored_cells": 2219,
     "performance_setups": 15,
     "suppression_gates": 0
   },
@@ -81,17 +81,17 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "FUNDING_EXTREME_SIGNAL",
-        "context_key": "OVERLAP/VOLATILE_EXPANSION/NORMAL/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.3742705943865818,
-        "n": 16,
+        "strategy": "LIQUIDITY_SWEEP_REVERSAL",
+        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": -1.6196005156048345,
+        "n": 17,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "FUNDING_EXTREME_SIGNAL",
-        "context_key": "OVERLAP/VOLATILE_EXPANSION/NORMAL/BTC_NEUTRAL",
-        "edge_r": -1.3742705943865818,
-        "n": 16,
+        "strategy": "LIQUIDITY_SWEEP_REVERSAL",
+        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
+        "edge_r": -1.501403561664329,
+        "n": 20,
         "verdict": "NEGATIVE"
       }
     ],
