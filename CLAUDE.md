@@ -2441,3 +2441,38 @@ python -m src.main
   index second; `enable_user` does the reverse. **Both orderings fail toward
   the user staying disabled**, which is the safe direction, and that is the
   reason they differ rather than an inconsistency.
+
+- **A test that patches the module global a TUNABLE falls back to is inert, and
+  it will pass anyway for a reason you did not intend.** `_tunable_str`'s own
+  docstring says `runtime_tunables.get` "returns the ENV default whenever the
+  client is not wired" — the *registered default*, never `None` — so
+  `monkeypatch.setattr(sr_mod, "CHANNEL_CAP_MODE", "enforce")` changes nothing
+  in a test: the gate keeps reading the config value. Two existing cap tests
+  were pinned that way and **both still passed with the pin removed**, because
+  five held LONGs trip `same_direction_throttle` and the candidate died at a
+  different gate entirely. Green suite, right outcome, wrong mechanism, and the
+  assertion that was supposed to protect the gate protected nothing.
+
+  Three habits, and the first is the only one that actually settles it.
+  **Verify a pin by reverting it** — if the test still passes without the thing
+  it is pinning, the pin is decoration; this file already says to verify a fix
+  by reverting it, and a *pin* is the same object. **Assert the drop REASON,
+  not the outcome** — `not in active_signals` is satisfiable by twelve gates,
+  `drops_by_reason["per_channel_cap"] == 1` by exactly one. And **lift the
+  neighbouring bounds** so the gate under test is the only one that can fire,
+  or the test measures whichever gate happens to be first.
+
+  Corollary: patch `src.runtime_tunables.get` and let unlisted keys return
+  `None` so they fall back to their module globals. A helper that names the
+  overrides is worth the four lines — it makes "this value is tunable-backed"
+  visible at the call site, which is exactly the fact that was invisible.
+
+- **A counter key must not contain the separator the reporter partitions on.**
+  `_drop` writes both `reason` and `reason:setup_class`, and `delivery_stats`
+  splits them with `":" not in k`. So a reason keyed `risk_manager:rr_floor`
+  filed the entire gate under the by-setup table and left `drops_by_reason`
+  empty — the gate counted perfectly and appeared nowhere. `/system/redis` paid
+  for this on a dict-method collision and the ops throttle table paid for it
+  again on `copy`; this is the third hat, at the delimiter instead of the name.
+  **The test that asserts the counter is what catches it** — reading the line
+  tells you nothing, because both keys look equally reasonable.
