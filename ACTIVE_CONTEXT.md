@@ -4,6 +4,99 @@
 
 ---
 
+## SESSION 144 2026-09-04 — the LSR wall was the channel cap, and a 13th gate nobody counted
+
+Owner: *"compare LSR signals Feed vs dark … why not every signal of LSR in dark
+not delivering to live feed?"* — then, on the answer: *"we have only one channel
+… each path has its own cap so don't keep any cap on max signals of channel"*.
+
+### The funnel, measured [verified, from `dark_signals_live_v1.json` via a guest session]
+
+146 LSR dark rows, 2026-07-31 → 09-04, **all 146 SHORT**, 53 symbols:
+
+| | n | |
+|---|---|---|
+| unstamped | 44 | written before the rule armed ~08-12 |
+| stayed dark | 1 | the rule declined it |
+| **promoted** | **101** | the rule matched ~100% of post-arm candidates |
+| → dropped at a stamped router gate | 65 | `per_channel_cap` 32 · `correlation_lock` 21 · `same_direction_throttle` 11 · `stale_age` 1 |
+| → killed at the RiskManager, **silently** | 31 | no counter, no stamp, no funnel row |
+| → **delivered** | **5** | 4.95% of promoted |
+
+**The promotion rule was never the constraint.** Two walls were.
+
+### Wall 1 — a per-channel cap that is a book cap
+
+`360_SCALP` is the only fully-live channel, so a cap of 5 named *per channel*
+capped the **whole book across 17 paths**: at most five paths represented at
+once, highest-volume path holding the slots by arithmetic. Live counters, one
+4.9h boot: **65 dequeued, 9 delivered (13.8%), `per_channel_cap` 45 of 56
+drops**, `active_signals` at exactly 5 against a limit of 5.
+
+### Wall 2 — the 13th gate
+
+`_process` is documented as twelve stamped gates. Three exits below them were
+bare `return`s — RiskManager, missing Telegram channel id, permanent delivery
+failure — so **11 of 65 dequeued candidates (17%) reached neither a delivery
+nor a stamped drop**, and a promoted dark row killed there read
+`promoted_enqueued` forever, indistinguishable from one in flight. The
+separation on LSR is clean: of the 36 promoted rows that survived every stamped
+gate, **all 5 with designed R:R ≥ 1.2 delivered and all 31 below it died**,
+median 0.44, max 1.14. 78% of LSR candidates carry an R:R under the floor the
+RiskManager enforces — the geometry, not the gate, is what fails there.
+
+### SHIPPED — #1013 (engine) + ops #211, both merged by the owner 10:05/10:06
+
+`CHANNEL_CAP_MODE` ships **off**; `enforce` and `MAX_CONCURRENT_SIGNALS_BOOK`
+(ships 0) are re-armable from `/control` with no redeploy. Both bounds are
+evaluated on every candidate whatever the mode, counterfactual published. The
+three exits now stamp, keyed by cause. Ops renders the switch, four states,
+`OFF — BOOK UNBOUNDED` carrying its own consequence sentence.
+
+**Blast radius, stated before the merge, not after.** "Each path has its own
+cap" is true in config and **has never once fired** (`per_path_only: 0`,
+`both_block: 0` over 20 evaluations) and `MAX_SAME_DIRECTION_CUMULATIVE` is 0 —
+so nothing bounds book SIZE now. Ceiling = 17 paths x 3 x 2 = **102** against
+5; estimate ~41 (Little's Law, 1.63/h admitted, 3.07h hold — an estimate, and
+labelled). And it is a money number: `assert_position_cap` bounds an order's
+**notional** and nothing anywhere bounds a user's concurrent **position
+count**, so the router's ceiling *is* each auto-trade user's position count.
+
+### Post-deploy watch [verified 10:18, uptime 743s]
+
+Counters **reset** (81 → 1 processed), so the restart is real and not the old
+process; `channel_cap` present with `mode: off`, `book_limit: 0`,
+`held_by_channel {360_SCALP: 4}`; `per_channel_cap` gone from
+`drops_by_reason`; panel renders in the right state. Pulse Healthy, 81 pairs,
+0 open positions, `daily_kill_tripped: false`.
+
+**And the very first candidate of the new process dropped on
+`risk_manager_rr_floor`** (MOVER_TREND_PULLBACK) — the 13th gate firing
+visibly on its first opportunity, where before it was silent.
+
+### OPEN — carried into the next session
+
+- **n=1 proves nothing.** A 12-minute-old process is not a window. The
+  refutation condition stands: **if after one full trading day delivery is
+  still ~14% with drops merely relocated to `same_direction_throttle` or
+  `correlation_lock`, the channel cap was not the binding constraint** and the
+  next look is the correlation lock's tightness, not a wider bound.
+- **Watch `held_total` against ~41.** Past that, set
+  `max_concurrent_signals_book` from `/control` rather than waiting on a deploy.
+- **LSR's TP1 geometry is the real constraint and is untouched.** 78% of its
+  candidates are born under the R:R floor. That is TP/SL shape — owner-sign-off,
+  and it needs its own dark-first evidence. Do **not** lower the floor: by R:R
+  bucket the dark rows read `<0.5` 75% win / −0.025% against `≥1.2` 35% /
+  +0.287%, and the win-rate gradient is **mechanical** (a nearer target must be
+  hit more often). Same shape as the TPE TP1 trap.
+- **`PLAN_AI_TRADE_GOVERNOR.md` §9 needs re-pricing.** §2.1's ~120 calls/day
+  was derived from the caps just removed. Flat in members still holds; flat in
+  book size does not, and at the ceiling it is up to ~20x. Read
+  `read.ai_governor`, do not infer from a constant that has moved twice in a
+  fortnight.
+
+---
+
 ## SESSION 143 2026-09-04 — the wake test answered NO, and it moved the analyst inside the engine
 
 Owner restated the target in one sentence: *"new signal out, you Claude wake
