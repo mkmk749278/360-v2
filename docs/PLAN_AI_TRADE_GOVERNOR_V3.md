@@ -363,6 +363,49 @@ evidence behind it (the SUI unlock; both open-web passes scored 0). Feeds
 **Layer A as a rule**, never a model as prose. This is where the you.com credits
 belong, and nowhere else.
 
+**Exercised against the live vendor, 2026-09-04 [measured].** Three endpoints on
+`https://api.you.com/v1/`, header `X-API-Key`:
+
+| Endpoint | Latency | Returns |
+|---|---|---|
+| `/v1/search` | 0.7–1.0s | 10 web results, snippets, some dated |
+| `/v1/answer` | 1.6–2.4s | the extracted fact plus citations |
+| `/v1/research` | 19.4s | an agentic pass that checks its own work |
+
+Coverage on our microcap movers is **not** the problem — BMT, BULLA, DEXE and
+BICO all returned real tokenomics sources. **Data quality is.** Asked for the
+*next* unlock:
+
+| Symbol | `/v1/answer` | Verdict |
+|---|---|---|
+| SUI | Sep 3 2026 — 24,142,139 | correct |
+| **BMT** | **Aug 18 2026** — 9,700,000 | **17 days in the past** |
+| **BICO** | **1 Nov 2025** — 1,000,000,000 | **10 months stale, implausible size** |
+| BULLA | NONE | correctly abstained |
+
+Two of four confidently wrong, both on microcaps — the population this book
+actually trades. `/v1/research` **fixed the BMT case** (*"18 September 2026 —
+9,700,000 BMT (Investors), 0.97% of total supply"*, cited to CoinGecko): the
+cheap endpoint had the right amount and the wrong month.
+
+Three rules follow, and the first is what makes an unreliable source safe:
+
+- **We never trust the text; we trust date arithmetic we do ourselves.** Any
+  returned unlock date `<= today` is discarded and counted as `stale_answer`.
+  That single rule catches both failures above. Refuse, do not clamp.
+- **`/v1/research` for the calendar, not `/v1/answer`** — and therefore the
+  calendar is a **per-symbol daily cache**, never a per-signal call. 19s is
+  fine on a daily refresh and impossible on a signal.
+- **A single answer is not ground truth.** Two sources disagreed on SUI (Sep 1 /
+  22.01M against Sep 3 / 24.14M), so a fact without source agreement is marked
+  `unverified` rather than published as a date.
+
+One side-finding worth keeping: the research pass volunteered *"Bubblemaps
+Surges on Upbit Listing"* with +66% 24h and +110% 30d on **BMT — the symbol that
+produced four of the book's top ten trades** (§2). That is instrument context
+the engine has never had, and it arrived from the calendar query rather than
+from a news crawl.
+
 ### What does not change
 
 Every invariant in v1 §7 and v2 §10 carries forward: a menu key and never a
@@ -400,7 +443,12 @@ established; or put a model on the path that decides whether a fill happens.
 
 ## 9. Cost
 
-Layer A and Layer D cost nothing per signal. Layer B is the existing fast lane:
+Layer A costs nothing per signal. **Layer D's per-call price is not yet
+measured** — the test above spent 6 `search`, 4 `answer` and 1 `research` call
+against a $200 credit balance and the remaining balance has not been read back,
+so the daily-refresh cost over ~75 symbols is **unpriced and must not be quoted
+until it is**. It is a cache with a daily period, so it is not on any hot
+path. Layer B is the existing fast lane:
 **$0.00074/call measured, ~$2.80/month** at design volume **[verified]**; the
 same lane on Claude Haiku 4.5 ($1/$5 per MTok) is ~4× that and still noise.
 Layer C at ≤2 passes/day is ~$25/month. Total **$5–40/month** against one Auto
