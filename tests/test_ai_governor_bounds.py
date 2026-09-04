@@ -319,3 +319,82 @@ async def test_a_cooldown_is_a_throttle_not_a_refusal(monkeypatch):
     h = gov.health()
     assert h["throttles"][gov.THROTTLE_COOLDOWN] == 1
     assert gov.THROTTLE_COOLDOWN not in h["refusals"]
+
+
+# ── A counter is not a cause: how LATE, not just that it was late ───────────
+#
+# The first live window refused 6 of 6 `ADJUST_SL` verdicts as `stale_verdict`
+# and no surface could say by how much. One second and ninety seconds are the
+# same integer there and have opposite fixes — widen the bound, or fix the
+# drain cadence — so the counter alone cannot decide anything. This is
+# `trail_governor.place_failed` arriving one lane over, and these tests pin the
+# instrument rather than the fix, because the fix needs evidence this produces.
+
+
+async def test_a_stale_refusal_records_how_late_it_was(monkeypatch):
+    """The refusal must carry its age, or nobody can tell which fix it needs."""
+    monkeypatch.setattr(gov, "apply_enabled", lambda: True)
+    m, sn = _menu_and_snapshot()
+    out = await (
+        gov.apply_verdict(_verdict(gov.PANIC_CLOSE, None, issued_at=0.0), sn, m, now=10_000.0)
+    )
+    assert out == gov.REFUSE_STALE_VERDICT
+
+    age = gov.health()["verdict_age"]
+    assert age["n"] == 1
+    assert age["stale_n"] == 1
+    assert age["max_sec"] == pytest.approx(10_000.0)
+    assert age["samples"][-1]["action"] == gov.PANIC_CLOSE
+    assert age["samples"][-1]["stale"] is True
+
+
+async def test_maintain_is_measured_too_so_the_stale_rate_has_a_denominator():
+    """MAINTAIN returns BEFORE the staleness check, so the refusal is only ever
+    observable on the arms that would have acted.
+
+    Measured only there, "6 of 6 stale" is a fact about those six and says
+    nothing about the lane's clock. The age is therefore taken for every
+    action, and a late MAINTAIN is still counted late — while still being
+    applied, because nothing about its behaviour changes.
+    """
+    m, sn = _menu_and_snapshot()
+    out = await (
+        gov.apply_verdict(_verdict(gov.MAINTAIN, None, issued_at=0.0), sn, m, now=10_000.0)
+    )
+    assert out == gov.MAINTAIN, "behaviour is unchanged: MAINTAIN still applies"
+
+    age = gov.health()["verdict_age"]
+    assert age["n"] == 1, "a MAINTAIN verdict is in the denominator"
+    assert age["stale_n"] == 1, "and it is counted as late when it is late"
+
+
+async def test_the_age_ring_is_bounded_and_the_count_beside_it_is_not():
+    """The newest few must never read as the whole population."""
+    m, sn = _menu_and_snapshot()
+    for i in range(gov._VERDICT_AGE_RING + 10):
+        await (
+            gov.apply_verdict(
+                _verdict(gov.MAINTAIN, None, issued_at=float(i)), sn, m, now=float(i) + 1.0
+            )
+        )
+
+    age = gov.health()["verdict_age"]
+    assert len(age["samples"]) == gov._VERDICT_AGE_RING
+    assert age["n"] == gov._VERDICT_AGE_RING + 10
+    assert age["stale_n"] == 0, "one second is not stale against a ten-second bound"
+
+
+def test_the_bound_is_published_beside_the_age():
+    """A duration with no threshold beside it cannot be read.
+
+    The page must not re-derive `AI_GOV_VERDICT_MAX_AGE_SEC` from its own copy
+    of the config — the drifting-mirror defect this repo has paid for under
+    several names.
+    """
+    from config import AI_GOV_VERDICT_MAX_AGE_SEC
+
+    diag = gov.build_diag()
+    assert diag["bounds"]["verdict_max_age_sec"] == pytest.approx(
+        float(AI_GOV_VERDICT_MAX_AGE_SEC)
+    )
+    assert "verdict_age" in diag["health"]

@@ -286,6 +286,12 @@ trail; and which mechanism it hands to. Both gate the arm, not the measurement.
   reads, and threaded posting all exercised against the live workspace
   **[verified]** — `#lumin-signals` (`C0BUB9R8WCX`) was created and the first
   scorecard posted during the session that wrote this.
+- **An incoming webhook posts into the channel.** `Lumin Engine`
+  (`B0BUGDU0223`) created 2026-09-04, HTTP 200, message stored with a bot id
+  and no user, mentions resolved **[verified]**. This is the engine → Slack
+  direction and it works.
+- **Slack cannot wake a Claude session either — see §6.2a.** Both routes are
+  now measured dead, not assumed.
 - **Binance public REST 451s from non-whitelisted IPs** **[verified]**; OKX and
   CoinGecko answer keyless and were used for every market figure in §1
   **[verified]**.
@@ -303,7 +309,68 @@ worse than no watchdog — an ephemeral analyst is admissible only as an
 enhancement. The engine decides; the deep lane upgrades a thesis; if it is not
 there, nothing waits and nothing degrades.
 
-### 6.3 Slack as the event bus
+### 6.2a The wake test — RUN 2026-09-04, and it answered NO
+
+§16's first open question, settled by measurement rather than by argument. Two
+posts into `#lumin-signals`, both with the mention resolved to
+`<@U0BUVE692R4|Claude>`, in a channel Claude had been invited to and where a
+message typed by the owner gets a reply within seconds **[verified]**:
+
+| Test | Poster | Result |
+|---|---|---|
+| 1 · 07:30 IST | the Claude app, on the owner's behalf (`Sent using Claude`) | **no reply**, one hour |
+| 2 · 08:31 IST | the `Lumin Engine` incoming webhook — a bot id, no user | **no reply** |
+
+Test 1 alone was not conclusive and this document says so rather than burying
+it: the connector and the Slack Claude app are the **same app**
+(`A08SF47R6P4`, bot user `U0BUVE692R4`), so Claude was ignoring its own
+message, which is ordinary loop protection. Test 2 removed that confound
+entirely — a different app, its own bot identity, the exact shape the engine
+would send — and the answer did not change.
+
+**The mechanism is structural, not a setting.** Claude in Slack runs each
+session under *the connected Claude account of the person who mentioned it*
+**[documented, vendor]**. A webhook message has no person behind it, so there
+is no account to run a session under and nothing to wake. No toggle changes
+that.
+
+**So there is no path by which the engine wakes an external analyst.** The
+session-scoped inbound webhook answers 401 (§6.1) and Slack does not respond to
+machines. Every remaining design is **pull, not push**, and that is the finding
+that reorganises this document — see §6.2b.
+
+### 6.2b What that means: the automatic lane is IN the engine
+
+The owner's requirement, restated 2026-09-04: *"new signal out, you Claude wake
+review that signal with your own analysis, adjust if anything needed, if that
+not correct we do cancel — everything should go automatic."*
+
+Automatic on every signal, with no human in the loop, rules out an external
+Claude session **by measurement, not by preference**. What it does not rule out
+is the requirement itself: the engine already makes its own model call, on its
+own clock, with no session and no Slack, and that call is the fast lane that is
+live today. The deep lane is therefore **not a different machine reached over a
+transport** — it is the same in-process call given more context (§3.1, §8), a
+longer clock (§4), and the fifth verdict (§5).
+
+This collapses the roadmap rather than extending it: D1's polling analyst and
+D2's woken analyst were two transports for a component that should not be
+remote at all. What survives from them is the part that was always independent
+of the transport — the packet, the standing thesis, and the scorecard.
+
+**Slack is demoted from transport to surface**, and that is not a loss:
+
+- the engine posts the packet through the webhook (verified working);
+- the owner reads it on his phone, where he already is;
+- when he wants a research pass with judgement in it, he `@Claude`s the thread
+  himself — a human mention, which works today, costs nothing when unused, and
+  analyses only the signals he cares about.
+
+That last line is an **override channel and never a link in the chain** (§6.2),
+which is exactly the standing this document already required of anything
+session-bound.
+
+### 6.3 Slack as the reporting surface
 
 Chosen by the owner. Three properties earn it over GitHub:
 
@@ -316,12 +383,11 @@ Chosen by the owner. Three properties earn it over GitHub:
 - **A fresh session per signal, if the inbound path works** — nothing to keep
   alive, which is the only clean answer to §6.2.
 
-**The gate, unresolved and blocking every event-driven variant:** whether the
-Claude Slack app responds to a message posted by an **incoming webhook** (a bot)
-rather than a human. Most Slack integrations ignore bot messages by default to
-prevent loops. This is a ten-minute test and **no event-driven work starts before
-it answers.** If it answers no, the polling variant below stands and is already
-useful.
+**That gate was run on 2026-09-04 and it answered no** (§6.2a). The three
+properties above still earn Slack its place — they were always properties of
+the *channel*, not of the wake — but the third one ("a fresh session per
+signal, if the inbound path works") is struck. Slack is where the owner reads
+and overrides; it drives nothing.
 
 **Push the data, do not grant the access.** The engine posts the packet; the
 session needs no ops credential at all, only outward public market data. That is
@@ -498,8 +564,8 @@ Concretely, and in the same PR as the code:
 | Phase | Ships | Gate |
 |---|---|---|
 | **D0** | Blindness columns (§3.3) · scoring harness (§7) · Lane A stamps (§8) · menu reads the Level Book (§3.2) | Normal PR — no model involved, nothing on the money path |
-| **D1** | Slack channel + engine packet poster + polling analyst. Theses recorded, scored, applied to nothing | Owner arms after one watched cycle |
-| **D2** | The wake test (§6.3). If it passes, event-driven fresh session per signal | Test result, not a decision |
+| **D1** | Slack channel + engine packet poster. Packets posted, theses recorded, scored, applied to nothing. ~~Polling analyst~~ — see §6.2b | Owner arms after one watched cycle |
+| ~~**D2**~~ | ~~Event-driven fresh session per signal~~ — **STRUCK 2026-09-04.** The wake test ran and answered no (§6.2a); there is no path by which the engine wakes a session, so the analyst is in-process or it does not exist | Closed by measurement |
 | **D3** | Deep lane with the §9.1 tool stack, news last | Owner sign-off |
 | **D4** | Activate one arm — `ADJUST_TP` or `HAND_TO_TRAIL`, both fully decidable — owner's account first | **Owner sign-off** against a scored window |
 | **D5** | Harvest a consistently-winning pattern into a **deterministic rule** | Dark-first + owner sign-off |
@@ -585,18 +651,24 @@ Settled by the owner, 2026-09-03, recorded so they are not re-asked: Slack is th
 transport; dark-to-ops before any live effect; the program continues to be built
 out rather than paused on a four-row result.
 
+Settled by measurement, 2026-09-04: **the Claude Slack app does not respond to
+a machine-posted message** — twice, once from the connector and once from a
+plain incoming webhook (§6.2a). D2 is struck and the automatic lane lives in
+the engine (§6.2b). Recorded here in full because a question answered by a test
+is worth more than the design that asked it, and because the next reader will
+otherwise re-run it.
+
 Still open:
 
-1. **Does the Claude Slack app respond to a webhook-posted message?** Ten-minute
-   test. *Gates D2 and every event-driven variant.*
-2. **`HAND_TO_TRAIL` — per-signal or per-user, and to which mechanism?**
+1. **`HAND_TO_TRAIL` — per-signal or per-user, and to which mechanism?**
    *Gates D4.*
-3. **Cancel semantics** — retract-and-close-at-market with a signal-card
+2. **Cancel semantics** — retract-and-close-at-market with a signal-card
    retraction, or veto-before-dispatch at the cost of entry latency? *Gates the
    veto arm; §9.3 says the catchable population is small either way.*
-4. **The IP-split free-tier research lane, or a paid key?** *Gates D3's cost.*
-5. **Signal geometry in a third-party workspace** — deliberate acceptance
-   required (§6.4).
+3. **The IP-split free-tier research lane, or a paid key?** *Gates D3's cost.*
+4. **Signal geometry in a third-party workspace** — deliberate acceptance
+   required (§6.4). Narrower now that Slack carries no verdict: the packet is
+   a report, not a control path.
 
 ---
 
