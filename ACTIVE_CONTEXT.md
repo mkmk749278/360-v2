@@ -4,6 +4,120 @@
 
 ---
 
+## SESSION 143 2026-09-04 — the wake test answered NO, and it moved the analyst inside the engine
+
+Owner restated the target in one sentence: *"new signal out, you Claude wake
+review that signal with your own analysis, adjust if anything needed, if that
+not correct we do cancel — everything should go automatic."* The session ran
+the test that decides whether that can be built the way v2 assumed, and it
+cannot.
+
+### The wake test — RUN, and the answer is no
+
+Two posts into `#lumin-signals`, both with the mention resolved to
+`<@U0BUVE692R4|Claude>`, in a channel Claude had been invited to and where the
+owner's own typed message gets a reply in seconds:
+
+| Test | Poster | Result |
+|---|---|---|
+| 1 · 07:30 IST | the Claude app, on the owner's behalf | **no reply**, one hour |
+| 2 · 08:31 IST | `Lumin Engine` incoming webhook — bot id, no user | **no reply** |
+
+Test 1 alone proved nothing and the first write-up said so: the connector and
+the Slack Claude app are the **same app** (`A08SF47R6P4` / `U0BUVE692R4`), so
+Claude was ignoring its own message — ordinary loop protection. Test 2 removed
+the confound (different app, own bot identity, the exact shape the engine
+sends) and the answer held.
+
+**The mechanism is structural.** Claude in Slack runs a session under the
+connected account of the *person* who mentioned it; a webhook message has no
+person, so there is no account to run and nothing to wake. With the
+session-webhook 401 from Session 142, **both** engine→analyst wake routes are
+now measured dead.
+
+### What that changes, and it simplifies the program
+
+**The automatic lane cannot be a Claude session, so it is the engine's own
+model call.** That call already exists, already runs on every signal, needs no
+transport and no human — it is the fast lane. The deep lane is therefore not a
+remote analyst reached over a bus; it is the same in-process call with more
+context (v2 §3.1/§8), a longer clock (§4) and the fifth verdict (§5). D1's
+polling analyst and D2's woken analyst were two transports for a component that
+should not be remote. **D2 is struck** (v2 §12); what survives is the packet,
+the standing thesis and the scorecard.
+
+**Slack is demoted from transport to surface** — and the packet path works:
+`Lumin Engine` (`B0BUGDU0223`) posts, HTTP 200, bot identity, mentions resolve.
+The owner reads it on his phone and can `@Claude` a thread himself when he
+wants a judgement pass. That is an override channel, never a link in the chain
+(§6.2).
+
+### The live read — and the defect it found
+
+`/signals/ai-governor` and `read.ai_governor`, read through a guest session
+2026-09-04 **[verified]**: 3,194 sweeps · 5 arms · 15 calls all `ok` · 18
+verdicts · **72 ledger rows** · $0.0148 · 2,682 ms · `provider_failures: []`.
+The lane is no longer all-`MAINTAIN`: `trigger:near_tp` fired 6 times and
+produced 6 `ADJUST_SL`.
+
+**And all six were thrown away.** `refusals: {stale_verdict: 6}` — 6 of 6.
+`apply_verdict` returns on `MAINTAIN` *before* the staleness check, so the
+refusal is only ever observable on the arms that would have acted, and 100% of
+them aged out. **Arm `sl` today and it reads ARMED on `/control` while doing
+nothing** — the `TRAIL_GOVERNOR_TIMEFRAME` defect exactly.
+
+The cause is **not** established, and the reason it is not is the shipped fix:
+the refusal counted the event and never the age, so one second and ninety
+seconds were the same integer with opposite fixes (`place_failed`, one lane
+over). **[hypothesis, labelled]** the monitor tick's real period exceeds
+`AI_GOV_VERDICT_MAX_AGE_SEC` (10s) minus the 2.7s latency, so a verdict issued
+in tick N is always drained ≥10s later. Do **not** widen the bound first — it
+is the stale-envelope rule protecting the money path.
+
+**Blindness confirmed live and worse than the split suggested**: 72/72 fully
+blind, `avg_unknown_frac 1.0`, book and flow both `not_subscribed` on all 36
+rows carrying the split. Engine watchdog `ai_governor_blind` has been paging on
+it for 47 cycles (#1010). Two of the four trigger rungs cannot fire while a
+symbol is unsubscribed — `flow_opposed` gates on `cvd_slope_aligned.readable`.
+
+**And the scorecard's headline is selection, not effect**: "wanted to act" 5
+signals 5/0 +2.16% net against "left alone" 16 at 4/12 −0.01%. The acted-on
+population *is* the `near_tp` population, and a trade sitting near its target is
+a winner by construction. `ADJUST_TP` still has **0 theses**, so there is no
+effect estimate of anything.
+
+### SHIPPED
+
+The verdict-age instrument: every verdict's age is stamped at the apply path —
+**including `MAINTAIN`**, because measuring only the arms that act gives the
+stale rate no denominator — with a bounded ring beside the unbounded count and
+the bound published so the page reads an age against the threshold that
+produced it. Behaviour is unchanged: the refusal stays exactly where it was.
+The fix for the staleness needs the evidence this produces; the instrument goes
+first.
+
+### OPEN — not resolved by this session
+
+- **Why the verdicts age out.** Read `verdict_age` on the next window before
+  touching `AI_GOV_VERDICT_MAX_AGE_SEC` or the drain cadence.
+- **The blindness decision is the owner's**: widen `DEPTH_MAX_SYMBOLS` /
+  `AGGTRADE_MAX_SYMBOLS` past 40, subscribe depth/aggTrade **on arm** and
+  release at close (bounded by the ~5 open signals rather than the universe),
+  or accept and label. The measurement now exists; the trade does not.
+- **D0 is recorded as complete and is about half of what §8 specified.** The
+  Level Book menu and the `pair_manager` instrument classifier shipped; the
+  CoinGecko market-cap/volume call and the structure fields (Volume Profile,
+  SMC, structure state, patterns) did not — `grep` across all three
+  `ai_governor*` modules returns nothing for any of them.
+- `HAND_TO_TRAIL` per-signal vs per-user, and which mechanism — owner, gates D4.
+- Cancel semantics — owner. §9.3 stands: none of the nine manually examined
+  signals would have been cancelled at a 60–180s horizon, so the veto catches
+  *wrong on its face*, not *this setup will fail*.
+- Still carried: `AI_GOV_PANIC_MAX_POSITIONS` (0 = the arm refuses, which is
+  safe) and `AI_GOV_MAX_USD_PER_DAY` (unset; the deep lane makes it mandatory).
+
+---
+
 ## SESSION 142 2026-09-03 — the deep lane, designed; and the first scored thesis
 
 Owner asked what the AI implementation actually does, then directed it toward

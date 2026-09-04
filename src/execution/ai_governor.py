@@ -171,6 +171,16 @@ def _blank_health() -> Dict[str, Any]:
         "provider_failures": [],
         "latency_ms_last": 0,
         "served_models": {},
+        # How OLD a verdict was when the apply path looked at it. The refusal
+        # counter beside it says a verdict aged out and cannot say by how
+        # much — one second and ninety seconds are the same integer and have
+        # opposite fixes (`trail_governor.place_failed`, again). Recorded for
+        # EVERY verdict including MAINTAIN, because MAINTAIN returns before
+        # the staleness check: measuring only the arms that act would make the
+        # stale rate a fact about those arms rather than about the lane's
+        # clock, and there would be no denominator to read it against.
+        # Bounded ring, published beside the unbounded counts.
+        "verdict_age": {"n": 0, "stale_n": 0, "max_sec": 0.0, "samples": []},
     }
 
 
@@ -195,6 +205,36 @@ def _refuse(reason: str) -> None:
 #: How many recent provider failures to keep. Small on purpose: this is a
 #: diagnosis aid, not a ledger, and the ledger of verdicts is elsewhere.
 _PROVIDER_FAILURE_RING = 20
+
+#: How many recent verdict ages to keep. Same size and same reasoning as the
+#: ring above: enough to see a distribution, never enough to be mistaken for
+#: the population — which is why the unbounded ``n`` rides beside it.
+_VERDICT_AGE_RING = 20
+
+
+def _record_verdict_age(action: str, age_sec: float, *, stale: bool) -> None:
+    """Stamp how old one verdict was when the apply path reached it.
+
+    Pure telemetry: it changes no decision, and it is deliberately taken
+    BEFORE the MAINTAIN early return so the stale rate has a denominator.
+    A dict update under a lock is not the per-user work the MAINTAIN path is
+    protected from — that rule is about Firestore reads, position walks and
+    exchange calls, none of which this is.
+    """
+    with _health_lock:
+        block = _health.setdefault(
+            "verdict_age", {"n": 0, "stale_n": 0, "max_sec": 0.0, "samples": []}
+        )
+        block["n"] = int(block.get("n", 0)) + 1
+        if stale:
+            block["stale_n"] = int(block.get("stale_n", 0)) + 1
+        block["max_sec"] = round(max(float(block.get("max_sec", 0.0)), age_sec), 3)
+        samples = block.setdefault("samples", [])
+        samples.append(
+            {"action": action, "age_sec": round(age_sec, 3), "stale": bool(stale)}
+        )
+        if len(samples) > _VERDICT_AGE_RING:
+            del samples[:-_VERDICT_AGE_RING]
 
 
 def _record_provider_failure(result: Any, now: float, *, max_output_tokens: int) -> None:
@@ -980,6 +1020,17 @@ async def apply_verdict(
 
     now = _now() if now is None else now
 
+    # Measured first, and for every action. `stale_verdict` counted the event
+    # and never the age, so nothing could say whether the bound is wrong or
+    # the drain cadence is — and because MAINTAIN returns below without ever
+    # reaching the staleness check, the refusal is only ever observable on the
+    # arms that would have acted. Recording here gives that rate a
+    # denominator.
+    age_sec = now - verdict.issued_at
+    _record_verdict_age(
+        verdict.action, age_sec, stale=age_sec > float(AI_GOV_VERDICT_MAX_AGE_SEC)
+    )
+
     # MAINTAIN costs NOTHING. Not a Firestore read, not a position walk, not an
     # exchange call. It is most of every window, and any per-user work here is
     # pure waste multiplied by the member count (§2.2).
@@ -987,7 +1038,7 @@ async def apply_verdict(
         _count_in("by_action", "applied:maintain")
         return MAINTAIN
 
-    if now - verdict.issued_at > float(AI_GOV_VERDICT_MAX_AGE_SEC):
+    if age_sec > float(AI_GOV_VERDICT_MAX_AGE_SEC):
         # The stale-envelope rule the diag channel already uses: the world has
         # moved on, and applying a minutes-old exit decision from it is worse
         # than doing nothing.
@@ -1508,6 +1559,7 @@ def build_diag() -> Dict[str, Any]:
         AI_GOV_MAX_CALLS_PER_SIGNAL,
         AI_GOV_MAX_USD_PER_DAY,
         AI_GOV_PANIC_MAX_POSITIONS,
+        AI_GOV_VERDICT_MAX_AGE_SEC,
     )
 
     ledger = get_ledger()
@@ -1531,6 +1583,10 @@ def build_diag() -> Dict[str, Any]:
             # as an arm that is simply quiet.
             "panic_max_positions": int(AI_GOV_PANIC_MAX_POSITIONS),
             "panic_armed": int(AI_GOV_PANIC_MAX_POSITIONS) > 0,
+            # Published so the page reads an age against the bound that
+            # produced it. A duration with no threshold beside it is the
+            # `stale_verdict` counter's own problem one layer up.
+            "verdict_max_age_sec": float(AI_GOV_VERDICT_MAX_AGE_SEC),
         },
         "health": health(),
         "arms": arms_snapshot(),
