@@ -2810,10 +2810,66 @@ PERFORMANCE_TRACKER_PATH: str = os.getenv(
 )
 
 # ---------------------------------------------------------------------------
-# Max concurrent signals per channel.
-#
-# SCALP: capped for capital protection (leveraged trades).
+# Per-channel concurrency cap — and why it no longer selects paths
 # ---------------------------------------------------------------------------
+#
+# Owner, 2026-09-04: *"actually we have only one channel we don't have any
+# other channel, with in that scalp channel we have about 17 paths, and each
+# path has its own cap so don't keep any cap on max signals of channel"*.
+#
+# He is right about the shape.  `360_SCALP` is the only fully-live channel
+# (`360_SCALP_DIVERGENCE` is limited-live), so a cap of 5 named *per channel*
+# is in fact a cap of 5 on the WHOLE BOOK across 17 live paths — at most five
+# paths can be represented at once, and the highest-volume path holds the slots
+# by arithmetic.  That is the same starvation the global same-direction cap had
+# (see DIRECTION_CAP_MODE below), measured the same way: over one 4.9h boot the
+# router dequeued 65 candidates, delivered 9, and `per_channel_cap` took **45
+# of the 56 drops** with `active_signals` sitting at exactly 5 against a limit
+# of 5.  On the dark lane's promoted LIQUIDITY_SWEEP_REVERSAL rows it took 32
+# of 101 — the largest single stamped reason a promoted signal reached nobody.
+#
+# **What this costs, stated before the switch rather than after.**  "Each path
+# has its own cap" is true in configuration and has never once bitten: the
+# direction cap's own counterfactual read `per_path_only: 0` and
+# `both_block: 0` over 20 evaluations, and MAX_SAME_DIRECTION_CUMULATIVE is 0
+# (off, by the owner's 2026-08-22 decision).  So with this cap off, what bounds
+# the SIZE of the book is 17 paths x 3 per direction x 2 directions = **102
+# concurrent signals** against 5 today.  Little's Law on the measured admitted
+# rate (1.63/h) and book (5) gives a mean hold of 3.07h, so the realistic
+# figure if every `per_channel_cap` drop were admitted is ~41 concurrent — an
+# ESTIMATE from measured inputs, and labelled as one.
+#
+# And that is a money number, because `tripwires.assert_position_cap` bounds an
+# order's NOTIONAL ($500 default, $2,000 ceiling) and nothing anywhere bounds a
+# user's concurrent POSITION COUNT.  The router's concurrency ceiling *is* each
+# auto-trade user's open-position count: at the $500 default, simultaneous
+# exposure goes from ~$2,500 to an estimated ~$20,000, ceiling $51,000.  Top
+# USDT-M alts are 0.85-0.95 correlated to BTC, so those are close to one
+# position N times over.
+#
+# So the cap is switched, not deleted — `off` by the owner's instruction,
+# `enforce` restorable from ops without a redeploy, and BOTH modes evaluated on
+# every candidate with the counterfactual published.  Putting it back is then
+# read off what the other mode would have done rather than guessed, exactly as
+# the direction-cap switch is.  Deleting a cap costs a deploy to get back, and
+# the moment you want it back is the moment you cannot wait for one.
+CHANNEL_CAP_MODE: str = _safe_choice(
+    "CHANNEL_CAP_MODE", "off", frozenset({"enforce", "off"}),
+)
+
+#: Book-wide concurrent-signal ceiling, across every channel and every path.
+#: ``0`` disables it, which is what the owner asked for ("don't keep any cap")
+#: and what ships.  It exists because with ``CHANNEL_CAP_MODE=off`` there is
+#: otherwise NO bound on the total size of the book — a per-path budget bounds
+#: a path, never the sum of them — and this is the one dial that can re-arm a
+#: book bound from ops without touching path behaviour.  Kept separate from the
+#: per-channel cap on purpose: a channel at its bound and a book at its ceiling
+#: are different findings with different fixes, and pooling them is exactly
+#: what made a per-channel cap behave as a path selector.
+MAX_CONCURRENT_SIGNALS_BOOK: int = _safe_int("MAX_CONCURRENT_SIGNALS_BOOK", "0")
+
+#: Retained for ``CHANNEL_CAP_MODE=enforce`` and for the counterfactual, which
+#: is evaluated on every candidate whatever the mode is set to.
 MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
     "360_SCALP":            int(os.getenv("MAX_SCALP_SIGNALS", "5")),
     "360_SCALP_FVG":        int(os.getenv("MAX_SCALP_FVG_SIGNALS", "3")),

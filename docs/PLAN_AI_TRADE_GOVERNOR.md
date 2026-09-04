@@ -113,9 +113,28 @@ that can take the book down.
 
 ### 2.1 The AI is per signal — flat in members
 
-**[verified]** `config/__init__.py:2817` — `MAX_CONCURRENT_SIGNALS_PER_CHANNEL`
-caps `360_SCALP` at **5**; `MAX_SAME_DIRECTION_GLOBAL` is **3**. The live book
-carries a handful of distinct theses at any moment.
+**[verified 2026-08-xx, SUPERSEDED 2026-09-04]** `config/__init__.py` —
+`MAX_CONCURRENT_SIGNALS_PER_CHANNEL` capped `360_SCALP` at **5** and
+`MAX_SAME_DIRECTION_GLOBAL` was **3**, so the live book carried a handful of
+distinct theses at any moment.
+
+**Neither bound is what holds today, and the call-count figure below inherits
+that.** `DIRECTION_CAP_MODE` went `per_path` on 2026-08-22 (each path holds its
+own budget of 3 per direction, cumulative ceiling off) and `CHANNEL_CAP_MODE`
+went `off` on 2026-09-04 at the owner's instruction, because with one live
+channel a per-channel cap of 5 was a cap on the whole book across 17 paths and
+was starving every path but the largest. The remaining bound on book SIZE is
+live paths x per-path budget x 2 directions — about **102**, against 5 — with
+`MAX_CONCURRENT_SIGNALS_BOOK` (default 0 = off) as the re-armable ceiling.
+
+So the sentence below is a bound on *today's observed* book, not on the
+configured one, and **the governor's spend scales with concurrent signals**:
+at the structural ceiling the ~120 calls/day figure is up to ~20x that. It is
+still flat in members — that argument is untouched, and it is the one §2.1
+exists to make — but it is **no longer flat in book size**, and §9's price needs
+re-deriving against the delivered rate on a fresh window rather than against a
+cap that is gone. `read.ai_governor` counts the calls; read it, do not infer
+them from a constant that has moved twice in a fortnight.
 
 Everything in the brief's Reality Feed — order-book imbalance, CVD, BTC context, the
 wall in front of TP — is a fact about the **symbol**, not about the user. The only

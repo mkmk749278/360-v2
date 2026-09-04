@@ -25,8 +25,10 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from config import (
     ALL_CHANNELS,
+    CHANNEL_CAP_MODE,
     CHANNEL_COOLDOWN_SECONDS,
     CHANNEL_TELEGRAM_MAP,
+    MAX_CONCURRENT_SIGNALS_BOOK,
     MAX_CONCURRENT_SIGNALS_PER_CHANNEL,
     MAX_SAME_DIRECTION_GLOBAL,
     MAX_SAME_DIRECTION_PER_PATH,
@@ -256,6 +258,71 @@ def _tunable_int(key: str, fallback: int) -> int:
         return fallback
 
 
+#: The RiskManager's refusal classes, matched on the prose it already writes.
+#: Kept as a mapping rather than as `risk.reason` verbatim because that string
+#: interpolates the *values* — "Insufficient R:R (0.44 < 1.2)" — so using it as
+#: a counter key would create one bucket per candidate and count nothing.
+#:
+#: A reason this table has never heard of is returned under `other` rather than
+#: dropped or forced into a neighbour, and `risk.reason` still reaches the log.
+#: A hand-written list of what belongs somewhere is silent by construction on
+#: the next member, so the unknown bucket is the part that has to exist.
+_RISK_REASON_CLASSES: tuple[tuple[str, str], ...] = (
+    ("insufficient r:r", "rr_floor"),
+    ("concurrent signals per symbol", "symbol_concurrency"),
+    ("concurrent", "same_direction_symbol"),
+    ("imbalance", "order_book_imbalance"),
+    ("book", "order_book_imbalance"),
+)
+
+
+def _risk_reason_class(reason: Any) -> str:
+    """Bucket a RiskManager refusal by its cause, never by its numbers."""
+    text = str(reason or "").lower()
+    if not text:
+        return "unspecified"
+    for needle, label in _RISK_REASON_CLASSES:
+        if needle in text:
+            return label
+    return "other"
+
+
+@dataclasses.dataclass(frozen=True)
+class _ChannelCap:
+    """One candidate's concurrency verdict under BOTH the channel cap and the
+    book ceiling.
+
+    Two dimensions, never pooled.  The per-channel cap asks *is this channel
+    full*; with one live channel that is in practice *is the book full*, which
+    is precisely why it behaved as a path selector and why the owner switched
+    it off (see ``CHANNEL_CAP_MODE``).  The book ceiling asks the same question
+    deliberately and across every channel, so re-arming one is a different
+    decision from re-arming the other and the counters must be able to say
+    which fired.
+
+    Carried as a value rather than a tuple of bools for the same reason
+    :class:`_DirectionCap` is: the gate, the log line and the counterfactual
+    then read identical fields, and a second reading of "would this have been
+    blocked" is how a panel ends up disagreeing with the gate it is used to
+    justify.
+    """
+
+    mode: str
+    channel: str
+    setup: str
+    blocked: bool
+    reason: str
+    drop_reason: str
+    count: int
+    limit: int
+    channel_count: int
+    channel_limit: int
+    book_count: int
+    book_limit: int
+    would_block_channel: bool
+    would_block_book: bool
+
+
 @dataclasses.dataclass(frozen=True)
 class _DirectionCap:
     """One candidate's same-direction verdict under BOTH modes.
@@ -360,6 +427,7 @@ class SignalRouter:
         # ones a switch decision is read from, so an absent `global_only` is
         # the worst possible blank on this panel.
         self._direction_cap_counterfactual: Dict[str, int] = defaultdict(int)
+        self._channel_cap_counterfactual: Dict[str, int] = defaultdict(int)
         for _bucket in (
             "evaluated", "both_block", "global_only", "per_path_only",
             "neither_blocks",
@@ -1089,6 +1157,159 @@ class SignalRouter:
         current = str(getattr(signal, "setup_class", "") or "").strip()
         return current.upper() if current else "UNCLASSIFIED"
 
+    def _channel_cap_decision(self, signal: Signal) -> "_ChannelCap":
+        """Evaluate the channel cap AND the book ceiling; apply what is armed.
+
+        Read the LIVE tunables rather than the boot defaults, for the reason
+        ``_tunable_str`` records: a ``docker exec`` one-shot reports what the
+        image was built with, so the counters below are the only honest source
+        for what the running engine is doing.
+
+        The channel cap is evaluated even when ``mode == "off"``.  That is not
+        spare work — it is the whole instrument: it says how many candidates
+        the cap WOULD have taken, which is the number the decision to re-arm it
+        has to be read from.  Shipping the effect off and the measurement off
+        would leave that decision with nowhere to look, which is how a dark
+        lane ends up with an empty panel nobody can act on.
+        """
+        mode = _tunable_str("channel_cap_mode", CHANNEL_CAP_MODE)
+        book_limit = _tunable_int(
+            "max_concurrent_signals_book", MAX_CONCURRENT_SIGNALS_BOOK
+        )
+        channel_limit = MAX_CONCURRENT_SIGNALS_PER_CHANNEL.get(signal.channel, 5)
+
+        channel_count = sum(
+            1 for s in self._active_signals.values() if s.channel == signal.channel
+        )
+        book_count = len(self._active_signals)
+
+        would_block_channel = channel_count >= channel_limit
+        # ``0`` disables the ceiling — a decision somebody made, not an unset
+        # value, and it must not read as "block everything".
+        would_block_book = bool(book_limit) and book_count >= book_limit
+
+        # The book ceiling is checked FIRST when both would fire, because it is
+        # the bound an operator armed deliberately across every channel; a
+        # candidate refused for it and one refused for a single channel being
+        # full are different findings and pooling them is what this split
+        # exists to prevent.
+        if would_block_book:
+            blocked, reason, drop = True, "Book ceiling", "book_cap"
+            count, limit = book_count, book_limit
+        elif mode == "enforce" and would_block_channel:
+            blocked, reason, drop = True, "Per-channel cap", "per_channel_cap"
+            count, limit = channel_count, channel_limit
+        else:
+            blocked, reason, drop = False, "", ""
+            count, limit = channel_count, channel_limit
+
+        return _ChannelCap(
+            mode=mode,
+            channel=str(signal.channel or ""),
+            setup=str(getattr(signal, "setup_class", "") or "UNKNOWN"),
+            blocked=blocked,
+            reason=reason,
+            drop_reason=drop,
+            count=count,
+            limit=limit,
+            channel_count=channel_count,
+            channel_limit=channel_limit,
+            book_count=book_count,
+            book_limit=book_limit,
+            would_block_channel=would_block_channel,
+            would_block_book=would_block_book,
+        )
+
+    def _record_channel_cap_counterfactual(self, cap: "_ChannelCap") -> None:
+        """Count what each bound WOULD have done to this candidate.
+
+        ``channel_only`` is the population the owner switched the cap off for:
+        candidates a per-channel cap kills that no book ceiling would touch.
+        Keyed by setup as well as totalled, because "this cap costs 45 drops"
+        and "this cap costs one path 45 drops" support opposite readings of the
+        same integer — the second is crowding-out, the first is volume.
+        """
+        c = self._channel_cap_counterfactual
+        c["evaluated"] += 1
+        ch, bk = cap.would_block_channel, cap.would_block_book
+        if ch and bk:
+            c["both_block"] += 1
+        elif ch:
+            c["channel_only"] += 1
+            c[f"channel_only:{cap.setup}"] += 1
+        elif bk:
+            c["book_only"] += 1
+            c[f"book_only:{cap.setup}"] += 1
+        else:
+            c["neither_blocks"] += 1
+
+    def channel_cap_report(self) -> Dict[str, Any]:
+        """What the concurrency bounds are doing, and what the other would do.
+
+        Published whether or not the cap is armed, for the same reason
+        :meth:`direction_cap_report` is: a decision with nowhere to read it is a
+        decision that keeps getting deferred.
+
+        **Counters are cumulative since engine start and reset on restart** —
+        in-process integers, not a ledger, so a low number after a deploy is a
+        young process rather than a quiet market.
+
+        ``would_have_blocked`` answers *how many more candidates survive this
+        hop with the cap off* and is structurally incapable of answering *how
+        many more would be profitable*: every one of them still faces the
+        correlation-group limit, the same-direction cap, TP/SL sanity, four
+        staleness checks, the channel floor and the risk manager below this
+        gate, and their outcomes are unknowable because they never traded.
+        """
+        c = self._channel_cap_counterfactual
+        evaluated = int(c.get("evaluated", 0) or 0)
+        flat = {k: v for k, v in c.items() if ":" not in k}
+        by_key = {k: v for k, v in c.items() if ":" in k}
+
+        # Live occupancy, per channel and in total — what makes a saturated
+        # bound legible as saturation rather than as an absence of candidates.
+        held: Dict[str, int] = defaultdict(int)
+        for s in self._active_signals.values():
+            held[str(s.channel or "")] += 1
+
+        mode = _tunable_str("channel_cap_mode", CHANNEL_CAP_MODE)
+        # The population the *unarmed* bound would have taken.  With the cap
+        # off that is what switching it back on would cost; with it on, it is
+        # what the book ceiling would add.
+        would_have_blocked = int(
+            c.get("channel_only", 0) if mode == "off" else c.get("book_only", 0)
+        )
+
+        return {
+            "mode": mode,
+            "channel_limits": dict(MAX_CONCURRENT_SIGNALS_PER_CHANNEL),
+            # 0 means the book ceiling is OFF — a decision somebody made, not
+            # an unset value.
+            "book_limit": _tunable_int(
+                "max_concurrent_signals_book", MAX_CONCURRENT_SIGNALS_BOOK
+            ),
+            "evaluated": evaluated,
+            "counterfactual": dict(sorted(flat.items())),
+            "counterfactual_by_setup": dict(
+                sorted(by_key.items(), key=lambda kv: -kv[1])
+            ),
+            "would_have_blocked": would_have_blocked,
+            "would_have_blocked_share": (
+                (would_have_blocked / evaluated) if evaluated else None
+            ),
+            "held_by_channel": dict(sorted(held.items(), key=lambda kv: -kv[1])),
+            "held_total": sum(held.values()),
+            #: The bound that remains once the channel cap is off and the book
+            #: ceiling is 0: live paths x per-path budget x 2 directions.  It
+            #: is the honest ceiling and it belongs beside the counters rather
+            #: than in a comment nobody reads.
+            "unbounded_ceiling_note": (
+                "with mode=off and book_limit=0 the only bound on book SIZE is "
+                "the per-path same-direction budget: live paths x limit x 2 "
+                "directions"
+            ),
+        }
+
     def _direction_cap_decision(self, signal: Signal) -> "_DirectionCap":
         """Evaluate BOTH modes; apply the configured one.
 
@@ -1308,6 +1529,11 @@ class SignalRouter:
             # says which budgets are held and what the other mode would have
             # passed.
             "direction_cap": self.direction_cap_report(),
+            # The concurrency bounds' own X-ray, beside the counter they
+            # explain.  `per_channel_cap` took 45 of 56 drops over one boot and
+            # the row above can only say that it did — this says which channel
+            # is holding what, and what the bound that is NOT armed would take.
+            "channel_cap": self.channel_cap_report(),
         }
 
     def position_lock_health(self) -> Dict[str, Any]:
@@ -1382,18 +1608,20 @@ class SignalRouter:
                 )
                 return self._drop(signal, "symbol_channel_cooldown")
 
-        # Per-channel concurrent position cap
-        channel_count = sum(
-            1 for s in self._active_signals.values() if s.channel == signal.channel
-        )
-        channel_max = MAX_CONCURRENT_SIGNALS_PER_CHANNEL.get(signal.channel, 5)
-        if channel_count >= channel_max:
+        # Per-channel concurrent cap, and the book ceiling beside it.
+        #
+        # Both are evaluated on every candidate whatever the configured mode,
+        # so the panel that would justify re-arming the channel cap cannot
+        # disagree with the gate that performs it.  See CHANNEL_CAP_MODE.
+        chan = self._channel_cap_decision(signal)
+        self._record_channel_cap_counterfactual(chan)
+        if chan.blocked:
             log.info(
-                "Per-channel cap reached for {} ({}/{}) – {} {} blocked",
-                signal.channel, channel_count, channel_max,
+                "{} reached for {} ({}/{}) – {} {} blocked",
+                chan.reason, signal.channel, chan.count, chan.limit,
                 signal.symbol, signal.direction.value,
             )
-            return self._drop(signal, "per_channel_cap")
+            return self._drop(signal, chan.drop_reason)
 
         # Correlation-aware position limiting (group-based)
         active_positions = {
@@ -1543,18 +1771,43 @@ class SignalRouter:
             active_signals=self.active_signals,
         )
         if not risk.allowed:
+            # The THIRTEENTH gate, and until 2026-09-04 the only one that was
+            # still a bare `return`. Nothing counted it and nothing stamped it,
+            # so its drops appeared in no funnel and a promoted dark row it
+            # killed read `promoted_enqueued` forever — indistinguishable from
+            # one still in flight. Measured on the live box: 11 of 65 dequeued
+            # candidates (17%) reached neither a delivery nor a stamped drop,
+            # and 31 of 101 promoted LIQUIDITY_SWEEP_REVERSAL rows sat here.
+            # All 31 carried a designed R:R below this gate's own 1.2 floor,
+            # against 5 delivered rows all at 1.22 or above — a clean 36/36
+            # separation that was invisible from every surface in both repos.
+            #
+            # Keyed by the manager's own reason class, because "the risk
+            # manager refused" is not a cause: an R:R floor, a per-symbol
+            # concurrency limit and an order-book imbalance are one integer and
+            # three different fixes (`place_failed`, one subsystem over).
             log.warning(
                 "Signal {} {} blocked by risk manager: {}",
                 signal.symbol, signal.direction.value, risk.reason,
             )
-            return
+            # Underscore, never a colon: `_drop` keys the per-setup split as
+            # `reason:setup_class` and `delivery_stats` partitions on that
+            # colon, so a colon here would file the whole gate under the
+            # by-setup table and leave `drops_by_reason` empty. Caught by the
+            # test below asserting the counter, not by reading the code.
+            return self._drop(
+                signal, f"risk_manager_{_risk_reason_class(risk.reason)}"
+            )
         signal.risk_label = risk.risk_label
 
         # Format and send to premium channel
         channel_id = CHANNEL_TELEGRAM_MAP.get(signal.channel, "")
         if not channel_id:
+            # Configuration, not a market condition — and it is silent by
+            # construction: no channel id means no delivery for EVERY candidate
+            # on that channel, forever, with nothing on any page to say so.
             log.warning("No Telegram channel configured for {}", signal.channel)
-            return
+            return self._drop(signal, "no_channel_configured")
 
         text = self._format_signal(signal)
 
@@ -1591,6 +1844,14 @@ class SignalRouter:
                 await _delivery_sleep(2 ** retries)  # 1 s, 2 s for retries 0, 1
                 await self._queue.put(signal)
             else:
+                # A permanently lost signal is the most serious outcome on this
+                # hop and was the least visible: three failed Telegram sends and
+                # the candidate is gone, never reaching `dispatch_signal_to_
+                # active_users` or the app feed either, with no counter anywhere.
+                # Stamped and counted like every other drop — a retry that is
+                # about to be re-queued is NOT stamped, because it has not been
+                # dropped yet and counting it would double-count the candidate.
+                self._drop(signal, "delivery_failed")
                 log.error(
                     "Signal {} {} permanently lost after 3 delivery attempts",
                     signal.channel,
