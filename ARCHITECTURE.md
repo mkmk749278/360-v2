@@ -312,8 +312,16 @@ down 30%. `None` there means the detector could not report it, never `0.0`.
 
 `SignalRouter` (`src/signal_router.py`) is a second, independent filter layer — it drops
 most of what it dequeues: correlation lock, per-symbol and per-channel cooldown,
-per-channel concurrency cap, correlation-group limit, global same-direction throttle,
-TP/SL sanity, staleness. **Enqueue is not dispatch.**
+per-channel concurrency cap (**off since 2026-09-04** — `CHANNEL_CAP_MODE`; the
+book ceiling `MAX_CONCURRENT_SIGNALS_BOOK` replaces it and ships at 0),
+correlation-group limit, same-direction throttle (`per_path` since 2026-08-22),
+TP/SL sanity, staleness, **and the RiskManager** (R:R floor, per-symbol
+concurrency, order-book imbalance) — which sits below every counted gate and
+was, until 2026-09-04, a bare `return` with no counter and no stamp, so its
+drops appeared in no funnel and left a promoted dark row reading
+`promoted_enqueued` forever.
+**Enqueue is not dispatch**, and `/signals/router-drops` is where the whole hop
+is read.
 
 | Surface | Path | Role |
 |---|---|---|

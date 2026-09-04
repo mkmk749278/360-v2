@@ -207,6 +207,8 @@ def _build_registry() -> Dict[str, Tunable]:
         DIRECTION_CAP_MODE,
         MAX_SAME_DIRECTION_PER_PATH,
         MAX_SAME_DIRECTION_CUMULATIVE,
+        CHANNEL_CAP_MODE,
+        MAX_CONCURRENT_SIGNALS_BOOK,
     )
 
     items = [
@@ -252,6 +254,52 @@ def _build_registry() -> Dict[str, Tunable]:
             default=DIRECTION_CAP_MODE,
             category="Safety",
             choices=("global", "per_path"),
+        ),
+        Tunable(
+            key="channel_cap_mode",
+            label="Per-channel concurrency cap — armed or off",
+            description=(
+                "enforce: a channel may hold at most MAX_SCALP_SIGNALS (5) "
+                "concurrent signals. off: it holds none of its own, which is "
+                "what ships (owner, 2026-09-04). 360_SCALP is the only fully "
+                "live channel, so a cap named per-channel is in fact a cap on "
+                "the WHOLE BOOK across 17 paths — at most five paths can be "
+                "represented at once and the highest-volume path holds the "
+                "slots by arithmetic. Measured on the live box it took 45 of "
+                "56 router drops in one 4.9h boot, and 32 of 101 promoted "
+                "LIQUIDITY_SWEEP_REVERSAL rows. Both settings are evaluated on "
+                "every candidate whatever this is set to, so read what the "
+                "unarmed one would have taken at /signals/router-drops before "
+                "flipping. off RAISES blast radius and nothing else bounds "
+                "book SIZE unless the book ceiling below is set. "
+                "Blast-radius cap: owner sign-off item."
+            ),
+            type="str",
+            default=CHANNEL_CAP_MODE,
+            category="Safety",
+            choices=("enforce", "off"),
+        ),
+        Tunable(
+            key="max_concurrent_signals_book",
+            label="Book ceiling — concurrent signals, all channels",
+            description=(
+                "Total concurrent signals across every channel and path. 0 "
+                "disables it, which is what ships (owner: 'don't keep any cap'). "
+                "This is the ONLY bound on book size once the per-channel cap "
+                "is off — a per-path budget bounds a path, never the sum of "
+                "them — so with both off the ceiling is live paths x per-path "
+                "budget x 2 directions, about 102 today against 5 before. "
+                "Nothing bounds a user's concurrent POSITION COUNT either "
+                "(assert_position_cap bounds an order's notional), so this "
+                "number is each auto-trade user's maximum simultaneous "
+                "exposure divided by their position size. Re-armable here "
+                "without a redeploy. Blast-radius cap: owner sign-off item."
+            ),
+            type="int",
+            default=MAX_CONCURRENT_SIGNALS_BOOK,
+            category="Safety",
+            min_value=0,
+            max_value=200,
         ),
         Tunable(
             key="max_same_direction_per_path",

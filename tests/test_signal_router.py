@@ -384,10 +384,39 @@ class TestSignalRouter:
         assert "TEST-PIP-SL-SHORT" not in router.active_signals
 
     @pytest.mark.asyncio
-    async def test_per_channel_cap_blocks_excess_within_same_channel(self, queue, router, sent_messages):
-        """When a channel is full, additional signals for that channel are blocked."""
+    async def test_per_channel_cap_blocks_excess_within_same_channel(self, queue, router, sent_messages, monkeypatch):
+        """When a channel is full AND the cap is armed, further signals are blocked.
+
+        Pinned to ``enforce`` because the shipped default is ``off`` (owner,
+        2026-09-04).  Without the pin this test would go green over a router
+        that never checks the cap at all — its own sentence becoming false at
+        the moment somebody changes the premise, which is the rot case this
+        repo has paid for.  The cap is retained and re-armable from ops, so the
+        behaviour it asserts is still real and still needs a guard.
+
+        It asserts the drop REASON, not merely the outcome.  Verified by
+        reverting the pin: without it this test STILL PASSED, because five held
+        LONGs trip ``same_direction_throttle`` and the candidate dies at a
+        different gate — an assertion outliving its premise while staying
+        green, which is the rot case this repo has already paid for once.  The
+        direction cap is lifted so the channel cap is the only bound that can
+        fire, and the reason is checked so no future gate can satisfy this test
+        by accident.
+        """
+        import src.signal_router as sr_mod
         from config import MAX_CONCURRENT_SIGNALS_PER_CHANNEL
 
+        # Pin the TUNABLE, not the module global. `runtime_tunables.get`
+        # returns the registered DEFAULT when no Firestore client is wired —
+        # not None — so `setattr(sr_mod, "CHANNEL_CAP_MODE", ...)` is inert
+        # here. That inert pin was written first and both tests still passed,
+        # because a different gate happened to block the candidate; lifting
+        # the direction cap is what exposed it.
+        monkeypatch.setattr(
+            "src.runtime_tunables.get",
+            lambda key, *a, **k: "enforce" if key == "channel_cap_mode" else None,
+        )
+        monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", 50)
         channel = "360_SCALP"
         cap = MAX_CONCURRENT_SIGNALS_PER_CHANNEL.get(channel, 5)
 
@@ -421,8 +450,9 @@ class TestSignalRouter:
         except asyncio.CancelledError:
             pass
 
-        # The new signal must be blocked; channel cap must not be exceeded
+        # The new signal must be blocked BY THIS GATE; channel cap not exceeded
         assert "TEST-NEW-CAP" not in router.active_signals
+        assert router.delivery_stats()["drops_by_reason"].get("per_channel_cap") == 1
         channel_count = sum(
             1 for s in router.active_signals.values() if s.channel == channel
         )
@@ -430,13 +460,33 @@ class TestSignalRouter:
 
     @pytest.mark.asyncio
     async def test_per_channel_cap_does_not_block_other_channels(self, queue, router, sent_messages, monkeypatch):
-        """When one channel is full, signals from other channels are still accepted."""
+        """When one channel is full, signals from other channels are still accepted.
+
+        Pinned to ``enforce`` for the same reason as the test above, and here
+        the pin matters more: with the cap off nothing blocks anything, so an
+        "the other channel got through" assertion alone would pass
+        **vacuously** — green for a reason that has nothing to do with
+        per-channel isolation.  So a SAME-channel candidate is enqueued beside
+        the cross-channel one and asserted blocked on ``per_channel_cap``: the
+        test now needs the cap to be both armed and channel-scoped, and fails
+        against a router that is not enforcing it at all.
+        """
         import src.signal_router as sr_mod
         from config import MAX_CONCURRENT_SIGNALS_PER_CHANNEL
 
+        # Pin the TUNABLE, not the module global. `runtime_tunables.get`
+        # returns the registered DEFAULT when no Firestore client is wired —
+        # not None — so `setattr(sr_mod, "CHANNEL_CAP_MODE", ...)` is inert
+        # here. That inert pin was written first and both tests still passed,
+        # because a different gate happened to block the candidate; lifting
+        # the direction cap is what exposed it.
+        monkeypatch.setattr(
+            "src.runtime_tunables.get",
+            lambda key, *a, **k: "enforce" if key == "channel_cap_mode" else None,
+        )
         # Raise global same-direction cap so this test can focus purely on
         # per-channel isolation without the global throttle interfering.
-        monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", 10)
+        monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", 50)
 
         scalp_channel = "360_SCALP"
         scalp_cap = MAX_CONCURRENT_SIGNALS_PER_CHANNEL.get(scalp_channel, 5)
@@ -461,7 +511,23 @@ class TestSignalRouter:
             signal_id="TEST-FVG-CROSS",
             timestamp=utcnow(),
         )
+        # …and a SAME-channel candidate, which must NOT get through. Without
+        # this second half the test is satisfied by a router that enforces
+        # nothing.
+        same_channel = Signal(
+            channel=scalp_channel,
+            symbol="SCALPOVERFLOWUSDT",
+            direction=Direction.LONG,
+            entry=1.0000,
+            stop_loss=0.9900,
+            tp1=1.0200,
+            tp2=1.0300,
+            confidence=90,
+            signal_id="TEST-SCALP-OVERFLOW",
+            timestamp=utcnow(),
+        )
         await queue.put(sig)
+        await queue.put(same_channel)
         task = asyncio.create_task(router.start())
         await asyncio.sleep(0.2)
         await router.stop()
@@ -471,8 +537,11 @@ class TestSignalRouter:
         except asyncio.CancelledError:
             pass
 
-        # The FVG signal must be accepted even though SCALP is full
+        # The FVG signal must be accepted even though SCALP is full …
         assert "TEST-FVG-CROSS" in router.active_signals
+        # … and the cap must still be channel-scoped and actually enforcing.
+        assert "TEST-SCALP-OVERFLOW" not in router.active_signals
+        assert router.delivery_stats()["drops_by_reason"].get("per_channel_cap") == 1
 
     @pytest.mark.asyncio
     async def test_failed_send_does_not_leave_active_signal_or_lock(self, queue, sent_messages, monkeypatch):
@@ -1635,3 +1704,297 @@ class TestRouterDeliveryCensusIsPublished:
         assert out["schema"] == 1
         assert out["processed"] == 3 and out["delivered"] == 1 and out["dropped"] == 2
         assert out["drops_by_reason_setup"]["per_channel_cap:MOVER_TREND_PULLBACK"] == 2
+
+
+class TestChannelCapMode:
+    """The per-channel cap is switched, not deleted (owner, 2026-09-04).
+
+    ``360_SCALP`` is the only fully-live channel, so a cap named per-channel
+    was a cap on the whole book across 17 paths — it took 45 of 56 router
+    drops in one measured 4.9h boot, and 32 of 101 promoted
+    ``LIQUIDITY_SWEEP_REVERSAL`` rows.  It now defaults to ``off``, with the
+    book ceiling beside it as the re-armable bound and the counterfactual
+    published either way.
+
+    Every test here drives the real router loop rather than calling the
+    decision helper, because the property that matters is what reaches a
+    subscriber and a helper asserting its own return shape is a mock agreeing
+    with the author.
+    """
+
+    @staticmethod
+    def _tunables(monkeypatch, **overrides):
+        """Override the LIVE tunable reads, not the module globals.
+
+        This is the trap ``_tunable_str``'s own docstring records: with no
+        Firestore client ``runtime_tunables.get`` returns the tunable's
+        registered DEFAULT rather than ``None``, so patching the module global
+        a tunable falls back to changes nothing.  A test that patched the
+        global and passed would be asserting the config default, not the
+        override it thinks it set — which is how a bound goes untested.
+        """
+        monkeypatch.setattr(
+            "src.runtime_tunables.get", lambda key, *a, **k: overrides.get(key)
+        )
+
+    @staticmethod
+    async def _run(router, queue, sig):
+        await queue.put(sig)
+        task = asyncio.create_task(router.start())
+        await asyncio.sleep(0.2)
+        await router.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    @staticmethod
+    def _fill_channel(router, channel, n):
+        for i in range(n):
+            dummy = _make_signal(symbol=f"FILL{i}USDT", channel=channel, confidence=90)
+            dummy.signal_id = f"FILL-{i}"
+            router._active_signals[dummy.signal_id] = dummy
+            router._position_lock[dummy.symbol] = dummy.direction
+
+    @pytest.mark.asyncio
+    async def test_off_admits_a_signal_a_full_channel_would_have_blocked(
+        self, queue, router, sent_messages, monkeypatch
+    ):
+        """The shipped default. This is the behaviour the owner asked for."""
+        import src.signal_router as sr_mod
+        from config import MAX_CONCURRENT_SIGNALS_PER_CHANNEL
+
+        self._tunables(monkeypatch, channel_cap_mode="off",
+                       max_concurrent_signals_book=0)
+        monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", 50)
+
+        cap = MAX_CONCURRENT_SIGNALS_PER_CHANNEL.get("360_SCALP", 5)
+        self._fill_channel(router, "360_SCALP", cap)
+
+        sig = _make_signal(symbol="NEWUSDT", confidence=90)
+        sig.signal_id = "CAP-OFF-ADMITTED"
+        await self._run(router, queue, sig)
+
+        assert "CAP-OFF-ADMITTED" in router.active_signals
+        assert router.delivery_stats()["drops_by_reason"].get("per_channel_cap", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_the_counterfactual_still_counts_what_the_cap_would_have_taken(
+        self, queue, router, sent_messages, monkeypatch
+    ):
+        """Effect off, measurement on.
+
+        A switch shipped with its measurement off produces an empty panel and a
+        decision that keeps getting deferred, which is exactly how this repo
+        has lost dark lanes before.  ``channel_only`` is the population that
+        says what re-arming the cap would cost.
+        """
+        import src.signal_router as sr_mod
+        from config import MAX_CONCURRENT_SIGNALS_PER_CHANNEL
+
+        self._tunables(monkeypatch, channel_cap_mode="off",
+                       max_concurrent_signals_book=0)
+        monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", 50)
+
+        cap = MAX_CONCURRENT_SIGNALS_PER_CHANNEL.get("360_SCALP", 5)
+        self._fill_channel(router, "360_SCALP", cap)
+
+        sig = _make_signal(symbol="NEWUSDT", confidence=90)
+        sig.signal_id = "CAP-OFF-COUNTED"
+        sig.setup_class = "LIQUIDITY_SWEEP_REVERSAL"
+        await self._run(router, queue, sig)
+
+        report = router.delivery_stats()["channel_cap"]
+        assert report["mode"] == "off"
+        assert report["counterfactual"]["channel_only"] == 1
+        assert report["would_have_blocked"] == 1
+        # Keyed by setup as well as totalled: "this cap costs 45 drops" and
+        # "this cap costs ONE path 45 drops" are different findings.
+        assert (
+            report["counterfactual_by_setup"]["channel_only:LIQUIDITY_SWEEP_REVERSAL"]
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_book_ceiling_blocks_and_names_itself_apart_from_the_channel_cap(
+        self, queue, router, sent_messages, monkeypatch
+    ):
+        """The re-armable bound, and it must not borrow the channel's name.
+
+        A candidate refused because the whole book is full and one refused
+        because a single channel is full are different findings with different
+        fixes, so they never share a drop reason.
+        """
+        import src.signal_router as sr_mod
+
+        self._tunables(monkeypatch, channel_cap_mode="off",
+                       max_concurrent_signals_book=3)
+        monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", 50)
+
+        self._fill_channel(router, "360_SCALP", 3)
+
+        sig = _make_signal(symbol="NEWUSDT", confidence=90)
+        sig.signal_id = "BOOK-CEILING-BLOCKED"
+        await self._run(router, queue, sig)
+
+        assert "BOOK-CEILING-BLOCKED" not in router.active_signals
+        drops = router.delivery_stats()["drops_by_reason"]
+        assert drops.get("book_cap") == 1
+        assert drops.get("per_channel_cap", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_zero_is_off_not_block_everything(
+        self, queue, router, sent_messages, monkeypatch
+    ):
+        """``0`` is a decision somebody made, never an unset value.
+
+        The bound that does NOT do the work needs its own test — a ceiling read
+        as ``count >= 0`` refuses every candidate on an empty book and would
+        take the whole feed down silently.
+        """
+        import src.signal_router as sr_mod
+
+        self._tunables(monkeypatch, channel_cap_mode="off",
+                       max_concurrent_signals_book=0)
+
+        sig = _make_signal(symbol="NEWUSDT", confidence=90)
+        sig.signal_id = "EMPTY-BOOK-ADMITTED"
+        await self._run(router, queue, sig)
+
+        assert "EMPTY-BOOK-ADMITTED" in router.active_signals
+        assert router.delivery_stats()["drops_by_reason"].get("book_cap", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_report_renders_before_any_candidate_is_seen(self, router):
+        """A panel that appears only once it trips teaches the reader that its
+        absence means "fine" when it equally means the check stopped running.
+        """
+        report = router.delivery_stats()["channel_cap"]
+        assert report["evaluated"] == 0
+        assert report["would_have_blocked"] == 0
+        # None, not 0.0 — no candidate was seen, so there is no share to state.
+        assert report["would_have_blocked_share"] is None
+        assert report["book_limit"] == 0
+
+
+class TestTheUnstampedRouterExits:
+    """The three gates below the twelve counted ones.
+
+    ``_process`` was documented as rejecting on twelve conditions and stamping
+    each. Three exits below them were still bare ``return``s — the RiskManager,
+    a missing Telegram channel id, and permanent delivery failure — so their
+    drops appeared in no funnel, in no suppression audit, and left a promoted
+    dark row reading ``promoted_enqueued`` forever, indistinguishable from one
+    still in flight.
+
+    Measured on the live box 2026-09-04: **11 of 65 dequeued candidates (17%)**
+    reached neither a delivery nor a stamped drop, and **31 of 101** promoted
+    ``LIQUIDITY_SWEEP_REVERSAL`` rows sat at the RiskManager — all 31 below its
+    own 1.2 R:R floor, against 5 delivered rows all at 1.22 or above.
+    """
+
+    @staticmethod
+    async def _run(router, queue, sig):
+        await queue.put(sig)
+        task = asyncio.create_task(router.start())
+        await asyncio.sleep(0.2)
+        await router.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_a_risk_manager_refusal_is_counted_and_named(self, queue, router):
+        """It must be counted, and NOT under a single "risk manager" integer.
+
+        An R:R floor, a per-symbol concurrency limit and an order-book
+        imbalance are three different fixes; one counter for all three is the
+        `place_failed` defect one subsystem over.
+        """
+        sig = _make_signal(symbol="RRFLOORUSDT", confidence=90)
+        sig.signal_id = "RISK-RR-FLOOR"
+        # TP1 nearer than the stop: designed R:R 0.5, below the 1.2 floor.
+        sig.stop_loss = sig.entry - 100
+        sig.tp1 = sig.entry + 50
+        await self._run(router, queue, sig)
+
+        assert "RISK-RR-FLOOR" not in router.active_signals
+        drops = router.delivery_stats()["drops_by_reason"]
+        assert drops.get("risk_manager_rr_floor") == 1
+
+    @pytest.mark.asyncio
+    async def test_an_unconfigured_channel_is_counted_not_silent(
+        self, queue, sent_messages, monkeypatch
+    ):
+        """No channel id means no delivery for EVERY candidate on that channel,
+        forever, and nothing anywhere said so."""
+        monkeypatch.setitem(
+            signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SCALP", ""
+        )
+
+        async def mock_send(_chat_id, _text):
+            sent_messages.append(("sent", _text))
+            return True
+
+        r = SignalRouter(
+            queue=queue, send_telegram=mock_send, format_signal=lambda s: "x"
+        )
+        sig = _make_signal(symbol="NOCHANUSDT", confidence=90)
+        sig.signal_id = "NO-CHANNEL"
+        await self._run(r, queue, sig)
+
+        assert "NO-CHANNEL" not in r.active_signals
+        assert r.delivery_stats()["drops_by_reason"].get("no_channel_configured") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_permanently_lost_signal_is_counted_once_not_per_retry(
+        self, queue, monkeypatch
+    ):
+        """The most serious outcome on this hop and the least visible.
+
+        Counted ONCE, at the point the candidate is actually abandoned — a
+        re-queued retry has not been dropped yet, and stamping it would
+        double-count the candidate the way the enqueue funnel already does.
+        """
+        monkeypatch.setitem(
+            signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SCALP", "premium"
+        )
+
+        async def instant_sleep(_secs):
+            pass
+
+        monkeypatch.setattr(signal_router_module, "_delivery_sleep", instant_sleep)
+
+        async def always_fails(_chat_id, _text):
+            return False
+
+        r = SignalRouter(
+            queue=queue, send_telegram=always_fails, format_signal=lambda s: "x"
+        )
+        sig = _make_signal(symbol="LOSTUSDT", confidence=90)
+        sig.signal_id = "DELIVERY-LOST"
+        await self._run(r, queue, sig)
+
+        assert "DELIVERY-LOST" not in r.active_signals
+        drops = r.delivery_stats()["drops_by_reason"]
+        assert drops.get("delivery_failed") == 1, "counted once, after the last retry"
+
+    def test_the_reason_classifier_buckets_by_cause_not_by_numbers(self):
+        """`risk.reason` interpolates the values, so using it as a counter key
+        would create one bucket per candidate and count nothing."""
+        from src.signal_router import _risk_reason_class
+
+        assert _risk_reason_class("Insufficient R:R (0.44 < 1.2)") == "rr_floor"
+        assert _risk_reason_class("Insufficient R:R (0.91 < 1.2)") == "rr_floor"
+        assert (
+            _risk_reason_class("Max 2 concurrent signals per symbol exceeded")
+            == "symbol_concurrency"
+        )
+        # A cause this table has never heard of is named, never dropped and
+        # never forced into a neighbour.
+        assert _risk_reason_class("something nobody has written yet") == "other"
+        assert _risk_reason_class("") == "unspecified"
+        assert _risk_reason_class(None) == "unspecified"
