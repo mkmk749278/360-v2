@@ -4,6 +4,78 @@
 
 ---
 
+## SESSION 144 2026-09-04 — the program was aimed at the wrong half of the trade
+
+Owner: *"you are just reacting and different solutions for different replies —
+look at the goal accordingly. Go deep research on all of our requirements,
+signal quality, AI utilisation, implementation, then come with proper solution
+and implementation process."* Correct criticism. `docs/PLAN_AI_TRADE_GOVERNOR_V3.md`
+is the answer, measured rather than argued.
+
+**The measurement.** 1,580 delivered closed signals, 90 days, from
+`/track-record/trades.csv` — the recorded book, not a replay. Net **+88.21%** at
+a fixed notional, **36.3%** win, median trade **negative**, mean positive.
+
+**Finding 1 — the edge is ten trades.** The top 10 of 1,580 contribute **105%**
+of the net; the book minus its top 5% is **−398%**. Any mechanism that trims the
+right tail is negative-EV by construction.
+
+**Finding 2 — the armed arm is the dangerous one.** `ADJUST_TP` may only move a
+target NEARER (v1 §7). Capping every winner at +2% takes the book from +88% to
+**−558%**; at +5%, to −11%. `AI_GOV_ARMS_ENABLED` is `tp`. Apply is OFF so
+nothing has happened, but "decidable" was being used as a proxy for "safe" and
+they are different properties. **Stated limit:** the export has no MFE column,
+so the sim does not model losers rescued by a nearer target — the true effect is
+less bad, and `/exit-backtest` prices it properly. That is P0.
+
+**Finding 3 — the asymmetry.** A perfect veto dropping the worst 5% yields
+**+478%**. Exit management is worth up to −646%; entry filtering up to +390%.
+`OWNER_BRIEF` §3.2 said this fifteen months of sessions ago — *"the residual gap
+is entry quality + fees, not the exit"* — and nothing was pointed at it.
+
+**Finding 4 — the owner's memory diagnosis, tested both ways.** He is right that
+the engine has no memory: `strategy_edge` keys on `(strategy, context_key)` and
+**symbol appears nowhere**; the one per-symbol stamp (#998) is observe-only and
+already broken on `RANGE_FADE` (#1010). But *which coins are good* is
+**refuted** — corr(first-half, second-half) per symbol = **−0.19**, and symbols
+that were winning went on to −0.189%. What survives is *is this coin in a paying
+episode right now*: previous trade on the symbol lost within 6h → **−0.309%**
+against a +0.026% baseline, and the COLD side stays negative after removing the
+top 10 (−0.343%) and the top 5% (−0.642%). HOT−COLD CI excludes zero at the
+top-10 cut and includes it at the top-5% cut, so the **veto half is the robust
+half** and the winning half is not established. This retracts the per-pair
+dossier I proposed earlier the same day, from the data I proposed it from.
+
+**Finding 5 — the reviewer is blind by construction.** 72/72 verdicts with no
+book and no CVD; `grep` shows no Volume Profile, structure state, SMC or pattern
+anywhere in the governor modules; two of four trigger rungs cannot fire. The
+0-of-5 and 1-of-4 manual passes are therefore evidence about
+reasoning-without-inputs, not about reasoning.
+
+**The design (v3 §7):** a deterministic veto at emission (Layer A) · the
+existing in-process reviewer, unblinded, with `ADJUST_TP` de-armed and
+`HAND_TO_TRAIL` added (Layer B) · a rare escalation-only deep pass (Layer C) ·
+a scheduled-events calendar, the only news-shaped input with evidence, feeding
+Layer A as a rule (Layer D). Cost $5–40/month; a consumer subscription cannot
+serve any of it.
+
+**Implementation P0–P5 in §8**, each gated by a measurement rather than a date,
+and P4 arms exactly one rule on a window that did not suggest it.
+
+### OPEN — owner decisions
+
+- **De-arm `ADJUST_TP` now?** It is the only armed arm and §3 says it is the
+  wrong one to be first.
+- **Stream budget**: widen the 40-symbol caps, or subscribe on-arm and release
+  at close (bounded by the ~5 open signals).
+- **The veto reduces delivered signals** — `campaign_cold` would have dropped
+  254 of 1,395. That is against `OWNER_BRIEF` §3.2's "quantity matters" and is a
+  product decision, not an engineering one.
+- Carried: `HAND_TO_TRAIL` per-signal vs per-user, `AI_GOV_MAX_USD_PER_DAY`,
+  signal geometry in a third-party workspace.
+
+---
+
 ## SESSION 143 2026-09-04 — the wake test answered NO, and it moved the analyst inside the engine
 
 Owner restated the target in one sentence: *"new signal out, you Claude wake

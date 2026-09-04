@@ -17,6 +17,9 @@ transport, the `HAND_TO_TRAIL` verdict, and the scoring harness) is
 `docs/PLAN_AI_TRADE_GOVERNOR_V2.md`, written 2026-09-03. Read v2 before
 changing anything here; §3 of it records three gaps between this document and
 the shipped code.
+**Read `docs/PLAN_AI_TRADE_GOVERNOR_V3.md` first (2026-09-04).** It measures the
+recorded book and de-arms the `tp` arm this document scheduled first; the fast
+lane described below is still what runs, and its invariants (§7) are unchanged.
 **Companions:** `docs/LLM_SIGNAL_CRITIC_BRIDGE.md` (the pre-dispatch sibling — §1
 below), `docs/STATISTICAL_CHANGE_POLICY.md` (binds the rollout — §11),
 `docs/PRICE_ACTION_PROGRAM.md` (owns the reality-feed inputs — §3).

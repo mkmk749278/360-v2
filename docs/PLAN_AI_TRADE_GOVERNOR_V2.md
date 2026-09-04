@@ -2,6 +2,13 @@
 
 **Status:** design of record for the *deep* lane. Written 2026-09-03. Nothing in
 this document is implemented.
+**Superseded in part by `docs/PLAN_AI_TRADE_GOVERNOR_V3.md` (2026-09-04).** v3
+measured the recorded book — 1,580 closed signals — and found the program aimed
+at the wrong half of the trade: the book's entire profit is ten trades, so the
+`ADJUST_TP` arm this document schedules first (§12 D4) is measured *negative*,
+and the headroom is in a veto at emission. v3 supersedes this document's
+**targeting and rollout**; its invariants (§10), transport findings (§6) and
+scoring discipline (§7) stand.
 **Relationship to v1:** `docs/PLAN_AI_TRADE_GOVERNOR.md` remains the design of
 record for the **fast lane** — the bar-clock classifier that is live, measuring,
 and described accurately there. This document does not replace it. It adds the
