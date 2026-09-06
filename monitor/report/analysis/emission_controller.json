@@ -76,7 +76,7 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "KEEP",
+        "SKIP",
         "SKIP",
         "SKIP"
       ],
@@ -237,7 +237,7 @@
       "SR_FLIP_RETEST|min_samples": 1759,
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 1855
     },
-    "cycle": 2058
+    "cycle": 2102
   },
   "ledger": [
     {

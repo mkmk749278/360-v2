@@ -1,21 +1,21 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 756,
-    "wins": 232,
-    "losses": 299,
-    "neutral": 225,
-    "win_rate_pct": 30.7,
-    "avg_pnl_pct": 0.1592
+    "n": 782,
+    "wins": 241,
+    "losses": 310,
+    "neutral": 231,
+    "win_rate_pct": 30.8,
+    "avg_pnl_pct": 0.1762
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 233,
+    "n": 237,
     "wins": 45,
-    "losses": 76,
-    "neutral": 112,
-    "win_rate_pct": 19.3,
-    "avg_pnl_pct": 0.2308
+    "losses": 79,
+    "neutral": 113,
+    "win_rate_pct": 19.0,
+    "avg_pnl_pct": 0.2126
   },
   {
     "setup": "SR_FLIP_RETEST",
@@ -37,30 +37,30 @@
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
-    "n": 87,
+    "n": 89,
     "wins": 18,
     "losses": 42,
-    "neutral": 27,
-    "win_rate_pct": 20.7,
-    "avg_pnl_pct": -0.075
+    "neutral": 29,
+    "win_rate_pct": 20.2,
+    "avg_pnl_pct": -0.0733
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 80,
-    "wins": 15,
-    "losses": 35,
+    "n": 85,
+    "wins": 18,
+    "losses": 37,
     "neutral": 30,
-    "win_rate_pct": 18.8,
-    "avg_pnl_pct": -0.1614
+    "win_rate_pct": 21.2,
+    "avg_pnl_pct": -0.1249
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 64,
-    "wins": 19,
-    "losses": 25,
-    "neutral": 20,
-    "win_rate_pct": 29.7,
-    "avg_pnl_pct": 0.2107
+    "n": 72,
+    "wins": 21,
+    "losses": 29,
+    "neutral": 22,
+    "win_rate_pct": 29.2,
+    "avg_pnl_pct": 0.1613
   },
   {
     "setup": "BREAKDOWN_SHORT",
@@ -82,21 +82,21 @@
   },
   {
     "setup": "TREND_PULLBACK_EMA",
-    "n": 17,
+    "n": 19,
     "wins": 3,
     "losses": 5,
-    "neutral": 9,
-    "win_rate_pct": 17.6,
-    "avg_pnl_pct": 0.1112
+    "neutral": 11,
+    "win_rate_pct": 15.8,
+    "avg_pnl_pct": 0.0995
   },
   {
     "setup": "MEAN_REVERT",
-    "n": 11,
-    "wins": 3,
+    "n": 12,
+    "wins": 4,
     "losses": 2,
     "neutral": 6,
-    "win_rate_pct": 27.3,
-    "avg_pnl_pct": 0.414
+    "win_rate_pct": 33.3,
+    "avg_pnl_pct": 0.6409
   },
   {
     "setup": "FUNDING_EXTREME_SIGNAL",
