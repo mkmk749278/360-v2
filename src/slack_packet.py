@@ -295,6 +295,14 @@ def render(packet: Dict[str, Any]) -> str:
             f"TP1 `{packet.get('tp1')}` · conf `{packet.get('confidence')}` · "
             f"tf `{packet.get('trigger_tf')}`"
         )
+    if kind == KIND_TEST:
+        note = packet.get("note")
+        return (
+            ":test_tube: *Lumin Engine — connection test*\n"
+            "This is NOT a signal and nothing was traded. It confirms the engine "
+            "can reach this channel."
+            + (f"\n_{note}_" if note else "")
+        )
     if kind == KIND_VERDICT:
         blind = packet.get("unknown_frac")
         # An unmeasured blindness is not a measured zero, so it renders as a
@@ -472,6 +480,104 @@ def spawn_drain(*, task_factory: Any = None) -> bool:
         fail_open.record("slack_packet.spawn", exc)
         return False
     return True
+
+
+# ── The pre-arm test post ───────────────────────────────────────────────────
+
+
+#: A packet that is unmistakably not a signal. It shares the outbound path,
+#: the budget and the counters with the real lane, and shares NOTHING with the
+#: signal format: a test message that reads like a tradeable signal, in the
+#: channel signals arrive on, is a message somebody can act on.
+KIND_TEST = "test"
+
+
+def build_test_packet(note: str = "") -> Dict[str, Any]:
+    return {
+        "kind": KIND_TEST,
+        "note": str(note or "")[:140],
+        "at": round(_now(), 3),
+    }
+
+
+def dispatch_test_post(*, note: str = "", task_factory: Any = None) -> Dict[str, Any]:
+    """Post ONE test message now, on the owner's explicit action.
+
+    **This is the one path that does not require the lane switch, and that is a
+    decision rather than an oversight.** The arming rule for a new outbound loop
+    is *"armed by the owner after one watched cycle"* — and a cycle you cannot
+    trigger is a cycle you cannot watch. Waiting for a real delivered signal to
+    find out whether the webhook works means discovering a bad URL at the moment
+    the lane is supposed to start being useful.
+
+    What the switch still governs is untouched, and that is the property that
+    matters: `enqueue` refuses while disabled, `drain` refuses while disabled,
+    and `spawn_drain` refuses while disabled — so the ENGINE still posts nothing
+    on its own. This is a single message, per invocation, through an audited ops
+    action, and it spends the same hourly budget so it cannot be hammered.
+
+    It does require a webhook URL. "No URL" is a named refusal rather than a
+    silent no-op, because the two have different fixes and the whole point of
+    this entry is to tell them apart.
+
+    ``note`` is accepted for an API caller and is deliberately NOT declared in
+    the catalog entry's ``needs``: the ops console renders a text input for
+    ``symbol`` and for nothing else, on purpose, and a declared need no surface
+    can satisfy is the same "declared and unread" shape this repo keeps paying
+    for. Empty is the ordinary case.
+
+    Returns what it DID, not what happened — the post is dispatched onto the
+    loop and its outcome lands in the same `outcomes` / `responses` counters the
+    real lane writes, so reading `read.slack_packet` afterwards exercises the
+    instrument as well as the transport.
+    """
+    if not configured():
+        _count_in("refusals", NOT_CONFIGURED)
+        return {
+            "dispatched": False,
+            "reason": NOT_CONFIGURED,
+            "detail": "no SLACK_PACKET_WEBHOOK_URL on this container",
+        }
+
+    now = _now()
+    if not _budget_ok(now):
+        _count_in("refusals", BUDGET_EXHAUSTED)
+        return {"dispatched": False, "reason": BUDGET_EXHAUSTED}
+
+    packet = build_test_packet(note)
+
+    async def _run() -> None:
+        session = aiohttp.ClientSession()
+        try:
+            await _post_one(session, packet)
+        except Exception as exc:  # noqa: BLE001
+            fail_open.record("slack_packet.test_post", exc)
+        finally:
+            try:
+                await session.close()
+            except Exception as exc:  # noqa: BLE001
+                fail_open.record("slack_packet.test_session_close", exc)
+
+    spawn = task_factory or asyncio.create_task
+    try:
+        spawn(_run())
+    except Exception as exc:  # noqa: BLE001
+        # No running loop. Named rather than raised, and the budget is already
+        # spent — which is the conservative direction for a bypass path.
+        fail_open.record("slack_packet.test_dispatch", exc)
+        return {"dispatched": False, "reason": "no_event_loop", "detail": _redact(exc)}
+
+    _count_in("by_kind", KIND_TEST)
+    return {
+        "dispatched": True,
+        "lane_at_dispatch": lane_state(),
+        "rendered": render(packet),
+        "note": (
+            "One test message was sent. Read `read.slack_packet` again for the "
+            "outcome — it lands in `outcomes` and `responses` beside the real "
+            "lane's, so a failure names what Slack said."
+        ),
+    }
 
 
 def health() -> Dict[str, Any]:

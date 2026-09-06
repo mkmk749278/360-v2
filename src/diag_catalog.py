@@ -622,7 +622,39 @@ def _reseed_symbol(ctx: Ctx) -> Dict[str, Any]:
             "result": str(seed(symbol))[:400]}
 
 
+def _slack_test_post(ctx: Ctx) -> Dict[str, Any]:
+    """Send ONE test message to the Slack channel, now.
+
+    Exists because the lane's own arming rule requires a watched cycle and the
+    real trigger is a delivered signal — roughly sixteen a day. Waiting for one
+    means discovering a bad webhook at the moment the lane is meant to start
+    being useful, which is the opposite of a watched cycle.
+
+    It is the only path that does not consult `slack_packet_enabled`, and the
+    switch's actual property is untouched: the engine still posts nothing on its
+    own while it is off (`enqueue`, `drain` and `spawn_drain` all refuse).
+    Bounded to one message per invocation, spending the same hourly budget.
+    """
+    from src import slack_packet as _sp
+
+    return _sp.dispatch_test_post(note=str(ctx.args.get("note") or "")[:140])
+
+
 for _e in (
+    Entry("action.slack_test_post", "Slack — send one test message", "action",
+          "Post a single, clearly-marked test message to the configured Slack "
+          "channel without waiting for a delivered signal. Refuses by name if no "
+          "webhook URL reached this container. Read `read.slack_packet` "
+          "afterwards for the outcome — it lands in the same counters the real "
+          "lane writes, so this exercises the instrument as well as the "
+          "transport.",
+          _slack_test_post,
+          effect="Sends ONE message to the Slack channel the webhook was created "
+                 "for. Reversible by deleting that message. Touches no order, no "
+                 "position and no signal. It is deliberately NOT gated on "
+                 "`slack_packet_enabled`, because a lane armed only after a "
+                 "watched cycle needs a way to produce one; the switch still "
+                 "stops the engine posting on its own."),
     Entry("action.flush_ledgers", "Flush measurement ledgers", "action",
           "Force every measurement ledger to persist what it holds in memory.",
           _flush_ledgers,
