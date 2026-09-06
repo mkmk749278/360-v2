@@ -103,9 +103,44 @@ here**:
 That is the exact condition the depth-pool defect wrote the rule for — 40
 streams, 40 silent, pool HEALTHY, because the stream name came from
 documentation and was never dialled. **Not shipped rather than shipped blind.**
-Three options, all owner's, none derivable from here: build the SUBSCRIBE
-frame and exercise it on the VPS; widen the caps (simple, permanent WS load,
-scales with the universe); or accept and label the blindness.
+
+### …and widening the caps is not the cheap alternative. It is the worse one.
+
+The obvious fallback was "just raise `DEPTH_MAX_SYMBOLS` past 40". Measured
+before recommending it, and it does not survive the measurement.
+
+**The depth feed is not broken and the cap is not the fault** — it is pointed
+at the wrong symbols. `/diagnostics/data-intake` **[verified 2026-09-06]**:
+**42 / 42 books fresh, 31,975,309 messages accepted, 0 rejected.** The streams
+work perfectly; the delivered book simply is not in them, because the 40 are
+chosen by tier1 rank while the book is dominated by promoted movers.
+
+The delivered book over 7 days is **328 distinct symbols**, and the
+distribution is flat — the most-delivered symbol carries 14 rows, the next 10,
+then a long tail. Coverage if the subscribed set were the top-N *by actual
+delivery frequency*, which is hindsight and unavailable in advance:
+
+| subscribed N | rows covered |
+|---|---|
+| 40 (today's cap) | **36%** |
+| 80 | 54% |
+| 150 | 70% |
+| 250 | 87% |
+
+So a **perfectly** chosen 40 still leaves ~64% of the book blind, and reaching
+87% costs 250 permanent subscriptions — 6x the cap, forever, on a box Binance
+has rate-limited before. Subscribe-on-arm needs **~6 symbols at a time**
+(6 arms open, measured the same day). The long tail is not a reason to widen
+the cap; it is the argument that a cap on a *static* set cannot work at all.
+
+*Method, labelled: symbol counts are a regex over the rendered `/track-record`
+page, whose table caps at 500 rows, so the percentages are approximate. The
+shape — 328 distinct, flat tail — is what carries the conclusion, not the
+decimals.*
+
+**Options, all owner's:** build the SUBSCRIBE frame and exercise it on the VPS
+(the only one that scales); widen the caps knowing the table above; or accept
+and label the blindness. The measurement now exists; the trade does not.
 
 ---
 
