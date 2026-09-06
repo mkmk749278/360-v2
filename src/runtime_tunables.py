@@ -136,6 +136,7 @@ def _build_registry() -> Dict[str, Tunable]:
         AI_GOV_MODEL,
         AI_GOV_PROVIDER,
         ALLOCATOR_RECOMMEND_ENABLED,
+        SLACK_PACKET_ENABLED,
         BE_ARM_NOISE_MULT,
         BE_ARM_R_MULT,
         BE_ARM_TP1_CAP_FRACTION,
@@ -441,6 +442,23 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=AI_GOV_MEASURE_ENABLED,
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="slack_packet_enabled",
+            label="Slack packet poster — report delivered signals and verdicts",
+            description=(
+                "Post a report into the owner's Slack channel when a signal is "
+                "delivered and when the governor returns a verdict that is not "
+                "MAINTAIN. A SURFACE, never a control path: nothing reads Slack "
+                "back and no exit depends on a post. OFF by default — a new "
+                "outbound loop on the trading box is armed after one watched "
+                "cycle, which is the 2026-09-01 incident's own rule. It stays "
+                "inert without SLACK_PACKET_WEBHOOK_URL, and the page says "
+                "which of the two is missing."
+            ),
+            type="bool",
+            default=SLACK_PACKET_ENABLED,
             category="Stops & exits",
         ),
         Tunable(

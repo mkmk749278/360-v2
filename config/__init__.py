@@ -4835,6 +4835,55 @@ AI_GOV_REQUEST_TIMEOUT_SEC: float = _safe_float("AI_GOV_REQUEST_TIMEOUT_SEC", "2
 #: How far the trade must move, in R, before the state counts as materially
 #: changed. Mechanical rather than fitted: it is the trade's own designed risk,
 #: not a number this window generated.
+# ── D1: the Slack packet poster ─────────────────────────────────────────────
+#
+# The engine posts a report into the owner's Slack channel: a delivered signal
+# when its arm opens, and a governor verdict that is not MAINTAIN. It is a
+# SURFACE and never a link in the chain — nothing reads Slack back, no verdict
+# depends on it, and the whole lane failing changes no exit.
+#
+# That standing is measured, not chosen. `docs/PLAN_AI_TRADE_GOVERNOR_V2.md`
+# §6.2a: the Claude Slack app was posted to twice on 2026-09-04, once from the
+# connector and once from a plain incoming webhook, and did not reply either
+# time — it runs a session under the account of the PERSON who mentioned it and
+# a webhook message has no person. The session-scoped inbound webhook answers
+# 401. So there is no path by which the engine wakes an external analyst, and
+# anything built on the assumption that there is would be a watchdog that fails
+# silently.
+#
+# DEFAULT OFF, and it stays off until the owner arms it after one watched
+# cycle. This is a new outbound loop on the trading box and the rule that
+# covers it was paid for on 2026-09-01, when a default-ON sweep took auto-trade
+# down for every paid user for four hours.
+SLACK_PACKET_ENABLED: bool = _safe_bool("SLACK_PACKET_ENABLED", "false")
+
+#: The incoming-webhook URL. A SECRET: it is a write capability on the
+#: channel, so it is never logged, never rendered in an error, never put in a
+#: diag payload, and never committed. `slack_packet._redact` strips it from
+#: anything recorded, because an aiohttp exception string can carry the URL it
+#: was dialling.
+SLACK_PACKET_WEBHOOK_URL: str = os.getenv("SLACK_PACKET_WEBHOOK_URL", "")
+
+#: The channel the webhook is bound to. Display only — a webhook posts where it
+#: was created and this cannot redirect it. Published so the ops page can say
+#: WHERE the packets went rather than only that they went.
+SLACK_PACKET_CHANNEL_ID: str = os.getenv("SLACK_PACKET_CHANNEL_ID", "")
+
+#: Blast-radius cap on the poster, per hour, spent at the TOP of the send —
+#: before the HTTP call, before any per-packet work, so it bounds the branch
+#: that does nothing as well as the one that posts. The orphan-sweep incident
+#: was a budget that only decremented on the branch doing work.
+SLACK_PACKET_MAX_PER_HOUR: int = _safe_int("SLACK_PACKET_MAX_PER_HOUR", "60")
+
+#: How many packets one drain may send. Bounds a backlog's effect on the
+#: monitor loop's cycle time: a flood cannot starve the loop that owns the FSM
+#: clock, it just drains over more ticks.
+SLACK_PACKET_MAX_PER_DRAIN: int = _safe_int("SLACK_PACKET_MAX_PER_DRAIN", "5")
+
+#: Outbound timeout. Short on purpose: this is a report, and a slow report must
+#: never become a slow monitor loop.
+SLACK_PACKET_TIMEOUT_SEC: float = _safe_float("SLACK_PACKET_TIMEOUT_SEC", "8.0")
+
 AI_GOV_TRIGGER_R_BAND: float = _safe_float("AI_GOV_TRIGGER_R_BAND", "0.5")
 
 #: Distance to TP1 below which a wall in front of the target could matter at

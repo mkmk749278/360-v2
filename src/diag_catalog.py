@@ -315,6 +315,19 @@ def _ai_governor(ctx: Ctx) -> Dict[str, Any]:
     return _aig.build_diag()
 
 
+def _slack_packet(ctx: Ctx) -> Dict[str, Any]:
+    """The Slack report lane: armed or not, what Slack said, what is queued.
+
+    Carries no secret. `webhook_configured` answers whether a URL EXISTS, which
+    is the only question the page needs and the only answer safe to give it —
+    the URL is a write capability on the channel and a read-only guest can
+    reach this entry.
+    """
+    from src import slack_packet as _sp
+
+    return _sp.build_diag()
+
+
 def _ai_governor_scorecard(ctx: Ctx) -> Dict[str, Any]:
     """Every governor thesis against what the signal actually did.
 
@@ -469,6 +482,14 @@ for _e in (
           "the closed-signal record off disk and belongs in its own entry, so "
           "the arms and bounds stay readable when the record is large or slow.",
           _ai_governor),
+    Entry("read.slack_packet", "Slack packet poster", "read",
+          "Whether the report lane is armed, whether a webhook URL is set, what "
+          "is queued, and what Slack itself said on the last few posts — the "
+          "status code alone cannot separate a bad payload from a dead channel. "
+          "Four lane states, because 'armed but no URL' is neither working nor "
+          "broken. Never carries the webhook URL: it is a write capability on "
+          "the channel and this entry is guest-readable.",
+          _slack_packet),
     Entry("read.ai_governor_scorecard", "AI Governor scorecard", "read",
           "Every governor thesis graded against the closed-signal record — one "
           "thesis per signal, per arm, with the MAINTAIN baseline computed on "

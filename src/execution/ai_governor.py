@@ -586,6 +586,46 @@ def arms_snapshot() -> List[Dict[str, Any]]:
         ]
 
 
+# ── The Slack report lane (D1) — a surface, never a link in the chain ───────
+#
+# Wrapped rather than called inline so a failure in the report can never reach
+# the governor: every one of these swallows, counts and returns. The lane is
+# OFF by default and each call is a dict lookup until the owner arms it.
+
+
+def _slack_enqueue_signal(sig: Any, trigger_tf: str) -> None:
+    try:
+        from src import slack_packet
+
+        if slack_packet.lane_state() != "ready":
+            return
+        slack_packet.enqueue(slack_packet.build_signal_packet(sig, trigger_tf=trigger_tf))
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("ai_governor.slack_signal", exc)
+
+
+def _slack_enqueue_verdict(verdict: Any, unknown_frac: Optional[float]) -> None:
+    try:
+        from src import slack_packet
+
+        if slack_packet.lane_state() != "ready":
+            return
+        slack_packet.enqueue(
+            slack_packet.build_verdict_packet(verdict, unknown_frac=unknown_frac)
+        )
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("ai_governor.slack_verdict", exc)
+
+
+def _slack_spawn_drain() -> None:
+    try:
+        from src import slack_packet
+
+        slack_packet.spawn_drain()
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("ai_governor.slack_drain", exc)
+
+
 def observe_signal(sig: Any, *, trigger_tf: str, now: Optional[float] = None) -> bool:
     """Open an arm for a signal, once. Returns True when a new arm was created.
 
@@ -928,6 +968,10 @@ async def sweep(
     # on the healthy path would make the floor read best exactly when the loop
     # is worst.
     _record_sweep_period(now)
+    # Kicked off this loop and never awaited: a slow report must not become a
+    # slow monitor loop. Returns immediately when the lane is off, which is
+    # every tick until the owner arms it.
+    _slack_spawn_drain()
 
     # Applied FIRST, so a verdict lands on the tick after it arrives and is
     # re-validated against state read fresh in that same tick.
@@ -961,7 +1005,12 @@ async def sweep(
             _refuse(REFUSE_TF_UNKNOWN)
             outcomes[REFUSE_TF_UNKNOWN] = outcomes.get(REFUSE_TF_UNKNOWN, 0) + 1
             continue
-        observe_signal(sig, trigger_tf=trigger_tf, now=now)
+        if observe_signal(sig, trigger_tf=trigger_tf, now=now):
+            # A new arm is a newly delivered signal, once, and this is the
+            # cheapest true statement of "a signal went out" the engine has.
+            # Enqueue only — every network cost is on the drain, which runs
+            # off this loop. Inert unless the owner has armed the lane.
+            _slack_enqueue_signal(sig, trigger_tf)
         with _arms_lock:
             arm = _arms.get(signal_id)
         if arm is None:
@@ -1118,6 +1167,13 @@ async def evaluate(
             row = verdict.as_row()
             row["snapshot"] = snapshot.as_dict()
             row["unknown_frac"] = round(snapshot.blind_fraction(), 4)
+            # MAINTAIN is most of every window and is not news; a report that
+            # posted it would train the reader to ignore the channel, which is
+            # the one failure mode a paging surface cannot have. The blindness
+            # fraction rides along because a verdict issued with no book and no
+            # CVD is legitimate and presenting it as an informed one is not.
+            if verdict.action != MAINTAIN:
+                _slack_enqueue_verdict(verdict, row["unknown_frac"])
             # Beside the pooled fraction, never instead of it. Book-blind and
             # flow-blind have different causes and different fixes, and the
             # pooled number cannot say which — see `Snapshot.readability`.
