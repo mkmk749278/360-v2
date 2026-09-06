@@ -48,7 +48,7 @@ from src.utils import get_logger
 
 log = get_logger("ai_governor_ledger")
 
-SCHEMA = 2
+SCHEMA = 3
 
 #: Older schemas this build reads unchanged.
 #:
@@ -66,7 +66,14 @@ SCHEMA = 2
 #: else) does not, because then old and new rows disagree about what a column
 #: **is**. The schema number cannot tell those apart, so the decision is stated
 #: here rather than inferred.
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1})
+#: Schema 3 (2026-09-06) **adds** ``queued_at`` — the moment the model's answer
+#: was parsed, as against ``issued_at``, which is the tick that launched the
+#: request. Every schema-1 and schema-2 row keeps its full standing: their
+#: ``issued_at`` still means exactly what it always meant, and they simply have
+#: no second stamp. Additive, so both are read rather than dropped — a purge
+#: here would destroy the window an adoption decision reads, which is the
+#: defect a bare ``!=`` loader cost this repo on 371 rows.
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1, 2})
 
 _DEFAULT_PATH = os.path.join("data", "ai_governor_v1.json")
 

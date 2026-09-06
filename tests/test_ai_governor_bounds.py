@@ -65,13 +65,14 @@ def _menu_and_snapshot(signal_id: str = "sig-1"):
 
 
 def _verdict(action: str, choice: Optional[str], signal_id: str = "sig-1",
-             issued_at: float = 1000.0) -> gov.Verdict:
+             issued_at: float = 1000.0,
+             queued_at: Optional[float] = None) -> gov.Verdict:
     return gov.Verdict(
         signal_id=signal_id, action=action, choice=choice, confidence=0.8,
         rationale="test", premise_broken=(), served_model="gemini-3.7-flash-002",
         requested_model="gemini-3.7-flash", prompt_schema=gov.PROMPT_SCHEMA,
         snapshot_digest="abc", as_of_bar_ms=1, issued_at=issued_at,
-        latency_ms=100, usage={}, cost_usd=0.0,
+        latency_ms=100, usage={}, cost_usd=0.0, queued_at=queued_at,
     )
 
 
@@ -398,3 +399,147 @@ def test_the_bound_is_published_beside_the_age():
         float(AI_GOV_VERDICT_MAX_AGE_SEC)
     )
     assert "verdict_age" in diag["health"]
+
+
+# ── The age has two halves with opposite fixes ──────────────────────────────
+#
+# Measured live 2026-09-06 through a guest session, on the instrument the
+# previous session shipped: 139 verdicts, **58 aged out (41.7%)**, oldest
+# 26.2s, against a bound of 10.0s — and of the 20-row ring, the FASTEST
+# verdict was 7.3s and the median 9.85s. Nothing can arrive sooner than the
+# model's round trip plus one sweep interval, so a 10s bound sits at the
+# median of its own pipeline and refuses whichever half jitter puts on the far
+# side. These tests pin the two halves and the floor; the bound itself is the
+# owner's number and is deliberately not changed here.
+
+
+async def test_the_age_is_split_into_model_and_queue_wait():
+    """One integer cannot say which wait spent the budget, and they differ.
+
+    A slow model is fixed by a faster model, a smaller batch or a longer
+    bound; a slow drain is fixed by the sweep cadence and no model change
+    touches it. `place_failed` one lane over: a counter is not a cause.
+    """
+    m, sn = _menu_and_snapshot()
+    # Launched at t=0, model answered at t=4.4, drained at t=9.6.
+    await gov.apply_verdict(
+        _verdict(gov.MAINTAIN, None, issued_at=0.0, queued_at=4.4), sn, m, now=9.6
+    )
+
+    age = gov.health()["verdict_age"]
+    sample = age["samples"][-1]
+    assert sample["age_sec"] == pytest.approx(9.6)
+    assert sample["model_sec"] == pytest.approx(4.4), "the round trip"
+    assert sample["queue_wait_sec"] == pytest.approx(5.2), "waiting for the next sweep"
+    assert sample["model_sec"] + sample["queue_wait_sec"] == pytest.approx(
+        sample["age_sec"]
+    ), "the halves must account for the whole, or one of them is being hidden"
+    assert age["split_n"] == 1
+    assert age.get("split_missing_n", 0) == 0, "this row carried both stamps"
+
+
+async def test_a_verdict_written_before_the_stamp_is_counted_apart_not_imputed():
+    """A missing stamp is not a zero.
+
+    Imputing `queued_at = issued_at` would put the entire age on the queue and
+    point the fix at the drain cadence for every pre-split row in the ledger —
+    the flattering direction for the model and the wrong one for the reader.
+    """
+    m, sn = _menu_and_snapshot()
+    await gov.apply_verdict(
+        _verdict(gov.MAINTAIN, None, issued_at=0.0, queued_at=None), sn, m, now=9.6
+    )
+
+    age = gov.health()["verdict_age"]
+    sample = age["samples"][-1]
+    assert sample["age_sec"] == pytest.approx(9.6), "the pooled age still records"
+    assert "model_sec" not in sample and "queue_wait_sec" not in sample
+    assert age["split_missing_n"] == 1
+    assert age.get("split_n", 0) == 0, "it must not enter the split's denominator"
+
+
+# ── The floor: what the pipeline can achieve, against what the bound allows ──
+
+
+def test_the_floor_is_unmeasurable_until_both_terms_exist():
+    """"Not enough samples" is not "the floor is zero".
+
+    Rendering an unmeasured floor as a clean one is the flattering direction of
+    the same error, and it would make the bound look like it had headroom it
+    has never been shown to have.
+    """
+    floor = gov.verdict_age_floor()
+    assert floor["measurable"] is False
+    assert floor["reason"] == "no_split_samples"
+    assert "floor_sec" not in floor, "no number is offered where none was measured"
+
+
+async def test_a_bound_at_or_below_the_floor_is_named_as_such():
+    """The defect this whole change exists to make visible.
+
+    `issued_at` is stamped at the tick that launches the request, the model
+    answers seconds later, and `drain_verdicts` runs once per sweep — so the
+    floor is the round trip plus one sweep interval and no verdict can be
+    younger. Nothing computed it, so a bound underneath it could not be
+    checked against anything. This is `_HEARTBEAT_MAX_AGE_SECONDS` — a comment
+    asserting the bound exceeds a worst-case cycle over a value that did not —
+    arriving at the governor.
+    """
+    m, sn = _menu_and_snapshot()
+    # Two sweeps, five seconds apart: the achieved cadence.
+    gov._record_sweep_period(100.0)
+    gov._record_sweep_period(105.0)
+    # A verdict whose round trip alone was 6s.
+    await gov.apply_verdict(
+        _verdict(gov.MAINTAIN, None, issued_at=0.0, queued_at=6.0), sn, m, now=11.0
+    )
+
+    floor = gov.verdict_age_floor()
+    assert floor["measurable"] is True
+    assert floor["model_mean_sec"] == pytest.approx(6.0)
+    assert floor["sweep_p50_sec"] == pytest.approx(5.0)
+    assert floor["floor_sec"] == pytest.approx(11.0), "6s round trip + one 5s sweep"
+    assert floor["bound_sec"] == pytest.approx(10.0)
+    assert floor["bound_below_floor"] is True, (
+        "a 10s bound against an 11s floor can never pass — that is not a "
+        "staleness rule, it is a rename of 'always refuse'"
+    )
+    assert floor["headroom_sec"] == pytest.approx(-1.0)
+
+
+def test_the_floor_is_published_where_the_bound_is_read():
+    """A threshold with no floor beside it is the second half of the defect.
+
+    The first was a duration with no threshold. Both have to be on the page or
+    the reader cannot tell a lane that is late from a bound that is impossible.
+    """
+    gov._record_sweep_period(100.0)
+    gov._record_sweep_period(105.0)
+    diag = gov.build_diag()
+    assert "verdict_age_floor" in diag
+    assert diag["verdict_age_floor"]["bound_sec"] == diag["bounds"][
+        "verdict_max_age_sec"
+    ], "one writer, one reader — the page must not carry a second copy"
+
+
+# ── The achieved cadence, not the one the loop asks for ─────────────────────
+
+
+def test_the_sweep_period_is_measured_and_nonsense_is_refused_not_clamped():
+    """`MONITOR_POLL_INTERVAL` is a sleep, not a period.
+
+    The same cycle carries the signal fan-out, four measurement lanes and the
+    trail governor. And a clock that went backwards is not a period: clamping
+    it would quietly drag the floor toward whatever the outlier was, which is
+    the clamp-is-not-a-guard rule at a measurement.
+    """
+    for t in (0.0, 5.0, 10.2, 15.0):
+        gov._record_sweep_period(t)
+    period = gov.health()["sweep_period"]
+    assert period["n"] == 3
+    assert period["p50_sec"] == pytest.approx(5.0)
+    assert period["max_sec"] == pytest.approx(5.2)
+
+    gov._record_sweep_period(14.0)      # backwards
+    gov._record_sweep_period(9_000.0)   # a restart, not a period
+    assert gov.health()["sweep_period"]["n"] == 3, "both refused, neither clamped"

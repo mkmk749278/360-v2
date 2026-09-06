@@ -181,6 +181,13 @@ def _blank_health() -> Dict[str, Any]:
         # clock, and there would be no denominator to read it against.
         # Bounded ring, published beside the unbounded counts.
         "verdict_age": {"n": 0, "stale_n": 0, "max_sec": 0.0, "samples": []},
+        # How often `sweep` is actually ENTERED. `MONITOR_POLL_INTERVAL` is the
+        # period the loop asks for and not the one it achieves — the loop also
+        # carries the signal fan-out, four measurement lanes and the trail
+        # governor — and this interval is one of the two terms in the floor
+        # below. Nothing measured it, which is why the bound could be set under
+        # its own pipeline and nobody could say so.
+        "sweep_period": {"n": 0, "p50_sec": 0.0, "max_sec": 0.0},
     }
 
 
@@ -212,14 +219,36 @@ _PROVIDER_FAILURE_RING = 20
 _VERDICT_AGE_RING = 20
 
 
-def _record_verdict_age(action: str, age_sec: float, *, stale: bool) -> None:
-    """Stamp how old one verdict was when the apply path reached it.
+def _record_verdict_age(
+    action: str,
+    age_sec: float,
+    *,
+    stale: bool,
+    model_sec: Optional[float] = None,
+    queue_wait_sec: Optional[float] = None,
+) -> None:
+    """Stamp how old one verdict was when the apply path reached it, and WHY.
 
     Pure telemetry: it changes no decision, and it is deliberately taken
     BEFORE the MAINTAIN early return so the stale rate has a denominator.
     A dict update under a lock is not the per-user work the MAINTAIN path is
     protected from — that rule is about Firestore reads, position walks and
     exchange calls, none of which this is.
+
+    The age is the sum of two independent waits with **opposite fixes**, and
+    pooling them is `place_failed` one lane over:
+
+    * ``model_sec`` — the tick at which the request was launched to the moment
+      the answer was parsed. Irreducible for a given provider; the fix is a
+      faster model, a smaller batch, or a longer bound.
+    * ``queue_wait_sec`` — parsed to drained. Bounded below by the interval
+      between two ``sweep`` calls, because `drain_verdicts` runs once per
+      sweep; the fix is the drain cadence, and no model change touches it.
+
+    A single integer cannot say which one is spending the budget, and the
+    remedy differs entirely. Both ride beside the pooled age, never instead
+    of it. ``None`` means a verdict written before the split — counted apart,
+    never imputed, because a missing stamp is not a zero.
     """
     with _health_lock:
         block = _health.setdefault(
@@ -229,12 +258,138 @@ def _record_verdict_age(action: str, age_sec: float, *, stale: bool) -> None:
         if stale:
             block["stale_n"] = int(block.get("stale_n", 0)) + 1
         block["max_sec"] = round(max(float(block.get("max_sec", 0.0)), age_sec), 3)
+        # Unbounded running totals for the two halves, so the split has a
+        # population rather than only the last twenty rows. Counted on their
+        # own denominator: a pre-split verdict contributes to neither.
+        if model_sec is not None and queue_wait_sec is not None:
+            block["split_n"] = int(block.get("split_n", 0)) + 1
+            block["model_sec_total"] = round(
+                float(block.get("model_sec_total", 0.0)) + float(model_sec), 3
+            )
+            block["queue_wait_sec_total"] = round(
+                float(block.get("queue_wait_sec_total", 0.0)) + float(queue_wait_sec), 3
+            )
+            block["model_sec_max"] = round(
+                max(float(block.get("model_sec_max", 0.0)), float(model_sec)), 3
+            )
+            block["queue_wait_sec_max"] = round(
+                max(float(block.get("queue_wait_sec_max", 0.0)), float(queue_wait_sec)),
+                3,
+            )
+        else:
+            block["split_missing_n"] = int(block.get("split_missing_n", 0)) + 1
         samples = block.setdefault("samples", [])
-        samples.append(
-            {"action": action, "age_sec": round(age_sec, 3), "stale": bool(stale)}
-        )
+        sample: Dict[str, Any] = {
+            "action": action,
+            "age_sec": round(age_sec, 3),
+            "stale": bool(stale),
+        }
+        if model_sec is not None and queue_wait_sec is not None:
+            sample["model_sec"] = round(float(model_sec), 3)
+            sample["queue_wait_sec"] = round(float(queue_wait_sec), 3)
+        samples.append(sample)
         if len(samples) > _VERDICT_AGE_RING:
             del samples[:-_VERDICT_AGE_RING]
+
+
+#: Recent intervals between consecutive ``sweep`` entries. Bounded: this is a
+#: cadence reading, not a ledger. Sized so a p50 over it spans ~10 minutes at
+#: the nominal 5s period — long enough to survive one slow cycle, short enough
+#: that a cadence change shows up while somebody is still looking.
+_SWEEP_PERIOD_RING = 120
+_sweep_times: Deque[float] = deque(maxlen=2)
+_sweep_periods: Deque[float] = deque(maxlen=_SWEEP_PERIOD_RING)
+
+
+def _record_sweep_period(now: float) -> None:
+    """Measure the interval this loop ACHIEVES, not the one it asks for.
+
+    ``MONITOR_POLL_INTERVAL`` is a sleep, not a period: the same cycle carries
+    the signal fan-out, four measurement lanes and the trail governor, so the
+    achieved interval is the sleep plus whatever the rest of the tick cost.
+    It is one of the two terms in `verdict_age_floor`, and until this existed
+    the floor could only be argued for rather than read.
+    """
+    with _health_lock:
+        if _sweep_times:
+            delta = now - _sweep_times[-1]
+            # A clock that went backwards, or a first sweep after a long idle,
+            # is not a period. Refused rather than clamped: a clamp here would
+            # quietly drag the floor toward whatever the outlier was.
+            if 0.0 < delta < 600.0:
+                _sweep_periods.append(delta)
+        _sweep_times.append(now)
+        if _sweep_periods:
+            ordered = sorted(_sweep_periods)
+            _health["sweep_period"] = {
+                "n": len(ordered),
+                "p50_sec": round(ordered[len(ordered) // 2], 3),
+                "max_sec": round(ordered[-1], 3),
+            }
+
+
+def verdict_age_floor() -> Dict[str, Any]:
+    """The fastest a verdict can POSSIBLY reach the apply path, from measurement.
+
+    ``sweep`` stamps ``issued_at`` at the tick that launches the request; the
+    model answers some seconds later; and the queue is not drained until the
+    NEXT sweep, because `drain_verdicts` runs once per sweep. So
+
+        floor = model round trip + one sweep interval
+
+    and no verdict can be younger than that however healthy the lane is. A
+    bound at or below the floor is not a staleness rule — it refuses
+    everything, or refuses whichever half of the distribution jitter puts on
+    the far side, and either way the refusal is a fact about our own cadence
+    rather than about the world having moved.
+
+    This is the constant-asserting-a-property-it-does-not-have defect that
+    `_HEARTBEAT_MAX_AGE_SECONDS` cost a day of restarts to, arriving at the
+    governor: there the comment said the bound *"must be longer than a
+    worst-case scan cycle"* and the value did not satisfy it. Here nothing
+    computed the floor at all, so the bound could not be checked against it.
+    Published rather than enforced — the number is the owner's, and this is
+    the reading he sets it from.
+    """
+    from config import AI_GOV_VERDICT_MAX_AGE_SEC
+
+    with _health_lock:
+        block = dict(_health.get("verdict_age") or {})
+        period = dict(_health.get("sweep_period") or {})
+    split_n = int(block.get("split_n", 0) or 0)
+    model_p50 = (
+        round(float(block.get("model_sec_total", 0.0)) / split_n, 3) if split_n else None
+    )
+    sweep_p50 = float(period.get("p50_sec") or 0.0) or None
+    bound = float(AI_GOV_VERDICT_MAX_AGE_SEC)
+
+    if model_p50 is None or sweep_p50 is None:
+        # Three states, not two. "Not enough samples yet" is not "the floor is
+        # zero", and rendering an unmeasured floor as a clean one is the
+        # flattering direction of the same error.
+        return {
+            "measurable": False,
+            "reason": "no_split_samples" if split_n == 0 else "no_sweep_periods",
+            "bound_sec": bound,
+        }
+
+    floor = round(model_p50 + sweep_p50, 3)
+    n = int(block.get("n", 0) or 0)
+    stale_n = int(block.get("stale_n", 0) or 0)
+    return {
+        "measurable": True,
+        "bound_sec": bound,
+        "floor_sec": floor,
+        "model_mean_sec": model_p50,
+        "sweep_p50_sec": round(sweep_p50, 3),
+        # The two readings that decide whether the bound is doing any work.
+        # `bound_below_floor` means it can never pass; `headroom_sec` says how
+        # much of the distribution sits above the floor before the bound bites.
+        "bound_below_floor": bound <= floor,
+        "headroom_sec": round(bound - floor, 3),
+        "stale_frac": round(stale_n / n, 4) if n else None,
+        "n": n,
+    }
 
 
 def _record_provider_failure(result: Any, now: float, *, max_output_tokens: int) -> None:
@@ -353,6 +508,12 @@ class Verdict:
     usage: Dict[str, int]
     cost_usd: Optional[float]
     price_at_verdict: Optional[float] = None
+    #: When the model's answer was PARSED, as against ``issued_at``, which is
+    #: the tick that launched the request. The gap between them is the round
+    #: trip; the gap from here to apply is the queue wait. Optional because a
+    #: verdict reconstructed from a schema-2 row has no such stamp, and a
+    #: missing stamp is not a zero.
+    queued_at: Optional[float] = None
 
     def as_row(self) -> Dict[str, Any]:
         return {
@@ -371,6 +532,7 @@ class Verdict:
             "snapshot_digest": self.snapshot_digest,
             "as_of_bar_ms": self.as_of_bar_ms,
             "issued_at": self.issued_at,
+            "queued_at": self.queued_at,
             "latency_ms": self.latency_ms,
             "usage": dict(self.usage),
             "cost_usd": self.cost_usd,
@@ -401,6 +563,11 @@ def reset_state_for_test() -> None:
         _queue.clear()
     _call_times.clear()
     _apply_times.clear()
+    # The cadence rings too. Left out, a sweep period recorded by one test
+    # leaks into the floor another test computes — and the floor is exactly
+    # the number this instrument exists to make trustworthy.
+    _sweep_times.clear()
+    _sweep_periods.clear()
     _spend_day = ""
     _spend_usd = 0.0
 
@@ -692,6 +859,10 @@ def parse_verdicts(
             snapshot_digest=snapshot.digest(),
             as_of_bar_ms=snapshot.as_of_bar_ms,
             issued_at=now,
+            # Stamped HERE, at the moment the answer exists — not at `now`,
+            # which is the tick that launched the request. Two clocks, and the
+            # distance between them is the model's round trip.
+            queued_at=_now(),
             latency_ms=result.latency_ms,
             usage=dict(result.usage),
             cost_usd=cost,
@@ -752,6 +923,11 @@ async def sweep(
     """
     now = _now() if now_ts is None else now_ts
     _count("cycles")
+    # Before every early return below. The achieved cadence is a property of
+    # this loop whether or not the governor is enabled, and measuring it only
+    # on the healthy path would make the floor read best exactly when the loop
+    # is worst.
+    _record_sweep_period(now)
 
     # Applied FIRST, so a verdict lands on the tick after it arrives and is
     # re-validated against state read fresh in that same tick.
@@ -1027,8 +1203,20 @@ async def apply_verdict(
     # arms that would have acted. Recording here gives that rate a
     # denominator.
     age_sec = now - verdict.issued_at
+    # Split into the two waits that make it up. `queued_at` is absent only on a
+    # verdict predating the stamp, and those are counted apart rather than
+    # given a zero — imputing one would put the whole age on the queue and
+    # point the fix at the wrong half.
+    model_sec = queue_wait_sec = None
+    if verdict.queued_at is not None:
+        model_sec = max(0.0, float(verdict.queued_at) - verdict.issued_at)
+        queue_wait_sec = max(0.0, now - float(verdict.queued_at))
     _record_verdict_age(
-        verdict.action, age_sec, stale=age_sec > float(AI_GOV_VERDICT_MAX_AGE_SEC)
+        verdict.action,
+        age_sec,
+        stale=age_sec > float(AI_GOV_VERDICT_MAX_AGE_SEC),
+        model_sec=model_sec,
+        queue_wait_sec=queue_wait_sec,
     )
 
     # MAINTAIN costs NOTHING. Not a Firestore read, not a position walk, not an
@@ -1588,6 +1776,12 @@ def build_diag() -> Dict[str, Any]:
             # `stale_verdict` counter's own problem one layer up.
             "verdict_max_age_sec": float(AI_GOV_VERDICT_MAX_AGE_SEC),
         },
+        # The bound above, read against what this pipeline can actually
+        # deliver. A duration with no threshold beside it was the first
+        # problem; a threshold with no FLOOR beside it is the second, and it
+        # is the one that made 58 of 139 verdicts age out on a lane whose
+        # fastest possible answer measured 7.3s.
+        "verdict_age_floor": verdict_age_floor(),
         "health": health(),
         "arms": arms_snapshot(),
         "ledger_rows": ledger.count(),
