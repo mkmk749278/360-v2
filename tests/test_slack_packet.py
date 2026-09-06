@@ -335,3 +335,39 @@ def test_a_failed_spawn_releases_the_latch(monkeypatch):
     started = []
     assert sp.spawn_drain(task_factory=lambda c: started.append(c) or c.close()) is True
     assert started, "a later drain must still be able to start"
+
+
+def test_the_diag_publishes_the_upstream_switch_too(monkeypatch):
+    """Two switches, and the lane is inert if either is off.
+
+    Packets are enqueued from the governor's sweep, so turning
+    `ai_gov_measure_enabled` off stops the reports while this lane still reads
+    "ready" — armed, configured, and fed by nothing. A page showing one switch
+    cannot say which half is missing; that is the promotions page's `lane_off`
+    state arriving one repo earlier.
+    """
+    _arm(monkeypatch)
+    from src.execution import ai_governor as aig
+
+    monkeypatch.setattr(aig, "measure_enabled", lambda: False)
+    diag = sp.build_diag()
+    assert diag["lane"] == "ready", "this lane's own switches are both on"
+    assert diag["source_lane_enabled"] is False, "and nothing is feeding it"
+    assert diag["source"] == "ai_governor.sweep"
+
+
+def test_an_unreadable_upstream_switch_is_none_not_false(monkeypatch):
+    """"We could not ask" and "the governor is off" are different facts.
+
+    Rendering the first as the second tells the owner his governor is disabled
+    when it may be running perfectly — `INDEX COLD` and the kill switch's
+    `initialised` boolean, at a report lane.
+    """
+    _arm(monkeypatch)
+    from src.execution import ai_governor as aig
+
+    def _boom():
+        raise RuntimeError("cannot read")
+
+    monkeypatch.setattr(aig, "measure_enabled", _boom)
+    assert sp.build_diag()["source_lane_enabled"] is None

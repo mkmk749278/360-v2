@@ -494,9 +494,27 @@ def build_diag() -> Dict[str, Any]:
 
     with _queue_lock:
         depth = len(_queue)
+    # Both switches, because the lane is inert if EITHER is off and for
+    # different reasons — a page showing one cannot say which half is missing.
+    # Packets are enqueued from the governor's own sweep, so turning
+    # `ai_gov_measure_enabled` off stops the reports while this lane still
+    # reads "ready": armed, configured, and fed by nothing. That is the
+    # promotions page's `lane_off` state arriving one repo earlier.
+    try:
+        from src.execution import ai_governor as _aig
+
+        upstream = bool(_aig.measure_enabled())
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("slack_packet.upstream", exc)
+        upstream = None
+
     return {
         "lane": lane_state(),
         "enabled": enabled(),
+        # None is "we could not ask", never "the governor is off" — an
+        # unreadable switch and a switch reading no are different facts.
+        "source_lane_enabled": upstream,
+        "source": "ai_governor.sweep",
         # Whether a URL EXISTS, never the URL. The one question the page needs
         # and the one answer that is safe to give it.
         "webhook_configured": configured(),
