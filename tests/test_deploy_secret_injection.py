@@ -93,6 +93,49 @@ def test_the_gemini_key_is_injected_at_both_ends():
     assert "^GEMINI_API_KEY=" in text, "deploy.yml no longer writes the key into .env"
 
 
+def test_a_write_capability_secret_is_masked_in_the_deploy_log():
+    """The derived check above proves a secret is DELIVERED. It says nothing
+    about whether delivering it prints it.
+
+    `SLACK_PACKET_WEBHOOK_URL` is a write capability on the channel — anyone
+    holding it can post as Lumin Engine — and the deploy step interpolates it
+    into a shell script whose stdout is relayed back into the Actions log. So
+    the mask is the guard, and it is pinned by name rather than derived,
+    because "which secrets are capabilities" is a judgement about each one and
+    not a property of the file.
+
+    Engine-side the same URL is stripped from the ops payload and from
+    anything handed to `fail_open` (`slack_packet._redact`); this is the third
+    surface, one repo out.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "secrets.SLACK_PACKET_WEBHOOK_URL" in text, (
+        "deploy.yml no longer delivers the webhook — is this guard stale?"
+    )
+    assert "::add-mask::${{ secrets.SLACK_PACKET_WEBHOOK_URL }}" in text, (
+        "the webhook URL reaches the deploy log unmasked"
+    )
+
+
+def test_the_slack_lane_ships_disarmed():
+    """A new outbound loop on the trading box is armed by the owner, not by a
+    deploy.
+
+    2026-09-01: a default-ON sweep got this IP rate-limited off Binance and
+    took auto-trade down for every paid user for about four hours. Delivering
+    the credential must not also switch the lane on — the two are separate
+    decisions and the second one is his.
+    """
+    env_example = (REPO / ".env.example").read_text(encoding="utf-8")
+    assert "SLACK_PACKET_ENABLED=false" in env_example, (
+        "the bootstrap .env would arm the Slack lane on a fresh VPS"
+    )
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "SLACK_PACKET_ENABLED=true" not in workflow, (
+        "the deploy arms the lane; arming is the owner's, from /control"
+    )
+
+
 def test_every_exemption_carries_a_reason():
     """An exemption nobody had to justify is how a list grows past what it was
     approved for."""
