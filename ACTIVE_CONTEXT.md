@@ -4,6 +4,146 @@
 
 ---
 
+## OPEN, LIVE NOW — the governor is blind and half its verdicts are discarded
+
+Both stated in the present tense because both are still true as this session
+ends. Neither is a money-path fault — apply is OFF — but both corrupt the only
+window an adoption decision will ever be read from.
+
+1. **200 of 200 governor rows are fully blind.** `avg_unknown_frac 1.0`, order
+   book and flow both `not_subscribed` on every row **[verified 2026-09-06 via
+   guest session]**. Was 72 of 72 in Session 143; the population grew and the
+   rate did not move. `ai_governor_blind` has been paging for weeks.
+2. **58 of 139 verdicts (41.7%) age out before they can be applied**, and
+   **13 of 26 `ADJUST_SL` — half of every actionable verdict this lane has ever
+   produced.** Instrumented in #1015; the bound itself is untouched and is the
+   owner's to set.
+
+---
+
+## SESSION 145 2026-09-06 — the wake is dead, the bound was under its own floor
+
+Owner: *"what about AI implementation — actually can we forward real-time
+signals to slack to wake up Claude and to review signal?"*
+
+### The wake half was already measured dead, twice
+
+Session 143 ran it and this session confirms nothing has changed: the Claude
+Slack app runs a session under the connected account of **the person** who
+mentioned it, so a webhook message — having no person — wakes nothing. The
+session-scoped inbound webhook answers 401. Both engine→analyst routes are
+measured dead, and D2 stays struck. **Slack is a surface; the automatic
+analyst is the engine's own model call.** Owner directed: build D1 anyway
+(the report), and fix the governor first.
+
+### The staleness had a cause, and the instrument shipped last session found it
+
+`sweep()` stamps `issued_at` at the **tick that launches the request**, the
+model answers 2.7–8.8s later, and the queue is not drained until the **next**
+sweep — `drain_verdicts` runs once per sweep. So
+
+    floor = model round trip + one sweep interval
+
+and **no verdict can be younger than that**. Live ring, 20 samples: min
+**7.3s**, median **9.85s**, max 24.5s, against a bound of **10.0s**. Nothing
+arrived under 7.3s. The bound sits 0.15s above the median of its own
+pipeline's delivery time, so what it refuses is decided by jitter rather than
+by the world having moved. `_HEARTBEAT_MAX_AGE_SECONDS` arriving at the
+governor — and here nothing computed the floor at all, so the bound could not
+be checked against anything.
+
+**The bound is deliberately not changed** (env var + redeploy, money-path
+number, owner's). What ships is the cause: `model_sec` and `queue_wait_sec`
+split apart — opposite fixes, and a pooled integer names neither — the
+**achieved** sweep interval, which nothing measured, and `verdict_age_floor()`
+publishing `bound_below_floor` / `headroom_sec` beside the bound.
+
+### SHIPPED — #1015
+
+Ledger schema 2→3, additive. Its guard asserted `SCHEMA == 2` and went red on
+the bump while the property was never in question; it now derives from
+`ADDITIVE_FROM_SCHEMAS`.
+
+D1: `src/slack_packet.py`, default OFF, armed from `/control`
+(`slack_packet_enabled`). Budget spent at the top of the drain, depth taken
+once, drain spawned and never awaited. MAINTAIN is not posted. Every verdict
+line carries `unknown_frac` and says it applied to nothing. Observable day one
+via `read.slack_packet`. Needs `SLACK_PACKET_WEBHOOK_URL` on the VPS.
+
+**Two secret surfaces, not one.** The diag never publishes the webhook URL —
+and the second leak was found by *reading the captured stderr of the test that
+pinned the first*: `fail_open.record` was WARNing the raw aiohttp error, with
+the dialled URL in it, into the container log. Both pinned; the log pin
+asserts what `record` **receives**, because it de-duplicates per site and an
+output assertion goes green against unredacted code.
+
+**Three of my own pins passed without their fix on the first attempt** and
+were rewritten until they bit — including one that used `capsys` where loguru
+holds its own stderr. And one test created and closed its own event loop, the
+defect that broke sixteen unrelated tests on 2026-09-02, caught before it cost
+a suite run.
+
+### BLOCKED — subscribe-on-arm, and it is a vendor seam I cannot exercise
+
+Owner chose *"subscribe depth/aggTrade on arm, release at close"* over widening
+the 40-symbol caps. It is the right answer and **it cannot be built safely from
+here**:
+
+- `WebSocketManager` has **no incremental subscribe**. Streams are baked into
+  the connection URL at construction; `update_streams_for_top50` is
+  kline-only and is a full `stop()` → `start()` **pool restart**.
+- Applied per arm that is ~30+ pool restarts a day, each with a 30–60s
+  resubscribe window — the depth feed would be **down exactly when a new
+  signal needs it**, from an IP that has been rate-limited off Binance before.
+- The cheap version needs Binance's `{"method":"SUBSCRIBE"}` control frame,
+  which is a **new vendor seam**, and this box gets **HTTP 451 on `fapi` and
+  403 on `fstream`** **[verified this session]**. I cannot connect to it once
+  before shipping it.
+
+That is the exact condition the depth-pool defect wrote the rule for — 40
+streams, 40 silent, pool HEALTHY, because the stream name came from
+documentation and was never dialled. **Not shipped rather than shipped blind.**
+
+### …and widening the caps is not the cheap alternative. It is the worse one.
+
+The obvious fallback was "just raise `DEPTH_MAX_SYMBOLS` past 40". Measured
+before recommending it, and it does not survive the measurement.
+
+**The depth feed is not broken and the cap is not the fault** — it is pointed
+at the wrong symbols. `/diagnostics/data-intake` **[verified 2026-09-06]**:
+**42 / 42 books fresh, 31,975,309 messages accepted, 0 rejected.** The streams
+work perfectly; the delivered book simply is not in them, because the 40 are
+chosen by tier1 rank while the book is dominated by promoted movers.
+
+The delivered book over 7 days is **328 distinct symbols**, and the
+distribution is flat — the most-delivered symbol carries 14 rows, the next 10,
+then a long tail. Coverage if the subscribed set were the top-N *by actual
+delivery frequency*, which is hindsight and unavailable in advance:
+
+| subscribed N | rows covered |
+|---|---|
+| 40 (today's cap) | **36%** |
+| 80 | 54% |
+| 150 | 70% |
+| 250 | 87% |
+
+So a **perfectly** chosen 40 still leaves ~64% of the book blind, and reaching
+87% costs 250 permanent subscriptions — 6x the cap, forever, on a box Binance
+has rate-limited before. Subscribe-on-arm needs **~6 symbols at a time**
+(6 arms open, measured the same day). The long tail is not a reason to widen
+the cap; it is the argument that a cap on a *static* set cannot work at all.
+
+*Method, labelled: symbol counts are a regex over the rendered `/track-record`
+page, whose table caps at 500 rows, so the percentages are approximate. The
+shape — 328 distinct, flat tail — is what carries the conclusion, not the
+decimals.*
+
+**Options, all owner's:** build the SUBSCRIBE frame and exercise it on the VPS
+(the only one that scales); widen the caps knowing the table above; or accept
+and label the blindness. The measurement now exists; the trade does not.
+
+---
+
 ## SESSION 144 2026-09-04 — the LSR wall was the channel cap, and a 13th gate nobody counted
 
 Owner: *"compare LSR signals Feed vs dark … why not every signal of LSR in dark

@@ -301,32 +301,50 @@ def test_an_unparseable_record_file_is_named_apart_from_a_missing_one():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_2_reads_schema_1_rows_through_the_real_serializer():
-    """Schema 2 only ADDS the readability split, so schema-1 rows keep their
-    standing. A loader that dropped them would delete the window on the first
-    flush after deploy — 371 SAR rows, and the rule was already written down."""
-    assert led.SCHEMA == 2
-    assert 1 in led.ADDITIVE_FROM_SCHEMAS
+def test_every_additive_schema_still_loads_through_the_real_serializer():
+    """An additive bump ADDS fields, so every older row keeps its full standing.
 
+    Derived from ``ADDITIVE_FROM_SCHEMAS`` rather than naming a version, because
+    the version is the half that moves: this test previously asserted
+    ``SCHEMA == 2`` and went red on the schema-3 bump while the property it
+    exists to protect was never in question. An assertion that has to be edited
+    on every bump is one that gets edited without being read — the rot case, at
+    the one guard standing between an additive bump and a deleted window (371
+    SAR rows, and the rule was already written down).
+    """
     import json
 
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "ai_governor_v1.json")
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(
-                {
-                    "schema": 1,
-                    "written_at": 0.0,
-                    "max_rows": 4000,
-                    "evicted": 0,
-                    "rows": [{"signal_id": "old-1", "action": gov.MAINTAIN, "unknown_frac": 0.5}],
-                },
-                fh,
+    assert led.ADDITIVE_FROM_SCHEMAS, "an additive-from set that is empty is a decision, not a default"
+    assert led.SCHEMA not in led.ADDITIVE_FROM_SCHEMAS, "the current schema is not an older one"
+
+    for older in sorted(led.ADDITIVE_FROM_SCHEMAS):
+        assert older < led.SCHEMA, "reading FORWARD is always refused"
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ai_governor_v1.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "schema": older,
+                        "written_at": 0.0,
+                        "max_rows": 4000,
+                        "evicted": 0,
+                        "rows": [
+                            {
+                                "signal_id": f"old-{older}",
+                                "action": gov.MAINTAIN,
+                                "unknown_frac": 0.5,
+                            }
+                        ],
+                    },
+                    fh,
+                )
+            ledger = led.GovernorLedger(path=path)
+            ledger.load()
+            assert ledger.count() == 1, (
+                f"a schema-{older} row must survive an additive bump to "
+                f"{led.SCHEMA}"
             )
-        ledger = led.GovernorLedger(path=path)
-        ledger.load()
-        assert ledger.count() == 1, "a schema-1 row must survive an additive bump"
-        assert ledger.rows()[0]["signal_id"] == "old-1"
+            assert ledger.rows()[0]["signal_id"] == f"old-{older}"
 
 
 def test_a_newer_schema_is_still_refused():
