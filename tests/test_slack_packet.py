@@ -310,3 +310,28 @@ def test_the_verdict_line_says_it_applied_to_nothing():
     """Apply is OFF. A report that read like a live intervention would be the
     reassuring direction of a wrong caption, which is the dangerous one."""
     assert "applied to nothing" in sp.render(sp.build_verdict_packet(_Verdict()))
+
+
+def test_a_failed_spawn_releases_the_latch(monkeypatch):
+    """`spawn_drain` guards against two concurrent drains with a flag.
+
+    If the task is never created — `asyncio.create_task` raises without a
+    running loop — a flag left set disables the lane for the life of the
+    process while every counter still reads healthy. Ask of any guard: what
+    advances the clock, and does a FAILURE advance it?
+    """
+    _arm(monkeypatch)
+    sp.enqueue({"kind": sp.KIND_SIGNAL, "symbol": "BTCUSDT"})
+
+    def _boom(coro):
+        # Closed explicitly: an un-awaited coroutine is a ResourceWarning, and
+        # a test that leaves warnings behind trains the reader to skim them.
+        coro.close()
+        raise RuntimeError("no running event loop")
+
+    assert sp.spawn_drain(task_factory=_boom) is False
+    assert sp._drain_running is False, "the latch must not survive a failed spawn"
+
+    started = []
+    assert sp.spawn_drain(task_factory=lambda c: started.append(c) or c.close()) is True
+    assert started, "a later drain must still be able to start"

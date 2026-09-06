@@ -457,7 +457,20 @@ def spawn_drain(*, task_factory: Any = None) -> bool:
                 _drain_running = False
 
     spawn = task_factory or asyncio.create_task
-    spawn(_run())
+    try:
+        spawn(_run())
+    except Exception as exc:  # noqa: BLE001
+        # The latch must be released on the path where the task was never
+        # created — `asyncio.create_task` raises without a running loop, and
+        # leaving `_drain_running` True there would silently disable the lane
+        # for the life of the process while every counter still read healthy.
+        # A guard whose failure path forgets to undo its own flag is the
+        # idempotence-key defect: what advances the clock, and does a failure
+        # advance it?
+        with _lock:
+            _drain_running = False
+        fail_open.record("slack_packet.spawn", exc)
+        return False
     return True
 
 
