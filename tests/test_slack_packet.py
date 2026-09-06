@@ -60,15 +60,28 @@ class _Session:
         return None
 
 
-class _Sig:
-    signal_id = "sig-1"
-    symbol = "BTCUSDT"
-    side = "LONG"
-    setup_class = "MOVER_TREND_PULLBACK"
-    entry = 100.0
-    stop_loss = 98.0
-    tp1 = 103.0
-    confidence = 0.72
+def _real_signal(**over):
+    """Build the ENGINE'S OWN `Signal`, never a stub.
+
+    The first cut of this file hand-wrote a class with `side = "LONG"` on it.
+    `Signal` has never had a `side` attribute — it is `direction` — so every
+    packet in the first live window rendered a BLANK where the direction
+    belongs, and the tests were green the whole time because they asserted my
+    invented key back at me. That is `zone_distance_atr` and
+    `classify_pending` verbatim, committed in the change whose PR body quoted
+    the rule. Driving the real dataclass is the fix for the class, not just for
+    the field.
+    """
+    from src.channels.base import Direction, Signal
+
+    kwargs = dict(
+        channel="360_SCALP", symbol="BTCUSDT", direction=Direction.LONG,
+        entry=100.0, stop_loss=98.0, tp1=103.0, tp2=106.0,
+        confidence=72.0, setup_class="MOVER_TREND_PULLBACK",
+        original_sl_distance=2.0,
+    )
+    kwargs.update(over)
+    return Signal(**kwargs)
 
 
 class _Verdict:
@@ -301,7 +314,7 @@ def test_an_unmeasured_blindness_renders_a_dash_not_a_zero():
 def test_a_signal_packet_carries_no_per_user_field():
     """Quantity, uid and the B17 exit profile are facts about a subscriber and
     have no business in a third-party workspace (§6.4)."""
-    pkt = sp.build_signal_packet(_Sig(), trigger_tf="15m")
+    pkt = sp.build_signal_packet(_real_signal(), trigger_tf="15m")
     for banned in ("uid", "user_id", "qty", "quantity", "notional", "exit_mechanism"):
         assert banned not in pkt
 
@@ -478,3 +491,60 @@ def test_the_catalog_entry_is_an_action_with_a_written_effect():
         "the ops console renders a text input for `symbol` and nothing else, so "
         "a declared need no surface can satisfy is declared-and-unread"
     )
+
+
+# ── What the first live window actually rendered ────────────────────────────
+
+
+def test_the_direction_comes_from_the_real_field_name():
+    """`Signal.direction`, not `side`.
+
+    Measured in production 2026-09-06: every packet in the first live window
+    posted `*GRTUSDT*  · MOVER_TREND_PULLBACK` — two spaces and no direction —
+    because `build_signal_packet` read `sig.side`, which does not exist. It
+    shipped green because the test built its own stub carrying that key.
+    """
+    pkt = sp.build_signal_packet(_real_signal(), trigger_tf="15m")
+    assert pkt["direction"] == "LONG"
+    assert "side" not in pkt, "the field that never existed must not linger"
+    body = sp.render(pkt)
+    assert "*BTCUSDT* LONG ·" in body
+    assert "*BTCUSDT*  ·" not in body, "the blank-direction render is back"
+
+
+def test_a_missing_direction_renders_a_question_mark_not_a_blank():
+    """A blank is invisible, which is precisely why nobody caught the real
+    defect for a whole live window. `?` is a question somebody asks."""
+    pkt = sp.build_signal_packet(_real_signal(), trigger_tf="15m")
+    pkt["direction"] = ""
+    assert "*BTCUSDT* ? ·" in sp.render(pkt)
+
+
+def test_a_stop_sitting_at_entry_is_named_as_break_even():
+    """`trade_monitor` sets `signal.stop_loss = signal.entry` on the BE shift.
+
+    Rendered under a bare "SL" that reads as a zero-risk trade — which is what
+    BNBUSDT posted live: `entry 765.36 · SL 765.36`. The resting stop is the
+    useful number; that it is no longer the designed one is the missing half.
+    """
+    pkt = sp.build_signal_packet(_real_signal(stop_loss=100.0), trigger_tf="5m")
+    body = sp.render(pkt)
+    assert "at break-even" in body
+    assert "not the designed stop" in body
+
+
+def test_an_unmoved_stop_carries_no_note():
+    """The note must mean something. A caption on every row is a caption on
+    none."""
+    body = sp.render(sp.build_signal_packet(_real_signal(), trigger_tf="15m"))
+    assert "break-even" not in body
+    assert "moved" not in body
+
+
+def test_a_signal_with_no_designed_distance_claims_nothing():
+    """Three states, not two. Unknown renders no note rather than implying the
+    stop is original — a missing stamp is not a pass."""
+    pkt = sp.build_signal_packet(
+        _real_signal(stop_loss=97.0, original_sl_distance=0.0), trigger_tf="15m")
+    assert pkt["designed_sl_distance"] is None
+    assert "moved" not in sp.render(pkt)
