@@ -371,3 +371,110 @@ def test_an_unreadable_upstream_switch_is_none_not_false(monkeypatch):
 
     monkeypatch.setattr(aig, "measure_enabled", _boom)
     assert sp.build_diag()["source_lane_enabled"] is None
+
+
+# ── The pre-arm test post, and the bypass it is confined to ─────────────────
+#
+# The lane arms after a watched cycle and its real trigger is a delivered
+# signal (~16/day), so without this the first evidence that the webhook works
+# arrives at the moment the lane is supposed to start being useful. That is the
+# opposite of a watched cycle.
+
+
+async def test_the_test_post_works_while_the_lane_is_disabled(monkeypatch):
+    """The one path that does not consult the switch — deliberately.
+
+    A cycle you cannot trigger is a cycle you cannot watch, so the arming rule
+    would be unsatisfiable without it.
+    """
+    monkeypatch.setattr(sp, "enabled", lambda: False)
+    monkeypatch.setattr(sp, "_webhook_url", lambda: "https://hooks.slack.com/services/T/B/tok12345")
+    assert sp.lane_state() == sp.DISABLED
+
+    sent = []
+    out = sp.dispatch_test_post(note="hello", task_factory=lambda c: sent.append(c) or c.close())
+    assert out["dispatched"] is True
+    assert out["lane_at_dispatch"] == sp.DISABLED, "it reports the state it bypassed"
+    assert sent, "a post was actually dispatched"
+
+
+async def test_the_bypass_does_not_leak_into_the_automatic_path(monkeypatch):
+    """The property the switch actually guarantees: the ENGINE posts nothing on
+    its own while it is off.
+
+    This is the assertion that makes the bypass admissible. If `enqueue`,
+    `drain` or `spawn_drain` ever stopped consulting the switch, a "default OFF"
+    outbound loop would be posting anyway — 2026-09-01's incident, arriving
+    through the door built for testing.
+    """
+    monkeypatch.setattr(sp, "enabled", lambda: False)
+    monkeypatch.setattr(sp, "_webhook_url", lambda: "https://hooks.slack.com/services/T/B/tok12345")
+
+    assert sp.enqueue({"kind": sp.KIND_SIGNAL, "symbol": "BTCUSDT"}) == sp.DISABLED
+    sp._queue.append({"kind": sp.KIND_SIGNAL, "symbol": "BTCUSDT"})
+    sess = _Session()
+    assert await sp.drain(session=sess) == 0
+    assert sess.calls == [], "drain made no network call while disabled"
+    assert sp.spawn_drain(task_factory=lambda c: c.close()) is False
+
+
+def test_the_test_post_refuses_by_name_with_no_url(monkeypatch):
+    """"No URL" and "switch off" have different fixes, and telling them apart is
+    the whole reason this entry exists."""
+    monkeypatch.setattr(sp, "_webhook_url", lambda: "")
+    out = sp.dispatch_test_post()
+    assert out["dispatched"] is False
+    assert out["reason"] == sp.NOT_CONFIGURED
+    assert "SLACK_PACKET_WEBHOOK_URL" in out["detail"]
+
+
+def test_the_test_message_cannot_be_mistaken_for_a_signal(monkeypatch):
+    """A message that reads like a tradeable signal, in the channel signals
+    arrive on, is a message somebody can act on.
+
+    It shares the transport, the budget and the counters with the real lane and
+    shares nothing with the signal FORMAT.
+    """
+    body = sp.render(sp.build_test_packet("smoke"))
+    assert "NOT a signal" in body
+    assert "nothing was traded" in body.lower()
+    for field in ("entry", "SL", "TP1", "conf"):
+        assert f"{field} `" not in body, f"the test message renders a {field} like a real signal"
+
+
+async def test_the_test_post_spends_the_same_hourly_budget(monkeypatch):
+    """Bounded to one message per invocation, and it cannot be hammered — the
+    bypass does not come with its own unbounded allowance."""
+    monkeypatch.setattr(sp, "enabled", lambda: False)
+    monkeypatch.setattr(sp, "_webhook_url", lambda: "https://hooks.slack.com/services/T/B/tok12345")
+    monkeypatch.setattr("config.SLACK_PACKET_MAX_PER_HOUR", 2)
+
+    fired = []
+    fac = lambda c: fired.append(c) or c.close()  # noqa: E731
+    assert sp.dispatch_test_post(task_factory=fac)["dispatched"] is True
+    assert sp.dispatch_test_post(task_factory=fac)["dispatched"] is True
+    third = sp.dispatch_test_post(task_factory=fac)
+    assert third["dispatched"] is False
+    assert third["reason"] == sp.BUDGET_EXHAUSTED
+    assert len(fired) == 2
+
+
+def test_the_catalog_entry_is_an_action_with_a_written_effect():
+    """An action nobody had to justify is how a list grows past what it was
+    approved for — and this one bypasses a safety switch, so its effect line is
+    where that is stated in the operator's own words."""
+    from src import diag_catalog as dc
+
+    entry = [e for e in dc.catalog() if e["key"] == "action.slack_test_post"]
+    assert entry, "the entry is not registered"
+    e = entry[0]
+    assert e["kind"] == "action"
+    assert e["effect"].strip(), "an action with no written effect"
+    assert "slack_packet_enabled" in e["effect"], (
+        "the effect line must say it bypasses the switch — a bypass a reader "
+        "has to discover from the source is not a documented one"
+    )
+    assert e["needs"] == [], (
+        "the ops console renders a text input for `symbol` and nothing else, so "
+        "a declared need no surface can satisfy is declared-and-unread"
+    )
