@@ -269,6 +269,75 @@ def _edge_store_internals(ctx: Ctx) -> Dict[str, Any]:
     }
 
 
+def _entry_fidelity(ctx: Ctx) -> Dict[str, Any]:
+    """The stamped entry against the price that actually existed at dispatch.
+
+    ``Signal.entry`` is the close of the candle the evaluator triggered on, and
+    every number this engine publishes about a trade divides by it. The order
+    goes out seconds later, and on a continuation setup price has usually kept
+    moving in the signal's direction over those seconds — so the stamped entry
+    is systematically better than the price available, and the difference is
+    booked as profit.
+
+    Measured against Binance's own 1m tape (2026-09-07, 605 of the 652 rows
+    closed in the 30 days to 09-06): mean drift **+0.226%**, already moved with
+    the trade on **67%** of rows, and the book's **+0.342%/trade** is
+    **+0.118%** when the same exits are priced from the tape. This entry is
+    that measurement, live and continuous, from the engine's own stamps.
+
+    Read COVERAGE first. The observation is knowable exactly once, so rows
+    closed before the stamp shipped can never be rebased — they are counted
+    under ``refusals``, never averaged in as zero drift, and until the window
+    behind the stamp fills, ``priced`` being small is the honest state rather
+    than a fault.
+
+    Changes nothing: the rebased book is published beside the recorded one and
+    no gate reads either. One obvious action was priced and withdrawn the same
+    day — refusing signals whose mark had already moved past the stamped entry
+    drops rows carrying −91.4% of BOOK PnL and **+20.0% of REAL PnL**.
+    """
+    from dataclasses import asdict
+
+    from src import entry_fidelity
+
+    tracker = ctx.need("_performance_tracker")
+    records = list(getattr(tracker, "_records", []))
+    rows = [asdict(r) for r in records]
+    recent = rows[-500:]
+    clamped = sum(
+        1 for r in rows if float(r.get("max_favorable_excursion_pct") or 0.0) == 0.0
+    )
+    # The floor, in one number: rows whose clamped MFE reads exactly 0.00 while
+    # the unclamped peak beside it is negative are rows where "+0.00%" was
+    # never a measurement. Only stamped rows can answer, so it is reported
+    # against its own denominator rather than against the book.
+    stamped_peak = [r for r in rows if r.get("peak_pnl_pct") is not None]
+    floor_rows = sum(
+        1
+        for r in stamped_peak
+        if float(r.get("max_favorable_excursion_pct") or 0.0) == 0.0
+        and float(r.get("peak_pnl_pct") or 0.0) < 0.0
+    )
+    return {
+        "all_time": entry_fidelity.summarise(rows),
+        "last_500": entry_fidelity.summarise(recent),
+        "mfe_clamp": {
+            "rows": len(rows),
+            "mfe_exactly_zero": clamped,
+            "mfe_exactly_zero_pct": (
+                round(100.0 * clamped / len(rows), 1) if rows else 0.0
+            ),
+            "rows_with_unclamped_peak": len(stamped_peak),
+            "zero_mfe_with_negative_peak": floor_rows,
+            "note": (
+                "A row with MFE 0.00 and a negative peak never went favourable "
+                "at all — the 0.00 was the floor, not a reading. Rows without "
+                "an unclamped peak predate the stamp and cannot say."
+            ),
+        },
+    }
+
+
 def _candle_census(ctx: Ctx) -> Dict[str, Any]:
     """Per-timeframe bucket census, and how many sit at the 1,000-bar cap.
 
@@ -502,6 +571,10 @@ for _e in (
     Entry("read.edge_store", "Edge store internals", "read",
           "Cell count, record counts and the biggest cells — where the 39 MB "
           "of serialisation cost lives.", _edge_store_internals),
+    Entry("read.entry_fidelity", "Entry fidelity — stamp vs tape", "read",
+          "The stamped entry against the price that actually existed at "
+          "dispatch, the drift that gap books as profit, and the same book "
+          "rebased beside it. Coverage first.", _entry_fidelity),
     Entry("read.candle_census", "Candle bucket census", "read",
           "Buckets per timeframe and how many sit at the 1,000-bar cap.",
           _candle_census),

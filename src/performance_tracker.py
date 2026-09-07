@@ -115,6 +115,29 @@ class SignalRecord:
     first_breach_to_terminal_sec: Optional[float] = None
     max_favorable_excursion_pct: float = 0.0
     max_adverse_excursion_pct: float = 0.0
+    # Entry fidelity (2026-09-07) — see ``src/entry_fidelity.py`` for the
+    # measurement. ``entry`` above is the close of the candle the evaluator
+    # triggered on, not a price the trade started at: against Binance's own 1m
+    # tape the market had already moved WITH the trade by dispatch on 67% of
+    # rows, mean +0.226%, and that drift is booked as profit. It accounts for
+    # the whole gap between this record's +0.342%/trade and the +0.118%/trade
+    # the same exits are worth when priced from the tape.
+    #
+    # Additive: ``entry`` and ``pnl_pct`` are untouched, so every existing row
+    # and every existing consumer keeps its meaning, and the rebased book is
+    # published beside the recorded one rather than replacing it. Rows closed
+    # before this shipped carry 0.0 / None and are REFUSED a rebased figure
+    # rather than handed a guess — the observation is knowable exactly once.
+    first_observed_price: float = 0.0
+    first_observed_at: Optional[float] = None
+    first_observed_source: str = ""
+    first_observed_stale: bool = False
+    # Unclamped excursions. The MFE/MAE pair above cannot cross zero, so a
+    # trade whose best moment was −0.4% is recorded identically to one that
+    # never moved and to one nobody priced: 24.4% of stop-outs sit exactly on
+    # 0.00 against 3.0% in the bucket beside it. ``None`` = never measured.
+    peak_pnl_pct: Optional[float] = None
+    trough_pnl_pct: Optional[float] = None
     stop_loss: float = 0.0                 # stop-loss price for SL-geometry analysis
     # The entry→SL distance the trade was actually sized for, in percent, stamped
     # where it becomes true (2026-08-01).
@@ -261,6 +284,12 @@ class PerformanceTracker:
         first_breach_to_terminal_sec: Optional[float] = None,
         max_favorable_excursion_pct: float = 0.0,
         max_adverse_excursion_pct: float = 0.0,
+        first_observed_price: float = 0.0,
+        first_observed_at: Optional[float] = None,
+        first_observed_source: str = "",
+        first_observed_stale: bool = False,
+        peak_pnl_pct: Optional[float] = None,
+        trough_pnl_pct: Optional[float] = None,
         stop_loss: float = 0.0,
         sl_distance_pct_at_entry: float = 0.0,
         shipped_sl_distance_pct: float = 0.0,
@@ -313,6 +342,14 @@ class PerformanceTracker:
             first_breach_to_terminal_sec=first_breach_to_terminal_sec,
             max_favorable_excursion_pct=max_favorable_excursion_pct,
             max_adverse_excursion_pct=max_adverse_excursion_pct,
+            first_observed_price=float(first_observed_price or 0.0),
+            first_observed_at=(
+                None if first_observed_at is None else float(first_observed_at)
+            ),
+            first_observed_source=str(first_observed_source or ""),
+            first_observed_stale=bool(first_observed_stale),
+            peak_pnl_pct=(None if peak_pnl_pct is None else float(peak_pnl_pct)),
+            trough_pnl_pct=(None if trough_pnl_pct is None else float(trough_pnl_pct)),
             stop_loss=stop_loss,
             sl_distance_pct_at_entry=float(sl_distance_pct_at_entry or 0.0),
             shipped_sl_distance_pct=float(shipped_sl_distance_pct or 0.0),

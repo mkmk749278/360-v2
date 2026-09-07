@@ -161,6 +161,35 @@ class Signal:
     pnl_pct: float = 0.0
     max_favorable_excursion_pct: float = 0.0
     max_adverse_excursion_pct: float = 0.0
+    # Unclamped excursions, seeded from the FIRST observation rather than from
+    # zero (2026-09-07).  The two fields above start at 0.0 and only ratchet
+    # (``max``/``min``), so they cannot be negative: a trade whose best moment
+    # was −0.4% records ``max_favorable_excursion_pct == 0.0``, identically to
+    # one that printed exactly its entry and to one nobody ever priced.  That
+    # is a floor wearing a measurement's caption, and the closed book shows it
+    # as a floor rather than a market — 24.4% of stop-outs sit exactly on 0.00
+    # against 3.0% in the 0.00–0.05 bucket beside it, with the mirror on the
+    # winners' MAE (30.0% against 2.8%).
+    #
+    # These are ADDITIVE and the originals keep their exact meaning, so every
+    # existing consumer, every persisted row and every arm threshold reads the
+    # same number it always did.  ``None`` means never measured, which is a
+    # third state the clamped pair cannot express.
+    peak_pnl_pct: Optional[float] = None
+    trough_pnl_pct: Optional[float] = None
+    # The price that actually existed when the monitor first priced this signal
+    # — as opposed to ``entry``, which is the close of the candle the evaluator
+    # triggered on and is not a price the trade started at.  See
+    # ``src/entry_fidelity.py`` for the measurement that produced these.
+    #
+    # ``first_observed_stale`` is load-bearing and is why the source travels
+    # with the price: a symbol that has left the scan universe serves a frozen
+    # candle close, and rebasing onto a frozen price manufactures a drift that
+    # is a fact about our feed rather than about the market.
+    first_observed_price: float = 0.0
+    first_observed_at: Optional[datetime] = None
+    first_observed_source: str = ""
+    first_observed_stale: bool = False
     # Original SL distance at signal creation (used by trailing stop logic so that
     # the trailing buffer doesn't collapse to zero after TP2 moves SL to break-even)
     original_sl_distance: float = 0.0
