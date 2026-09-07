@@ -4,6 +4,70 @@
 
 ---
 
+## OPEN, LIVE NOW — the recorded book overstates the real one by ~3x
+
+Stated in the present tense because it is still true as this session ends. The
+instrument ships in **#1020** (engine) and **360ce-ops #ops** (the surface); the
+*number* below is not repaired by them and is not repairable retroactively.
+
+`Signal.entry` is the close of the candle the evaluator triggered on, and every
+number this engine publishes about a trade divides by it — `pnl_pct`, MFE, MAE,
+R, the app's signal card, `/track-record`, the edge matrix, every dark lane. The
+order goes out seconds later, and on a continuation setup price has usually kept
+moving in the signal's direction over those seconds, so the stamped entry is
+systematically **better** than the price that was available and the difference
+is **booked as profit**.
+
+Measured against Binance's own USD-M 1m tape (`data.binance.vision`, which this
+box CAN reach while `fapi` answers 451), 605 of the 652 rows closed in the 30
+days to 2026-09-06, reconstructed bar by bar **[verified 2026-09-07]**:
+
+| | recorded | priced from the tape |
+|---|---|---|
+| avg / trade | **+0.342%** | **+0.118%** |
+| total | +207.1% | +71.1% |
+| net of a 0.07% round trip | +0.272% | **+0.048%** |
+
+Mean drift **+0.226%**, median +0.162%, and the market had already moved WITH
+the trade by dispatch on **67%** of rows — a bias, not noise. `0.342 − 0.226 =
+0.116` against a measured `0.118`: **the drift is the entire gap** and there is
+nothing else in it. Robust to the fill assumption (dispatch minute's open /
+close / next bar's open → +0.129 / +0.119 / +0.119). Spread and slippage are not
+modelled, so the rebased figure is if anything optimistic.
+
+**Three things the next session must not re-derive:**
+
+- **It is not the SL.** The evaluator's own *uncapped* stop would have saved
+  **23%** of zero-MFE stop-outs against **22%** of the positive-MFE control —
+  identical. The `MOVER_TREND_PULLBACK` 3% cap is associated with these rows
+  (67% cap-compressed against 49%) and is **not what costs them**. That
+  association was written up before the tape check and the causal reading was
+  wrong.
+- **It is not the whole signal.** Priced on the tape, net of fees:
+  `MOVER_TREND_PULLBACK` **+0.122%** (n=423), `FAILED_AUCTION_RECLAIM` +0.332%,
+  `DIVERGENCE_CONTINUATION` +0.408%. The negative one is **`MOVER_AVWAP_SCALP`
+  at −0.467% (n=42)**; `QUIET_COMPRESSION_BREAK` is ~flat.
+- **Do NOT gate on the drift.** Refusing signals whose live mark had already
+  moved >0.5% past the stamped entry drops 11% of rows carrying **−91.4% of BOOK
+  PnL and +20.0% of REAL PnL**, and the whole monotonic gradient across drift
+  bands collapses to noise (+0.48 / +0.09 / −0.17 / +0.30 / −0.10 / +0.06) once
+  the drift is out of the numerator. It would have thrown away money while every
+  ops page showed a triumph. **Priced and withdrawn 2026-09-07.**
+
+The owner's question that started it was why signals show `↑+0.00%` MFE. Answer:
+`max_favorable_excursion_pct` starts at 0.0 and only ratchets, so it cannot be
+negative — 24.4% of stop-outs sit exactly on 0.00 against 3.0% in the bucket
+beside it, with the mirror on the winners' MAE (30.0% against 2.8%). A floor
+wearing a measurement's caption. `peak_pnl_pct` fixes it forward; **there is no
+backfill** — the true peak is discarded at write time.
+
+**Open and unanswered:** whether to act on the drift at all. The measurement now
+exists (`read.entry_fidelity`, and the panel on `/track-record`); the trade does
+not. Nothing in this session's work changes an order, a gate or an existing
+field.
+
+---
+
 ## OPEN, LIVE NOW — the governor is blind and half its verdicts are discarded
 
 Both stated in the present tense because both are still true as this session
