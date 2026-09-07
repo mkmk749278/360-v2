@@ -393,6 +393,46 @@ class TestFirstObservationStamp:
 
 
 # ---------------------------------------------------------------------------
+# The restart round trip. A field a writer populates and a SERIALIZER drops is
+# invisible at both ends — that is what cost this repo its candle timestamps —
+# so the contract is driven through the real serializer rather than reasoned
+# about. A dropped first_observed_price would be re-stamped after the restart
+# at a price minutes later, silently and in the flattering direction.
+# ---------------------------------------------------------------------------
+
+
+class TestRestartRoundTrip:
+    def _stamped(self) -> Signal:
+        sig = _signal()
+        sig.first_observed_price = 99.5
+        sig.first_observed_at = datetime(2026, 9, 7, 2, 26, 22, tzinfo=timezone.utc)
+        sig.first_observed_source = "mark"
+        sig.first_observed_stale = True
+        sig.peak_pnl_pct = -0.41
+        sig.trough_pnl_pct = -3.2
+        return sig
+
+    def test_every_new_field_survives_the_real_serializer(self):
+        from src.signal_router import _signal_from_dict, _signal_to_dict
+
+        sig = self._stamped()
+        back = _signal_from_dict(_signal_to_dict(sig))
+        assert back is not None
+        for field in (
+            "first_observed_price", "first_observed_at", "first_observed_source",
+            "first_observed_stale", "peak_pnl_pct", "trough_pnl_pct",
+        ):
+            assert getattr(back, field) == getattr(sig, field), field
+
+    def test_the_observation_time_is_in_the_DERIVED_datetime_set(self):
+        # Not a hand-kept list: a stringified datetime that nobody converts back
+        # comes home as a str and every later comparison raises or lies.
+        from src.signal_router import _SIGNAL_DATETIME_FIELDS
+
+        assert "first_observed_at" in _SIGNAL_DATETIME_FIELDS
+
+
+# ---------------------------------------------------------------------------
 # The zero floor. This is the assertion that fails against the pre-fix tree.
 # ---------------------------------------------------------------------------
 
