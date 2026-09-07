@@ -248,19 +248,67 @@ def build_signal_packet(sig: Any, *, trigger_tf: str = "") -> Dict[str, Any]:
     workspace. §6.4 records putting signal geometry there as a deliberate
     decision rather than a default.
     """
+    # `direction`, not `side`. `Signal` has never carried a `side` attribute —
+    # the first cut read one, so EVERY packet rendered a blank where the
+    # direction belongs, and it shipped because the test built its own stub
+    # with `side="LONG"` on it. A mock whose keys you chose asserts your
+    # assumption back at you; the tests below drive the real `Signal` now.
+    direction = getattr(sig, "direction", None)
+    direction = str(getattr(direction, "value", direction) or "").upper()
+
+    entry = getattr(sig, "entry", None)
+    stop = getattr(sig, "stop_loss", None)
+    # `stop_loss` is MUTABLE and `trade_monitor` moves it in place — to entry on
+    # the break-even shift, to tp1 on the TP1 park, and along on a trail. So the
+    # resting stop is the useful number and it is NOT the risk the trade was
+    # sized for; `original_sl_distance` is. Rendering the first under a bare
+    # "SL" is how BNBUSDT posted `entry 765.36 · SL 765.36` and read as a
+    # zero-risk trade rather than as a position already at break-even.
+    designed = getattr(sig, "original_sl_distance", None)
+    try:
+        designed = float(designed) if designed else None
+    except (TypeError, ValueError):
+        designed = None
+
     return {
         "kind": KIND_SIGNAL,
         "signal_id": str(getattr(sig, "signal_id", "") or ""),
         "symbol": str(getattr(sig, "symbol", "") or ""),
-        "side": str(getattr(sig, "side", "") or ""),
+        "direction": direction,
         "setup_class": str(getattr(sig, "setup_class", "") or ""),
-        "entry": getattr(sig, "entry", None),
-        "stop_loss": getattr(sig, "stop_loss", None),
+        "entry": entry,
+        "stop_loss": stop,
+        "designed_sl_distance": designed,
         "tp1": getattr(sig, "tp1", None),
         "confidence": getattr(sig, "confidence", None),
         "trigger_tf": str(trigger_tf or ""),
         "at": round(_now(), 3),
     }
+
+
+def _stop_note(packet: Dict[str, Any]) -> str:
+    """Say when the resting stop is no longer the one the trade was sized for.
+
+    Three states, not two: at break-even, moved but not to entry, and unknown
+    (an older row, or a signal carrying no designed distance) — which renders
+    nothing rather than implying the stop is original.
+    """
+    entry = packet.get("entry")
+    stop = packet.get("stop_loss")
+    designed = packet.get("designed_sl_distance")
+    if entry is None or stop is None:
+        return ""
+    try:
+        entry_f, stop_f = float(entry), float(stop)
+    except (TypeError, ValueError):
+        return ""
+    if entry_f and abs(stop_f - entry_f) <= abs(entry_f) * 1e-9:
+        return " _(at break-even — moved, not the designed stop)_"
+    if designed:
+        moved = abs(abs(entry_f - stop_f) - float(designed)) > float(designed) * 0.02
+        if moved:
+            return " _(moved from the designed stop)_"
+    return ""
 
 
 def build_verdict_packet(verdict: Any, *, unknown_frac: Optional[float] = None) -> Dict[str, Any]:
@@ -288,10 +336,15 @@ def render(packet: Dict[str, Any]) -> str:
     """One line a phone can read, with the caveats that change its meaning."""
     kind = packet.get("kind")
     if kind == KIND_SIGNAL:
+        # A missing direction renders `?`, never a blank. A blank is invisible
+        # — which is exactly why the first live window shipped with no
+        # direction on any packet and nothing looked wrong.
+        direction = packet.get("direction") or "?"
         return (
-            f"*{packet.get('symbol')}* {packet.get('side')} · "
+            f"*{packet.get('symbol')}* {direction} · "
             f"{packet.get('setup_class')}\n"
-            f"entry `{packet.get('entry')}` · SL `{packet.get('stop_loss')}` · "
+            f"entry `{packet.get('entry')}` · SL `{packet.get('stop_loss')}`"
+            f"{_stop_note(packet)} · "
             f"TP1 `{packet.get('tp1')}` · conf `{packet.get('confidence')}` · "
             f"tf `{packet.get('trigger_tf')}`"
         )
