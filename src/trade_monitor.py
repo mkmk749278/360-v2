@@ -61,7 +61,7 @@ from src.execution import be_policy as _be_policy
 from src.execution import runner_policy as _runner_policy
 from src.execution import ai_governor
 from src.execution import trail_governor
-from src import atr_trail_live, sar_live_shadow, trail_mechanisms
+from src import atr_trail_live, entry_fidelity, sar_live_shadow, trail_mechanisms
 from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
 from src.live_ticks import resolve_recent_ticks
@@ -538,6 +538,12 @@ class TradeMonitor:
                 first_breach_to_terminal_sec=_duration(first_breach_ts_epoch, terminal_ts_epoch),
                 max_favorable_excursion_pct=sig.max_favorable_excursion_pct,
                 max_adverse_excursion_pct=sig.max_adverse_excursion_pct,
+                # Entry fidelity + the unclamped excursions, derived once in
+                # ``entry_fidelity`` so this writer and the expiry path in
+                # ``main.py`` cannot drift apart — a field carried by one
+                # terminal writer and not the other reads as missing data
+                # rather than as a missing writer (2026-09-07).
+                **entry_fidelity.record_fields(sig),
                 stop_loss=float(sig.stop_loss),
                 # The risk the trade was sized for, which ``stop_loss`` above no
                 # longer is by the time we get here — BE shift / TP1 park / trail
@@ -1028,7 +1034,11 @@ class TradeMonitor:
             self._outcome_recorded_ids &= set(signals.keys())
 
         async def _process_signal(sig: Signal) -> None:
+            # ``_latest_price`` stays the seam every caller and test already
+            # uses; the source view is consulted only for the write-once stamp
+            # below, so the per-tick path is byte-for-byte what it was.
             price = self._latest_price(sig.symbol)
+            price_source, price_stale = "", False
             if price is None:
                 # Fallback: the mark-price feed covers every Binance USDT-M
                 # futures symbol via !markPrice@arr@1s — including symbols that
@@ -1043,11 +1053,28 @@ class TradeMonitor:
                     _feed = _mpf.get_instance()
                     if _feed is not None:
                         price = _feed.get_price(sig.symbol)
+                        if price is not None:
+                            price_source, price_stale = "mark", False
                 except Exception:
                     pass
             if price is None:
                 return
             sig.current_price = price
+            # The price that actually existed the first time we could ask —
+            # as opposed to ``sig.entry``, which is the close of the candle the
+            # evaluator triggered on. Stamped here because this is the earliest
+            # point at which it is knowable, and it is knowable exactly once.
+            #
+            # The extra lookup runs once per signal, behind the write-once
+            # guard, and only to name the feed: the PRICE stamped is the one
+            # this tick actually used. Two views of the same chain, microseconds
+            # apart — not a second reading.
+            if not getattr(sig, "first_observed_price", 0.0):
+                if not price_source:
+                    _, price_source, price_stale = self._latest_price_with_source(
+                        sig.symbol
+                    )
+                self._stamp_first_observation(sig, price, price_source, price_stale)
             # Auto-execution: attempt to place an order the first time we see
             # this signal (status == "ACTIVE" and no order has been placed yet).
             # The OrderManager is a no-op when auto-execution is disabled.
@@ -1352,8 +1379,27 @@ class TradeMonitor:
             return False
 
     def _latest_price(self, symbol: str) -> Optional[float]:
-        """Return the freshest available price — used for PnL and general
-        price display.
+        """The freshest available price. ``_latest_price_with_source`` below is
+        the implementation; this is the price-only view of it."""
+        return self._latest_price_with_source(symbol)[0]
+
+    def _latest_price_with_source(
+        self, symbol: str
+    ) -> Tuple[Optional[float], str, bool]:
+        """Freshest price, which feed answered, and whether it may be frozen.
+
+        One implementation with two views rather than two copies of the chain:
+        the per-tick price path wants the number, and the first-observation
+        stamp (``src/entry_fidelity.py``) also needs to know WHICH feed
+        produced it, because rebasing a trade onto a frozen mover close
+        manufactures a drift that is a fact about our feed rather than about
+        the market.
+
+        The returned flag describes the PRICE, not the store: when a stale
+        candle diverts to the mark feed the answer is fresh, and saying
+        otherwise would refuse exactly the rows that divert exists to rescue.
+
+        Used for PnL and general price display.
 
         Normally the last 1m candle close from the scan store. But that close
         keeps serving a STALE non-None value once the symbol drops out of the
@@ -1371,18 +1417,47 @@ class TradeMonitor:
         # Divert to the mark feed only when the candle is genuinely stale AND
         # the feed actually has a fresh price — otherwise behaviour is
         # unchanged, so a healthy pair is never repriced off a second source.
-        if self._candle_stale(symbol):
+        stale = self._candle_stale(symbol)
+        if stale:
             mark = self._mark_feed_price(symbol)
             if mark is not None:
-                return mark
+                return mark, "mark", False
         if candle_close is not None:
-            return candle_close
+            return candle_close, "candle", stale
         ticks, _tick_source = resolve_recent_ticks(self._store, symbol)
         if ticks:
             tick_price = ticks[-1].get("price")
             if tick_price is not None:
-                return float(tick_price)
-        return None
+                return float(tick_price), "tick", stale
+        return None, "none", stale
+
+    def _stamp_first_observation(
+        self, sig: Signal, price: float, source: str, stale: bool
+    ) -> None:
+        """Record the first price the monitor ever saw for this signal.
+
+        Write-once, because this is knowable exactly once: by the second tick
+        the market has moved and the answer to "what could we actually have
+        had" is gone. Same class as ``entry_regime`` — there is no honest
+        backfill, so rows written before this shipped stay unstamped and are
+        refused a rebased figure rather than handed a guess.
+
+        The source and the staleness flag travel with the price because the
+        rebased book must be able to refuse a frozen mover close: see
+        ``src/entry_fidelity.py``, which does the arithmetic and names each
+        refusal.
+
+        Changes no order, no gate and no existing field. ``sig.entry`` is
+        untouched and remains what every current consumer divides by.
+        """
+        if getattr(sig, "first_observed_price", 0.0):
+            return
+        if not price or price <= 0:
+            return
+        sig.first_observed_price = float(price)
+        sig.first_observed_at = utcnow()
+        sig.first_observed_source = str(source or "")
+        sig.first_observed_stale = bool(stale)
 
     def _candle_extremes(self, symbol: str) -> tuple:
         """Return (high, low) of last 1m candle.
@@ -2416,6 +2491,23 @@ class TradeMonitor:
             )
         sig.max_favorable_excursion_pct = max(sig.max_favorable_excursion_pct, sig.pnl_pct)
         sig.max_adverse_excursion_pct = min(sig.max_adverse_excursion_pct, sig.pnl_pct)
+        # The same two excursions without the zero floor (2026-09-07). The pair
+        # above start at 0.0 and only ratchet, so neither can cross zero: a
+        # trade whose best moment was −0.4% records MFE 0.00, indistinguishable
+        # from one that printed exactly its entry and from one never priced at
+        # all. Seeded from the first evaluation instead, ``None`` means never
+        # measured and a negative peak means what it says.
+        #
+        # Additive on purpose — the clamped pair keeps its exact meaning, so
+        # the BE ratchet, the trailing invalidation and every persisted row are
+        # untouched. Reading them side by side is also the detector: MFE 0.00
+        # beside a negative ``peak_pnl_pct`` is the floor, in one row.
+        _peak = getattr(sig, "peak_pnl_pct", None)
+        _trough = getattr(sig, "trough_pnl_pct", None)
+        if _peak is None or sig.pnl_pct > _peak:
+            sig.peak_pnl_pct = sig.pnl_pct
+        if _trough is None or sig.pnl_pct < _trough:
+            sig.trough_pnl_pct = sig.pnl_pct
 
         # Engine-default BE ratchet (owner directive 2026-06-29; noise-aware
         # re-tune ACTIVE 2026-07-07). Once the trade's MFE clears the arm

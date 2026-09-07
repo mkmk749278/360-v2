@@ -30,6 +30,7 @@ from src.ai_engine import get_ai_insight
 from src.bootstrap import Bootstrap
 from src.macro_watchdog import MacroWatchdog
 from src.channels.base import Signal
+from src import entry_fidelity
 from src.channels.scalp import ScalpChannel
 from src.channels.scalp_fvg import ScalpFVGChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
@@ -916,6 +917,9 @@ class CryptoSignalEngine:
                     max_adverse_excursion_pct=float(
                         getattr(sig, "max_adverse_excursion_pct", 0.0) or 0.0
                     ),
+                    # Same derivation as the monitor's terminal path — one
+                    # writer of the shape, two call sites (2026-09-07).
+                    **entry_fidelity.record_fields(sig),
                     # Stamped where it becomes true: the regime at entry is
                     # knowable only from the Signal, and no later pass can
                     # recover it (2026-07-28).
