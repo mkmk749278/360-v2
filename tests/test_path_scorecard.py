@@ -238,3 +238,115 @@ def test_the_interval_is_stable_across_PROCESSES():
         "rows — a reader comparing this panel against the one he opened an "
         "hour ago cannot tell resampling noise from the book moving"
     )
+
+
+def test_a_raising_retirement_lookup_does_not_take_the_READ_down(monkeypatch):
+    """This module is a reader and must not be the reason a diagnostic fails."""
+    from src import path_retirement
+
+    def _boom():
+        raise RuntimeError("tunables unreachable")
+
+    monkeypatch.setattr(path_retirement, "snapshot", _boom)
+    now = time.time()
+    out = ps.summarise(_rows("A", "LONG", ["XUSDT"], 1.0, now=now), now=now)
+    assert out["cells"][0]["n"] == 1, "the grading still ran"
+    assert "RuntimeError" in (out["retirement_error"] or "")
+    assert out["already_retired"] == []
+
+
+def test_path_retirement_is_imported_in_exactly_ONE_place():
+    """And that place is the guarded lookup.
+
+    Found by running the ops contract test in an environment without the
+    engine's own dependencies: the lookup was wrapped in a try and
+    `_is_retired` imported the same module again, unguarded, so an import
+    failure raised straight out of `summarise`. The wildcard token is expanded
+    inside the guarded lookup now and nothing downstream needs to know it
+    exists.
+
+    Pinned on the TREE rather than by count of a string, because the next
+    unguarded import will be written by somebody who has not read this file.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(ps))
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        names = [a.name for a in node.names]
+        module = getattr(node, "module", "") or ""
+        if "path_retirement" not in module and "path_retirement" not in names:
+            continue
+        # Which function encloses it?
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef) and node in ast.walk(fn):
+                sites.append(fn.name)
+                break
+    assert sites == ["_retired_lookup"], (
+        f"path_retirement is imported from {sites}; every one of those is a "
+        "path on which a reader can take down the read it reports on"
+    )
+
+
+# ── It runs on the ENGINE'S event loop ──────────────────────────────────────
+
+def test_resampling_sums_and_counts_is_identical_to_concatenating():
+    """The load-bearing arithmetic behind the vectorised bootstrap.
+
+    The mean of a cluster resample is the total of the picked symbols' sums
+    over the total of their counts. If that identity is ever broken the
+    interval silently becomes an unweighted mean of per-symbol means — a
+    different estimator, still plausible-looking, and it would quietly
+    under-weight the symbols carrying most of the evidence.
+
+    Reference built here with the same draws, by concatenating.
+    """
+    import numpy as np
+
+    by_symbol = {"A": [1.0, 3.0, 5.0], "B": [-2.0], "C": [0.5, 0.5]}
+    symbols = sorted(by_symbol)
+    size = len(symbols)
+    iters = 500
+    picks = np.random.default_rng(99).integers(0, size, size=(iters, size))
+
+    reference = []
+    for row in picks:
+        pool = [v for i in row for v in by_symbol[symbols[i]]]
+        reference.append(sum(pool) / len(pool))
+    reference.sort()
+
+    sums = np.array([sum(by_symbol[s]) for s in symbols], dtype=np.float64)
+    counts = np.array([len(by_symbol[s]) for s in symbols], dtype=np.float64)
+    vectorised = np.sort(sums[picks].sum(axis=1) / counts[picks].sum(axis=1))
+
+    assert np.allclose(vectorised, reference)
+
+
+def test_the_whole_read_stays_far_inside_one_monitor_tick():
+    """`diag_catalog.run` executes synchronously on the snapshot writer's event
+    loop — the engine's own — whose achieved period sets the governor's
+    staleness floor and whose snapshot keys carry a 60s TTL.
+
+    The first cut rebuilt the pooled list once per resample and measured
+    0.475s at 2,000 in-window rows, growing with the book. This bound is
+    ~50x what the vectorised version takes and ~5x under what the loop
+    version would take at this size, so it is a regression guard rather than a
+    stopwatch: it catches somebody reintroducing the per-resample loop, and it
+    does not fail because CI was busy.
+    """
+    now = time.time()
+    rows = []
+    for i in range(20_000):
+        rows.append({
+            "setup_class": f"PATH_{i % 12}", "direction": "LONG" if i % 2 else "SHORT",
+            "symbol": f"S{i % 140}USDT", "pnl_pct": (i % 9) - 4.0,
+            "terminal_outcome_timestamp": now - 3600,
+        })
+    started = time.perf_counter()
+    out = ps.summarise(rows, now=now)
+    elapsed = time.perf_counter() - started
+    assert out["coverage"]["in_window"] == 20_000
+    assert elapsed < 1.0, f"summarise took {elapsed:.2f}s on the engine's loop"

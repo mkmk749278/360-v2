@@ -78,10 +78,11 @@ in memory and is called only from the diagnostic channel, never from a loop.
 """
 from __future__ import annotations
 
-import random
 import time
 import zlib
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+import numpy as np
 
 #: Rows younger than this are the window. Age, never count — see the module
 #: docstring. 30 days is the same window `/track-record` leads with, so a
@@ -150,24 +151,36 @@ def _cluster_ci(
     that instrument did. Resampling the cluster is the same correction the
     August retirement analysis used, and it is why ``symbols`` is published
     beside ``n`` rather than behind it.
+
+    Vectorised, and that is not a micro-optimisation. `diag_catalog.run`
+    executes **synchronously on the snapshot writer's event loop** — the
+    engine's own loop, whose achieved period sets the governor's staleness
+    floor and whose snapshot keys carry a 60s TTL. The obvious implementation
+    (rebuild the pooled list once per resample) measured **0.475s** at 2,000
+    in-window rows and grows with the book: a half-second stall on the loop a
+    43-MB serialisation already cost 1.85s of. Resampling the per-symbol SUMS
+    and COUNTS is arithmetically identical to concatenating the picks — the
+    mean of a cluster resample is the total of the picked sums over the total
+    of the picked counts — and turns the inner loop into two array reductions.
+
+    Deterministic across processes and numpy versions: PCG64 with an explicit
+    seed, which is the whole reason the seed is published on the payload.
     """
     symbols = sorted(by_symbol)
     if len(symbols) < 2:
         return None, None
-    rng = random.Random(seed)
+    sums = np.array([sum(by_symbol[s]) for s in symbols], dtype=np.float64)
+    counts = np.array([len(by_symbol[s]) for s in symbols], dtype=np.float64)
     size = len(symbols)
-    means: List[float] = []
-    for _ in range(iters):
-        pool: List[float] = []
-        for _ in range(size):
-            pool.extend(by_symbol[symbols[rng.randrange(size)]])
-        if pool:
-            means.append(sum(pool) / len(pool))
-    if not means:
-        return None, None
-    means.sort()
-    lo = means[int(0.025 * len(means))]
-    hi = means[min(int(0.975 * len(means)), len(means) - 1)]
+    rng = np.random.default_rng(seed)
+    picks = rng.integers(0, size, size=(iters, size))
+    totals = sums[picks].sum(axis=1)
+    n_total = counts[picks].sum(axis=1)
+    # A resample can only be empty if every cluster is, which cannot happen —
+    # a symbol is only a key here because it carries at least one trade.
+    means = np.sort(totals / n_total)
+    lo = float(means[int(0.025 * iters)])
+    hi = float(means[min(int(0.975 * iters), iters - 1)])
     return round(lo, 4), round(hi, 4)
 
 
@@ -203,7 +216,7 @@ def _verdict(
     return VERDICT_UNDECIDED, "interval spans zero"
 
 
-def _retired_lookup() -> Tuple[Dict[Tuple[str, str], str], bool, Optional[str]]:
+def _retired_lookup() -> Tuple[Set[Tuple[str, str]], Set[str], bool, Optional[str]]:
     """What `path_retirement` currently diverts, and whether it is acting.
 
     Read through that module's own ``snapshot()`` rather than its internals —
@@ -222,24 +235,31 @@ def _retired_lookup() -> Tuple[Dict[Tuple[str, str], str], bool, Optional[str]]:
 
         snap = path_retirement.snapshot()
         if snap.get("error"):
-            return {}, False, str(snap["error"])
-        out: Dict[Tuple[str, str], str] = {}
+            return set(), set(), False, str(snap["error"])
+        pairs: Set[Tuple[str, str]] = set()
+        wildcards: Set[str] = set()
         for item in snap.get("retired") or ():
             setup = str(item.get("setup_class") or "").upper()
             side = str(item.get("side") or "").upper()
-            if setup:
-                out[(setup, side)] = "configured"
-        return out, bool(snap.get("enabled")), None
+            if not setup:
+                continue
+            # The wildcard is EXPANDED here, where the module that owns it is
+            # already imported, so nothing downstream needs to know the token.
+            # An unguarded second import of the same module is how a reader
+            # takes down the read it was supposed to be reporting on.
+            if side == path_retirement.ANY_SIDE:
+                wildcards.add(setup)
+            else:
+                pairs.add((setup, side))
+        return pairs, wildcards, bool(snap.get("enabled")), None
     except Exception as exc:  # pragma: no cover - defensive
-        return {}, False, f"{type(exc).__name__}: {exc}"
+        return set(), set(), False, f"{type(exc).__name__}: {exc}"
 
 
 def _is_retired(
-    retired: Dict[Tuple[str, str], str], setup: str, side: str
+    pairs: Set[Tuple[str, str]], wildcards: Set[str], setup: str, side: str
 ) -> bool:
-    from src.path_retirement import ANY_SIDE
-
-    return (setup, side) in retired or (setup, ANY_SIDE) in retired
+    return setup in wildcards or (setup, side) in pairs
 
 
 def summarise(
@@ -266,7 +286,7 @@ def summarise(
     cutoff = now - window_days * 86400.0
     fee = float(fee_pct)
 
-    retired, retirement_acting, retirement_error = _retired_lookup()
+    retired_pairs, retired_all, retirement_acting, retirement_error = _retired_lookup()
 
     considered = 0
     undated = 0
@@ -308,7 +328,7 @@ def summarise(
             min_trades=min_trades,
             min_symbols=min_symbols,
         )
-        frozen = _is_retired(retired, setup, side)
+        frozen = _is_retired(retired_pairs, retired_all, setup, side)
         graded.append(
             {
                 "setup_class": setup,
@@ -352,7 +372,10 @@ def summarise(
             for c in candidates
         ],
         "already_retired": [
-            {"setup_class": s, "side": d} for (s, d) in sorted(retired)
+            {"setup_class": st, "side": sd}
+            for (st, sd) in sorted(
+                list(retired_pairs) + [(w, "*") for w in retired_all]
+            )
         ],
         "retirement_acting": retirement_acting,
         "retirement_error": retirement_error,
