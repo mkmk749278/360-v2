@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-07T05:09:08.442376+00:00",
-  "generated_at_ts": 1788757748.442376,
+  "generated_at": "2026-09-08T05:07:08.019459+00:00",
+  "generated_at_ts": 1788844028.0194595,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "f0bbf7557386d66b7cb6055ffcc149bd676f9993",
+  "git_sha": "04d1e35df3b9ddd9447b4f4e98c285c2d8344f42",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 9067,
-    "strategy_matrix_scored_cells": 2346,
+    "strategy_matrix_cells": 9244,
+    "strategy_matrix_scored_cells": 2389,
     "performance_setups": 15,
     "suppression_gates": 0
   },
@@ -30,13 +30,6 @@
         "verdict": "STRONG"
       },
       {
-        "strategy": "MOVER_AVWAP_SCALP@SAREXIT",
-        "context_key": "ASIA/MARKUP/CASCADE/BTC_NEUTRAL",
-        "edge_r": 1.7296457628451012,
-        "n": 15,
-        "verdict": "STRONG"
-      },
-      {
         "strategy": "LIQUIDITY_SWEEP_REVERSAL",
         "context_key": "OVERLAP/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL/ALTCOIN",
         "edge_r": 1.6551356591636845,
@@ -44,17 +37,24 @@
         "verdict": "STRONG"
       },
       {
+        "strategy": "LIQUIDITY_SWEEP_REVERSAL",
+        "context_key": "NY/RANGE/NORMAL/BTC_FALLING",
+        "edge_r": 1.6373988697370283,
+        "n": 19,
+        "verdict": "STRONG"
+      },
+      {
+        "strategy": "LIQUIDITY_SWEEP_REVERSAL",
+        "context_key": "NY/RANGE/NORMAL/BTC_FALLING/MIDCAP",
+        "edge_r": 1.6373988697370283,
+        "n": 19,
+        "verdict": "STRONG"
+      },
+      {
         "strategy": "FAILED_AUCTION_RECLAIM",
         "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_FALLING/ALTCOIN",
         "edge_r": 1.553575342649317,
         "n": 22,
-        "verdict": "STRONG"
-      },
-      {
-        "strategy": "DIVERGENCE_CONTINUATION",
-        "context_key": "LONDON/MARKUP/NORMAL/BTC_NEUTRAL",
-        "edge_r": 1.5066679696435694,
-        "n": 39,
         "verdict": "STRONG"
       }
     ],
@@ -76,8 +76,8 @@
       {
         "strategy": "TREND_PULLBACK_EMA@SAREXIT",
         "context_key": "NY/QUIET/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": -1.85234405577578,
-        "n": 17,
+        "edge_r": -1.6485795172947388,
+        "n": 19,
         "verdict": "NEGATIVE"
       },
       {
