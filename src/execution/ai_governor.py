@@ -392,6 +392,133 @@ def verdict_age_floor() -> Dict[str, Any]:
     }
 
 
+#: Multiple of the slowest recent sweep interval the effective bound must
+#: clear. A verdict is queued in one tick and drained in the NEXT, so a bound
+#: at one tick refuses on jitter alone; 1.5 leaves room for one slow tick
+#: without letting a genuinely old verdict through.
+_BOUND_TICK_MULTIPLE = 1.5
+
+#: Hard ceiling, whatever the loop does. A monitor tick that has gone minutes
+#: long is a fault in its own right, and inheriting it here would silently
+#: turn the staleness rule off at exactly the moment it matters.
+_BOUND_HARD_CAP_SEC = 60.0
+
+
+def arm_reachability() -> Dict[str, Any]:
+    """Which armed arms the model has ever actually asked for.
+
+    ``AI_GOV_ARMS_ENABLED`` defaults to ``tp`` alone, and the reasoning is
+    sound on its own terms: the TP arm is the only one fully decidable from
+    the closed-signal record, because the adjustment moves the target NEARER
+    and ``max_favorable_excursion_pct`` settles it with no ordering
+    ambiguity. What nothing checked is whether the model ever chooses it.
+
+    Live on 2026-09-08, 480 ledger rows and 90 verdicts: **MAINTAIN 56,
+    ADJUST_SL 34, ADJUST_TP zero.** Every actionable verdict this lane has
+    ever produced belongs to an arm that is not armed, and the armed arm has
+    never fired. So arming the effect flag today would change nothing at all
+    — of the 34 ``ADJUST_SL`` verdicts, 16 already die ``stale_verdict`` and
+    the remaining 18 would move from ``apply_off`` to ``arm_off``.
+
+    That state is invisible in every counter the page had. ``armed_arms`` is
+    a config echo, the verdict mix is a separate table, and reading the fault
+    means holding both in your head and noticing an absence — which is the
+    one thing a table of counts cannot show. `by_action` never carries a
+    zero, because a key is created when it is first incremented, so
+    "ADJUST_TP: 0" is not a row that exists to be missing.
+
+    Publishes the join instead: per arm, whether it is armed, how many
+    verdicts have chosen it, and the one state worth naming —
+    ``armed_and_never_chosen``. Reports only; nothing is armed or disarmed
+    here, and which arms should be armed stays the owner's decision.
+    """
+    with _health_lock:
+        by_action = dict((_health.get("by_action") or {}))
+    seen = {arm: int(by_action.get(action, 0) or 0) for action, arm in _ARM_OF.items()}
+    armed = set(armed_arms())
+    rows = []
+    for arm in ARMS:
+        rows.append(
+            {
+                "arm": arm,
+                "armed": arm in armed,
+                "verdicts_seen": seen.get(arm, 0),
+                # Named rather than left as two numbers a reader must join.
+                "armed_and_never_chosen": arm in armed and seen.get(arm, 0) == 0,
+            }
+        )
+    actionable = sum(seen.values())
+    reachable = sum(v for arm, v in seen.items() if arm in armed)
+    return {
+        "arms": rows,
+        "actionable_verdicts": actionable,
+        # The number that says what arming the effect flag would do TODAY.
+        # Zero against a non-zero actionable count is the fault.
+        "reachable_verdicts": reachable,
+        "all_armed_arms_unchosen": bool(armed) and reachable == 0 and actionable > 0,
+    }
+
+
+def effective_verdict_max_age() -> Dict[str, Any]:
+    """The bound `_apply_verdict` actually enforces, derived from the loop.
+
+    The configured number is a FLOOR, not the rule. ``sweep`` stamps
+    ``issued_at`` at the tick that launches a request and `drain_verdicts`
+    runs once per sweep, so the fastest a verdict can possibly arrive is the
+    model round trip plus one sweep interval (`verdict_age_floor`). A fixed
+    bound under that figure does not measure whether the world moved — it
+    refuses whichever half of the distribution loop jitter puts on the far
+    side, and the refusal is a fact about our own cadence.
+
+    That is not hypothetical. Live on 2026-09-08: bound **10.0s**, measured
+    floor **14.1s** (5.2s model + 9.0s p50 sweep, worst tick 30.0s), headroom
+    **−4.1s** — in that state no verdict can pass, and 28 of 90 were recorded
+    stale including 13 of 26 ``ADJUST_SL``, which is every actionable verdict
+    the lane has produced. `verdict_age_floor` has published exactly this
+    reading since #1015 and **nothing consumed it**: the bound stayed the
+    config constant, so the measurement that named the fault could not correct
+    it. A reading nobody reads is `flush()` without a caller, one lane over.
+
+    Derived rather than configured, and both numbers are published because a
+    reader needs to know which one binds:
+
+        effective = min(cap, max(configured_floor, slowest_recent_tick x 1.5))
+
+    ``slowest`` rather than the median on purpose. The p50 tick is what the
+    loop usually achieves and the bound has to survive the tick it actually
+    hit — on the live reading those differ by more than 3x (9.0s against
+    30.0s), which is wider than any headroom either figure showed.
+
+    Refuses to derive rather than guessing: with no measured period the
+    configured floor stands and ``source`` says so. An unmeasured tick must
+    not read as a fast one.
+    """
+    from config import AI_GOV_VERDICT_MAX_AGE_SEC
+
+    configured = float(AI_GOV_VERDICT_MAX_AGE_SEC)
+    with _health_lock:
+        period = dict(_health.get("sweep_period") or {})
+    slowest = float(period.get("max_sec") or 0.0)
+    if slowest <= 0.0:
+        return {
+            "effective_sec": configured,
+            "configured_sec": configured,
+            "observed_tick_sec": None,
+            "source": "configured",
+            "reason": "no_sweep_periods",
+        }
+    derived = min(_BOUND_HARD_CAP_SEC, max(configured, slowest * _BOUND_TICK_MULTIPLE))
+    return {
+        "effective_sec": round(derived, 3),
+        "configured_sec": configured,
+        "observed_tick_sec": round(slowest, 3),
+        "tick_multiple": _BOUND_TICK_MULTIPLE,
+        "cap_sec": _BOUND_HARD_CAP_SEC,
+        "source": "derived" if derived > configured else "configured",
+        "capped": derived >= _BOUND_HARD_CAP_SEC,
+    }
+
+
 def _record_provider_failure(result: Any, now: float, *, max_output_tokens: int) -> None:
     """Keep the provider's own words for the last few failures.
 
@@ -1248,7 +1375,6 @@ async def apply_verdict(
     Returns the outcome name. Every refusal is counted; there is no path that
     both declines to act and says nothing.
     """
-    from config import AI_GOV_VERDICT_MAX_AGE_SEC
 
     now = _now() if now is None else now
 
@@ -1267,10 +1393,16 @@ async def apply_verdict(
     if verdict.queued_at is not None:
         model_sec = max(0.0, float(verdict.queued_at) - verdict.issued_at)
         queue_wait_sec = max(0.0, now - float(verdict.queued_at))
+    # The DERIVED bound, not the config constant. The constant is a floor and
+    # on the live loop it sat 4.1s BELOW the fastest arrival this pipeline can
+    # produce, so it refused on our own cadence rather than on the world
+    # moving. `effective_verdict_max_age` explains the derivation; both
+    # numbers are published so a reader knows which one bound.
+    max_age = float(effective_verdict_max_age()["effective_sec"])
     _record_verdict_age(
         verdict.action,
         age_sec,
-        stale=age_sec > float(AI_GOV_VERDICT_MAX_AGE_SEC),
+        stale=age_sec > max_age,
         model_sec=model_sec,
         queue_wait_sec=queue_wait_sec,
     )
@@ -1282,7 +1414,7 @@ async def apply_verdict(
         _count_in("by_action", "applied:maintain")
         return MAINTAIN
 
-    if age_sec > float(AI_GOV_VERDICT_MAX_AGE_SEC):
+    if age_sec > max_age:
         # The stale-envelope rule the diag channel already uses: the world has
         # moved on, and applying a minutes-old exit decision from it is worse
         # than doing nothing.
@@ -1808,10 +1940,16 @@ def build_diag() -> Dict[str, Any]:
 
     ledger = get_ledger()
     provider = str(_tunable("ai_gov_provider", ""))
+    _eff_bound = effective_verdict_max_age()
     return {
         "measure_enabled": measure_enabled(),
         "apply_enabled": apply_enabled(),
         "armed_arms": list(armed_arms()),
+        # Which armed arm has ever produced a verdict. See `arm_reachability`:
+        # the lane ships armed on `tp` alone and has produced ZERO ADJUST_TP
+        # verdicts against 34 ADJUST_SL, so arming apply today would act on
+        # nothing — a state no counter on the page could express.
+        "arm_reachability": arm_reachability(),
         "provider": provider,
         "provider_configured": llm_client.configured(provider),
         "model_requested": str(_tunable("ai_gov_model", "")),
@@ -1831,6 +1969,15 @@ def build_diag() -> Dict[str, Any]:
             # produced it. A duration with no threshold beside it is the
             # `stale_verdict` counter's own problem one layer up.
             "verdict_max_age_sec": float(AI_GOV_VERDICT_MAX_AGE_SEC),
+            # The bound actually enforced, and the tick it was derived from.
+            # Ops has rendered both keys since the panel shipped and the
+            # engine has never sent them, so the page carried a paragraph
+            # describing a derivation that did not exist — the defect this
+            # repo keeps re-learning, on the panel an owner reads to decide
+            # whether the staleness rule is doing anything.
+            "verdict_max_age_effective_sec": _eff_bound["effective_sec"],
+            "observed_tick_sec": _eff_bound["observed_tick_sec"],
+            "verdict_max_age_source": _eff_bound["source"],
         },
         # The bound above, read against what this pipeline can actually
         # deliver. A duration with no threshold beside it was the first
