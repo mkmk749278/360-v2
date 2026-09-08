@@ -269,6 +269,34 @@ def _edge_store_internals(ctx: Ctx) -> Dict[str, Any]:
     }
 
 
+def _path_scorecard(ctx: Ctx) -> Dict[str, Any]:
+    """Every ``(setup_class, side)`` of the DELIVERED book, graded.
+
+    The 2026-08-13 retirements were decided off exactly this analysis and it
+    was run by hand, once. Between then and now the only per-path number
+    anywhere was an unqualified mean on a page — which is what made the
+    2026-08-30 regression unreadable: the delivered book went from
+    +0.506%/trade to -0.113%/trade with no surface able to say which path, if
+    any, was responsible.
+
+    Read ``cells_drawn`` and the floor before any interval. The floor is
+    applied BEFORE the interval on purpose: the worst-looking cell in the
+    current window is three trades with an interval excluding zero, and
+    ranking on the interval would put a path one click from retirement on the
+    strength of three bad days.
+
+    Names retirement candidates; retires nothing. `path_retirement` is the
+    arming surface and it stays the owner's.
+    """
+    from dataclasses import asdict
+
+    from src import path_scorecard
+
+    tracker = ctx.need("_performance_tracker")
+    rows = [asdict(r) for r in list(getattr(tracker, "_records", []))]
+    return path_scorecard.summarise(rows)
+
+
 def _entry_fidelity(ctx: Ctx) -> Dict[str, Any]:
     """The stamped entry against the price that actually existed at dispatch.
 
@@ -571,6 +599,15 @@ for _e in (
     Entry("read.edge_store", "Edge store internals", "read",
           "Cell count, record counts and the biggest cells — where the 39 MB "
           "of serialisation cost lives.", _edge_store_internals),
+    Entry("read.path_scorecard", "Per-path verdict — delivered book", "read",
+          "Every (setup_class, side) of the delivered book with n, distinct "
+          "symbols, net %, a symbol-clustered 95% interval and a verdict — the "
+          "standing version of the hand-run analysis the August retirements "
+          "were decided from. The sample floor is applied BEFORE the interval, "
+          "so a three-trade cell whose interval excludes zero reads "
+          "INSUFFICIENT rather than LOSES. Names retirement candidates and "
+          "retires nothing.",
+          _path_scorecard),
     Entry("read.entry_fidelity", "Entry fidelity — stamp vs tape", "read",
           "The stamped entry against the price that actually existed at "
           "dispatch, the drift that gap books as profit, and the same book "

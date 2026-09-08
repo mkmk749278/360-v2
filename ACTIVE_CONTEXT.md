@@ -4,6 +4,76 @@
 
 ---
 
+## OPEN, LIVE NOW — the delivered book turned negative on 2026-08-30 and nobody knows why
+
+Present tense because it is still true as this session ends, and it is the
+largest open item in the repo. The instrument ships in this session; the
+**cause does not**, and three candidate causes were tested and refuted rather
+than left as plausible stories.
+
+The owner removed the same-direction and per-channel caps so every path could
+reach the feed instead of `MOVER_TREND_PULLBACK` holding the slots by
+arithmetic. **As a routing change it worked exactly as intended** — MVRTP's
+share of the delivered book fell 76% → 59% and every other path is running
+3–7x its old delivery rate. Measured off `/track-record`'s per-trade export,
+30-day window, 100 USDT notional, 0.07% round trip:
+
+| | trades | per day | avg / trade | win | net |
+|---|---|---|---|---|---|
+| 09 Aug – 29 Aug | 310 | 14.8 | **+0.506%** | 39% | +156.87 |
+| 30 Aug – 08 Sep | 374 | 37.4 | **−0.113%** | 30% | −42.22 |
+
+The mechanism visible in the record is **frequency, not size**: SL_HIT
+**35% → 47%** and it is 40–52% on every one of the last ten days, a level
+shift rather than a bad patch; `PROFIT_LOCKED` 33% → 16%. Winner sizes are
+unchanged (PROFIT_LOCKED +4.34 → +4.13, TP1_HIT +3.04 → +3.05) and the loser
+is slightly *smaller* (−2.97 → −2.42). Median trade identical at −0.070% in
+both halves. **The right tail is what vanished.**
+
+**Three explanations tested and refuted — do not re-derive them:**
+
+- **Not the marginal same-direction entries the cap used to stop.** Removing
+  it created a "3+ same-direction already open" bucket: 177 rows, 47% of the
+  book, at **−0.108%** — no worse than the "2 open" bucket (−0.173%) that
+  existed while the cap was on. Within MVRTP the gradient is non-monotonic
+  (−0.177 / −0.602 / +0.511).
+- **Not volume.** Pearson r between a day's MVRTP count and that day's mean
+  net is **+0.177** over 31 days: if anything the busy days are better.
+- **Not only the newly-unblocked paths.** They are negative in aggregate, but
+  **MVRTP carries −20.6% of the −42.2% alone** — never suppressed, never the
+  marginal path, and its own delivery doubled (11.2 → 22.2/day) while its edge
+  went +0.565% → −0.093%.
+
+**And the dark feed cannot serve as the market control.** Its composition
+flips between the halves (TPE 40% → MVRTP 46%) and dark MVRTP has **zero**
+pre-30-Aug rows, so the pooled comparison is a mix artefact. A "market vs us"
+verdict does not exist yet. That is the next session's first question.
+
+Read `read.path_scorecard` (and `/path-scorecard`) before forming a theory.
+
+## OPEN, LIVE NOW — and every path is still UNDECIDABLE
+
+Eighteen `(setup, side)` cells over the ten days since diversification, and
+**not one interval excludes zero** except `MA_CROSS_TREND_SHIFT:LONG` at
+**n=3** — [−5.57, −2.87], which is `FAILED_AUCTION_RECLAIM`'s +0.846R with the
+sign flipped and is refused by the sample floor. `MOVER_TREND_PULLBACK:LONG`,
+the biggest line at n=226, reads **[−0.50, +0.37]**.
+
+Only 2 of 18 cells clear the floor at all and both are UNDECIDED. So the
+owner's *"produce good signals from every path"* is **not answerable by
+naming paths today**, and the scorecard exists so that it becomes answerable
+without anyone re-running a query by hand. Zero retirement candidates is the
+honest current answer, and the page says so in those words rather than
+rendering a blank.
+
+Concentrated for reference, and **not actionable at these n**: MA_CROSS (n=3,
+−11.5%), FUNDING (n=1, −3.1%), WHALE (n=1, −1.7%), BREAKDOWN (n=5, −3.7%),
+LSR (n=7, −2.6%) — 17 trades carrying −22.6% of the loss. Diversification also
+produced winners: QCB +3.5% (n=57), DIVERGENCE +4.3% (n=10), MEAN_REVERT
++4.3% (n=8).
+
+---
+
 ## OPEN, LIVE NOW — the recorded book overstates the real one by ~3x
 
 Stated in the present tense because it is still true as this session ends. The
@@ -68,20 +138,107 @@ field.
 
 ---
 
-## OPEN, LIVE NOW — the governor is blind and half its verdicts are discarded
+## OPEN, LIVE NOW — the governor is blind, and arming it would do nothing
 
-Both stated in the present tense because both are still true as this session
-ends. Neither is a money-path fault — apply is OFF — but both corrupt the only
+Stated in the present tense because both are still true as this session ends.
+Neither is a money-path fault — apply is OFF — but both corrupt the only
 window an adoption decision will ever be read from.
 
 1. **200 of 200 governor rows are fully blind.** `avg_unknown_frac 1.0`, order
-   book and flow both `not_subscribed` on every row **[verified 2026-09-06 via
-   guest session]**. Was 72 of 72 in Session 143; the population grew and the
-   rate did not move. `ai_governor_blind` has been paging for weeks.
-2. **58 of 139 verdicts (41.7%) age out before they can be applied**, and
-   **13 of 26 `ADJUST_SL` — half of every actionable verdict this lane has ever
-   produced.** Instrumented in #1015; the bound itself is untouched and is the
-   owner's to set.
+   book and flow both `not_subscribed` on every row **[verified 2026-09-08 via
+   guest session]**. Was 72 of 72 in Session 143 and 200 of 200 in 144; the
+   population grows and the rate does not move. `ai_governor_blind` has been
+   paging for weeks. **Still blocked on the vendor SUBSCRIBE seam** — this box
+   gets 451 on `fapi` and 403 on `fstream`, so the frame cannot be exercised
+   once before shipping it, and widening the static caps is measured worse
+   (a perfectly chosen 40 covers 36% of the delivered book).
+2. **Arming the effect flag today would change nothing.**
+   `AI_GOV_ARMS_ENABLED` defaults to `tp` alone, and across 480 ledger rows
+   and 90 verdicts the mix is MAINTAIN 56 / **ADJUST_SL 34** / **ADJUST_TP
+   zero**. Every actionable verdict belongs to an arm that is not armed. Of
+   the 34, 16 die `stale_verdict` and the other 18 would move from
+   `apply_off` to `arm_off`. Now published as `arm_reachability` and rendered
+   on the page; **which arms to arm is the owner's call and nothing here
+   changes it.** The TP arm was chosen because it is the only one decidable
+   from the closed-signal record, which is still true — the open question is
+   whether to arm `sl` and accept an undecidable arm, or to change what the
+   model is asked for.
+
+**FIXED this session (was #2 in the previous entry): the staleness bound.**
+It was the flat `AI_GOV_VERDICT_MAX_AGE_SEC` constant sitting **4.1s below its
+own measured floor** (10.0s against 14.1s), where no verdict can pass — 28 of
+90 aged out. `verdict_age_floor` had published that reading since #1015 and
+**nothing consumed it**. It is now derived from the loop (configured floor
+against the slowest recent tick x1.5, 60s cap), enforced, and published with
+the tick it came from. Ops had rendered `verdict_max_age_effective_sec` and
+`observed_tick_sec` since its panel shipped and the engine had never sent
+either, so the page carried a paragraph describing a derivation that did not
+exist.
+
+---
+
+## SESSION 146 2026-09-08 — the caps came off, the book turned, and the governor's bound was under its own floor
+
+Owner, from a guest session: *"signal quality and AI governor"*, then — on the
+volume finding — *"the reason for volume is we removed same direction and
+channel max cap to all paths to produce signals; before that only MVRTP has
+signals and that suppressing all other signals, however we need to produce
+Good signals from every path."*
+
+The two OPEN entries at the top of this file are this session's findings and
+they are not repeated here. What follows is what shipped and what it cost.
+
+### SHIPPED — engine, `src/path_scorecard.py`
+
+The standing version of the analysis the 2026-08-13 retirements were decided
+from, which had been run **by hand, once**. Per `(setup_class, side)` on the
+delivered book: n, distinct symbols, net and gross, a symbol-clustered 95%
+interval, a verdict, and a retirement-candidate list. Registered as
+`read.path_scorecard`; rendered at ops `/path-scorecard`.
+
+**The sample floor is applied BEFORE the interval, and that ordering is the
+whole design.** Ranked on the interval, the top row of the current window is
+`MA_CROSS_TREND_SHIFT:LONG` — three trades, [−5.57, −2.87], excludes zero,
+drawn from eighteen cells — one click from retirement. Floor-first it reads
+`INSUFFICIENT` and names which bound it failed. Nothing is retired here;
+`path_retirement` is the arming surface and stays the owner's.
+
+Two properties worth keeping: a **retired cell is stamped frozen, not zero**
+(retirement diverts to the dark lane, so its delivered n stops growing and its
+verdict stops being a reading about today), and the **window is bounded by
+age, never by count** — a count-bounded window on a low-volume path holds
+evidence from whenever that path last emitted, which is `cohort_edge`'s
+absorbing state arriving through the denominator instead of through the gate.
+
+### SHIPPED — engine, the governor's two faults
+
+`effective_verdict_max_age` and `arm_reachability`; both described in the
+governor entry above. Ops renders both, and the bound paragraph that had been
+describing a derivation the engine did not have is corrected rather than
+deleted — it now says what the code does and records that it was false until
+today.
+
+### The cost bug I shipped and caught in the same session
+
+`diag_catalog.run` executes **synchronously on the snapshot writer's event
+loop** — the engine's. My first bootstrap rebuilt the pooled list once per
+resample: **0.475s** at 2,000 in-window rows and growing with the book, on the
+loop whose achieved period sets the governor's own staleness floor. Resampling
+per-symbol **sums and counts** is arithmetically identical and takes 18ms,
+flat in book size. Before adding a diagnostic, ask which loop runs it.
+
+### Method notes, because three of my own hypotheses died
+
+I formed and tested three causes for the 30-Aug regression — marginal
+same-direction entries, volume, the new paths — and all three were refuted by
+the export. A fourth, using the dark feed as a market control, was **withdrawn
+before it was written down** when its composition turned out to flip between
+the halves. *State the refutation condition before naming a mechanism*
+continues to be the cheapest rule in this file.
+
+Every new test was verified by reverting the fix: 7 of 8 bound tests, 5 of 5
+reachability tests, and the cross-process determinism pin all fail against the
+pre-fix tree.
 
 ---
 
