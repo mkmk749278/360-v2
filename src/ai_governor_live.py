@@ -107,6 +107,13 @@ ACTION_TP = "ADJUST_TP"
 ACTION_PANIC = "PANIC_CLOSE"
 ACTION_MAINTAIN = "MAINTAIN"
 
+#: The two questions a verdict can answer, mirrored from the engine's governor
+#: so this module does not import it at module scope (the governor imports this
+#: one). Kept as constants rather than bare strings because they are stamped
+#: onto rows a surface reads.
+REVIEW_ENTRY = "entry"
+REVIEW_ONGOING = "ongoing"
+
 #: Why an edit did not land. Named rather than pooled, because the next move
 #: differs for every one of them: ``no_arm`` is a coverage question (the arm
 #: never opened, and ``record_open_refusal`` already says why), ``wrong_way`` is
@@ -329,6 +336,7 @@ def record_verdict(
     *,
     ledger: Optional[arms.SarLiveLedger] = None,
     now_ts: Optional[float] = None,
+    review_kind: str = REVIEW_ONGOING,
 ) -> str:
     """Apply one verdict to this signal's arm as an edit. Returns the outcome.
 
@@ -381,11 +389,25 @@ def record_verdict(
             # actually available, and keeps the close the model was looking at
             # as the confirm fill so the gap between them is readable.
             arm["pending_close"] = {
-                "reason": arms.EXIT_GOVERNOR_PANIC,
+                # Which question produced the close. The event is identical —
+                # out at the next bar's open — and the reason is not: at entry
+                # it means "this trade was not worth taking", later it means
+                # "the premise broke". One name for both would leave a page
+                # able to count cancels and unable to say what kind.
+                "reason": (
+                    arms.EXIT_GOVERNOR_REJECT
+                    if str(review_kind) == REVIEW_ENTRY
+                    else arms.EXIT_GOVERNOR_PANIC
+                ),
+                "review_kind": str(review_kind),
                 "at": float(now_ts) if now_ts is not None else None,
                 "ref_price": arm.get("last_close"),
             }
-            arm["gov_panic_edits"] = int(arm.get("gov_panic_edits") or 0) + 1
+            arm["gov_review_at_close"] = str(review_kind)
+            if str(review_kind) == REVIEW_ENTRY:
+                arm["gov_reject_edits"] = int(arm.get("gov_reject_edits") or 0) + 1
+            else:
+                arm["gov_panic_edits"] = int(arm.get("gov_panic_edits") or 0) + 1
             book.mark_dirty()
             _count(act, EDIT_APPLIED)
             return EDIT_APPLIED
