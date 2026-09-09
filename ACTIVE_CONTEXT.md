@@ -271,6 +271,102 @@ exist.
 
 ---
 
+## SESSION 147 2026-09-09 — the governor became a mechanism with its own running book, and was finally asked the question
+
+Two owner asks, both shipped: *"make AI governor a separate mechanism / signal
+fired / live continues as usual / but AI reviews it, make adjustment if needed
+and also cancels signal if not worthy / and runs in ops real like signal (how
+actually SAR live happening)"*, and — chosen by him from two options — *"ask
+worthiness at entry, keep the critic later"*.
+
+### The mechanism existed. Nobody was asking. (#1024)
+
+`PANIC_CLOSE` was chosen **0 times in 480 rows**, and `ADJUST_TP` zero. That is
+not the model declining to cancel: the schema-1 system prompt told it *"you are
+a risk critic for an **already-open** scalp … MAINTAIN — prefer this …
+PANIC_CLOSE — reserve for a **genuine regime break**."* **The prompt was working
+exactly as written**, and building the cancel column over it would have produced
+an all-zero row reading as *"the AI never cancels"* — a claim about our prompt
+wearing a finding's clothes.
+
+`PROMPT_SCHEMA` 1 → 2 is a **redefinition**; the ledger bump 3 → 4 beside it is
+**additive**, and splitting them is the point. Every row stamps `prompt_schema`
+and now `review_kind`, so a schema-2 *ongoing* row was asked the identical
+question a schema-1 row was and stays comparable, while a schema-2 *entry* row
+answered a different question and is never pooled with either. **Filter, do not
+purge** — the 480 rows keep their standing.
+
+`review = "entry"` is the first look only, and it is asked whether the trade
+deserved to be taken at all. Every later look is the unchanged conservative
+critic. Both rubrics live in **one** system prompt with a per-position `review`
+field selecting which applies, so a mixed batch is still **one** model call.
+`EXIT_GOVERNOR_REJECT` is named apart from `EXIT_GOVERNOR_PANIC`: the event is
+identical (exit at the next bar's open) and *"we are sending signals we
+shouldn't"* and *"the market turned"* have completely different next moves.
+
+**Read `by_review_action` before anything else. If `entry:PANIC_CLOSE` is still
+zero after a real window, the prompt change did not take and the next move is
+the prompt, not the page.**
+
+### The running book (`360ce-ops` #217)
+
+`/signals/governor-live` — on the **SAR-live handler**, not a new page. What
+makes that surface worth reading is not its level function but six sessions of
+guards behind the arms: the stale-anchor refusal (#836), the per-advance replay
+guard (#846), the regressed-vs-rolled-off split, the freshness stamps (#835),
+the two fills and the two denominators. A second page re-derives all of it.
+
+**But this mechanism never governs**, and pushing it through handover prose is
+correct numbers under false sentences. Every branch keys off the engine's own
+`governs` / `edits_geometry` manifest flags — **tri-state**, so an engine
+predating them keeps the original wording. The handover columns are *absent
+rather than empty*: questions this mechanism cannot be asked, and a blank in a
+column that cannot apply reads as missing data.
+
+**A third member exposed four two-member special cases, none of which would have
+crashed**: the mechanism selector lit the ATR button on the governor's own page,
+the nav token lit the ATR pill, the cross-link offered "the other mechanism"
+(singular) and sent the third to SAR's page, and the template explainer had the
+chandelier in its `{% else %}` — so the governor rendered ATR prose with `mult`
+defaulted to 3.0 for a mechanism with no such parameter. **A two-member special
+case reads as a total function until a third member arrives**, and the tell is
+an `else` that names one member rather than handling the remainder.
+
+There is deliberately **no dark governor lane**, and that absence needed its own
+state (`no_such_lane`) — falling into `unavailable` told the reader to check
+`SAR_LIVE_SHADOW_ENABLED` for a file nothing will ever write. The first cut of
+that guard used **truthiness** and broke three healthy SAR tests: an absent
+`file` key is an older provenance dict, only `file: None` means no lane. That is
+the 2026-09-03 `ok`/`error` rule verbatim, **second recurrence in eight days**.
+
+**Two more found by rendering the page, not by testing it**: the shared
+execution panel read `CANNOT TELL`, which implies uncertainty about whether a
+model is moving a real stop — it is a definite **no**, because `governor` is
+deliberately outside `trail_mechanisms.MECHANISMS` (the permission list) while
+being inside `ARM_MECHANISMS` (what the engine steps). And the copy asserting
+*"Four populations, four files"* was made false by this very change; the count
+is derived now.
+
+### The claim I made to the owner and then falsified myself
+
+I recommended collapsing the page's three diag calls into one before building
+this, and put the sequencing to him. **The recommendation was wrong on its
+premise.** `_DIAG_MAX_PER_CYCLE` is **4** and ops already sends 3 concurrently,
+so they drain in one pass; the 7–22s is the **15s `_CYCLE_INTERVAL_S` phase
+wait** on the snapshot writer, not per-call compute; and this page reads a file
+off the volume, adding **zero** diag calls. The question dissolved rather than
+being answered. A real fix exists and was not built: drain the diag queue on its
+own `BRPOP` task instead of the telemetry loop, the way
+`safety_switch_bridge` already does.
+
+### Still open, unchanged
+
+- **`/control` → "AI Trade Governor — armed arms" must read `tp,sl`.** A stored
+  runtime tunable beats the new default. Unverified.
+- **200 of 200 rows are still blind** — no order book, no flow.
+- **`agreement_violations` and `unpairable` before any mean**, every time.
+
+
 ## SESSION 146 2026-09-08 — the caps came off, the book turned, and the governor's bound was under its own floor
 
 Owner, from a guest session: *"signal quality and AI governor"*, then — on the
