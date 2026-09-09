@@ -189,6 +189,38 @@ at all rather than what shortens it.
 - **200 of 200 rows are still blind** (below). Whatever this lane measures, it
   measures a governor operating without order book or flow.
 
+**VERIFIED ON THE BOX, 30 minutes after the merge** [read live via the diag
+console in a guest session, `read.ai_governor_paired`]. The lane is not
+merely deployed, it is working:
+
+| | |
+|---|---|
+| `enabled` / `lane` | `true` / `governor:live` |
+| Coverage | **10 signals seen, 10 fully armed, 0 unarmed, no misses** |
+| Open arms | 7 |
+| `edits` | `maintain:maintain_noop: 12` — **the hook is firing** |
+| `agreement_violations` | **0** |
+| `unpairable` | `treatment_still_walking: 7` — a wait, correctly named |
+
+**And the self-check has already earned its keep on real bars.** Three
+`MAINTAIN`-only signals have closed: `untouched` reads **n=3, identical=3,
+mean_delta_pct 0.0**, with treatment and baseline both at **−1.6859%**. Those
+two numbers are produced by two independent walks over the same bars and they
+agree to the last decimal, which is the property the entire paired comparison
+rests on — confirmed in production rather than only in a test. Zero `better`,
+zero `worse`, as required by construction.
+
+`per_arm` is `n=0` on all three arms, which is the honest current state: no
+actionable verdict has closed yet in this window. **There is still no number,
+and there will not be one for months** — what exists is a working instrument
+whose baseline is provably independent of its treatment.
+
+**The ops surface shipped with it** (`360ce-ops` **#215**): `/signals/ai-governor`
+gains an "Against the engine's own exit" card reading
+`read.ai_governor_paired`, below the selection panel and naming the difference
+between them in words. A dark lane without its panel is unfinished, and this
+one did not ship late.
+
 **And one deploy check that is not in any test.** `AI_GOV_ARMS_ENABLED` now
 defaults to `tp,sl` at the owner's instruction (apply still OFF, so no order
 moves). But `armed_arms()` reads the **runtime tunable first**: if
