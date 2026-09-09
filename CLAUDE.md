@@ -2515,6 +2515,84 @@ python -m src.main
   arm was added last, with the fix's own comment sitting right there saying so.
   **When you add an arm to a shared walk, every termination site is a site.**
 
+- **A two-member special case reads as a total function until a third member
+  arrives, and the tell is an `else` that names one member.** Adding the AI
+  governor as a third exit mechanism turned up four of them in one ops page,
+  none of which would have crashed: a selector whose second button was chosen
+  by `key != 'sar'` lit the ATR-trail button on the governor's own page; a nav
+  token `"sar_live" if mechanism == "sar" else "atr_live"` lit the ATR pill; a
+  cross-link offering *"the other mechanism"*, singular, sent the third to
+  SAR's page; and a template branch with the chandelier in its `{% else %}`
+  rendered ATR prose with `mult` **defaulted to 3.0** for a mechanism carrying
+  no such parameter. Every one produced a full-looking page describing the
+  wrong thing. This is the `is_tradfi_perp` deny-list rule with the arity
+  changed: a binary is a hand-written membership list with two entries, and it
+  is silent by construction on the third.
+
+- **Publish the DISTINCTION as data, not the membership.** What kept that page
+  honest was not a `key == "governor"` check anywhere in ops — it was
+  `trail_mechanisms.manifest` publishing `governs` / `edits_geometry` beside
+  `has_direction`, so the consumer branches on *what the mechanism does*. SAR
+  and the chandelier **govern**: once onside they cancel the signal's own stop
+  and own the exit. The governor never does — `onside` is permanently False, the
+  engine's geometry stays in force for the arm's whole life, and a verdict only
+  edits it. Ops therefore renders the handover columns as **absent rather than
+  empty**, because they are questions this mechanism cannot be asked and a blank
+  in a column that cannot apply reads as missing data. Corollary, and it is the
+  same rule the mechanism manifest already carried for `has_direction`: **the
+  flag must be tri-state.** An engine predating it sends neither value, and
+  defaulting to False rewrites SAR's page into the governor's while defaulting
+  to True asserts handover over a mechanism that never hands over.
+
+- **A prompt is a measurement instrument, and an all-zero column is a claim
+  about it before it is a claim about the world.** The AI governor chose
+  `PANIC_CLOSE` **0 times in 480 rows** and `ADJUST_TP` zero — and the schema-1
+  system prompt read *"you are a risk critic for an **already-open** scalp …
+  MAINTAIN — **prefer this** … PANIC_CLOSE — reserve for a **genuine regime
+  break**."* The model was doing exactly what it was told. Building the owner's
+  cancel column over that prompt would have shipped a zero reading as *"the AI
+  never cancels"*: our own instructions wearing a finding's clothes, which is
+  the `zone_distance_atr` shape one layer up — a measurement that could never
+  have been non-zero, so nothing could challenge the story told about it.
+  **Before reading a rate off a model's answers, read the question.**
+
+  Two things the fix carries. *"Was this worth taking"* is only coherent at the
+  **first** review and becomes hindsight afterwards, so `review = "entry"` and
+  `review = "ongoing"` are separate rubrics in **one** system prompt with a
+  per-position field selecting which applies — one call for a mixed batch, not
+  two. And the schema split is the whole point: `PROMPT_SCHEMA` 1 → 2 is a
+  **redefinition** while the ledger bump beside it is **additive**, so every row
+  stamps `prompt_schema` and `review_kind`, an ongoing schema-2 row stays
+  comparable with a schema-1 row, and an entry row is never pooled with either.
+  **Filter, do not purge** — a bump that dropped would have thrown away 480 rows
+  whose ongoing verdicts are still perfectly good.
+
+- **`evaluate` increments its call counter immediately after building the
+  payload, so anything that re-derives the prompt's own context afterwards
+  stamps the wrong value on every row — silently, while the prompt still asks
+  the right question and every page still renders.** `parse_verdicts` therefore
+  takes the review mapping as a **parameter**, from the same dict the prompt was
+  built from, and the test drives that ordering rather than the happy path. The
+  general form: **when a stamp describes what was ASKED, it must travel with the
+  ask, not be recomputed from state the ask has already moved on from.** Same
+  class as #848's denominator and the `dispatch_staleness_v2` anchor — ask
+  whether the thing a value is derived from is still what it was when the value
+  became true.
+
+- **A recommendation I gave the owner, falsified by one grep — and the lesson is
+  that I gave it before running the grep.** Asked to sequence a latency fix
+  before a feature, I said the ops page's three sequential diag calls should be
+  collapsed to one. `_DIAG_MAX_PER_CYCLE` is **4** and ops already issues the
+  three concurrently, so they drain in a single pass and collapsing saves
+  nothing; the 7–22s is the snapshot writer's **15s `_CYCLE_INTERVAL_S` phase
+  wait**, a uniform 0–15s queue delay, not per-call compute. The question
+  dissolved rather than being answered. *"Read the counter before costing the
+  operation"* arriving at a scheduling decision, and the cost of getting it
+  wrong was a question put to the owner that never needed asking. (The real fix,
+  unbuilt: drain the diag queue on its own `BRPOP` task rather than on the
+  telemetry loop — `safety_switch_bridge` is the pattern, and the argument is
+  the same one that kept the kill switch off the 15s cycle.)
+
 - **A counter key must not contain the separator the reporter partitions on.**
   `_drop` writes both `reason` and `reason:setup_class`, and `delivery_stats`
   splits them with `":" not in k`. So a reason keyed `risk_manager:rr_floor`
