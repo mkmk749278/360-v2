@@ -166,9 +166,9 @@
         "HOLD"
       ],
       "VOLUME_SURGE_BREAKOUT|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "DROP",
+        "DROP",
+        "DROP"
       ],
       "VOLUME_SURGE_BREAKOUT|min_samples": [
         "HOLD",
@@ -237,7 +237,7 @@
       "SR_FLIP_RETEST|min_samples": 1759,
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157
     },
-    "cycle": 2189
+    "cycle": 2232
   },
   "ledger": [
     {
@@ -1553,7 +1553,21 @@
       "routable": true
     }
   ],
-  "pending": [],
+  "pending": [
+    {
+      "strategy": "VOLUME_SURGE_BREAKOUT",
+      "param": "suppress_negative",
+      "old": true,
+      "new": false,
+      "applied": false,
+      "status": "PENDING",
+      "reason": "ev_below_bar |0.24|<0.25",
+      "verdict": "DROP",
+      "ev_per_suppression_r": -0.23607030595658463,
+      "n": 83,
+      "routable": true
+    }
+  ],
   "active_overrides": {
     "FUNDING_EXTREME_SIGNAL": {
       "min_samples": 15
@@ -1596,7 +1610,7 @@
   },
   "routability": {
     "enforced": true,
-    "routable_candidates": 0,
+    "routable_candidates": 1,
     "unroutable_candidates": 0,
     "unroutable_strategies": [],
     "dead_overrides": {},

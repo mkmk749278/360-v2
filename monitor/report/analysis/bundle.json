@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-08T05:07:08.019459+00:00",
-  "generated_at_ts": 1788844028.0194595,
+  "generated_at": "2026-09-09T05:06:42.843114+00:00",
+  "generated_at_ts": 1788930402.8431137,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "04d1e35df3b9ddd9447b4f4e98c285c2d8344f42",
+  "git_sha": "360b29ba8983385636bf61d718a6c4148bed1341",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 9244,
-    "strategy_matrix_scored_cells": 2389,
+    "strategy_matrix_cells": 9489,
+    "strategy_matrix_scored_cells": 2463,
     "performance_setups": 15,
     "suppression_gates": 0
   },
@@ -51,10 +51,10 @@
         "verdict": "STRONG"
       },
       {
-        "strategy": "FAILED_AUCTION_RECLAIM",
-        "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_FALLING/ALTCOIN",
-        "edge_r": 1.553575342649317,
-        "n": 22,
+        "strategy": "RANGE_FADE",
+        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_FALLING",
+        "edge_r": 1.5889656462756196,
+        "n": 17,
         "verdict": "STRONG"
       }
     ],
@@ -81,17 +81,17 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "LIQUIDATION_REVERSAL",
-        "context_key": "OVERLAP/MARKDOWN/CASCADE/BTC_FALLING/MIDCAP",
-        "edge_r": -1.3763070539419113,
-        "n": 17,
+        "strategy": "MOVER_TREND_PULLBACK@TUNED",
+        "context_key": "LONDON/MARKDOWN/NORMAL/BTC_NEUTRAL",
+        "edge_r": -1.6404054528688243,
+        "n": 50,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "LIQUIDATION_REVERSAL",
-        "context_key": "OVERLAP/MARKDOWN/CASCADE/BTC_FALLING",
-        "edge_r": -1.3763070539419113,
-        "n": 17,
+        "strategy": "MOVER_AVWAP_SCALP@SAREXIT",
+        "context_key": "NY/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL",
+        "edge_r": -1.519086091740804,
+        "n": 18,
         "verdict": "NEGATIVE"
       }
     ],
