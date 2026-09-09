@@ -138,6 +138,68 @@ field.
 
 ---
 
+## OPEN, LIVE NOW — the governor's edge is measurable from today, and unmeasured
+
+Present tense because the instrument ships this session and the **verdict does
+not**. Owner, from a guest session: *"how can we edge AI governor vs engine now
+exits"*.
+
+**Why the page could not answer it.** While apply is OFF every recorded outcome
+IS the MAINTAIN counterfactual, so for the SL and panic arms the closed-signal
+record says what happened *without* the intervention and is structurally silent
+on what acting would have produced. `ai_governor_score` says exactly that
+(`arm_undecidable_while_dark`, 47 of 47 theses). The one decidable arm,
+`ADJUST_TP`, has been chosen **zero** times.
+
+**And the number that was on the page points the wrong way if read as an
+effect.** Selection panel: the population the governor wanted to touch ran
+**+2.499%** net over 47 theses against **−0.521%** over 219 left alone. That is
+real and it is not an effect estimate. The only arm the model ever chooses is
+`ADJUST_SL`, the menu is tighter-only, and **37 of those 47 were winners** —
+tightening a stop on a winner can only clip it. `OWNER_BRIEF` §3.2 is the same
+shape with the arithmetic done: the pre-TP + invalidation machinery netted
+−25.79% where a plain TP1-full exit netted −6.65% on the same 494 signals.
+
+**One more reading from the page's own arithmetic:** `intervened` = 47 and
+`flip_flopped` = 47. Since ADJUST_TP and PANIC are zero, those must be the same
+set — **every actionable thesis in the window also said MAINTAIN on the same
+trade.** The governor has not yet made one unambiguous recommendation, and an
+edge estimate for a recommendation its author contradicts is not a thing.
+
+**What ships:** `src/ai_governor_live.py` — one arm per delivered signal on the
+setup's declared trigger timeframe, walked by the existing arm engine, carrying
+**two exits over one set of bars**: the geometry a verdict edited, and the
+geometry the evaluator shipped (`geom_*`, frozen at open). Their difference is
+a paired delta, so there is no population to select. Read
+`read.ai_governor_paired`.
+
+**What does NOT ship: a number.** The ledger is empty on deploy and fills at
+the rate the governor issues actionable verdicts — 10 in the last boot window.
+Under `STATISTICAL_CHANGE_POLICY` rule 1 (≥200 closed signals in the affected
+cohort AND ≥21 days) this is **months**, and pairing is what makes it feasible
+at all rather than what shortens it.
+
+**Three things the next session must check before reading anything off it:**
+
+- **`agreement_violations` must be 0.** A MAINTAIN-only signal edits nothing, so
+  its two walks are required to agree exactly. Anything above zero means the
+  control is not independent of the treatment and every delta is suspect.
+- **`unpairable` before any mean.** A baseline that stops resolving shrinks the
+  paired population while every treatment column still renders.
+- **200 of 200 rows are still blind** (below). Whatever this lane measures, it
+  measures a governor operating without order book or flow.
+
+**And one deploy check that is not in any test.** `AI_GOV_ARMS_ENABLED` now
+defaults to `tp,sl` at the owner's instruction (apply still OFF, so no order
+moves). But `armed_arms()` reads the **runtime tunable first**: if
+`ai_gov_arms_enabled` was ever set from ops, the stored value wins and the new
+default does nothing. **Open `/control` after the deploy and confirm "AI Trade
+Governor — armed arms" reads `tp,sl`**; if it reads `tp`, set it there. This is
+the write-path-refusing-what-the-read-path-serves defect this repo has already
+paid for once.
+
+---
+
 ## OPEN, LIVE NOW — the governor is blind, and arming it would do nothing
 
 Stated in the present tense because both are still true as this session ends.

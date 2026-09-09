@@ -53,6 +53,16 @@ What a mechanism may and may not do
   closed lives in the arm engine, which is the only place that can see the
   arm's history.
 
+``governor``
+    Not a trailing mechanism at all, and the third entry here for exactly the
+    reason the first two share one engine: the AI governor's counterfactual
+    needs the anchor check, the replay guard, the monotonicity refusal, the
+    stall stamps and the two fills, and none of those is about trailing. It
+    supplies the level a verdict last chose and **never comes onside**, so the
+    arm keeps testing the engine's own SL *and* TP1 while a verdict edits them
+    in place. :func:`_governor_point` carries the full reasoning; read it before
+    assuming a permanently-False ``onside`` is a bug.
+
 Why ``onside`` is a mechanism decision and not a shared one
 -----------------------------------------------------------
 The arm engine asks one question at the anchor and again on every bar while the
@@ -75,7 +85,31 @@ from src.sar_exit_shadow import parabolic_sar_live
 MECH_SAR = "sar"
 MECH_CHANDELIER = "chandelier"
 
+#: The AI governor's own "mechanism". It is not a trailing mechanism and it
+#: deliberately never governs — see :func:`_governor_point`. It exists so the
+#: governor's counterfactual can ride the arm engine rather than grow a second
+#: one, which is the whole argument of this module's docstring applied a third
+#: time.
+MECH_GOVERNOR = "governor"
+
+#: Mechanisms a live position may be handed to.
+#:
+#: **``MECH_GOVERNOR`` is deliberately NOT in here, and that omission is
+#: load-bearing.** ``trail_governor.GOVERNABLE`` is ``frozenset(MECHANISMS)``,
+#: so anything added to this tuple becomes selectable as a per-user exit
+#: mechanism that moves a resting stop on a live position. The governor arm is
+#: a measurement whose levels come from a model; putting it here would let an
+#: LLM's choice reach a real order through a set nobody reads as a permission
+#: list. ``tests/test_ai_governor_live.py`` pins the exclusion at both ends,
+#: because a membership rule stated only in a comment is the drift this repo
+#: has paid for under six names.
 MECHANISMS: Tuple[str, ...] = (MECH_SAR, MECH_CHANDELIER)
+
+#: Every mechanism the ARM ENGINE can walk — the live-governable ones plus the
+#: measurement-only governor. Kept apart from ``MECHANISMS`` rather than
+#: derived from it, so the two questions ("may a position be handed to this"
+#: and "can an arm be stepped under this") can never be answered by one set.
+ARM_MECHANISMS: Tuple[str, ...] = MECHANISMS + (MECH_GOVERNOR,)
 
 
 class TrailPoint(NamedTuple):
@@ -172,6 +206,13 @@ def default_params(mechanism: str) -> Dict[str, float]:
         SAR_EXIT_SHADOW_STEP,
     )
 
+    if mechanism == MECH_GOVERNOR:
+        # The governor has no tunables of its own: every level it uses was
+        # chosen by the model from a menu the engine built and validated, and
+        # the menu's parameters belong to the menu. An empty dict here is a
+        # statement, not an omission — a parameter invented on this side would
+        # be a second place a governor level could come from.
+        return {}
     if mechanism == MECH_CHANDELIER:
         return {"period": float(ATR_TRAIL_PERIOD), "mult": float(ATR_TRAIL_MULT)}
     # One indicator, one set of parameters: the live arm reads the same
@@ -187,6 +228,11 @@ def min_bars(mechanism: str, params: Dict[str, float]) -> int:
     *measurement* deserves): this is the hard floor below which the mechanism
     returns ``None``, and the engine uses it to refuse rather than to clamp.
     """
+    if mechanism == MECH_GOVERNOR:
+        # It reads no bars at all — the level arrives from a verdict. Requiring
+        # history would refuse arms on exactly the promoted movers whose series
+        # is thinnest, which is most of the delivered book.
+        return 0
     if mechanism == MECH_CHANDELIER:
         return int(params.get("period", 22)) + 2
     return 3
@@ -215,7 +261,7 @@ def prepare(
     """
     if mechanism == MECH_CHANDELIER:
         return wilder_atr(highs, lows, closes, int(params.get("period", 22)))
-    return None
+    return None  # SAR walks in full per bar; the governor reads no bars at all
 
 
 def point(
@@ -241,6 +287,8 @@ def point(
     """
     if upto < 0 or upto >= len(highs):
         return None
+    if mechanism == MECH_GOVERNOR:
+        return _governor_point(state=state)
     if mechanism == MECH_CHANDELIER:
         return _chandelier_point(
             ctx, highs, lows, closes, upto, side=side, state=state, params=params
@@ -270,6 +318,53 @@ def _sar_point(
         return None
     onside = bool(live.up) if _is_long(side) else (not bool(live.up))
     return TrailPoint(next_stop=float(live.next_stop), up=bool(live.up), onside=onside)
+
+
+#: The state key the arm engine seeds at open and a verdict overwrites. Named
+#: here rather than in the lane module because this is the only code that reads
+#: it — one writer of the meaning, one reader.
+GOV_STOP_KEY = "gov_stop"
+
+
+def _governor_point(*, state: Dict[str, Any]) -> Optional[TrailPoint]:
+    """The AI governor's "level" — and it never governs. Read this before use.
+
+    Every other mechanism here answers *"where would a trailing stop be parked
+    for the bar now forming"*, and the arm engine hands the trade to it the
+    moment it comes onside: from then on the arm tests that stop and **stops
+    testing TP1**, because for SAR and the chandelier the mechanism replaces
+    the whole exit.
+
+    **The governor does not replace the exit — it edits it.** ``ADJUST_SL``
+    moves the stop and leaves the TP ladder exactly where it was; ``ADJUST_TP``
+    moves the target and leaves the stop. Handing the trade over would silently
+    delete the half the verdict did not mention, and the arm would then be
+    measuring a mechanism nobody proposed — which is the defect that cost
+    2026-07-31, when two arms named for one mechanism measured two.
+
+    So ``onside`` is **permanently False**. The arm stays on ``GOV_GEOMETRY``
+    for its whole life, where the engine tests the stop *and* the target on
+    every bar, and a verdict edits ``arm["stop_loss"]`` / ``arm["tp1"]`` in
+    place. What this function supplies is only the level currently in force, so
+    the row can render "the stop this arm has parked right now" without the
+    surface having to know which lane it is reading.
+
+    ``up`` is ``None`` — the governor has no direction of its own, and "does not
+    answer that" is not "says down".
+    """
+    level = state.get(GOV_STOP_KEY)
+    if level is None:
+        # Refuse rather than invent. An arm whose stop we cannot state is an arm
+        # that measures nothing, and `new_arm` marks it INSUFFICIENT — a guessed
+        # level is a wrong answer with no signal (#800).
+        return None
+    try:
+        price = float(level)
+    except (TypeError, ValueError):
+        return None
+    if not (price > 0):
+        return None
+    return TrailPoint(next_stop=price, up=None, onside=False)
 
 
 def _chandelier_point(
@@ -343,6 +438,7 @@ def manifest(mechanism: str, params: Dict[str, float]) -> Dict[str, Any]:
     labels = {
         MECH_SAR: "Parabolic SAR",
         MECH_CHANDELIER: "ATR-trail (Chandelier)",
+        MECH_GOVERNOR: "AI governor (verdict-edited geometry)",
     }
     return {
         "key": str(mechanism),
@@ -352,4 +448,11 @@ def manifest(mechanism: str, params: Dict[str, float]) -> Dict[str, Any]:
         # chandelier has none, and a blank with no cause is how a reader decides
         # the engine stopped stamping.
         "has_direction": str(mechanism) == MECH_SAR,
+        # Does this mechanism TAKE OVER the exit, or EDIT the one already
+        # there? The two produce columns that look identical and mean different
+        # things: a handover row's `pnl_level_pct` is the mechanism's own exit
+        # with TP1 removed, an editing row's is the engine's geometry with one
+        # level moved. A surface that cannot tell them apart will pool them.
+        "governs": str(mechanism) != MECH_GOVERNOR,
+        "edits_geometry": str(mechanism) == MECH_GOVERNOR,
     }

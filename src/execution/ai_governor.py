@@ -407,18 +407,25 @@ _BOUND_HARD_CAP_SEC = 60.0
 def arm_reachability() -> Dict[str, Any]:
     """Which armed arms the model has ever actually asked for.
 
-    ``AI_GOV_ARMS_ENABLED`` defaults to ``tp`` alone, and the reasoning is
-    sound on its own terms: the TP arm is the only one fully decidable from
-    the closed-signal record, because the adjustment moves the target NEARER
-    and ``max_favorable_excursion_pct`` settles it with no ordering
-    ambiguity. What nothing checked is whether the model ever chooses it.
+    ``AI_GOV_ARMS_ENABLED`` **defaulted to ``tp`` alone until 2026-09-09**, and
+    the reasoning was sound on its own terms: the TP arm is the only one fully
+    decidable from the closed-signal record, because the adjustment moves the
+    target NEARER and ``max_favorable_excursion_pct`` settles it with no
+    ordering ambiguity. What nothing checked is whether the model ever chooses
+    it.
 
     Live on 2026-09-08, 480 ledger rows and 90 verdicts: **MAINTAIN 56,
-    ADJUST_SL 34, ADJUST_TP zero.** Every actionable verdict this lane has
-    ever produced belongs to an arm that is not armed, and the armed arm has
-    never fired. So arming the effect flag today would change nothing at all
-    — of the 34 ``ADJUST_SL`` verdicts, 16 already die ``stale_verdict`` and
-    the remaining 18 would move from ``apply_off`` to ``arm_off``.
+    ADJUST_SL 34, ADJUST_TP zero.** Every actionable verdict the lane had ever
+    produced belonged to an arm that was not armed, and the armed arm had never
+    fired — so arming the effect flag would have changed nothing at all. That
+    is the reading this function was built to publish, and it is the reading
+    the owner acted on: ``sl`` is armed from 2026-09-09, apply still OFF.
+
+    **The default has moved and this docstring is not the authority on it.**
+    ``armed_arms()`` reads the runtime tunable first, so an ops-set value wins
+    over the config default and a reader who trusts a sentence here can be
+    looking at a different lane than the one running. The rows below are the
+    fact; this paragraph is history.
 
     That state is invisible in every counter the page had. ``armed_arms`` is
     a config echo, the verdict mix is a separate table, and reading the fault
@@ -1306,6 +1313,15 @@ async def evaluate(
             # pooled number cannot say which — see `Snapshot.readability`.
             row.update(snapshot.readability())
             ledger.add(row)
+            # ── The paired counterfactual ──────────────────────────────────
+            # HERE, beside the ledger row, and deliberately NOT on the apply
+            # path. `apply_verdict` refuses on `apply_off` before it reaches an
+            # arm check, so a hook down there would record nothing at all while
+            # the lane is dark — which is every row this measurement exists to
+            # produce. The arm edit is the counterfactual; the apply path is the
+            # money path; they are answering different questions and only one of
+            # them is switched off.
+            _record_counterfactual(verdict, menu, now)
             _count("verdicts")
             _count_in("by_action", verdict.action)
             with _arms_lock:
@@ -1323,6 +1339,42 @@ async def evaluate(
     finally:
         if client is None:
             await cli.close()
+
+
+def _record_counterfactual(verdict: Verdict, menu: _menu.Menu, now: float) -> None:
+    """Hand one verdict to the paired arm lane, as an edit to its geometry.
+
+    The level is resolved from **the menu stored with this verdict**, never
+    rebuilt: a choice key must mean the same thing months later, and a key that
+    is not in its own menu is a ledger fault worth naming rather than a row to
+    drop quietly. `_apply_level` resolves it exactly this way on the money path,
+    so the counterfactual and the real thing cannot disagree about which price
+    the model picked.
+
+    Fail-open and silent about nothing: `record_verdict` counts every outcome,
+    including the ones where no arm existed, so "the lane produced no rows" can
+    always be told apart from "the lane was never offered any".
+    """
+    try:
+        from src import ai_governor_live as _cf
+
+        if not _cf.enabled():
+            return
+        price: Optional[float] = None
+        if verdict.action in (ADJUST_TP, ADJUST_SL):
+            cand = menu.lookup(verdict.choice or "")
+            if cand is None:
+                # Named, not skipped. The same refusal the apply path raises,
+                # arriving on the measurement side — and it is the one failure
+                # here that is a fault in OUR menu rather than in the model.
+                _count_in("by_action", "cf_unknown_choice")
+                return
+            price = float(cand.price)
+        _cf.record_verdict(
+            verdict.signal_id, verdict.action, price, now_ts=now
+        )
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("ai_governor.record_counterfactual", exc)
 
 
 # ── Apply — the path that scales with members ───────────────────────────────

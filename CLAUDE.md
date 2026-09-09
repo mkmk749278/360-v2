@@ -2467,6 +2467,54 @@ python -m src.main
   overrides is worth the four lines — it makes "this value is tunable-backed"
   visible at the call site, which is exactly the fact that was invisible.
 
+- **A set named for what EXISTS is read somewhere as what is PERMITTED, and
+  the read site is never next to the definition.** Adding the AI governor as a
+  third entry to `trail_mechanisms.MECHANISMS` is the obvious move — it is the
+  tuple of mechanisms the arm engine can walk, and the new one is walked by the
+  arm engine. It is also the wrong move: `trail_governor.GOVERNABLE` is
+  `frozenset(trail_mechanisms.MECHANISMS)`, so that tuple is simultaneously the
+  list of **per-user exit mechanisms a live position may be handed to**. A
+  measurement mechanism whose levels come from a model would have become
+  selectable on the money path — an LLM's choice reaching a real resting stop
+  through a set nobody reads as a permission list, and with nothing in the diff
+  saying so. Caught by grepping the consumers before adding the constant, which
+  cost thirty seconds. Two tuples now: `MECHANISMS` is the permission list,
+  `ARM_MECHANISMS` is what the engine can step, and a test pins the exclusion at
+  both ends because a membership rule stated only in a comment is the drift this
+  repo has paid for under six names. **Before adding a member to any shared
+  collection, grep its readers and ask what each one takes membership to mean.**
+
+- **A selection statistic and an effect estimate can share a panel, and the
+  naive reading of the first is not merely weaker than the second — it can point
+  the opposite way.** `/signals/ai-governor` reported the population the
+  governor wanted to touch at **+2.499%** net against **−0.521%** for the one it
+  left alone, correctly labelled *selection, not an effect estimate*. Read as an
+  endorsement it is backwards: the only arm the model ever chooses is
+  `ADJUST_SL`, the menu is tighter-only, and **37 of those 47 rows were
+  winners** — so applying the arm could only clip them. That is `OWNER_BRIEF`
+  §3.2's −25.79%-vs-−6.65% arriving through a new mechanism. **A label is not a
+  defence: when a panel publishes a comparison it says is not causal, work out
+  which way the causal version would point**, because a reader who skips the
+  caption gets the sign wrong and the caption is the only thing stopping them.
+
+  The fix is the same shape every time this repo has hit it: stop comparing
+  populations and compare a signal against itself. `sar_live_shadow` was
+  already the arm engine rather than the SAR mechanism, so the governor became a
+  third mechanism and the missing half was a **geometry control** — the
+  engine's own SL/TP1, frozen at open, walked on the same bars by the same
+  walk. Two corollaries worth keeping: the control must read a **frozen copy**,
+  never the mutable `stop_loss` the treatment moves (a control that reads the
+  field the treatment edits is the treatment, and it agrees perfectly while
+  looking independent); and the untouched rows are then a **free detector** —
+  a MAINTAIN-only signal edits nothing, so its two walks must agree to the last
+  decimal, and `agreement_violations` says whether the whole page is sound.
+
+  And it caught its own omission on the first run: the existing abandon test
+  went red because `_note_series_state` terminated the mechanism arm and the
+  held arm and not the new one — the frozen-arm class, reintroduced by whichever
+  arm was added last, with the fix's own comment sitting right there saying so.
+  **When you add an arm to a shared walk, every termination site is a site.**
+
 - **A counter key must not contain the separator the reporter partitions on.**
   `_drop` writes both `reason` and `reason:setup_class`, and `delivery_stats`
   splits them with `":" not in k`. So a reason keyed `risk_manager:rr_floor`

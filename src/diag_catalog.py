@@ -443,6 +443,28 @@ def _ai_governor_scorecard(ctx: Ctx) -> Dict[str, Any]:
     return _aig.build_scorecard()
 
 
+def _ai_governor_paired(ctx: Ctx) -> Dict[str, Any]:
+    """The governor's effect measured AGAINST the engine's own exit, per row.
+
+    Distinct from `read.ai_governor_scorecard`, and the distinction is the
+    whole point rather than a filing decision. The scorecard joins the
+    closed-signal record, which — while apply is OFF — records what happened
+    *without* any intervention, so for the SL and panic arms it is structurally
+    silent on what acting would have produced and says so by name
+    (`arm_undecidable_while_dark`).
+
+    This entry reads the arm ledger instead, where every row carries BOTH exits
+    walked over one set of bars under one set of fill rules: the geometry a
+    verdict edited, and the geometry the evaluator shipped. That is a paired
+    delta, so it is an effect estimate rather than a selection statistic.
+
+    Assembled in the ENGINE. The api container has never stepped an arm.
+    """
+    from src import ai_governor_live as _cf
+
+    return _cf.build_diag()
+
+
 def _fail_open(ctx: Ctx) -> Dict[str, Any]:
     """Every fail-open exception site and its count — the silent-failure ledger."""
     from src import fail_open
@@ -596,6 +618,17 @@ for _e in (
           "parses `signal_performance.json`, so it is the SLOW entry of the "
           "pair — kept apart from `read.ai_governor` for exactly that reason.",
           _ai_governor_scorecard),
+    Entry("read.ai_governor_paired", "AI Governor vs the engine's exits", "read",
+          "The one comparison the scorecard cannot make: what each edited "
+          "signal did under the governor's geometry against what the SAME "
+          "signal did under the engine's own, walked over identical bars. "
+          "Paired per row, so there is no population to select — which is what "
+          "the +2.5%-vs--0.5% split on the scorecard is and is not. Per arm and "
+          "never pooled. Read `unpairable` and `agreement_violations` before "
+          "any mean: the first says which rows the baseline could not score, "
+          "and the second must be zero — a MAINTAIN-only signal edits nothing, "
+          "so its two walks are required to agree exactly.",
+          _ai_governor_paired),
     Entry("read.edge_store", "Edge store internals", "read",
           "Cell count, record counts and the biggest cells — where the 39 MB "
           "of serialisation cost lives.", _edge_store_internals),

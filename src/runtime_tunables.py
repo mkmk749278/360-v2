@@ -479,11 +479,15 @@ def _build_registry() -> Dict[str, Tunable]:
             key="ai_gov_arms_enabled",
             label="AI Trade Governor — armed arms",
             description=(
-                "Comma set of arms allowed to act: tp, sl, panic. TP alone by "
-                "default — it is the only arm fully decidable from the closed "
-                "signal record, because it moves the target nearer only and "
-                "max favourable excursion settles it with no ordering "
-                "ambiguity."
+                "Comma set of arms allowed to act: tp, sl, panic. tp,sl since "
+                "2026-09-09. TP alone was the default until then — the only arm "
+                "fully decidable from the closed signal record — but across 480 "
+                "ledger rows the model chose ADJUST_SL 34 times and ADJUST_TP "
+                "never, so every actionable verdict belonged to an arm that was "
+                "not armed and arming the effect flag would have changed "
+                "nothing. The SL arm is now scored on a paired counterfactual "
+                "walk instead (read.ai_governor_paired). Apply is still OFF, so "
+                "this moves no order on its own."
             ),
             type="str",
             default=AI_GOV_ARMS_ENABLED,
