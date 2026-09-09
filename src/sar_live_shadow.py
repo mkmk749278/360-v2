@@ -209,6 +209,11 @@ EXIT_GOVERNOR_LEVEL = "governor_level"
 #: we took, and one word for two events is how a page stops being able to say
 #: what happened.
 EXIT_GOVERNOR_PANIC = "governor_panic"
+#: The governor's ENTRY-review cancel: the trade was judged not worth taking at
+#: all. Named apart from a mid-trade panic because the two are different
+#: findings — "we should not have sent this signal" and "the market turned" —
+#: and one word for both is how a page stops being able to say what happened.
+EXIT_GOVERNOR_REJECT = "governor_reject_entry"
 EXIT_STATIC_SL = "static_sl"
 EXIT_STATIC_TP1 = "static_tp1"
 

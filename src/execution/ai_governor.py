@@ -624,6 +624,16 @@ class Arm:
     refusals: Dict[str, int] = field(default_factory=dict)
 
 
+#: The two questions a review can answer, stamped on every verdict. Defined
+#: here rather than beside the prompt because `Verdict` defaults to
+#: `REVIEW_ONGOING` and a constant used above its definition is a NameError at
+#: import — which is how 72 test modules failed to collect on the first run of
+#: this change. One word for two different questions is how a page stops being
+#: able to say what it measured, so they are constants rather than literals.
+REVIEW_ENTRY = "entry"
+REVIEW_ONGOING = "ongoing"
+
+
 @dataclass(frozen=True)
 class Verdict:
     signal_id: str
@@ -648,6 +658,12 @@ class Verdict:
     #: verdict reconstructed from a schema-2 row has no such stamp, and a
     #: missing stamp is not a zero.
     queued_at: Optional[float] = None
+    #: Which question this verdict answered — `entry` (was the trade worth
+    #: taking) or `ongoing` (does the premise still hold). Defaults to
+    #: `ongoing` because that is what every schema-1 row was asked, so a
+    #: reconstructed old verdict lands in the population it belongs to rather
+    #: than in a nameless one.
+    review_kind: str = REVIEW_ONGOING
 
     def as_row(self) -> Dict[str, Any]:
         return {
@@ -663,6 +679,10 @@ class Verdict:
             "served_model": self.served_model,
             "requested_model": self.requested_model,
             "prompt_schema": self.prompt_schema,
+            # Never pooled with an `ongoing` row: the two answered different
+            # questions, and `prompt_schema` alone cannot separate them because
+            # a schema-2 file holds both.
+            "review_kind": self.review_kind,
             "snapshot_digest": self.snapshot_digest,
             "as_of_bar_ms": self.as_of_bar_ms,
             "issued_at": self.issued_at,
@@ -903,20 +923,74 @@ def should_trigger(arm: Arm, snapshot: _snap.Snapshot, macro_moved: bool) -> Opt
     return None
 
 
+def _review_kind_for(signal_id: str) -> str:
+    """Which question this arm is being asked on this call.
+
+    An arm that has never been evaluated is at its ENTRY review; everything
+    after is ONGOING. Read from `calls_made`, and it must be read **before**
+    `evaluate` increments it — the caller does that, and `parse_verdicts` takes
+    the answer as a parameter rather than re-deriving it for exactly that
+    reason.
+
+    An arm the registry has lost (retired between the batch being built and
+    this call) reads ONGOING: the conservative side, because it means a row is
+    filed with the population that is *not* allowed to justify a cancel.
+    """
+    with _arms_lock:
+        arm = _arms.get(signal_id)
+    return REVIEW_ENTRY if arm is not None and arm.calls_made == 0 else REVIEW_ONGOING
+
+
 # ── The model contract ──────────────────────────────────────────────────────
 
-PROMPT_SCHEMA = 1
+#: 2 (2026-09-09) — a **REDEFINITION**, not an addition, and the distinction
+#: decides whether two rows may be averaged together.
+#:
+#: Schema 1 asked one question of every review: *"you are a risk critic for an
+#: already-open scalp; prefer MAINTAIN; reserve PANIC_CLOSE for a genuine
+#: regime break."* Under it the model chose `PANIC_CLOSE` **zero** times in 480
+#: rows and `ADJUST_TP` zero times — which is the prompt working as written,
+#: not the market never offering a reason.
+#:
+#: Owner, 2026-09-09: the governor should *"review it, make adjustment if
+#: needed and also cancel the signal if not worthy"*. That is a different
+#: question, and it is only coherent at the **first** review — "should this
+#: trade have been taken" stops being answerable once the trade has run. So the
+#: entry review asks it and every later review stays the critic it already was.
+#:
+#: Every row stamps `prompt_schema` and `review_kind`, so a schema-1 row and a
+#: schema-2 *entry* row are never pooled — and a schema-2 *ongoing* row was
+#: asked the identical question a schema-1 row was, so those two remain
+#: comparable. Nothing is purged: **filter, do not purge**, and the split is
+#: what makes filtering possible.
+PROMPT_SCHEMA = 2
 
 _SYSTEM_PROMPT = """\
-You are a risk critic for an already-open crypto futures scalp. The trade is
+You are a risk critic for already-open crypto futures scalps. Every trade is
 live; you cannot open, reverse, or size anything. You choose among four
 outcomes and nothing else.
 
-MAINTAIN     - reality still supports the original premise. Prefer this.
+Each position carries a "review" field, and it decides which question you are
+answering. Read it first.
+
+review = "entry" — this is the FIRST look at a trade that has just been taken.
+The question is whether this trade deserved to be taken at all, on what you can
+see now. Be willing to say no. A setup that is already working against its
+own premise, is entering into an obvious wall, or whose reason for existing is
+not visible in the data you were given, is not worth its risk — answer
+PANIC_CLOSE. Do not extend it the benefit of the doubt because it is new.
+
+review = "ongoing" — the trade has been running and was judged worth taking.
+The question is only whether reality still supports the original premise.
+Prefer MAINTAIN here. Reserve PANIC_CLOSE for a genuine regime break; a trade
+being underwater is not one, because the stop was already sized for that.
+
+MAINTAIN     - the premise holds. The default on an "ongoing" review.
 ADJUST_TP    - take profit sooner. Choose a tp_* key NEARER than tp_0.
 ADJUST_SL    - reduce risk. Choose an sl_* key TIGHTER than sl_0.
-PANIC_CLOSE  - the premise is broken and waiting for the stop is worse than
-               paying the exit now. Reserve this for a genuine regime break.
+PANIC_CLOSE  - on "entry", the trade was not worth taking. On "ongoing", the
+               premise is broken and waiting for the stop is worse than paying
+               the exit now.
 
 Rules you must follow:
 - Return ONLY a key that appears in this position's own candidate list.
@@ -975,6 +1049,7 @@ def parse_verdicts(
     result: llm_client.LLMResult,
     batch: Dict[str, Tuple[_snap.Snapshot, _menu.Menu]],
     now: float,
+    reviews: Optional[Dict[str, str]] = None,
 ) -> List[Tuple[Verdict, _snap.Snapshot, _menu.Menu]]:
     """Turn the model's reply into verdicts, refusing anything outside the menu.
 
@@ -1030,6 +1105,11 @@ def parse_verdicts(
             served_model=result.served_model,
             requested_model=result.requested_model,
             prompt_schema=PROMPT_SCHEMA,
+            # Taken from the SAME mapping the prompt was built from, never
+            # recomputed here: `calls_made` has been incremented by now, so
+            # asking the arm again would stamp every entry review as ongoing
+            # and silently empty the population this change exists to create.
+            review_kind=(reviews or {}).get(signal_id, REVIEW_ONGOING),
             snapshot_digest=snapshot.digest(),
             as_of_bar_ms=snapshot.as_of_bar_ms,
             issued_at=now,
@@ -1250,9 +1330,18 @@ async def evaluate(
             _count_in("provider_status", llm_client.NOT_CONFIGURED)
             return 0
 
+        # Which question each position is being asked, decided HERE and read
+        # from `calls_made` BEFORE it is incremented below — the arm's own
+        # record of whether it has ever been evaluated. Computed once and
+        # reused for the stamp, so the prompt and the ledger can never disagree
+        # about which review a row was.
+        reviews = {sid: _review_kind_for(sid) for sid in batch}
         payload = {
             "schema": PROMPT_SCHEMA,
-            "positions": [snap.as_dict() for snap, _m in batch.values()],
+            "positions": [
+                dict(snap.as_dict(), review=reviews[sid])
+                for sid, (snap, _m) in batch.items()
+            ],
         }
         for _sid in batch:
             with _arms_lock:
@@ -1293,7 +1382,9 @@ async def evaluate(
             # model never changes an exit; the default is the deterministic FSM.
             return 0
 
-        verdicts = parse_verdicts(result.data or {}, result=result, batch=batch, now=now)
+        verdicts = parse_verdicts(
+            result.data or {}, result=result, batch=batch, now=now, reviews=reviews
+        )
         ledger = get_ledger()
         for verdict, snapshot, menu in verdicts:
             # MAINTAIN rows are recorded too. A lane that logs only its
@@ -1324,6 +1415,13 @@ async def evaluate(
             _record_counterfactual(verdict, menu, now)
             _count("verdicts")
             _count_in("by_action", verdict.action)
+            # Counted apart, on BOTH dimensions, because the interesting
+            # question is not "how many entry reviews" but "what does the model
+            # say at entry that it never says later". One `by_action` table
+            # cannot show that: `PANIC_CLOSE 3` is a different finding
+            # depending on which review produced it.
+            _count_in("by_review", verdict.review_kind)
+            _count_in("by_review_action", f"{verdict.review_kind}:{verdict.action}")
             with _arms_lock:
                 arm = _arms.get(verdict.signal_id)
                 if arm is not None:
@@ -1371,7 +1469,16 @@ def _record_counterfactual(verdict: Verdict, menu: _menu.Menu, now: float) -> No
                 return
             price = float(cand.price)
         _cf.record_verdict(
-            verdict.signal_id, verdict.action, price, now_ts=now
+            verdict.signal_id,
+            verdict.action,
+            price,
+            now_ts=now,
+            # Carried onto the arm so a cancel AT ENTRY is distinguishable from
+            # a panic mid-trade. Both close the shadow position, so the event
+            # is the same and the reason is not — and a page that cannot tell
+            # them apart would report "the governor cancels 8% of trades"
+            # without being able to say when, which is the whole question.
+            review_kind=verdict.review_kind,
         )
     except Exception as exc:  # noqa: BLE001
         fail_open.record("ai_governor.record_counterfactual", exc)

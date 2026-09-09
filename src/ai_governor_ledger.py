@@ -48,7 +48,18 @@ from src.utils import get_logger
 
 log = get_logger("ai_governor_ledger")
 
-SCHEMA = 3
+#: Schema 4 (2026-09-09) **adds** ``review_kind`` — whether a verdict answered
+#: the entry question ("was this trade worth taking") or the ongoing one ("does
+#: the premise still hold"). **Additive**: no existing field changes meaning,
+#: and a row without the key is an ``ongoing`` row by construction, because
+#: that is the only question schema-1 prompts ever asked.
+#:
+#: The REDEFINITION lives in ``ai_governor.PROMPT_SCHEMA`` (1 -> 2), which every
+#: row already stamps — so the two populations are separable per row without
+#: dropping a window. That split is deliberate: a ledger bump that purged here
+#: would throw away 480 rows whose ongoing verdicts remain perfectly comparable
+#: with today's.
+SCHEMA = 4
 
 #: Older schemas this build reads unchanged.
 #:
@@ -73,7 +84,7 @@ SCHEMA = 3
 #: no second stamp. Additive, so both are read rather than dropped — a purge
 #: here would destroy the window an adoption decision reads, which is the
 #: defect a bare ``!=`` loader cost this repo on 371 rows.
-ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1, 2})
+ADDITIVE_FROM_SCHEMAS: frozenset = frozenset({1, 2, 3})
 
 _DEFAULT_PATH = os.path.join("data", "ai_governor_v1.json")
 
