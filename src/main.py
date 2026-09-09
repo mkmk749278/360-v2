@@ -4353,6 +4353,28 @@ class CryptoSignalEngine:
             min_streak=12,
         ))
 
+        # The governor's paired lane, on its own key. It is the arm behind an
+        # adoption decision on a live exit mechanism, so a lane that quietly
+        # stops stepping would leave that decision reading a frozen window —
+        # and a frozen window looks exactly like a quiet one.
+        from src import ai_governor_live as _cf_probe_mod
+
+        def _cf_on() -> bool:
+            from src import ai_governor_live as _cf_p
+
+            return _cf_p.enabled()
+
+        fl.add_predicate(PredicateProbe(
+            name="ai_governor_live_arms",
+            fn=_arm_lane_probe(
+                _cf_probe_mod.lane(),
+                _cf_probe_mod.get_ledger,
+                "AI governor paired",
+                _cf_on,
+            ),
+            min_streak=12,
+        ))
+
         def _sar_hold_arm() -> Tuple[bool, str]:
             """Is the SECOND arm resolving, or only the first?
 

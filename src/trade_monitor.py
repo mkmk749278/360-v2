@@ -61,7 +61,13 @@ from src.execution import be_policy as _be_policy
 from src.execution import runner_policy as _runner_policy
 from src.execution import ai_governor
 from src.execution import trail_governor
-from src import atr_trail_live, entry_fidelity, sar_live_shadow, trail_mechanisms
+from src import (
+    ai_governor_live,
+    atr_trail_live,
+    entry_fidelity,
+    sar_live_shadow,
+    trail_mechanisms,
+)
 from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
 from src.live_ticks import resolve_recent_ticks
@@ -1153,6 +1159,19 @@ class TradeMonitor:
             # different windows they would differ by the window.  Its own
             # ledger, never a column in SAR's: see atr_trail_live's docstring.
             atr_trail_live.observe_signal(sig, self._store, price=price)
+            # ...and the AI governor's own arm, on the SAME clock, for the
+            # reason the owner asked for it (2026-09-09): while apply is OFF
+            # every recorded outcome is the MAINTAIN counterfactual, so the
+            # closed-signal record says what happened WITHOUT the intervention
+            # and can never say what acting would have produced. This arm walks
+            # the geometry a verdict edited beside the engine's own, on one row
+            # over identical bars, which is the only shape in which that
+            # question has an answer before the effect flag is armed.
+            #
+            # One arm per signal on the setup's declared trigger timeframe, not
+            # 5m+15m: a verdict is one thesis about one signal, and copying it
+            # onto two arms counts one recommendation twice.
+            ai_governor_live.observe_signal(sig, self._store, price=price)
 
         # ``return_exceptions=True`` is load-bearing, not tidiness.  Without
         # it one raising signal aborts the whole gather: every sibling's result
@@ -1203,6 +1222,13 @@ class TradeMonitor:
             sar_live_shadow.lane_of(trail_mechanisms.MECH_CHANDELIER, dark=False)
         )
         atr_trail_live.get_ledger().flush()
+        # The governor lane, stepped and rolled beside them. Its own health key
+        # (`governor:live`) — pooling it into SAR's bare `live` would let a
+        # stalled governor lane page as a SAR failure and a healthy SAR lane
+        # dilute a real governor one, and `main.py`'s probes read that key.
+        ai_governor_live.sweep(self._store, price_fn=self._price_for)
+        sar_live_shadow.roll_health_cycle(ai_governor_live.lane())
+        ai_governor_live.get_ledger().flush()
         # ...and the one arm that is not an arm.  Everything above records
         # where a stop WOULD have been parked; this places it, for the users
         # who opted in (2026-08-10, owner-only).  Same clock as the shadow

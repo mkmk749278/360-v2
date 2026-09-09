@@ -111,7 +111,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src import fail_open, ledger_schema, sar_exit_strategies, trail_mechanisms
 from src.sar_exit_shadow import SarLive, parabolic_sar_live
-from src.trail_mechanisms import MECH_CHANDELIER, MECH_SAR, TrailPoint
+from src.trail_mechanisms import (
+    MECH_CHANDELIER,
+    MECH_GOVERNOR,
+    MECH_SAR,
+    TrailPoint,
+)
 from src.utils import get_logger
 
 log = get_logger(__name__)
@@ -177,6 +182,8 @@ STATUS_CLOSED_SAR_FLIP = "CLOSED_SAR_FLIP"
 #: same word for two different events. The lanes never pool, so nothing is lost
 #: by naming them honestly and a great deal is lost by not.
 STATUS_CLOSED_TRAIL_STOP = "CLOSED_TRAIL_STOP"
+STATUS_CLOSED_GOVERNOR = "CLOSED_GOVERNOR_LEVEL"
+STATUS_CLOSED_PANIC = "CLOSED_PANIC"
 STATUS_CLOSED_SL = "CLOSED_SL"
 STATUS_CLOSED_TP1 = "CLOSED_TP1"
 STATUS_INSUFFICIENT = "INSUFFICIENT"
@@ -185,6 +192,8 @@ CLOSED_STATUSES = frozenset(
     {
         STATUS_CLOSED_SAR_FLIP,
         STATUS_CLOSED_TRAIL_STOP,
+        STATUS_CLOSED_GOVERNOR,
+        STATUS_CLOSED_PANIC,
         STATUS_CLOSED_SL,
         STATUS_CLOSED_TP1,
     }
@@ -192,6 +201,14 @@ CLOSED_STATUSES = frozenset(
 
 EXIT_SAR_FLIP = "sar_flip"
 EXIT_TRAIL_STOP = "trail_stop"
+#: The governor's own exit names. Unreachable while `onside` is permanently
+#: False and declared regardless — see `_MECH_EXIT`.
+EXIT_GOVERNOR_LEVEL = "governor_level"
+#: A verdict asked for an immediate market close. Its own reason rather than
+#: reusing a stop name: a stop is a level the market came to, this is a decision
+#: we took, and one word for two events is how a page stops being able to say
+#: what happened.
+EXIT_GOVERNOR_PANIC = "governor_panic"
 EXIT_STATIC_SL = "static_sl"
 EXIT_STATIC_TP1 = "static_tp1"
 
@@ -202,6 +219,13 @@ EXIT_STATIC_TP1 = "static_tp1"
 _MECH_EXIT: Dict[str, Tuple[str, str]] = {
     MECH_SAR: (EXIT_SAR_FLIP, STATUS_CLOSED_SAR_FLIP),
     MECH_CHANDELIER: (EXIT_TRAIL_STOP, STATUS_CLOSED_TRAIL_STOP),
+    # The governor never comes onside (see `trail_mechanisms._governor_point`),
+    # so this pair is unreachable by construction — and it is declared anyway.
+    # `mech_exit` falls back to SAR's names for an unmapped mechanism, so an
+    # omission here would book a governor exit as a "sar_flip" the day somebody
+    # changes that invariant. A mapping that costs one line is cheaper than a
+    # status nobody can read.
+    MECH_GOVERNOR: (EXIT_GOVERNOR_LEVEL, STATUS_CLOSED_GOVERNOR),
 }
 
 
@@ -302,7 +326,20 @@ OPEN_REFUSED_NO_SERIES = "no_series"
 #: this time that sentence is enforced by ``ADDITIVE_FROM_SCHEMAS`` below rather
 #: than asserted by a comment, which is exactly the distinction the 1 → 2 bump
 #: destroyed 371 rows failing to make.
-LEDGER_SCHEMA = 3
+#: 4 (2026-09-09) — the **geometry control**: ``geom_status`` and its fields,
+#: the engine's own SL/TP1 walked on the same bars and never overridden by any
+#: mechanism or verdict. **Additive.** Nothing existing changes meaning; rows
+#: written before it carry no ``geom_status`` and read as ``pre_arm``, owed
+#: nothing, exactly as a schema-1 row does for the held arm.
+#:
+#: It exists because every lane here could say what its mechanism produced and
+#: none could say what the engine's own exit produced **on the same bars**. The
+#: comparison was therefore always between two populations — the signals a
+#: mechanism took over and the signals it did not — which is a selection
+#: statistic wearing an effect estimate's clothes. Paired on one row it is an
+#: effect estimate, and it is the only shape in which a governor verdict can be
+#: scored at all while apply is OFF.
+LEDGER_SCHEMA = 4
 
 #: Older schemas this build reads **unchanged**, because the bump only added
 #: fields. Schema 1 rows carry every field the SAR verdict is computed from and
@@ -313,7 +350,7 @@ LEDGER_SCHEMA = 3
 #: first flush after deploy overwrote 371 rows. A bump that redefines a field
 #: instead of adding one must NOT be listed here — then old and new rows
 #: disagree about what a column means and the drop is correct.
-ADDITIVE_FROM_SCHEMAS = frozenset({1, 2})
+ADDITIVE_FROM_SCHEMAS = frozenset({1, 2, 3})
 
 #: Terminal states for the held-to-stop arm. Three, not two, for the reason
 #: #839 paid for: a walked window in which the stop was never reached is a
@@ -323,6 +360,17 @@ HOLD_OPEN = "OPEN"
 HOLD_SL = "CLOSED_SL"          # reached the original stop — the arm's own verdict
 HOLD_HORIZON = "HORIZON"       # walked to the arm's horizon, still open, peak is a floor
 HOLD_INSUFFICIENT = "INSUFFICIENT"  # the walk broke; terminal and deliberately unscored
+
+#: Terminal states for the **geometry control** — the engine's own SL and TP1,
+#: walked on the same bars as everything else on the row and never touched by a
+#: mechanism or a verdict. Same three-not-two rule as the held arm: a walked
+#: window in which neither level was reached is a measurement (``HORIZON``); a
+#: window that could not be walked is the absence of one (``INSUFFICIENT``).
+GEOM_OPEN = "OPEN"
+GEOM_SL = "CLOSED_SL"
+GEOM_TP1 = "CLOSED_TP1"
+GEOM_HORIZON = "HORIZON"
+GEOM_INSUFFICIENT = "INSUFFICIENT"
 
 
 # --------------------------------------------------------------------------- #
@@ -612,10 +660,14 @@ def _note_series_state(
         arm["closed_at"] = now
     arm["current_price"] = None
     arm["unrealized_pct"] = None
-    # The held arm was walking the same dead feed. Terminating the SAR arm alone
-    # would leave it OPEN forever in a retired row — the frozen-arm class this
-    # module exists to make impossible, reintroduced by the second arm.
+    # Every arm on this row was walking the same dead feed. Terminating the
+    # mechanism arm alone would leave the others OPEN forever in a retired row —
+    # the frozen-arm class this module exists to make impossible, reintroduced
+    # by whichever arm was added last. The existing test caught the geometry
+    # control's omission here on the first run, which is the whole argument for
+    # keying the sweep on `owed_verdict` rather than on any one arm.
     _hold_insufficient(arm, EXIT_FEED_STALLED, now)
+    _geom_insufficient(arm, EXIT_FEED_STALLED, now)
     return True
 
 
@@ -870,6 +922,40 @@ def new_arm(
         # stop have held this" question actually needs.
         "hold_mae_pre_peak_pct": 0.0,
         "hold_ambiguous_bar": False,
+        # ── The geometry control ────────────────────────────────────────────
+        # A THIRD walk over the same bars: the engine's own stop and target,
+        # frozen at open, never moved by a mechanism handover and never edited
+        # by a governor verdict. This is the paired baseline every lane in this
+        # module lacked.
+        #
+        # Why a frozen copy rather than reading `stop_loss` / `tp1` off the row.
+        # Those two are MUTABLE: `_apply_stop` rewrites the parked stop, and on
+        # the governor lane a verdict edits them in place by design. A control
+        # that reads the field the treatment moves is not a control — it is the
+        # treatment, and it would agree with it perfectly while looking like
+        # independent evidence. #848 with the arithmetic removed.
+        #
+        # What it buys: `pnl_level_pct` minus `geom_pnl_pct` is the mechanism's
+        # effect ON THIS SIGNAL, over identical bars, computed by one walk. The
+        # old comparison — signals a mechanism took over against signals it did
+        # not — is a fact about which signals qualify, not about the mechanism.
+        "geom_status": GEOM_OPEN,
+        "geom_exit_reason": None,
+        "geom_sl": float(stop_loss),
+        "geom_tp1": float(tp1),
+        "geom_bars": 0,
+        "geom_fill": None,
+        "geom_pnl_pct": None,
+        "geom_closed_at": None,
+        # Both levels touched inside one bar. OHLC cannot order them, so the
+        # row is resolved pessimistically and says so rather than being
+        # silently averaged as a fact — the same call the SAR arm already makes.
+        "geom_ambiguous_bar": False,
+        # An externally requested market close, filled by the walk on the next
+        # bar's open. See the consumer in `step_arm` for why it is generic and
+        # why it does not fill here. Present from creation so a blank means
+        # "nobody asked", never "predates the field".
+        "pending_close": None,
         #: Newest close either arm has walked. Used to mark a rule still open at
         #: the horizon — never a live price, which this row did not walk.
         "last_close": None,
@@ -919,16 +1005,33 @@ def hold_arm_open(arm: Dict[str, Any]) -> bool:
     return arm.get("hold_status") == HOLD_OPEN
 
 
+def geom_arm_open(arm: Dict[str, Any]) -> bool:
+    """Is the geometry control still owed a verdict?
+
+    A row written before schema 4 carries no ``geom_status`` and must read
+    **closed** — it predates the control, is owed nothing, and reading a missing
+    field as "open" would resurrect the whole history into the open set. Exactly
+    the call `hold_arm_open` makes for schema-1 rows, and for the same reason.
+    """
+    return arm.get("geom_status") == GEOM_OPEN
+
+
 def owed_verdict(arm: Dict[str, Any]) -> bool:
-    """Either arm still measuring.
+    """ANY arm on this row still measuring.
 
     This is the population the sweep keys on. Keying on the SAR arm alone is
     #835's shape and #869's corollary in one: the held arm exits at the original
     stop, which is normally *later* than the SAR flip, so a loop that retires on
     the SAR close freezes precisely the arm built to outlive it — silently,
     because a closed row looks correctly complete.
+
+    Three arms now, not two. The geometry control normally finishes FIRST (it
+    keeps the target the held arm removes), so it does not extend a row's life —
+    but it is in here anyway, because a population defined by "the arms that
+    happen to run longest" is not a population, and the next arm added may not
+    be the short one.
     """
-    return sar_arm_open(arm) or hold_arm_open(arm)
+    return sar_arm_open(arm) or hold_arm_open(arm) or geom_arm_open(arm)
 
 
 def _hold_insufficient(arm: Dict[str, Any], reason: str, now_ts: float) -> None:
@@ -950,6 +1053,76 @@ def _hold_insufficient(arm: Dict[str, Any], reason: str, now_ts: float) -> None:
             st["status"] = sar_exit_strategies.ST_HORIZON
             st["fill"] = None
             st["pnl_pct"] = None
+
+
+def _geom_insufficient(arm: Dict[str, Any], reason: str, now_ts: float) -> None:
+    """Terminate the geometry control with no verdict, naming why.
+
+    Unscored, exactly like the held arm's equivalent: an expiry is a walked
+    window in which nothing happened, this is the absence of a measurement, and
+    pooling them divides a rate by rows nobody scored. It matters more here
+    than anywhere else on the row — this is the *baseline*, so a broken control
+    silently removed from the denominator would leave the treatment's number
+    standing alone and looking complete.
+    """
+    if arm.get("geom_status") != GEOM_OPEN:
+        return
+    arm["geom_status"] = GEOM_INSUFFICIENT
+    arm["geom_exit_reason"] = reason
+    arm["geom_closed_at"] = now_ts
+
+
+def _step_geom(
+    arm: Dict[str, Any],
+    *,
+    high: float,
+    low: float,
+    open_: float,
+    close: float,
+    now_ts: float,
+) -> bool:
+    """Advance the geometry control over one closed bar. True if it changed.
+
+    The engine's own exit, replayed: stop and target both live, first touch
+    wins, a gap through the stop fills at the open and a resting limit fills at
+    its own price. Every convention is copied from the arm's ``GOV_GEOMETRY``
+    branch rather than re-derived, because a baseline computed under different
+    fill rules than the treatment measures the rules and not the mechanism.
+
+    It reads ``geom_sl`` / ``geom_tp1``, never ``stop_loss`` / ``tp1`` — see the
+    field comment in ``new_arm`` for why that distinction is the whole point.
+    """
+    entry = float(arm["entry"])
+    if entry <= 0:
+        return False
+    sl = arm.get("geom_sl")
+    tp1 = arm.get("geom_tp1")
+    if sl is None or tp1 is None:
+        return False
+    sl, tp1 = float(sl), float(tp1)
+    is_long = _is_long(arm["side"])
+    arm["geom_bars"] = int(arm.get("geom_bars") or 0) + 1
+
+    sl_hit = (low <= sl) if is_long else (high >= sl)
+    tp_hit = (high >= tp1) if is_long else (low <= tp1)
+    if not (sl_hit or tp_hit):
+        return True  # a consumed bar is a change worth persisting
+
+    if sl_hit and tp_hit:
+        arm["geom_ambiguous_bar"] = True
+    if sl_hit:
+        gapped = (open_ <= sl) if is_long else (open_ >= sl)
+        fill = open_ if gapped else sl
+        arm["geom_status"] = GEOM_SL
+        arm["geom_exit_reason"] = EXIT_STATIC_SL
+    else:
+        fill = tp1
+        arm["geom_status"] = GEOM_TP1
+        arm["geom_exit_reason"] = EXIT_STATIC_TP1
+    arm["geom_fill"] = float(fill)
+    arm["geom_pnl_pct"] = _pnl_pct(entry, fill, arm["side"])
+    arm["geom_closed_at"] = now_ts
+    return True
 
 
 def _step_hold(
@@ -1152,8 +1325,12 @@ def step_arm(
                 arm["status"] = STATUS_INSUFFICIENT
                 arm["exit_reason"] = rolled
                 arm["closed_at"] = now
-            # The held arm walked the same bars, so it lost the same window.
+            # Every arm on this row walked the same bars, so every one of them
+            # lost the same window. Terminating only some would leave a row
+            # whose treatment is scored and whose baseline is not — which reads
+            # as a result rather than as a broken walk.
             _hold_insufficient(arm, rolled, now)
+            _geom_insufficient(arm, rolled, now)
             return True
         n = len(times)
         changed = False
@@ -1238,9 +1415,10 @@ def step_arm(
                     arm["closed_at"] = now
                 arm["advance_replay_bars"] = float(pending)
                 arm["advance_allowed_bars"] = float(allowed)
-                # Both arms walk the same bars under the same guard: a series
-                # that jumped cannot be walked honestly by either of them.
+                # Every arm walks the same bars under the same guard: a series
+                # that jumped cannot be walked honestly by any of them.
                 _hold_insufficient(arm, EXIT_SERIES_JUMPED, now)
+                _geom_insufficient(arm, EXIT_SERIES_JUMPED, now)
                 log.warning(
                     "SAR arm {} refused a {:.0f}-bar advance ({:.1f} allowed by "
                     "the clock) — series jumped, not walked",
@@ -1284,10 +1462,51 @@ def step_arm(
                 ):
                     changed = True
 
+            # The geometry control, on the same bar and under the same fill
+            # rules. Advanced unconditionally beside the held arm rather than
+            # inside the mechanism branch below: the moment it depended on the
+            # mechanism still running, the baseline would stop exactly when the
+            # treatment did and could never outlive it — #835's shape, and it
+            # would be invisible because a closed row looks complete.
+            if geom_arm_open(arm):
+                if _step_geom(
+                    arm, high=hi, low=lo, open_=op, close=cl, now_ts=now,
+                ):
+                    changed = True
+
+            # ── An externally requested close, filled by the walk ──────────
+            # Generic on purpose: the arm engine knows "somebody asked for this
+            # arm to be out at market", and nothing about who asked or why. The
+            # AI governor's PANIC_CLOSE is the only caller today, and a branch
+            # naming it here would put one lane's vocabulary in the engine four
+            # lanes share.
+            #
+            # It fills at THIS bar's OPEN — the earliest price actually
+            # available after a decision taken mid-previous-bar — and keeps the
+            # close the requester was looking at as the confirm fill. Both
+            # fills, as everywhere else on this row: their difference is the
+            # cost of not being able to act instantly, it is never zero, and
+            # collapsing them would be choosing the flattering one.
+            pend = arm.get("pending_close")
+            if pend and sar_arm_open(arm):
+                ref = pend.get("ref_price")
+                _close(
+                    arm,
+                    reason=str(pend.get("reason") or EXIT_GOVERNOR_PANIC),
+                    status=STATUS_CLOSED_PANIC,
+                    fill_level=float(op),
+                    fill_confirm=float(ref if ref is not None else op),
+                    now_ts=now,
+                )
+                arm["pending_close"] = None
+                arm["closed_bar_ms"] = times[i]
+                changed = True
+
             if not sar_arm_open(arm):
-                # SAR is done; the held arm above is what is still walking. Stop
-                # once neither is, rather than iterating the rest of the window.
-                if not hold_arm_open(arm):
+                # The mechanism is done; the held arm and the geometry control
+                # are what may still be walking. Stop once none of them is,
+                # rather than iterating the rest of the window.
+                if not hold_arm_open(arm) and not geom_arm_open(arm):
                     break
                 continue
 
@@ -1912,9 +2131,18 @@ def observe_signal(
     lane: str = LANE_LIVE,
     mechanism: str = MECH_SAR,
     mech_params: Optional[Dict[str, float]] = None,
+    mech_state: Optional[Dict[str, Any]] = None,
     now_ts: Optional[float] = None,
 ) -> None:
     """Open this signal's arms on first sight. Advancing is ``sweep``'s job.
+
+    ``mech_state`` seeds the mechanism's carried state at the anchor. SAR and
+    the chandelier need none — they derive everything from the bars — but the
+    governor's level does not exist in the bars at all: it starts as the stop
+    the evaluator sized the trade for and is edited by a verdict later. Seeding
+    it here rather than defaulting inside the mechanism keeps the rule that a
+    mechanism which cannot state its level **refuses** (#800): an empty seed
+    still produces ``INSUFFICIENT`` rather than a guess.
 
     This function reads the signal and nothing else reads the signal — entry, SL,
     TP1, side and setup class are only knowable here. Once the arms exist they
@@ -2020,7 +2248,7 @@ def observe_signal(
                     )
                     _note(tf, False, OPEN_REFUSED_STALE_ANCHOR)
                     continue
-                mstate: Dict[str, Any] = {}
+                mstate: Dict[str, Any] = dict(mech_state or {})
                 live = _anchor_point(
                     mech,
                     symbol,
@@ -2159,6 +2387,19 @@ def sweep(
                         side=str(arm.get("side") or ""),
                         last_close=arm.get("last_close"),
                     )
+                # The geometry control reached the same bound on the same bars,
+                # and for the same reason it retires HORIZON rather than
+                # INSUFFICIENT: the window WAS walked and neither level was
+                # touched, which is a measurement. It is deliberately left with
+                # no `geom_pnl_pct` — marking it to the last close would book a
+                # fill the market never gave, and the row would then be scored
+                # against a price nobody could have got. An unscored horizon in
+                # the baseline is honest; an invented one silently moves every
+                # paired delta on the page.
+                if geom_arm_open(arm):
+                    arm["geom_status"] = GEOM_HORIZON
+                    arm["geom_exit_reason"] = EXIT_OPEN_AT_HORIZON
+                    arm["geom_closed_at"] = now
                 book.retire(arm_id)
                 tally["retired"] += 1
                 # Deliberately NOT a health miss. The arm reached a bound we
@@ -2428,10 +2669,41 @@ def hold_arm_health(ledger: Optional["SarLiveLedger"] = None) -> Dict[str, Any]:
         "hold_open": 0,
         "pre_arm_rows": 0,      # schema-1: predates the arm, owed nothing
         "one_armed": 0,
+        # ── The geometry control's own resolution, counted apart ────────────
+        # A baseline that quietly stops resolving does not empty the page — it
+        # shrinks the paired population while every treatment column still
+        # renders, so the deltas keep looking computed and describe fewer and
+        # fewer rows. This is the only number that can say so.
+        "geom_resolved": 0,      # reached the engine's own SL or TP1
+        "geom_horizon": 0,       # walked to the bound, deliberately unscored
+        "geom_insufficient": 0,  # the walk broke; named apart from the above
+        "geom_open": 0,
+        "geom_pre_arm_rows": 0,  # pre-schema-4: predates the control, owed nothing
+        # Rows carrying a mechanism verdict AND a scored baseline — the only
+        # rows a paired delta can be computed on, and therefore the denominator
+        # every such delta must be read against.
+        "pairable": 0,
     }
     for r in rows:
         sar_done = r.get("status") not in (None, STATUS_RUNNING)
         out["sar_resolved"] += 1 if sar_done else 0
+        gs = r.get("geom_status")
+        if gs is None:
+            out["geom_pre_arm_rows"] += 1
+        elif gs in (GEOM_SL, GEOM_TP1):
+            out["geom_resolved"] += 1
+            # Both halves scored, on one row, over one walk. `CLOSED_STATUSES`
+            # rather than "not RUNNING": an INSUFFICIENT mechanism arm has a
+            # terminal status and no fill, and counting it here would put rows
+            # with no treatment number into the denominator of every delta.
+            if r.get("status") in CLOSED_STATUSES:
+                out["pairable"] += 1
+        elif gs == GEOM_HORIZON:
+            out["geom_horizon"] += 1
+        elif gs == GEOM_INSUFFICIENT:
+            out["geom_insufficient"] += 1
+        else:
+            out["geom_open"] += 1
         hs = r.get("hold_status")
         if hs is None:
             # Not "the arm found nothing" — this row was written before the arm

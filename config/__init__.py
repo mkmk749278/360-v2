@@ -4753,10 +4753,42 @@ AI_GOV_MEASURE_ENABLED: bool = _safe_bool("AI_GOV_MEASURE_ENABLED", "true")
 AI_GOV_APPLY_ENABLED: bool = _safe_bool("AI_GOV_APPLY_ENABLED", "false")
 
 #: Which arms may APPLY once the effect flag is on, as a comma set of
-#: tp / sl / panic. Default is the TP arm alone: it is the only one fully
-#: decidable from the closed-signal record (the snap moves nearer only, so MFE
-#: settles it with no ordering ambiguity), and it is monotone-safe.
-AI_GOV_ARMS_ENABLED: str = os.getenv("AI_GOV_ARMS_ENABLED", "tp")
+#: tp / sl / panic.
+#:
+#: **Was ``tp`` alone until 2026-09-09, and that default made the effect flag
+#: inert.** The reasoning behind it was sound on its own terms — the TP arm is
+#: the only one fully decidable from the closed-signal record, because the
+#: adjustment moves the target nearer only and ``max_favorable_excursion_pct``
+#: settles it with no ordering ambiguity. What nothing checked is whether the
+#: model ever chooses it. Across 480 ledger rows and 90 verdicts on the live
+#: window the mix was MAINTAIN 56 / **ADJUST_SL 34** / **ADJUST_TP zero**:
+#: every actionable verdict belonged to the one arm that was not armed, so
+#: arming the effect flag would have changed nothing at all
+#: (`arm_reachability`, published 2026-09-08).
+#:
+#: Owner, 2026-09-09, on being shown that: arm ``sl`` now, with apply still OFF.
+#: This does not move an order — ``apply_verdict`` refuses on ``apply_off``
+#: before it ever reaches the arm check — and it is not cosmetic either: it is
+#: the difference between a verdict dying as ``arm_off`` and dying as
+#: ``apply_off``, and it makes the arm reachable the day apply is armed. That
+#: consequence is the point and is stated here rather than discovered later.
+#:
+#: The undecidability that motivated the old default is answered by
+#: ``src/ai_governor_live.py`` rather than by the arm list: the SL arm is now
+#: scored on a paired counterfactual walk against the engine's own geometry on
+#: the same bars, which is a measurement the closed-signal record cannot supply.
+AI_GOV_ARMS_ENABLED: str = os.getenv("AI_GOV_ARMS_ENABLED", "tp,sl")
+
+#: The governor's paired counterfactual — one arm per delivered signal, walked
+#: on the arm engine, against the engine's own SL/TP1 over the same bars.
+#:
+#: A **measurement** flag, so it ships ON (`CLAUDE.md § Project Phase`): a
+#: measurement shipped default-OFF produces an empty ops panel and a decision
+#: that keeps being deferred, which is exactly what happened to the SAR exit arm
+#: on 2026-07-25. The effect flag beside it (``AI_GOV_APPLY_ENABLED``) stays OFF
+#: and is the owner's. This lane changes no order and places nothing; it walks
+#: in-memory candles on the monitor loop like the three lanes beside it.
+AI_GOV_LIVE_ARMS_ENABLED: bool = _safe_bool("AI_GOV_LIVE_ARMS_ENABLED", "true")
 
 AI_GOV_PROVIDER: str = _safe_choice(
     "AI_GOV_PROVIDER", "google", frozenset({"google", "anthropic"})
