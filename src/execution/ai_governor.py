@@ -1464,7 +1464,7 @@ async def evaluate(
     cacheable prefix, costs ~5x fewer calls, and lets the model see the
     correlation that ``MAX_SAME_DIRECTION_GLOBAL`` exists to bound.
     """
-    from config import AI_GOV_OUTPUT_TOKEN_FLOOR
+    from config import AI_GOV_OUTPUT_TOKEN_FLOOR, AI_GOV_OUTPUT_TOKEN_PER_SIGNAL
 
     now = _now() if now is None else now
     cli = client or _client()
@@ -1508,7 +1508,9 @@ async def evaluate(
         # written, so the whole allowance can be spent producing nothing. The
         # ceiling is not a reservation: unused tokens are not billed, and the
         # per-hour call bound is what actually caps the spend.
-        budget = AI_GOV_OUTPUT_TOKEN_FLOOR + 150 * max(1, len(batch))
+        budget = AI_GOV_OUTPUT_TOKEN_FLOOR + AI_GOV_OUTPUT_TOKEN_PER_SIGNAL * max(
+            1, len(batch)
+        )
         result = await cli.complete_json(
             system=_SYSTEM_PROMPT,
             user=json.dumps(payload, separators=(",", ":")),

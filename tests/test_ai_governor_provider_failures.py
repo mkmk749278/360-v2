@@ -241,17 +241,29 @@ async def test_the_api_key_never_reaches_the_ring(monkeypatch):
 # ── The budget ──────────────────────────────────────────────────────────────
 
 async def test_the_output_budget_carries_a_floor_above_the_per_signal_share():
-    """150 tokens per signal was ample for the ANSWER and is the whole budget a
-    thinking-class model has to reason in before writing it."""
-    from config import AI_GOV_OUTPUT_TOKEN_FLOOR
+    """The per-signal share was ample for the ANSWER and is the whole budget a
+    thinking-class model has to reason in before writing it.
+
+    Both terms are read from config rather than written here. This test
+    hardcoded `150` and went red the moment PROMPT_SCHEMA 3's live truncation
+    forced the number up — an assertion outliving its premise at exactly the
+    moment somebody is changing the premise, which is the one moment nobody
+    re-reads it. Pinning the SHAPE (floor + per-signal x batch) survives a
+    resize; pinning the value only restates the constant.
+    """
+    from config import AI_GOV_OUTPUT_TOKEN_FLOOR, AI_GOV_OUTPUT_TOKEN_PER_SIGNAL
 
     cli = _Client([_failure()])
     await gov.evaluate(_batch(1), now=1000.0, client=cli)
-    assert cli.asked_max_output_tokens == [AI_GOV_OUTPUT_TOKEN_FLOOR + 150]
+    assert cli.asked_max_output_tokens == [
+        AI_GOV_OUTPUT_TOKEN_FLOOR + AI_GOV_OUTPUT_TOKEN_PER_SIGNAL
+    ]
 
     cli = _Client([_failure()])
     await gov.evaluate(_batch(3), now=1000.0, client=cli)
-    assert cli.asked_max_output_tokens == [AI_GOV_OUTPUT_TOKEN_FLOOR + 450]
+    assert cli.asked_max_output_tokens == [
+        AI_GOV_OUTPUT_TOKEN_FLOOR + AI_GOV_OUTPUT_TOKEN_PER_SIGNAL * 3
+    ]
 
 
 def test_the_floor_is_big_enough_to_be_worth_calling_a_floor():
