@@ -158,6 +158,17 @@ def _blank_health() -> Dict[str, Any]:
         # working, and pooling the two makes a healthy governor read as a
         # blocked one.
         "throttles": {},
+        # Every terminal state of the apply path, counted BY CONSTRUCTION.
+        # `apply_verdict` is a thin counting wrapper around the real body, so a
+        # return added later cannot escape this bucket the way `no_positions`
+        # did: it was the one exit with no counter, and by elimination it is
+        # where every ADJUST_SL verdict went while the panel read `applied 0`
+        # with no refusal beside it. The docstring on `apply_verdict` had
+        # asserted "there is no path that both declines to act and says
+        # nothing" since the lane shipped — a constant asserting a property the
+        # code beneath it did not have, for the tenth time in these two repos,
+        # and this one sat on the money path.
+        "apply_outcomes": {},
         "provider_status": {},
         # The counts above say HOW MANY calls failed and cannot say what the
         # provider objected to. `bad_json` covers a truncated answer, a
@@ -608,6 +619,24 @@ def armed_arms() -> Tuple[str, ...]:
     return tuple(a for a in (p.strip().lower() for p in raw.split(",")) if a in ARMS)
 
 
+def _arm_is_armed_now(action: str) -> Optional[bool]:
+    """Could a verdict of *action* move a real order right now?
+
+    `MAINTAIN` returns None rather than False: it has no arm, so "armed" is a
+    question it cannot be asked, and answering False would file every MAINTAIN
+    row as a dark row in a window that may not be dark. Same tri-state rule the
+    mechanism manifest already carries for `has_direction`.
+    """
+    arm = _ARM_OF.get(action)
+    if arm is None:
+        return None
+    try:
+        return bool(apply_enabled()) and arm in armed_arms()
+    except Exception as exc:  # noqa: BLE001 — a stamp is never worth a raise
+        fail_open.record("ai_governor.arm_is_armed_now", exc)
+        return None
+
+
 # ── Arms — one per SIGNAL, never per position ───────────────────────────────
 
 @dataclass
@@ -664,6 +693,21 @@ class Verdict:
     #: reconstructed old verdict lands in the population it belongs to rather
     #: than in a nameless one.
     review_kind: str = REVIEW_ONGOING
+    #: Was this verdict's own arm ARMED TO ACT at the moment it was issued —
+    #: `apply_enabled()` and this action's arm in `armed_arms()`?
+    #:
+    #: Recorded where it becomes true, not inferred later. While apply is off
+    #: every recorded outcome is the MAINTAIN counterfactual, which is what
+    #: makes the scorecard's selection panel readable at all. The day apply is
+    #: armed that stops being true *for the rows issued after it*, and without
+    #: this field the ledger holds treatment and control under one name with
+    #: nothing able to separate them — a window pooled at the moment it starts
+    #: meaning two things.
+    #:
+    #: `None` is a schema-2 row issued before this field existed. It is NOT
+    #: `False`: those rows were dark, but saying so from the absence of a stamp
+    #: is the inference this repo keeps paying for. Filter, do not purge.
+    apply_armed: Optional[bool] = None
 
     def as_row(self) -> Dict[str, Any]:
         return {
@@ -683,6 +727,7 @@ class Verdict:
             # questions, and `prompt_schema` alone cannot separate them because
             # a schema-2 file holds both.
             "review_kind": self.review_kind,
+            "apply_armed": self.apply_armed,
             "snapshot_digest": self.snapshot_digest,
             "as_of_bar_ms": self.as_of_bar_ms,
             "issued_at": self.issued_at,
@@ -1110,6 +1155,11 @@ def parse_verdicts(
             # asking the arm again would stamp every entry review as ongoing
             # and silently empty the population this change exists to create.
             review_kind=(reviews or {}).get(signal_id, REVIEW_ONGOING),
+            # Read at issue, for THIS action's arm — not "is the lane armed"
+            # in general. A window where `sl` is armed and `tp` is not holds
+            # treatment rows and counterfactual rows side by side, and only a
+            # per-action stamp can separate them.
+            apply_armed=_arm_is_armed_now(action),
             snapshot_digest=snapshot.digest(),
             as_of_bar_ms=snapshot.as_of_bar_ms,
             issued_at=now,
@@ -1529,11 +1579,38 @@ async def apply_verdict(
     now: Optional[float] = None,
     placer_factory: Any = None,
 ) -> str:
-    """Act on one verdict, re-validating every precondition against state NOW.
+    """Act on one verdict, and count what happened — whatever happened.
 
-    Returns the outcome name. Every refusal is counted; there is no path that
-    both declines to act and says nothing.
+    The counting lives HERE rather than at each return inside the body, and
+    that is the whole point. `_apply_verdict` has nine terminal states and one
+    of them (`no_positions`) had no counter, so a verdict that reached the
+    apply path and found nobody in the trade vanished: the panel read
+    `applied 0` beside twelve actionable ADJUST_SL verdicts and no refusal,
+    and the two readings a reader has to separate — *nobody was in this trade*
+    and *the apply path is broken* — were indistinguishable.
+
+    A wrapper is total by construction; a list of counted returns is a
+    hand-kept mirror of the control flow, which is the drift this repo has
+    paid for under six names. A return added to the body tomorrow is counted
+    without anyone remembering to count it.
     """
+    outcome = await _apply_verdict(
+        verdict, snapshot, menu, now=now, placer_factory=placer_factory
+    )
+    _count_in("apply_outcomes", str(outcome or "unnamed"))
+    return outcome
+
+
+async def _apply_verdict(
+    verdict: Verdict,
+    snapshot: _snap.Snapshot,
+    menu: _menu.Menu,
+    *,
+    now: Optional[float] = None,
+    placer_factory: Any = None,
+) -> str:
+    """The body. Every refusal here is ALSO named in `refusals`; the wrapper
+    above is what guarantees the outcome is counted at all."""
 
     now = _now() if now is None else now
 
@@ -1597,6 +1674,11 @@ async def apply_verdict(
         _refuse(REFUSE_INDEX_COLD)
         return REFUSE_INDEX_COLD
     if not positions:
+        # The index answered and the answer was "nobody". NOT a refusal: no
+        # user held this trade, so there was nothing to act on and nothing
+        # failed. Named and counted by the wrapper, because a lane with no
+        # subscribers in its signals and a lane whose apply path is dead
+        # produce the identical `applied 0`.
         return "no_positions"
 
     if verdict.action == PANIC_CLOSE:
@@ -2145,6 +2227,11 @@ def build_diag() -> Dict[str, Any]:
         # fastest possible answer measured 7.3s.
         "verdict_age_floor": verdict_age_floor(),
         "health": health(),
+        # The apply funnel, published so the page can say WHY `applied` is
+        # what it is. `health()["apply_outcomes"]` carries it; this key is the
+        # explicit contract with ops so the panel is not reading a bucket by
+        # luck.
+        "apply_funnel": dict(health().get("apply_outcomes") or {}),
         "arms": arms_snapshot(),
         "ledger_rows": ledger.count(),
         "ledger_evicted": ledger.evicted,

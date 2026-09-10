@@ -82,6 +82,13 @@ WHY_NO_MFE = "no_excursion_stamp"
 WHY_CHOICE_UNRESOLVED = "choice_not_in_menu"
 WHY_NO_DISTANCE = "candidate_has_no_distance"
 WHY_ARM_UNDECIDABLE = "arm_undecidable_while_dark"
+#: The same arm, undecidable for the OPPOSITE reason: it was armed, so the
+#: recorded outcome already contains its effect. Named apart because the next
+#: move differs — one waits for a live window, the other already has one and
+#: needs the paired walk to read it.
+WHY_ARM_UNDECIDABLE_ARMED = "arm_undecidable_while_armed"
+#: Armed part-way through, so the population holds both worlds.
+WHY_ARM_UNDECIDABLE_MIXED = "arm_undecidable_mixed_window"
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +245,16 @@ def thesis_per_signal(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, 
         # two halves that each looked complete, and nothing between them.
         slot["choice"] = thesis.get("choice")
         slot["snapshot"] = thesis.get("snapshot") or {}
+        # Whether THIS thesis could act. Lifted for the same reason as `choice`
+        # above, and the first test written against it caught the field being
+        # dropped right here — the slot is a fresh dict, so a key nobody lifts
+        # is silently gone by the time any arm reads it. That is #817 inside one
+        # file: a field one writer populates and one collapse drops, invisible
+        # at both ends because nothing crashes and no column looks empty.
+        #
+        # `.get` rather than a default: absent means a row issued before the
+        # stamp existed, and that is not the same fact as `False`.
+        slot["apply_armed"] = thesis.get("apply_armed")
     return out
 
 
@@ -407,24 +424,111 @@ def tp_arm(joined: Sequence[Mapping[str, Any]], fee_pct: float) -> Dict[str, Any
     }
 
 
-def _dark_arm(joined: Sequence[Mapping[str, Any]], action: str) -> Dict[str, Any]:
-    """An arm the record cannot decide while nothing is applied.
+def _dark_arm(
+    joined: Sequence[Mapping[str, Any]],
+    action: str,
+    *,
+    armed: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """An arm the closed-signal record cannot decide, and WHY it cannot.
 
     Published as a **counted, named** state rather than omitted: an arm missing
     from this block would read as one that never fired, and the two have
     opposite meanings.
+
+    The reason is read from state, never asserted. This function returned
+    `arm_undecidable_while_dark` unconditionally — including on a lane whose
+    apply flag was ON with this arm armed, where "nothing was applied" is
+    simply false. A constant asserting a property the code beneath it does not
+    have, on the panel an owner reads to decide whether to arm.
+
+    Three worlds, not two, and they are separated per ROW rather than for the
+    block, because arming happens mid-window:
+
+    * every row issued dark  → the record is the MAINTAIN counterfactual
+    * every row issued armed → the record is the treatment, so the arm's own
+      effect is baked into the outcome and cannot be differenced out of it
+    * a mix                  → the population holds both and pooling them is
+      the defect, so the split is published and neither half is called "the"
+      result
     """
     rows = [r for r in joined if str(r.get("action") or "") == action]
-    return {
-        "n": len(rows),
-        "decidable": 0,
-        "undecidable": {WHY_ARM_UNDECIDABLE: len(rows)} if rows else {},
-        "why": (
+    n_armed = sum(1 for r in rows if r.get("apply_armed") is True)
+    n_dark = sum(1 for r in rows if r.get("apply_armed") is False)
+    # Neither. A schema-2 row predating the stamp: dark in fact, but saying so
+    # from an absent stamp is an inference wearing a measurement's clothes.
+    n_unstamped = len(rows) - n_armed - n_dark
+
+    if n_armed and (n_dark or n_unstamped):
+        why_key = WHY_ARM_UNDECIDABLE_MIXED
+        why = (
+            "This arm was armed part-way through the window, so the record "
+            "holds rows taken WITHOUT it and rows taken WITH it under one "
+            "name. Pooling them would move the number with the arming date "
+            "rather than with the mechanism. Read the paired card instead — it "
+            "walks both exits over one row and needs no population split."
+        )
+    elif n_armed:
+        why_key = WHY_ARM_UNDECIDABLE_ARMED
+        why = (
+            "This arm was armed for every row here, so the recorded outcome IS "
+            "the arm acting. The record cannot difference out an effect that is "
+            "already inside it. The paired card is the effect estimate."
+        )
+    else:
+        why_key = WHY_ARM_UNDECIDABLE
+        why = (
             "Nothing was applied, so the record shows what happened WITHOUT this "
             "arm. Deciding it needs either a live window or a counterfactual walk, "
             "and for the SL arm two of its cases are not in the record at all."
-        ),
+        )
+    return {
+        "n": len(rows),
+        "decidable": 0,
+        "undecidable": {why_key: len(rows)} if rows else {},
+        "rows_armed": n_armed,
+        "rows_dark": n_dark,
+        # Named apart from `rows_dark`, never folded into it: a missing stamp
+        # is not a pass, and these rows are exactly the ones a reader wonders
+        # about when two stamps ship hours apart.
+        "rows_unstamped": n_unstamped,
+        "why": why,
     }
+
+
+def _shadow_note(joined: Sequence[Mapping[str, Any]]) -> str:
+    """What the recorded outcomes ARE, read off the rows rather than asserted.
+
+    This was a hardcoded sentence — "Apply is OFF, so every recorded outcome is
+    the MAINTAIN counterfactual" — emitted whatever the lane was doing. On
+    2026-09-10 the page carried it directly beneath a header reading
+    `Apply: ON, armed arms tp, sl, panic`. One page, both claims, and the
+    false one was the constant.
+    """
+    actionable = [r for r in joined if str(r.get("action") or "") != "MAINTAIN"]
+    n_armed = sum(1 for r in actionable if r.get("apply_armed") is True)
+    tail = (
+        " 'selection' compares the populations; only ADJUST_TP is an effect "
+        "estimate, and only on its decidable rows."
+    )
+    if not actionable or not n_armed:
+        return (
+            "No actionable verdict here was armed to act, so every recorded "
+            "outcome is the MAINTAIN counterfactual." + tail
+        )
+    if n_armed == len(actionable):
+        return (
+            "Every actionable verdict here was ARMED, so the recorded outcomes "
+            "already contain whatever the arms did. This is not the MAINTAIN "
+            "counterfactual and must not be read as one — the paired card is "
+            "the effect estimate." + tail
+        )
+    return (
+        f"Armed part-way through: {n_armed} of {len(actionable)} actionable "
+        "verdicts could act and the rest could not, so this population mixes "
+        "treatment and counterfactual. Read the per-arm split below, and the "
+        "paired card for an effect estimate." + tail
+    )
 
 
 def score(
@@ -469,11 +573,7 @@ def score(
             "ADJUST_SL": _dark_arm(joined, "ADJUST_SL"),
             "PANIC_CLOSE": _dark_arm(joined, "PANIC_CLOSE"),
         },
-        "shadow_note": (
-            "Apply is OFF, so every recorded outcome is the MAINTAIN "
-            "counterfactual. 'selection' compares the populations; only ADJUST_TP "
-            "is an effect estimate, and only on its decidable rows."
-        ),
+        "shadow_note": _shadow_note(joined),
     }
 
 

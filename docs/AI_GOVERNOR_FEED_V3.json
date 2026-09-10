@@ -1,0 +1,2133 @@
+{
+  "meta": {
+    "title": "AI Trade Governor - feed audit and payload contract v3",
+    "generated": "2026-09-10",
+    "repo": "mkmk749278/360-v2",
+    "modules": [
+      "src/execution/ai_governor.py",
+      "src/execution/ai_governor_snapshot.py",
+      "src/execution/ai_governor_menu.py",
+      "src/ai_governor_score.py"
+    ],
+    "purpose": "What the governor is fed today (measured, not read off the source), why that is not enough, and the exact contract for what it should be fed.",
+    "headline": {
+      "fields_today": 19,
+      "fields_v3": 73,
+      "new_fields": 54,
+      "new_fields_that_cost_nothing": 50,
+      "bytes_per_position_today": 1042,
+      "bytes_per_position_v3": 3900,
+      "reading": "50 of the 54 new fields are already inside the engine process - 21 are attributes on the Signal object the sweep already holds, 29 are derivable from the candle series the sweep already resolves for the menu and then discards. The governor is starving beside a full pantry."
+    },
+    "verified_vs_inferred": {
+      "verified": [
+        "The production payload shape and its 1042 bytes, rendered through the real build_snapshot and build_menu.",
+        "macro is empty in production: sweep's macro/macro_moved parameters have no caller and macro_vector has zero callers.",
+        "Blindness 200/200 on both book and flow, reason not_subscribed.",
+        "Menu census over 234 real signals against real Binance bars: 29.1% of TP menus offer no alternative to tp_0.",
+        "The fee is stated in margin percent inside a payload that is entirely price percent (config/__init__.py:255).",
+        "no_positions at ai_governor.py:1600 is the only apply-path return with no counter.",
+        "The scorecard's Apply is OFF note is an unconditional constant."
+      ],
+      "inferred": [
+        "That ADJUST_TP being 0 is caused mainly by the prompt rather than by the menu. The menu explains 29% of reviews; the split cannot be measured until menu sizes are stamped (AIG-005).",
+        "That base rates would stop the winner-clipping. That is the hypothesis this bundle is designed to test, not a result."
+      ]
+    },
+    "how_to_reproduce": {
+      "payload_today": "scratchpad/mkpayload.py - drives the real producers",
+      "menu_census": "scratchpad/menucensus.py - real bars from data.binance.vision (fapi answers 451 from this box; vision answers 200)"
+    }
+  },
+  "audit": {
+    "what_the_model_receives_today": {
+      "measured_how": "Rendered through the real producers (src/execution/ai_governor_snapshot.build_snapshot + ai_governor_menu.build_menu), not read off the source. Reproduce: scratchpad/mkpayload.py.",
+      "bytes_per_position_compact": 1042,
+      "distinct_fields_per_position": 27,
+      "fields": [
+        "signal_id",
+        "symbol",
+        "side",
+        "setup_class",
+        "entry_regime",
+        "trigger_tf",
+        "as_of_bar_ms",
+        "instrument{liquidity_band,move_24h_pct,parabolic}",
+        "dist_to_tp1_pct",
+        "dist_to_sl_pct",
+        "r_multiple_now",
+        "tp1_r_multiple",
+        "mfe_pct",
+        "mae_pct",
+        "bars_since_entry",
+        "book{readable}",
+        "flow{readable}",
+        "price{readable,value}",
+        "macro{}",
+        "tp_candidates[]",
+        "sl_candidates[]",
+        "review"
+      ],
+      "what_is_absent": [
+        "Every candle. Not one bar of price history, OHLC or volume.",
+        "ATR, realised volatility, any measure of whether the market got faster or slower since entry.",
+        "The premise. The prompt asks whether reality still supports the original premise; the payload names the setup_class and never states what that setup required.",
+        "Any base rate. No historical P(TP1 | this setup, this side, this R, this many bars).",
+        "Structure. No level book summary, no value area, no POC, no BOS/CHoCH state - though the level book object is already passed into sweep() for the menu.",
+        "Macro. See defect AIG-002: the macro block is empty in production.",
+        "Order book and CVD. See defect AIG-003: 200 of 200 sampled verdicts blind on both.",
+        "Position lifecycle: breakeven_set, trailing_stage, partial_close_pct, tp2/tp3, status - all on the Signal, none in the payload.",
+        "Score provenance: component_scores, confidence, mtf_score, confluence_count, soft_gate_flags, chart_pattern_names, analyst_reason, invalidation_summary - all on the Signal, none in the payload."
+      ]
+    },
+    "measured_evidence": {
+      "blindness_census": {
+        "verdicts_sampled": 200,
+        "book_blind": 200,
+        "flow_blind": 200,
+        "reason": "not_subscribed",
+        "mean_unknown_frac": 1.0,
+        "source": "engine blindness() via read.ai_governor, 2026-09-10"
+      },
+      "trigger_mix_since_boot": {
+        "r_band": 52,
+        "near_tp": 22,
+        "macro": 0,
+        "flow_opposed": 0,
+        "note": "macro and flow_opposed are the two that cannot fire - see AIG-002/AIG-003. The observed mix is exactly the two that can."
+      },
+      "verdict_mix_since_boot": {
+        "MAINTAIN": 57,
+        "ADJUST_SL": 12,
+        "ADJUST_TP": 0,
+        "PANIC_CLOSE": 0,
+        "applied": 0
+      },
+      "menu_census": {
+        "measured_how": "ai_governor_menu.build_menu driven over 234 real dark-feed signals against real Binance 5m/15m/1h bars from data.binance.vision. Reproduce: scratchpad/menucensus.py.",
+        "n": 234,
+        "tp_candidates_mean": 1.92,
+        "tp_candidates_median": 2,
+        "sl_candidates_mean": 3.37,
+        "sl_candidates_median": 3,
+        "pct_menus_where_ADJUST_TP_is_impossible": 29.1,
+        "pct_menus_where_ADJUST_SL_is_impossible": 27.4,
+        "worst_paths_for_tp_menu": {
+          "MEAN_REVERT": 94,
+          "DIVERGENCE_CONTINUATION": 67,
+          "LIQUIDITY_SWEEP_REVERSAL": 48
+        },
+        "reading": "The SL side is mechanically enriched (breakeven + two lock levels are free whenever the trade is in profit) while the TP side gets structural swings only. The menu is structurally biased toward SL adjustments, which is the direction the observed verdict mix runs."
+      },
+      "paired_outcome": {
+        "arm": "ADJUST_SL",
+        "n": 10,
+        "better": 0,
+        "worse": 2,
+        "mean_delta_pct": -0.36,
+        "governor_pct": 3.05,
+        "engine_pct": 3.42,
+        "agreement_violations": 2,
+        "note": "The page flags its own deltas suspect while agreement_violations > 0. Direction is still consistent with the mechanism: tighter-only menu applied to a winner-heavy selection."
+      }
+    },
+    "defects": [
+      {
+        "id": "AIG-001",
+        "severity": "high",
+        "title": "The premise is never stated, so the premise cannot be checked",
+        "claim": "The system prompt asks the model whether reality still supports the original premise. The payload carries setup_class as a bare name and nothing about what that setup required at entry.",
+        "evidence": "_SYSTEM_PROMPT (ai_governor.py:968) vs Snapshot.as_dict() (ai_governor_snapshot.py:118). No entry-condition field exists in the payload.",
+        "consequence": "Every review is the model guessing what MOVER_TREND_PULLBACK means from its name. It cannot detect a broken premise because it was never told the premise.",
+        "fix": "Ship the premise block: entry conditions as engine-generated enums, the entry_features stamped at entry, and the same features recomputed now.",
+        "verify": "A row whose premise.conditions is empty is refused and counted, never sent."
+      },
+      {
+        "id": "AIG-002",
+        "severity": "high",
+        "title": "macro is empty in production - the parameter has no caller",
+        "claim": "sweep(macro=..., macro_moved=...) is never passed by the only caller. macro_vector() has zero callers anywhere in src/.",
+        "evidence": "trade_monitor.py:1259 passes signals, store, price_fn, level_getter, pair_getter and nothing else. grep macro_vector src/ returns only its own definition.",
+        "consequence": "macro reaches the model as {}. No BTC context at all. The macro trigger reason can never fire, which is why trigger:macro is 0.",
+        "fix": "Pass the macro vector at the call site; source btc_state / btc_state_factor straight off the Signal, which already carries them.",
+        "verify": "Assert at the call site that the macro block is non-empty, and pin the trigger reason as reachable."
+      },
+      {
+        "id": "AIG-003",
+        "severity": "high",
+        "title": "100% book-blind and flow-blind, and it is a capacity decision nobody revisited",
+        "claim": "DEPTH_MAX_SYMBOLS and AGGTRADE_MAX_SYMBOLS are both 40 while the delivered book is dominated by promoted movers outside that set.",
+        "evidence": "Engine blindness census: 200 of 200 verdicts, both feeds, reason not_subscribed.",
+        "consequence": "Every verdict is issued with zero microstructure. The flow_opposed trigger can never fire.",
+        "fix": "Reserve a small slice of both stream budgets for symbols carrying an open governed signal. The governed set is 5-12 arms, so the marginal stream cost is bounded and known.",
+        "verify": "A probe fails when a governed symbol is not subscribed while reserved slots are free."
+      },
+      {
+        "id": "AIG-004",
+        "severity": "high",
+        "title": "The fee is quoted in margin percent inside a payload that is entirely price percent",
+        "claim": "The prompt says closing costs roughly 0.7% of margin. Every distance in the payload (dist_to_sl_pct, dist_to_tp1_pct, mfe_pct, mae_pct, every menu dist_pct) is a PRICE percentage.",
+        "evidence": "config/__init__.py:255 - 0.07% round-trip fees (= 0.7% on margin) at the 10x PRE_TP_LEVERAGE assumption. The prompt states the margin figure and never states the units differ.",
+        "consequence": "Against a 3.0% stop the model reads the exit as costing 0.7 of 3.0 (23% of risk) when in payload units it costs 0.07 of 3.0 (2% of risk). The cost of acting is overstated ten-fold in the only units the model can compare against - a mechanical bias toward MAINTAIN and away from PANIC_CLOSE.",
+        "fix": "Quote the fee in price percent, as a field, beside a stated leverage assumption. Never as prose.",
+        "verify": "fee_round_trip_price_pct is a payload field; a test asserts the prompt carries no numeric fee literal."
+      },
+      {
+        "id": "AIG-005",
+        "severity": "medium",
+        "title": "ADJUST_TP is structurally impossible on 29% of reviews and nothing counts it",
+        "claim": "The TP menu offers only tp_0 on 29.1% of real menus, so no nearer key exists to choose. No counter anywhere records menu size.",
+        "evidence": "Menu census, n=234, real bars.",
+        "consequence": "ADJUST_TP = 0 in 480+ rows cannot be attributed. The prompt and the menu are both candidate causes and the instrument cannot separate them - an all-zero column that is a claim about the instrument before it is a claim about the model.",
+        "fix": "Stamp tp_candidates_n / sl_candidates_n on every ledger row and publish the distribution. Then, separately, decide whether to enrich the TP side.",
+        "verify": "The ops panel renders the menu-size distribution beside the verdict mix."
+      },
+      {
+        "id": "AIG-006",
+        "severity": "medium",
+        "title": "The series is in hand at the sweep and discarded",
+        "claim": "sweep() resolves the full trigger-timeframe candle arrays for the menu and build_snapshot reads none of them.",
+        "evidence": "ai_governor.py:1250 (_series_for) and :1262 (_build_menu_for) both consume series; build_snapshot's signature takes no series.",
+        "consequence": "Price history, ATR, volume and volatility change are all free - no network call, no Firestore read, already in the loop - and none reaches the model.",
+        "fix": "Pass the series. Send the last N closed bars normalised to entry plus derived volatility, so nothing scales with member count.",
+        "verify": "Cost test asserts the bar block adds zero reads and zero vendor calls."
+      },
+      {
+        "id": "AIG-007",
+        "severity": "medium",
+        "title": "No base rate, so the model has no prior and clips winners",
+        "claim": "The model is asked to judge an open trade with no information about what trades in this state historically do.",
+        "evidence": "Payload has no historical field. Paired result: ADJUST_SL 0 better / 2 worse; 37 of the 47 signals it wanted to touch were winners.",
+        "consequence": "With a tighter-only menu and no prior, the rational-looking move on any trade in profit is to lock in - which is precisely the value-destroying one.",
+        "fix": "Ship a conditional base rate: for this setup x side x R-bucket x bars-elapsed, the historical share that went on to TP1 vs SL, with n. Computed offline from signal_performance.json and cached; zero cost on the hot path.",
+        "verify": "A cell under the sample floor renders as unknown with its n, never as a number."
+      },
+      {
+        "id": "AIG-008",
+        "severity": "high",
+        "title": "no_positions is the only apply-path exit with no counter",
+        "claim": "ai_governor.py:1600 returns 'no_positions' without _refuse() or _count(). Every other branch on that path counts.",
+        "evidence": "By elimination over the counted branches, this is where all 12 ADJUST_SL verdicts went while the page read Applied 0 with no refusal.",
+        "consequence": "The page cannot distinguish 'nobody was in this trade' from a broken apply path. It will read Applied 0 either way.",
+        "fix": "Count it, name it on the panel.",
+        "verify": "Test asserts every return on the apply path increments something."
+      },
+      {
+        "id": "AIG-009",
+        "severity": "medium",
+        "title": "The scorecard asserts Apply is OFF as a constant",
+        "claim": "ai_governor_score.py:471 emits the shadow_note unconditionally, and _dark_arm stamps arm_undecidable_while_dark regardless of apply_enabled().",
+        "evidence": "Live page: header reads Apply ON, armed arms tp/sl/panic; scorecard beneath reads Apply is OFF.",
+        "consequence": "One page states both. A constant asserting a property the code beneath it does not have - the class this repo has recorded eight times.",
+        "fix": "Key both on apply_enabled() and on the armed set.",
+        "verify": "Test drives the note with apply on and off and asserts the text changes."
+      }
+    ]
+  },
+  "field_catalog": [
+    {
+      "path": "id.signal_id",
+      "exists_today": true,
+      "source": "Signal.signal_id",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Joins the verdict to the ledger and to the closed-signal record.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.symbol",
+      "exists_today": true,
+      "source": "Signal.symbol",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Names the instrument.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.side",
+      "exists_today": true,
+      "source": "derived from Signal.direction",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Every distance below is signed toward this.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.setup_class",
+      "exists_today": true,
+      "source": "Signal.setup_class",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Which premise applies.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.trigger_tf",
+      "exists_today": true,
+      "source": "setup_timeframes.declared_for",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "A 5m bar and a 15m bar are different facts; the bar block below is on this clock.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.as_of_bar_ms",
+      "exists_today": true,
+      "source": "series['open_time'][-1]",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "The bar this world was read at. Makes the row re-scorable.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.review",
+      "exists_today": true,
+      "source": "_review_kind_for",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "entry = was this worth taking; ongoing = does the premise still hold.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.bars_since_entry",
+      "exists_today": true,
+      "source": "_bars_since_entry",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "How far into the trade.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.minutes_since_entry",
+      "exists_today": false,
+      "source": "now - Signal.detected_at",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Bars are ambiguous across timeframes; minutes are not, and the reconciler closes at 120.",
+      "carries_readability": false
+    },
+    {
+      "path": "id.minutes_to_stale_close",
+      "exists_today": false,
+      "source": "RECONCILER_MAX_POSITION_AGE_SEC - age",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "28% of positions close at 120-121 min on the stale-close backstop, not on a level. A model judging a 110-minute trade is judging one about to be closed regardless.",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.dist_to_tp1_pct",
+      "exists_today": true,
+      "source": "Snapshot",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Room to the first target.",
+      "carries_readability": "price_pct"
+    },
+    {
+      "path": "geometry.dist_to_sl_pct",
+      "exists_today": true,
+      "source": "Snapshot",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Room to the stop.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.dist_to_tp2_pct",
+      "exists_today": false,
+      "source": "Signal.tp2",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "The ladder is three legs; a model shown only leg one cannot reason about the rest.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.dist_to_tp3_pct",
+      "exists_today": false,
+      "source": "Signal.tp3",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "As above.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.r_multiple_now",
+      "exists_today": true,
+      "source": "Snapshot",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Where the trade stands in units of designed risk.",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.tp1_r_multiple",
+      "exists_today": true,
+      "source": "Snapshot",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "What the trade can earn. Bounds everything else.",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.sl_distance_pct_at_entry",
+      "exists_today": false,
+      "source": "Signal.original_sl_distance",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "The denominator R divides by. Publishing it lets the model sanity-check its own R.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.mfe_pct",
+      "exists_today": true,
+      "source": "Signal.max_favorable_excursion_pct",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Best it has been.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.mae_pct",
+      "exists_today": true,
+      "source": "Signal.max_adverse_excursion_pct",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Worst it has been. MFE without MAE bounds nothing.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "geometry.mfe_mae_tick_sampled",
+      "exists_today": false,
+      "source": "literal true",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "These update on mark-price ticks, not intrabar, so both are conservative. The model must not read them as exact.",
+      "carries_readability": false
+    },
+    {
+      "path": "lifecycle.breakeven_set",
+      "exists_today": false,
+      "source": "Signal.breakeven_set",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "A BE-shifted trade has no risk left. Tightening it further is pure downside and the model cannot currently see that it is already flat.",
+      "carries_readability": false
+    },
+    {
+      "path": "lifecycle.trailing_stage",
+      "exists_today": false,
+      "source": "Signal.trailing_stage",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "0 initial / 1 TP1 hit / 2 TP2 hit. Changes what an SL adjustment even means.",
+      "carries_readability": false
+    },
+    {
+      "path": "lifecycle.partial_close_pct",
+      "exists_today": false,
+      "source": "Signal.partial_close_pct",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Fraction already banked. A trade 50% closed is a different risk object.",
+      "carries_readability": false
+    },
+    {
+      "path": "lifecycle.stop_moved_since_entry",
+      "exists_today": false,
+      "source": "Signal.stop_loss vs original",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Whether anything has already moved this stop - the FSM, the trail governor, or a prior verdict.",
+      "carries_readability": false
+    },
+    {
+      "path": "lifecycle.exit_mechanism_governed",
+      "exists_today": false,
+      "source": "Position.exit_mechanism",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "When true the trail governor owns the stop and ADJUST_SL will be refused. Telling the model saves a wasted verdict.",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.tf",
+      "exists_today": false,
+      "source": "trigger_tf",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Which clock the bars below are on.",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.n",
+      "exists_today": false,
+      "source": "literal",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "How many closed bars follow.",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.rows",
+      "exists_today": false,
+      "source": "series high/low/close/volume, already resolved by _series_for",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "The single largest gap. The sweep holds the full array and sends none of it. Each row is [bars_ago, open_pct, high_pct, low_pct, close_pct, vol_ratio] with prices as percent from entry SIGNED TOWARD THE TRADE and vol_ratio against the prior-20 mean. Normalised so the model never sees a raw price and cannot be confused by instrument scale.",
+      "unit": "price_pct_from_entry",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.atr_pct_now",
+      "exists_today": false,
+      "source": "indicators.atr on the same series",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Is the market faster or slower than when we sized the stop.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.atr_pct_at_entry",
+      "exists_today": false,
+      "source": "Signal.geo_atr_stop / noise_floor_pct",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "The comparison the line above needs.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.atr_ratio_now_vs_entry",
+      "exists_today": false,
+      "source": "derived",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "One number for a volatility regime change. A 2x ATR expansion against the trade is a genuine premise break; being underwater is not.",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.closes_against_streak",
+      "exists_today": false,
+      "source": "derived from series",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Consecutive closes moving against the trade. The cheapest honest measure of 'it stopped working'.",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.range_last_bar_atr",
+      "exists_today": false,
+      "source": "derived",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "A 3-ATR bar is an event, not a drift.",
+      "carries_readability": false
+    },
+    {
+      "path": "bars.volume_ratio_last",
+      "exists_today": false,
+      "source": "derived",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Whether the move against us carries participation.",
+      "carries_readability": false
+    },
+    {
+      "path": "structure.levels_ahead",
+      "exists_today": false,
+      "source": "level_book.Level (price/type/source_tf/score) - the getter is ALREADY passed into sweep for the menu",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "What the trade has to get through to reach its target. Read by name off the real dataclass; a reader guessing at key shapes is the zone_distance_atr defect.",
+      "carries_readability": false
+    },
+    {
+      "path": "structure.levels_behind",
+      "exists_today": false,
+      "source": "level_book",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "What would catch it if it falls.",
+      "carries_readability": false
+    },
+    {
+      "path": "structure.poc_room_pct",
+      "exists_today": false,
+      "source": "volume_profile.compute_volume_profile",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Signed toward the trade: positive means the point of control is ahead of it.",
+      "unit": "price_pct",
+      "carries_readability": false
+    },
+    {
+      "path": "structure.inside_value_area",
+      "exists_today": false,
+      "source": "volume_profile value area",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Balance versus imbalance. A sweep-and-reclaim pays in balance and traps in imbalance, and nothing in the payload currently distinguishes them.",
+      "carries_readability": false
+    },
+    {
+      "path": "structure.state",
+      "exists_today": false,
+      "source": "structure_state.StructureTracker",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "BOS or CHoCH, with its own confidence. A structure break against the trade is the premise breaking.",
+      "carries_readability": false
+    },
+    {
+      "path": "structure.chart_patterns",
+      "exists_today": false,
+      "source": "Signal.chart_pattern_names",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "What the scanner saw. Already scored into the 10-pt Patterns dimension and never shown to the model.",
+      "carries_readability": false
+    },
+    {
+      "path": "flow.book_imbalance_aligned",
+      "exists_today": true,
+      "source": "entry_features, signed",
+      "cost_class": "stream_budget",
+      "why_the_model_needs_it": "Blind on 200 of 200 today. See AIG-003.",
+      "carries_readability": true
+    },
+    {
+      "path": "flow.cvd_slope_aligned",
+      "exists_today": true,
+      "source": "entry_features, signed",
+      "cost_class": "stream_budget",
+      "why_the_model_needs_it": "Blind on 200 of 200 today.",
+      "carries_readability": true
+    },
+    {
+      "path": "flow.footprint_delta_aligned",
+      "exists_today": false,
+      "source": "footprint.py (Phase 2b)",
+      "cost_class": "stream_budget",
+      "why_the_model_needs_it": "Buy/sell volume at price. The confirmation layer the price-action lane already uses.",
+      "carries_readability": true
+    },
+    {
+      "path": "flow.funding_rate",
+      "exists_today": false,
+      "source": "order_flow / oi_filter",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Already fetched for the OI+funding gate.",
+      "carries_readability": true
+    },
+    {
+      "path": "flow.oi_change_pct",
+      "exists_today": false,
+      "source": "oi_filter",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Rising OI into a move against us is participation, not noise.",
+      "carries_readability": true
+    },
+    {
+      "path": "macro.context_key",
+      "exists_today": false,
+      "source": "market_context (Layer A)",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "The cell everything else in this engine is keyed by.",
+      "carries_readability": false
+    },
+    {
+      "path": "macro.btc_state",
+      "exists_today": false,
+      "source": "Signal.btc_state",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Already on the Signal. -1 to +1, how hostile BTC is. Empty in the payload today (AIG-002).",
+      "carries_readability": false
+    },
+    {
+      "path": "macro.btc_state_factor",
+      "exists_today": false,
+      "source": "Signal.btc_state_factor",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "The multiplier the scanner applied.",
+      "carries_readability": false
+    },
+    {
+      "path": "macro.macro_direction",
+      "exists_today": false,
+      "source": "btc_state.macro_direction()",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "ADVANCE / NEUTRAL / DECLINE.",
+      "carries_readability": false
+    },
+    {
+      "path": "macro.btc_ret_5m_pct",
+      "exists_today": false,
+      "source": "btc_state",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Whether the whole market just moved.",
+      "carries_readability": true
+    },
+    {
+      "path": "macro.session",
+      "exists_today": false,
+      "source": "entry_features session",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "ASIA / LONDON / NY.",
+      "carries_readability": false
+    },
+    {
+      "path": "macro.same_direction_open",
+      "exists_today": false,
+      "source": "count over active signals",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "How many other open signals share this direction. The correlation MAX_SAME_DIRECTION_GLOBAL used to bound and nothing tells the model about.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.thesis",
+      "exists_today": false,
+      "source": "per-setup constant, engine-authored enum text",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "One sentence stating what this setup requires, from a fixed table keyed by setup_class. NOT free text from any external source.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.conditions",
+      "exists_today": false,
+      "source": "entry_features.features_for(setup) evaluated at entry and now",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "The heart of the fix. Each entry condition as {name, at_entry, now, still_true}. 'Does reality still support the premise' becomes answerable instead of guessed.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.entry_confidence",
+      "exists_today": false,
+      "source": "Signal.confidence / pre_ai_confidence",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "What we thought of it when we took it.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.component_scores",
+      "exists_today": false,
+      "source": "Signal.component_scores",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "The 100-pt breakdown. Tells the model WHICH dimension carried the trade, so it knows which one going stale matters.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.mtf_score",
+      "exists_today": false,
+      "source": "Signal.mtf_score",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Higher-timeframe agreement at entry.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.confluence_count",
+      "exists_today": false,
+      "source": "Signal.confluence_count",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "How many independent reasons existed.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.soft_gate_flags",
+      "exists_today": false,
+      "source": "Signal.soft_gate_flags",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Which soft gates fired but did not block. A trade that entered carrying three warnings is a different object.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.invalidation_summary",
+      "exists_today": false,
+      "source": "Signal.invalidation_summary",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "The engine's own statement of what would kill this trade. Engine-generated, closed vocabulary.",
+      "carries_readability": false
+    },
+    {
+      "path": "premise.entry_zone",
+      "exists_today": false,
+      "source": "Signal.entry_zone",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Whether price is still inside the zone the setup wanted.",
+      "carries_readability": false
+    },
+    {
+      "path": "base_rate.cell",
+      "exists_today": false,
+      "source": "strategy_edge (Layer C) for setup x context",
+      "cost_class": "cached_offline",
+      "why_the_model_needs_it": "The measured edge of this exact cell, with n and the verdict.",
+      "carries_readability": false
+    },
+    {
+      "path": "base_rate.cohort_expectancy",
+      "exists_today": false,
+      "source": "Signal.cohort_edge_expectancy / cohort_edge_samples",
+      "cost_class": "signal_attr",
+      "why_the_model_needs_it": "Already on the Signal.",
+      "carries_readability": false
+    },
+    {
+      "path": "base_rate.conditional",
+      "exists_today": false,
+      "source": "precomputed from signal_performance.json on a slow timer",
+      "cost_class": "cached_offline",
+      "why_the_model_needs_it": "P(reaches TP1) and P(hits SL) for this setup x side x R-bucket x bars-elapsed bucket, with n. The single field most likely to stop the model clipping winners: it turns 'this is in profit, lock it' into a decision against a measured prior. A bucket under the sample floor renders unknown with its n, never as a number.",
+      "carries_readability": false
+    },
+    {
+      "path": "base_rate.path_scorecard_verdict",
+      "exists_today": false,
+      "source": "path_scorecard",
+      "cost_class": "cached_offline",
+      "why_the_model_needs_it": "Whether this path is UNDECIDED, INSUFFICIENT or convicted, so the model weights its own judgement accordingly.",
+      "carries_readability": false
+    },
+    {
+      "path": "economics.fee_round_trip_price_pct",
+      "exists_today": false,
+      "source": "PRE_TP_FEE_PCT_ROUND_TRIP",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "0.07 in PRICE percent. Fixes AIG-004: the prompt currently states 0.7 (margin percent at 10x) inside a payload that is entirely price percent, overstating the cost of acting ten-fold.",
+      "carries_readability": false
+    },
+    {
+      "path": "economics.leverage_assumption",
+      "exists_today": false,
+      "source": "PRE_TP_LEVERAGE",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Stated so the two units can never be silently mixed again.",
+      "carries_readability": false
+    },
+    {
+      "path": "economics.notional_usd",
+      "exists_today": false,
+      "source": "AUTO_TRADE_NOTIONAL",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Fixed-notional sizing, so R does NOT equalise trades. The model must not reason as though it does.",
+      "carries_readability": false
+    },
+    {
+      "path": "menu.tp_candidates",
+      "exists_today": true,
+      "source": "ai_governor_menu",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Nearer-only targets. The only keys ADJUST_TP may return.",
+      "carries_readability": false
+    },
+    {
+      "path": "menu.sl_candidates",
+      "exists_today": true,
+      "source": "ai_governor_menu",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Tighter-only stops. The only keys ADJUST_SL may return.",
+      "carries_readability": false
+    },
+    {
+      "path": "menu.tp_candidates_n",
+      "exists_today": false,
+      "source": "len()",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "New. Without it an all-zero ADJUST_TP column cannot be attributed - AIG-005.",
+      "carries_readability": false
+    },
+    {
+      "path": "menu.sl_candidates_n",
+      "exists_today": false,
+      "source": "len()",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "As above.",
+      "carries_readability": false
+    },
+    {
+      "path": "menu.menu_refusal",
+      "exists_today": true,
+      "source": "ai_governor_menu",
+      "cost_class": "free_in_loop",
+      "why_the_model_needs_it": "Why a side is short.",
+      "carries_readability": false
+    }
+  ],
+  "catalog_summary": {
+    "fields_today": 19,
+    "fields_v3": 73,
+    "new_fields": 54,
+    "by_cost_class": {
+      "signal_attr": 21,
+      "free_in_loop": 29,
+      "stream_budget": 1,
+      "cached_offline": 3
+    }
+  },
+  "payload_v3": {
+    "request_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "AI Trade Governor request payload, prompt_schema 3",
+      "type": "object",
+      "required": [
+        "prompt_schema",
+        "shared",
+        "positions"
+      ],
+      "properties": {
+        "prompt_schema": {
+          "const": 3
+        },
+        "as_of_utc": {
+          "type": "string"
+        },
+        "shared": {
+          "type": "object",
+          "required": [
+            "economics",
+            "macro"
+          ],
+          "properties": {
+            "economics": {
+              "type": "object",
+              "required": [
+                "fee_round_trip_price_pct",
+                "leverage_assumption",
+                "notional_usd"
+              ],
+              "properties": {
+                "fee_round_trip_price_pct": {
+                  "type": "number",
+                  "description": "PRICE percent. 0.07. Not the margin figure."
+                },
+                "leverage_assumption": {
+                  "type": "number"
+                },
+                "notional_usd": {
+                  "type": "number"
+                },
+                "note": {
+                  "type": "string"
+                }
+              }
+            },
+            "macro": {
+              "type": "object",
+              "properties": {
+                "context_key": {
+                  "type": "string"
+                },
+                "macro_direction": {
+                  "enum": [
+                    "ADVANCE",
+                    "NEUTRAL",
+                    "DECLINE",
+                    "UNKNOWN"
+                  ]
+                },
+                "btc_state": {
+                  "type": "object",
+                  "properties": {
+                    "readable": {
+                      "type": "boolean"
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "readable"
+                  ],
+                  "description": "-1..+1, how hostile BTC is. Signal.btc_state."
+                },
+                "btc_state_factor": {
+                  "type": "object",
+                  "properties": {
+                    "readable": {
+                      "type": "boolean"
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "readable"
+                  ],
+                  "description": "Multiplier the scanner applied."
+                },
+                "btc_ret_5m_pct": {
+                  "type": "object",
+                  "properties": {
+                    "readable": {
+                      "type": "boolean"
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "readable"
+                  ],
+                  "description": "BTC 5m return, price percent."
+                },
+                "session": {
+                  "enum": [
+                    "ASIA",
+                    "LONDON",
+                    "NY",
+                    "OFF"
+                  ]
+                },
+                "same_direction_open": {
+                  "type": "integer"
+                }
+              }
+            },
+            "book_ceiling": {
+              "type": "object",
+              "properties": {
+                "open_signals": {
+                  "type": "integer"
+                },
+                "same_direction_cap": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "positions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "geometry",
+              "premise",
+              "menu"
+            ],
+            "properties": {
+              "id": {
+                "type": "object",
+                "required": [
+                  "signal_id",
+                  "symbol",
+                  "side",
+                  "setup_class",
+                  "trigger_tf",
+                  "review"
+                ],
+                "properties": {
+                  "signal_id": {
+                    "type": "string"
+                  },
+                  "symbol": {
+                    "type": "string"
+                  },
+                  "side": {
+                    "enum": [
+                      "LONG",
+                      "SHORT"
+                    ]
+                  },
+                  "setup_class": {
+                    "type": "string"
+                  },
+                  "trigger_tf": {
+                    "type": "string"
+                  },
+                  "review": {
+                    "enum": [
+                      "entry",
+                      "ongoing"
+                    ]
+                  },
+                  "as_of_bar_ms": {
+                    "type": "integer"
+                  },
+                  "bars_since_entry": {
+                    "type": "integer"
+                  },
+                  "minutes_since_entry": {
+                    "type": "number"
+                  },
+                  "minutes_to_stale_close": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "The reconciler closes at RECONCILER_MAX_POSITION_AGE_SEC. 28% of positions in the owner's window closed at 120-121 minutes on this backstop rather than at a level."
+                  }
+                }
+              },
+              "geometry": {
+                "type": "object",
+                "description": "All price percent, signed toward the trade.",
+                "required": [
+                  "dist_to_tp1_pct",
+                  "dist_to_sl_pct",
+                  "r_multiple_now"
+                ],
+                "properties": {
+                  "dist_to_tp1_pct": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "dist_to_sl_pct": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "dist_to_tp2_pct": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "dist_to_tp3_pct": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "r_multiple_now": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "tp1_r_multiple": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "sl_distance_pct_at_entry": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "mfe_pct": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "mae_pct": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "lifecycle": {
+                "type": "object",
+                "properties": {
+                  "breakeven_set": {
+                    "type": "boolean"
+                  },
+                  "trailing_stage": {
+                    "type": "integer"
+                  },
+                  "partial_close_pct": {
+                    "type": "number"
+                  },
+                  "stop_moved_since_entry": {
+                    "type": "boolean"
+                  },
+                  "exit_mechanism_governed": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "bars": {
+                "type": "object",
+                "description": "From the series the sweep already resolved. Zero marginal cost.",
+                "properties": {
+                  "tf": {
+                    "type": "string"
+                  },
+                  "n": {
+                    "type": "integer"
+                  },
+                  "columns": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "rows": {
+                    "type": "array",
+                    "items": {
+                      "type": "array"
+                    },
+                    "description": "[bars_ago, open_pct, favourable_extreme_pct, adverse_extreme_pct, close_pct, vol_ratio]. Percent from ENTRY, signed toward the trade."
+                  },
+                  "atr_pct_now": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "atr_pct_at_entry": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "atr_ratio_now_vs_entry": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "closes_against_streak": {
+                    "type": "integer"
+                  },
+                  "range_last_bar_atr": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "volume_ratio_last": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "structure": {
+                "type": "object",
+                "properties": {
+                  "levels_ahead": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "dist_pct": {
+                          "type": "number"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "source_tf": {
+                          "type": "string"
+                        },
+                        "score": {
+                          "type": "number"
+                        }
+                      },
+                      "description": "level_book.Level, read by name off the real dataclass."
+                    }
+                  },
+                  "levels_behind": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  },
+                  "poc_room_pct": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "readable"
+                    ],
+                    "description": "Signed toward the trade: positive means the POC is ahead of it."
+                  },
+                  "inside_value_area": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "readable"
+                    ],
+                    "description": "1 inside, 0 outside. Balance vs imbalance."
+                  },
+                  "state": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "confidence": {
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "chart_patterns": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "flow": {
+                "type": "object",
+                "properties": {
+                  "book_imbalance_aligned": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "readable"
+                    ],
+                    "description": "Signed. not_subscribed on 200/200 today - AIG-003."
+                  },
+                  "cvd_slope_aligned": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "readable"
+                    ],
+                    "description": "Signed. not_subscribed on 200/200 today."
+                  },
+                  "footprint_delta_aligned": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "readable"
+                    ],
+                    "description": "Phase 2b."
+                  },
+                  "funding_rate": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "readable"
+                    ],
+                    "description": "Already fetched for the OI+funding gate."
+                  },
+                  "oi_change_pct": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "readable"
+                    ],
+                    "description": "Open-interest change."
+                  }
+                }
+              },
+              "premise": {
+                "type": "object",
+                "required": [
+                  "thesis",
+                  "conditions"
+                ],
+                "properties": {
+                  "thesis": {
+                    "type": "string",
+                    "description": "Engine-authored constant per setup_class. Never external text."
+                  },
+                  "conditions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "at_entry",
+                        "now",
+                        "still_true"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "at_entry": {
+                          "type": [
+                            "number",
+                            "boolean",
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "now": {
+                          "type": [
+                            "number",
+                            "boolean",
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "still_true": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        }
+                      }
+                    },
+                    "description": "The heart of the change: entry_features evaluated at entry and now. Without this the prompt asks a question the payload cannot answer."
+                  },
+                  "entry_confidence": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "component_scores": {
+                    "type": "object"
+                  },
+                  "mtf_score": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "confluence_count": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "soft_gate_flags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "invalidation_summary": {
+                    "type": "string"
+                  },
+                  "entry_zone": {
+                    "type": "string"
+                  }
+                }
+              },
+              "base_rate": {
+                "type": "object",
+                "properties": {
+                  "cell": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string"
+                      },
+                      "n": {
+                        "type": "integer"
+                      },
+                      "net_avg_pct": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "win_pct": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "verdict": {
+                        "enum": [
+                          "KEEP",
+                          "UNDECIDED",
+                          "INSUFFICIENT",
+                          "RETIRE"
+                        ]
+                      },
+                      "interval_pct": {
+                        "type": [
+                          "array",
+                          "null"
+                        ]
+                      }
+                    }
+                  },
+                  "cohort_expectancy": {
+                    "type": "object",
+                    "properties": {
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "readable"
+                    ],
+                    "description": "Signal.cohort_edge_expectancy, with samples."
+                  },
+                  "conditional": {
+                    "type": "object",
+                    "properties": {
+                      "bucket": {
+                        "type": "string"
+                      },
+                      "n": {
+                        "type": "integer"
+                      },
+                      "p_reaches_tp1": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "p_hits_sl": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "p_flat_or_stale_close": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "note": {
+                        "type": "string"
+                      }
+                    },
+                    "description": "Under the sample floor every p is null and n is published. Unknown is a state, never a zero."
+                  },
+                  "path_scorecard_verdict": {
+                    "type": "string"
+                  }
+                }
+              },
+              "menu": {
+                "type": "object",
+                "required": [
+                  "tp_candidates",
+                  "sl_candidates"
+                ],
+                "properties": {
+                  "tp_candidates": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        },
+                        "dist_pct": {
+                          "type": "number"
+                        }
+                      }
+                    }
+                  },
+                  "sl_candidates": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  },
+                  "tp_candidates_n": {
+                    "type": "integer"
+                  },
+                  "sl_candidates_n": {
+                    "type": "integer"
+                  },
+                  "menu_refusal": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "response_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "AI Trade Governor response, unchanged from schema 2 except premise_broken scope",
+      "type": "object",
+      "required": [
+        "verdicts"
+      ],
+      "properties": {
+        "verdicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "signal_id",
+              "verdict",
+              "rationale"
+            ],
+            "properties": {
+              "signal_id": {
+                "type": "string"
+              },
+              "verdict": {
+                "enum": [
+                  "MAINTAIN",
+                  "ADJUST_TP",
+                  "ADJUST_SL",
+                  "PANIC_CLOSE"
+                ]
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A key from THIS position's menu. null for MAINTAIN and PANIC_CLOSE."
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "rationale": {
+                "type": "string",
+                "maxLength": 140,
+                "description": "What CHANGED. Not what is true."
+              },
+              "premise_broken": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Closed vocabulary, engine-defined. Only on PANIC_CLOSE or ADJUST_SL."
+              }
+            }
+          }
+        }
+      }
+    },
+    "example": {
+      "prompt_schema": 3,
+      "as_of_utc": "2026-09-10T05:15:00Z",
+      "batch_note": "One entry per open governed SIGNAL, never per position. Shared prefix is cacheable.",
+      "shared": {
+        "economics": {
+          "fee_round_trip_price_pct": 0.07,
+          "leverage_assumption": 10.0,
+          "notional_usd": 100.0,
+          "note": "Sizing is fixed-notional, so R does NOT equalise trades: a 0.8% loss and a 6.1% loss are both -1.00R and cost different money. Reason in price percent."
+        },
+        "macro": {
+          "context_key": "TRENDING_UP|LONDON|VOL_EXP",
+          "macro_direction": "NEUTRAL",
+          "btc_state": {
+            "readable": true,
+            "value": -0.18
+          },
+          "btc_state_factor": {
+            "readable": true,
+            "value": 0.94
+          },
+          "btc_ret_5m_pct": {
+            "readable": true,
+            "value": -0.07
+          },
+          "session": "LONDON",
+          "same_direction_open": 3
+        },
+        "book_ceiling": {
+          "open_signals": 5,
+          "same_direction_cap": 3
+        }
+      },
+      "positions": [
+        {
+          "id": {
+            "signal_id": "MVRTP-D99FD646",
+            "symbol": "BRUSDT",
+            "side": "SHORT",
+            "setup_class": "MOVER_TREND_PULLBACK",
+            "trigger_tf": "15m",
+            "review": "ongoing",
+            "as_of_bar_ms": 1788737400000,
+            "bars_since_entry": 7,
+            "minutes_since_entry": 105,
+            "minutes_to_stale_close": 15
+          },
+          "geometry": {
+            "dist_to_tp1_pct": 5.3509,
+            "dist_to_sl_pct": -0.2708,
+            "dist_to_tp2_pct": 7.3676,
+            "dist_to_tp3_pct": 9.5859,
+            "r_multiple_now": -0.91,
+            "tp1_r_multiple": 0.874,
+            "sl_distance_pct_at_entry": 3.0,
+            "mfe_pct": 0.09561060408517948,
+            "mae_pct": 3.020425901781839,
+            "mfe_mae_tick_sampled": true
+          },
+          "lifecycle": {
+            "breakeven_set": false,
+            "trailing_stage": 0,
+            "partial_close_pct": 0.0,
+            "stop_moved_since_entry": false,
+            "exit_mechanism_governed": false
+          },
+          "bars": {
+            "tf": "15m",
+            "n": 10,
+            "columns": [
+              "bars_ago",
+              "open_pct",
+              "favourable_extreme_pct",
+              "adverse_extreme_pct",
+              "close_pct",
+              "vol_ratio"
+            ],
+            "note": "All percentages are from ENTRY and SIGNED TOWARD THE TRADE. Positive is in the trade's favour on both a LONG and a SHORT.",
+            "rows": [
+              [
+                9,
+                -0.3477,
+                0.2608,
+                -1.4385,
+                -0.4259,
+                1.64
+              ],
+              [
+                8,
+                -0.4129,
+                -0.0217,
+                -1.6471,
+                -0.0869,
+                0.65
+              ],
+              [
+                7,
+                -0.0217,
+                0.0956,
+                -0.7127,
+                -0.4346,
+                0.32
+              ],
+              [
+                6,
+                -0.4259,
+                -0.4216,
+                -1.4863,
+                -1.0213,
+                0.68
+              ],
+              [
+                5,
+                -1.0169,
+                -0.6867,
+                -1.3168,
+                -1.0213,
+                0.35
+              ],
+              [
+                4,
+                -0.9518,
+                -0.8214,
+                -3.2464,
+                -2.9248,
+                1.48
+              ],
+              [
+                3,
+                -2.9552,
+                -2.4294,
+                -3.3029,
+                -2.6467,
+                0.64
+              ],
+              [
+                2,
+                -2.6249,
+                -1.3038,
+                -2.6249,
+                -2.0904,
+                1.08
+              ],
+              [
+                1,
+                -2.1078,
+                -1.7036,
+                -2.5424,
+                -2.2686,
+                0.23
+              ],
+              [
+                0,
+                -2.286,
+                -2.2208,
+                -3.3768,
+                -2.7292,
+                0.41
+              ]
+            ],
+            "atr_pct_now": 1.1211,
+            "atr_pct_at_entry": 1.1638,
+            "atr_ratio_now_vs_entry": 0.99,
+            "closes_against_streak": 2,
+            "range_last_bar_atr": 1.0,
+            "volume_ratio_last": 0.41
+          },
+          "structure": {
+            "levels_ahead": [
+              {
+                "dist_pct": 1.82,
+                "type": "resistance",
+                "source_tf": "4h",
+                "score": 71.0
+              },
+              {
+                "dist_pct": 3.44,
+                "type": "resistance",
+                "source_tf": "1d",
+                "score": 88.0
+              }
+            ],
+            "levels_behind": [
+              {
+                "dist_pct": -0.91,
+                "type": "support",
+                "source_tf": "1h",
+                "score": 54.0
+              }
+            ],
+            "poc_room_pct": {
+              "readable": true,
+              "value": -0.42
+            },
+            "inside_value_area": {
+              "readable": true,
+              "value": 1
+            },
+            "state": {
+              "readable": true,
+              "label": "BOS_UP",
+              "confidence": 0.62
+            },
+            "chart_patterns": [
+              "bull_flag"
+            ]
+          },
+          "flow": {
+            "book_imbalance_aligned": {
+              "readable": false,
+              "reason": "not_subscribed"
+            },
+            "cvd_slope_aligned": {
+              "readable": false,
+              "reason": "not_subscribed"
+            },
+            "footprint_delta_aligned": {
+              "readable": false,
+              "reason": "not_subscribed"
+            },
+            "funding_rate": {
+              "readable": true,
+              "value": 0.00012
+            },
+            "oi_change_pct": {
+              "readable": true,
+              "value": 2.4
+            }
+          },
+          "premise": {
+            "thesis": "MOVER_TREND_PULLBACK: a promoted mover in an established 15m trend pulled back to its SMA stack and resumed. It requires the stack to stay ordered and the pullback not to become a reversal.",
+            "conditions": [
+              {
+                "name": "sma_stack_ordered",
+                "at_entry": true,
+                "now": true,
+                "still_true": true
+              },
+              {
+                "name": "close_above_sma25",
+                "at_entry": true,
+                "now": false,
+                "still_true": false
+              },
+              {
+                "name": "pullback_depth_atr",
+                "at_entry": 0.82,
+                "now": 1.61,
+                "still_true": false
+              },
+              {
+                "name": "stack_sep_pct",
+                "at_entry": 3.4,
+                "now": 1.1,
+                "still_true": false
+              },
+              {
+                "name": "leg_move_pct",
+                "at_entry": 11.2,
+                "now": 11.2,
+                "still_true": true
+              }
+            ],
+            "entry_confidence": 72.0,
+            "component_scores": {
+              "market": 20.2,
+              "execution": 20.0,
+              "risk": 16.4,
+              "smc": 11.0,
+              "patterns": 4.0
+            },
+            "mtf_score": 0.55,
+            "confluence_count": 3,
+            "soft_gate_flags": [
+              "execution:overextended"
+            ],
+            "invalidation_summary": "Momentum loss on two consecutive readings, or a 15m close back below SMA99.",
+            "entry_zone": "0.18402-0.18489"
+          },
+          "base_rate": {
+            "cell": {
+              "key": "MOVER_TREND_PULLBACK|TRENDING_UP|LONDON",
+              "n": 226,
+              "net_avg_pct": 0.25,
+              "win_pct": 35.0,
+              "verdict": "UNDECIDED",
+              "interval_pct": [
+                -0.06,
+                0.55
+              ]
+            },
+            "cohort_expectancy": {
+              "readable": true,
+              "value": 0.04,
+              "samples": 41
+            },
+            "conditional": {
+              "bucket": "MVRTP|LONG|R:0.0to0.5|bars:5to10",
+              "n": 118,
+              "p_reaches_tp1": 0.41,
+              "p_hits_sl": 0.46,
+              "p_flat_or_stale_close": 0.13,
+              "note": "Historical, this setup and side only. Under the sample floor this renders unknown with its n."
+            },
+            "path_scorecard_verdict": "UNDECIDED"
+          },
+          "menu": {
+            "tp_candidates": [
+              {
+                "key": "tp_0",
+                "kind": "current",
+                "dist_pct": 2.6217
+              },
+              {
+                "key": "tp_1",
+                "kind": "swing",
+                "dist_pct": 0.2608
+              }
+            ],
+            "sl_candidates": [
+              {
+                "key": "sl_0",
+                "kind": "current",
+                "dist_pct": -3.0
+              }
+            ],
+            "tp_candidates_n": 2,
+            "sl_candidates_n": 1,
+            "menu_refusal": null,
+            "note": "dist_pct is signed toward the trade. Return ONLY a key from this position's own list."
+          }
+        }
+      ]
+    }
+  },
+  "system_prompt_v3": "You are a risk critic for already-open crypto futures scalps. Every trade is\nlive. You cannot open, reverse, size, or price anything. You choose one of four\noutcomes per position and nothing else.\n\nUNITS. Every percentage in this payload is a PRICE percentage and every\ndistance is SIGNED TOWARD THE TRADE: positive is in the trade's favour on both\na LONG and a SHORT. Never re-derive direction. The cost of closing is\n`shared.economics.fee_round_trip_price_pct` and it is in the same price\npercent as everything else - compare it directly against dist_to_sl_pct, never\nagainst a margin figure.\n\nSIZING. Positions are sized at a FIXED NOTIONAL, so R does not equalise trades:\na 0.8% loss and a 6.1% loss are both -1.00R and cost very different money.\nReason in price percent; R is context only.\n\nREAD IN THIS ORDER.\n1. `premise` - what this setup required and which of those conditions is still\n   true now. This is the question, not the setup's name.\n2. `base_rate.conditional` - what trades in this exact state historically did.\n   It is the prior your judgement has to beat. If n is below its floor it says\n   so; then you have no prior and should say that in the rationale.\n3. `bars` and `structure` - what actually changed.\n4. `flow` and `macro` - context, often unreadable.\n\nTHE FOUR OUTCOMES.\nMAINTAIN     - the premise holds, or nothing you can see justifies acting.\nADJUST_TP    - take profit sooner. Return a tp_* key NEARER than tp_0.\nADJUST_SL    - reduce risk. Return an sl_* key TIGHTER than sl_0.\nPANIC_CLOSE  - on an \"entry\" review, this trade was not worth taking. On an\n               \"ongoing\" review, the premise is broken and waiting for the stop\n               is worse than paying the exit now.\n\n`review` decides which question you are answering. Read it first.\n\nreview = \"entry\" - the FIRST look at a trade just taken. The question is\nwhether it deserved to be taken at all on what you can see. Be willing to say\nno. A setup already working against its own premise, entering into a level in\n`structure.levels_ahead` it has to clear to pay, or whose reason for existing\nis not visible in the data you were given, is not worth its risk. Do not extend\nit the benefit of the doubt because it is new.\n\nreview = \"ongoing\" - the trade has been running and was judged worth taking.\nThe question is only whether reality still supports the original premise.\nA trade being underwater is not a broken premise: the stop was sized for that.\nA broken premise looks like conditions in `premise.conditions` flipping to\nstill_true=false, a structure break against the trade, or ATR expanding well\npast what the stop was sized for.\n\nWHEN NOT TO TIGHTEN A STOP. This is the failure this lane has already measured.\nThe SL menu always offers breakeven and lock levels once a trade is in profit,\nso \"it is winning, lock it in\" is always available and is usually wrong: it\nclips the winners that pay for the losers. Choose ADJUST_SL only when a\nNAMED condition has broken - not because the trade is in profit, and not\nbecause it has stalled. If `lifecycle.breakeven_set` is true the trade already\nhas no risk and tightening it further is pure downside. If your reason for\nADJUST_SL would be equally true of a trade you would happily hold, it is not a\nreason.\n\nRULES YOU MUST FOLLOW.\n- Return ONLY a key that appears in this position's own candidate list. Keys\n  from another position's menu are refused.\n- `choice` must be null for MAINTAIN and PANIC_CLOSE.\n- If `menu.sl_candidates_n` is 1 there is no tighter stop to choose and\n  ADJUST_SL is unavailable. Same for tp.\n- If `lifecycle.exit_mechanism_governed` is true another module owns this stop\n  and ADJUST_SL will be refused. Do not choose it.\n- A field carrying `readable: false` means we could not observe it. It is not\n  zero and not neutral. Reason without it, and say so in the rationale if it\n  mattered.\n- `geometry.mfe_pct` and `mae_pct` are tick-sampled, not intrabar. Treat them\n  as lower bounds on how far the trade actually travelled.\n- `rationale` is one sentence under 140 characters naming WHAT CHANGED. \"The\n  trade is in profit\" is not what changed.\n- `premise_broken` names only reasons from the allowed list, and only on\n  PANIC_CLOSE or ADJUST_SL.\n",
+  "design_guards": [
+    "Every new optional field carries its own readability. A value we could not read is {readable:false, reason:...}, never a zero.",
+    "Every distance is signed toward the trade. A raw signed feature scored every SHORT backwards for a month without producing an empty column or a crash.",
+    "No free-form external text. No news, no social, no user string. The macro watchdog's news lane must not be joined to this one - a prompt whose output can close a live position is a money-path injection surface. Every string here is an engine-generated enum or an engine-authored constant.",
+    "The model returns menu KEYS, never prices. A hallucinated choice resolves to None and is refused and counted.",
+    "PROMPT_SCHEMA 3 is a REDEFINITION. Rows stamp prompt_schema and review_kind; schema-3 rows are never pooled with earlier ones. Nothing is purged.",
+    "The ledger row keeps the whole payload, so a verdict stays re-scorable months later. Snapshot.digest() over the new shape distinguishes 'asked twice about the same world' from 'the world moved'.",
+    "Cost: no field may add a Firestore read or a vendor call on the sweep. The bar block, the structure block and the premise block are all computed from objects the sweep already holds. Base rates are cached offline. Only the stream reservation has a marginal cost and it is bounded by the governed set.",
+    "A payload missing premise.conditions is refused and counted rather than sent - a model asked to check a premise it was not given is the defect this bundle exists to fix."
+  ],
+  "wiring": {
+    "principle": "Nothing below adds a Firestore read, a vendor call, or any cost that scales with the member count. 50 of the 54 new fields are already in the process; the audit's cost_class per field says which.",
+    "order": [
+      {
+        "step": 1,
+        "title": "Stop the money path acting on the current evidence",
+        "what": "AI_GOV_ARMS_ENABLED=tp (drop sl and panic), or AI_GOV_APPLY_ENABLED=false. Measurement stays ON.",
+        "why": "The paired card reads 0 better / 2 worse and -0.36%/trade on the only arm the model ever chooses. Applied is 0 today only because no governed signal has carried a position (AIG-008).",
+        "owner_sign_off": true,
+        "ships": "config flip, no deploy"
+      },
+      {
+        "step": 2,
+        "title": "Count no_positions and un-hardcode the scorecard note",
+        "what": "AIG-008 and AIG-009.",
+        "why": "Until these land, no panel can tell a working apply path from a dead one.",
+        "owner_sign_off": false,
+        "ships": "engine PR"
+      },
+      {
+        "step": 3,
+        "title": "Wire the macro block that already exists",
+        "what": "AIG-002. Pass macro= and macro_moved= at trade_monitor.py:1259; source btc_state / btc_state_factor off the Signal.",
+        "why": "One call site. Turns an empty object into real context and makes the macro trigger reachable.",
+        "owner_sign_off": false,
+        "ships": "engine PR, ~20 lines"
+      },
+      {
+        "step": 4,
+        "title": "Fix the units and the prompt - PROMPT_SCHEMA 3",
+        "what": "AIG-004. Fee as a field in price percent, prompt rewritten (system_prompt_v3 below). REDEFINITION: schema-3 rows are never pooled with schema-1 or schema-2. Filter, do not purge.",
+        "why": "The cost of acting is currently overstated ten-fold in the only units the model can compare against.",
+        "owner_sign_off": false,
+        "ships": "engine PR"
+      },
+      {
+        "step": 5,
+        "title": "Pass the series and ship the bars block",
+        "what": "AIG-006. build_snapshot takes series; emit the normalised bar rows plus ATR and streak.",
+        "why": "Free - the sweep already holds it. Largest single information gain in the bundle.",
+        "owner_sign_off": false,
+        "ships": "engine PR"
+      },
+      {
+        "step": 6,
+        "title": "Ship the premise block",
+        "what": "AIG-001. Per-setup thesis table plus entry_features evaluated at entry and now.",
+        "why": "Makes the question the prompt asks actually answerable. Biggest conceptual gain.",
+        "owner_sign_off": false,
+        "ships": "engine PR"
+      },
+      {
+        "step": 7,
+        "title": "Ship structure, lifecycle and score provenance",
+        "what": "level_book summary (getter already passed), volume profile, structure_state, plus the Signal attributes.",
+        "why": "All free. The level getter is already threaded into sweep for the menu.",
+        "owner_sign_off": false,
+        "ships": "engine PR"
+      },
+      {
+        "step": 8,
+        "title": "Ship the base rates",
+        "what": "AIG-007. strategy_edge cell + a conditional table precomputed from signal_performance.json on a slow timer.",
+        "why": "The field most likely to stop winner-clipping. Cached, O(1) on the hot path.",
+        "owner_sign_off": false,
+        "ships": "engine PR"
+      },
+      {
+        "step": 9,
+        "title": "Reserve stream slots for governed symbols",
+        "what": "AIG-003. A small reserved slice of DEPTH_MAX_SYMBOLS and AGGTRADE_MAX_SYMBOLS for symbols carrying an open governed signal.",
+        "why": "Only item with a real marginal cost. Bounded by the governed set (5-12 arms), not by the book.",
+        "owner_sign_off": true,
+        "ships": "engine PR + config"
+      },
+      {
+        "step": 10,
+        "title": "Stamp menu sizes and republish the panel",
+        "what": "AIG-005. tp_candidates_n / sl_candidates_n on every row; ops renders the distribution beside the verdict mix.",
+        "why": "Until this exists, an all-zero ADJUST_TP column cannot be attributed to the prompt or to the menu.",
+        "owner_sign_off": false,
+        "ships": "engine PR + ops PR"
+      },
+      {
+        "step": 11,
+        "title": "Re-measure, then decide",
+        "what": "Run schema 3 dark (measurement ON, apply OFF) for a window proportional to the verdict rate, then read the paired card again.",
+        "why": "The current paired n is 10. Nothing about arming should be decided from that either way.",
+        "owner_sign_off": true,
+        "ships": "nothing - a wait"
+      }
+    ],
+    "refutation_condition": "Stated before the work, per doctrine. If schema 3 runs a full window and the paired ADJUST_SL delta is still <= 0 with n above the sample floor, the governor does not improve exits on this book and the honest answer is to retire the arm rather than feed it more."
+  }
+}
