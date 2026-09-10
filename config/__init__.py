@@ -4859,7 +4859,39 @@ AI_GOV_PANIC_MAX_POSITIONS: int = _safe_int("AI_GOV_PANIC_MAX_POSITIONS", "0")
 #: window recorded: 20 calls, 20 failures, 0 verdicts. The ceiling is not a
 #: reservation — unused tokens are not billed — and `AI_GOV_MAX_CALLS_PER_HOUR`
 #: is what actually bounds the spend.
-AI_GOV_OUTPUT_TOKEN_FLOOR: int = _safe_int("AI_GOV_OUTPUT_TOKEN_FLOOR", "1024")
+#:
+#: **1024 was sized for the schema-2 payload and PROMPT_SCHEMA 3 broke it the
+#: hour it deployed.** First live call under the richer payload: `bad_json`,
+#: `finish_reason=MAX_TOKENS`, output 339 / thinking 1570 against a ceiling of
+#: 1924 (1024 + 150x6 arms). The model was given four times as much to reason
+#: about — a premise, twelve bars, a macro block — and the budget it reasons
+#: inside was not touched. That is this file's own rule from 2026-09-02, *"ask
+#: what else draws on a limit before sizing it for the thing it is named
+#: after"*, reproduced by the change that quoted it.
+#:
+#: 1570 is a LOWER bound on the thinking this payload wants, not its
+#: requirement: the ceiling cut it off. So the new floor is sized for headroom
+#: over an unknown rather than fitted to one observation.
+#:
+#: Raising it is close to free, and the reason matters. `max_output_tokens` is
+#: a CEILING, not a reservation: billing is on tokens actually produced, and a
+#: thinking model's reasoning length is driven by the task rather than by the
+#: room available. So a higher ceiling does not buy more thinking, it stops a
+#: finished thought being truncated before the JSON starts. The standing
+#: assumption is exactly that, and the `thinking_tokens` column on
+#: `/signals/ai-governor` is the instrument that tests it — if mean thinking
+#: climbs toward whatever ceiling is set, this reasoning is wrong and the fix
+#: is the payload rather than the number.
+AI_GOV_OUTPUT_TOKEN_FLOOR: int = _safe_int("AI_GOV_OUTPUT_TOKEN_FLOOR", "4096")
+
+#: Per-signal output allowance added to the floor above.
+#:
+#: 150 was ample for the ANSWER (a verdict is ~50 tokens) and is not what
+#: overflowed — but thinking scales with the number of positions in the batch
+#: as well as with each one's richness, so the per-signal term carries part of
+#: the correction rather than loading it all onto the floor. A batch of one and
+#: a batch of ten do not want the same headroom.
+AI_GOV_OUTPUT_TOKEN_PER_SIGNAL: int = _safe_int("AI_GOV_OUTPUT_TOKEN_PER_SIGNAL", "400")
 
 AI_GOV_VERDICT_MAX_AGE_SEC: float = _safe_float("AI_GOV_VERDICT_MAX_AGE_SEC", "10.0")
 AI_GOV_REQUEST_TIMEOUT_SEC: float = _safe_float("AI_GOV_REQUEST_TIMEOUT_SEC", "20.0")
