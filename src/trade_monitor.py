@@ -1269,6 +1269,16 @@ class TradeMonitor:
                 # move and quote volume Binance already sends us. Same wiring
                 # as the Level Book above, set in `main.py`.
                 pair_getter=self._pair_getter,
+                # The monitor's OWN TTL-cached BTC classifier, injected as a
+                # callable. `sweep(macro=...)` has existed since the lane
+                # shipped and no caller ever passed it, so the macro block
+                # reached the model as `{}` and the `macro` trigger reason
+                # could never fire. Injecting rather than letting the governor
+                # import it keeps the read on this loop's existing cache: the
+                # invalidation overlay already takes it once per
+                # INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC, so the governor
+                # adds no BTC work at any member count.
+                btc_opposes=self._btc_opposes_direction,
             )
         except Exception as exc:
             from src import fail_open
