@@ -52,6 +52,10 @@
       "FAILED_AUCTION_RECLAIM": {
         "suppress_negative": null,
         "min_samples": null
+      },
+      "VOLUME_SURGE_BREAKOUT": {
+        "suppress_negative": false,
+        "min_samples": null
       }
     },
     "history": {
@@ -76,9 +80,9 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -235,9 +239,10 @@
       "TREND_PULLBACK_EMA|min_samples": 1365,
       "FAILED_AUCTION_RECLAIM|min_samples": 1745,
       "SR_FLIP_RETEST|min_samples": 1759,
-      "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157
+      "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157,
+      "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251
     },
-    "cycle": 2232
+    "cycle": 2277
   },
   "ledger": [
     {
@@ -1551,23 +1556,22 @@
       "ev_per_suppression_r": null,
       "n": 30,
       "routable": true
-    }
-  ],
-  "pending": [
+    },
     {
       "strategy": "VOLUME_SURGE_BREAKOUT",
       "param": "suppress_negative",
       "old": true,
       "new": false,
-      "applied": false,
-      "status": "PENDING",
-      "reason": "ev_below_bar |0.24|<0.25",
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote",
       "verdict": "DROP",
-      "ev_per_suppression_r": -0.23607030595658463,
-      "n": 83,
+      "ev_per_suppression_r": -0.6300891952185222,
+      "n": 43,
       "routable": true
     }
   ],
+  "pending": [],
   "active_overrides": {
     "FUNDING_EXTREME_SIGNAL": {
       "min_samples": 15
@@ -1606,11 +1610,14 @@
     },
     "QUIET_COMPRESSION_BREAK": {
       "suppress_negative": false
+    },
+    "VOLUME_SURGE_BREAKOUT": {
+      "suppress_negative": false
     }
   },
   "routability": {
     "enforced": true,
-    "routable_candidates": 1,
+    "routable_candidates": 0,
     "unroutable_candidates": 0,
     "unroutable_strategies": [],
     "dead_overrides": {},
