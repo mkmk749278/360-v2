@@ -2296,6 +2296,165 @@ def blindness(sample: int = 200) -> Dict[str, Any]:
     }
 
 
+def payload_census(sample: int = 200) -> Dict[str, Any]:
+    """What the model was actually SHOWN, aggregated over recent verdicts.
+
+    PROMPT_SCHEMA 3 put the premise, the bars, the macro block and the FSM
+    lifecycle in front of the model. Each of those lives per-row inside
+    ``snapshot``, so without this the only way to see whether any of it is
+    arriving would be to read the ledger by hand — and ops must not reduce the
+    rows itself: the api container has never evaluated a candidate, so a
+    locally-assembled version reports a healthy zero. `INDEX COLD`, and the
+    promotion census before it.
+
+    Three things this deliberately does NOT do.
+
+    It does not grade. A premise that could not be re-read is a fact about the
+    monitor's one-timeframe budget, not a fault, and the caller is told which
+    reason applied rather than handed a verdict.
+
+    It counts a missing block APART from a present-but-empty one. `bars` absent
+    means a row written before schema 3; `bars.readable == False` means the
+    series was not there. Pooling them would report an old ledger as a broken
+    feed — the caption naming a cause the page cannot observe, which these two
+    repos have paid for under several names.
+
+    And it publishes the MENU SIZES. `ADJUST_TP` has been chosen zero times in
+    every window this lane has ever run, and nothing could say whether that is
+    the model declining or the menu never offering: measured over 234 real
+    signals against real bars, 29% of TP menus carry no alternative to `tp_0`,
+    so the action is structurally impossible on roughly three reviews in ten.
+    An all-zero column is a claim about the instrument before it is a claim
+    about the world.
+    """
+    rows = get_ledger().rows()[-int(max(1, sample)):]
+    if not rows:
+        # Nothing asked yet. A caller rendering 0% here would report a healthy
+        # lane on an empty one.
+        return {"rows": 0, "measured": False}
+
+    snaps = [(r.get("snapshot") or {}) for r in rows]
+    with_premise = [s for s in snaps if isinstance(s.get("premise"), dict) and s["premise"]]
+    with_bars = [s for s in snaps if isinstance(s.get("bars"), dict) and s["bars"]]
+    with_macro = [s for s in snaps if isinstance(s.get("macro"), dict) and s["macro"]]
+
+    thesis_rows = [p["premise"] for p in with_premise if p["premise"].get("thesis")]
+    refusals: Dict[str, int] = {}
+    for p in with_premise:
+        reason = str(p["premise"].get("refusal") or "")
+        if reason:
+            refusals[reason] = refusals.get(reason, 0) + 1
+
+    declared = recomputed = 0
+    entry_reasons: Dict[str, int] = {}
+    for block in thesis_rows:
+        for cond in block.get("conditions") or []:
+            declared += 1
+            if cond.get("now") is not None:
+                recomputed += 1
+            reason = cond.get("at_entry_reason")
+            if reason:
+                entry_reasons[str(reason)] = entry_reasons.get(str(reason), 0) + 1
+
+    bars_readable = sum(1 for s in with_bars if s["bars"].get("readable") is True)
+    bars_reasons: Dict[str, int] = {}
+    for s in with_bars:
+        if s["bars"].get("readable") is not True:
+            key = str(s["bars"].get("reason") or "unknown")
+            bars_reasons[key] = bars_reasons.get(key, 0) + 1
+
+    btc_known = sum(
+        1 for s in with_macro if s["macro"].get("btc_opposes_now") is not None
+    )
+
+    def _sizes(key: str) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for s in snaps:
+            values = s.get(key)
+            if isinstance(values, list):
+                out[str(len(values))] = out.get(str(len(values)), 0) + 1
+        return out
+
+    tp_sizes = _sizes("tp_candidates")
+    tp_total = sum(tp_sizes.values())
+
+    # ── Token headroom — deduplicated to CALLS, never rows ────────────────
+    #
+    # One request answers a whole batch, so every verdict it produced carries
+    # the SAME usage dict. Averaging over rows would weight a batch of six six
+    # times and report a per-call figure that no call ever had — the
+    # double-counting this repo already pays for when measurement arms are
+    # rolled up beside the strategies they were stamped from. `issued_at` is
+    # the tick that launched the request and is shared across the batch, so it
+    # is the call key.
+    #
+    # This block exists because the refutation condition published with the
+    # budget raise was not measurable when it was written: `thinking_tokens` is
+    # stamped on every call, success or failure, and was RENDERED only on the
+    # failure ring — so "watch whether thinking climbs toward the ceiling" could
+    # be checked on exactly the population that did not matter. An instrument
+    # that can only see failures cannot tell a healthy budget from a lucky one.
+    by_call: Dict[Any, Dict[str, Any]] = {}
+    for row in rows:
+        usage = row.get("usage")
+        if isinstance(usage, dict) and usage:
+            by_call.setdefault(row.get("issued_at"), usage)
+    thinking = [
+        int(u.get("thinking_tokens") or 0)
+        for u in by_call.values()
+        if u.get("thinking_tokens") is not None
+    ]
+    output = [int(u.get("output_tokens") or 0) for u in by_call.values()]
+    return {
+        "rows": len(rows),
+        "measured": True,
+        "tokens": {
+            "calls": len(by_call),
+            # Rows whose usage never carried the vendor's thoughts count.
+            # Named apart from zero thinking, which is a different fact.
+            "calls_with_thinking_stamp": len(thinking),
+            "thinking_mean": round(sum(thinking) / len(thinking), 1) if thinking else None,
+            "thinking_max": max(thinking) if thinking else None,
+            "output_mean": round(sum(output) / len(output), 1) if output else None,
+            "output_max": max(output) if output else None,
+        },
+        "premise": {
+            # A row with no premise block predates schema 3. Named apart from a
+            # premise that was REFUSED, which is a live path with no thesis.
+            "rows_with_block": len(with_premise),
+            "rows_without_block": len(snaps) - len(with_premise),
+            "rows_with_thesis": len(thesis_rows),
+            "refusals": refusals,
+            "conditions_declared": declared,
+            "conditions_recomputed_now": recomputed,
+            # Why the ENTRY side was blank, which is the common case on any
+            # signal born before this lane and is not a fault.
+            "at_entry_reasons": entry_reasons,
+        },
+        "bars": {
+            "rows_with_block": len(with_bars),
+            "rows_without_block": len(snaps) - len(with_bars),
+            "readable": bars_readable,
+            "reasons": bars_reasons,
+        },
+        "macro": {
+            "rows_with_block": len(with_macro),
+            "rows_without_block": len(snaps) - len(with_macro),
+            # Tri-state at the source: None is "could not ask", never "no".
+            "btc_opposes_readable": btc_known,
+        },
+        "menu": {
+            "tp_sizes": tp_sizes,
+            "sl_sizes": _sizes("sl_candidates"),
+            # The number that makes an all-zero ADJUST_TP column readable.
+            "tp_only_current": tp_sizes.get("1", 0),
+            "tp_only_current_pct": (
+                round(100.0 * tp_sizes.get("1", 0) / tp_total, 1) if tp_total else None
+            ),
+        },
+    }
+
+
 def build_scorecard() -> Dict[str, Any]:
     """The scorecard, as its OWN diagnostic read — never folded into `build_diag`.
 
@@ -2406,6 +2565,9 @@ def build_diag() -> Dict[str, Any]:
         # surface could say whether a verdict was informed or blind — which
         # makes every verdict on the page uninterpretable in either direction.
         "blindness": blindness(),
+        # What the model was SHOWN. Sibling of `blindness`, which answers the
+        # same question for the two feed fields only.
+        "payload_census": payload_census(),
     }
 
 
