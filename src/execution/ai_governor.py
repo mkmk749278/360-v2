@@ -158,6 +158,17 @@ def _blank_health() -> Dict[str, Any]:
         # working, and pooling the two makes a healthy governor read as a
         # blocked one.
         "throttles": {},
+        # Every terminal state of the apply path, counted BY CONSTRUCTION.
+        # `apply_verdict` is a thin counting wrapper around the real body, so a
+        # return added later cannot escape this bucket the way `no_positions`
+        # did: it was the one exit with no counter, and by elimination it is
+        # where every ADJUST_SL verdict went while the panel read `applied 0`
+        # with no refusal beside it. The docstring on `apply_verdict` had
+        # asserted "there is no path that both declines to act and says
+        # nothing" since the lane shipped — a constant asserting a property the
+        # code beneath it did not have, for the tenth time in these two repos,
+        # and this one sat on the money path.
+        "apply_outcomes": {},
         "provider_status": {},
         # The counts above say HOW MANY calls failed and cannot say what the
         # provider objected to. `bad_json` covers a truncated answer, a
@@ -608,6 +619,24 @@ def armed_arms() -> Tuple[str, ...]:
     return tuple(a for a in (p.strip().lower() for p in raw.split(",")) if a in ARMS)
 
 
+def _arm_is_armed_now(action: str) -> Optional[bool]:
+    """Could a verdict of *action* move a real order right now?
+
+    `MAINTAIN` returns None rather than False: it has no arm, so "armed" is a
+    question it cannot be asked, and answering False would file every MAINTAIN
+    row as a dark row in a window that may not be dark. Same tri-state rule the
+    mechanism manifest already carries for `has_direction`.
+    """
+    arm = _ARM_OF.get(action)
+    if arm is None:
+        return None
+    try:
+        return bool(apply_enabled()) and arm in armed_arms()
+    except Exception as exc:  # noqa: BLE001 — a stamp is never worth a raise
+        fail_open.record("ai_governor.arm_is_armed_now", exc)
+        return None
+
+
 # ── Arms — one per SIGNAL, never per position ───────────────────────────────
 
 @dataclass
@@ -664,6 +693,21 @@ class Verdict:
     #: reconstructed old verdict lands in the population it belongs to rather
     #: than in a nameless one.
     review_kind: str = REVIEW_ONGOING
+    #: Was this verdict's own arm ARMED TO ACT at the moment it was issued —
+    #: `apply_enabled()` and this action's arm in `armed_arms()`?
+    #:
+    #: Recorded where it becomes true, not inferred later. While apply is off
+    #: every recorded outcome is the MAINTAIN counterfactual, which is what
+    #: makes the scorecard's selection panel readable at all. The day apply is
+    #: armed that stops being true *for the rows issued after it*, and without
+    #: this field the ledger holds treatment and control under one name with
+    #: nothing able to separate them — a window pooled at the moment it starts
+    #: meaning two things.
+    #:
+    #: `None` is a schema-2 row issued before this field existed. It is NOT
+    #: `False`: those rows were dark, but saying so from the absence of a stamp
+    #: is the inference this repo keeps paying for. Filter, do not purge.
+    apply_armed: Optional[bool] = None
 
     def as_row(self) -> Dict[str, Any]:
         return {
@@ -683,6 +727,7 @@ class Verdict:
             # questions, and `prompt_schema` alone cannot separate them because
             # a schema-2 file holds both.
             "review_kind": self.review_kind,
+            "apply_armed": self.apply_armed,
             "snapshot_digest": self.snapshot_digest,
             "as_of_bar_ms": self.as_of_bar_ms,
             "issued_at": self.issued_at,
@@ -963,48 +1008,94 @@ def _review_kind_for(signal_id: str) -> str:
 #: asked the identical question a schema-1 row was, so those two remain
 #: comparable. Nothing is purged: **filter, do not purge**, and the split is
 #: what makes filtering possible.
-PROMPT_SCHEMA = 2
+#: 3 (2026-09-10) — a **REDEFINITION** again, and a larger one than schema 2.
+#:
+#: Schema 2 changed the QUESTION. Schema 3 changes the WORLD: the payload went
+#: from 27 scalars and ~1KB per position to the premise the trade was taken on,
+#: the bars it has traded since, where it sits in the FSM, and a macro block
+#: that was previously the empty object. A verdict issued under schema 2 was
+#: answered by a model that could not see any of it, so the two are not
+#: comparable and rows stamp `prompt_schema` so they are never pooled.
+#:
+#: Nothing is purged. **Filter, do not purge** — schema-2 rows carry a valid
+#: outcome and are most of the evidence about the lane's plumbing, even though
+#: they cannot speak to what a better-fed model decides.
+PROMPT_SCHEMA = 3
 
 _SYSTEM_PROMPT = """\
 You are a risk critic for already-open crypto futures scalps. Every trade is
-live; you cannot open, reverse, or size anything. You choose among four
-outcomes and nothing else.
+live. You cannot open, reverse, size, or price anything. You choose one of four
+outcomes per position and nothing else.
 
-Each position carries a "review" field, and it decides which question you are
-answering. Read it first.
+UNITS. Every percentage here is a PRICE percentage, and every distance is
+SIGNED TOWARD THE TRADE: positive is in its favour on both a LONG and a SHORT.
+Never re-derive direction. The cost of closing is
+shared.economics.fee_round_trip_price_pct and it is in those same price
+percent - compare it directly against dist_to_sl_pct.
 
-review = "entry" — this is the FIRST look at a trade that has just been taken.
-The question is whether this trade deserved to be taken at all, on what you can
-see now. Be willing to say no. A setup that is already working against its
-own premise, is entering into an obvious wall, or whose reason for existing is
-not visible in the data you were given, is not worth its risk — answer
+SIZING. Positions are sized at a FIXED NOTIONAL, so R does not equalise trades:
+a 0.8% loss and a 6.1% loss are both -1.00R and cost very different money.
+Reason in price percent; R is context only.
+
+READ IN THIS ORDER.
+1. premise - what this setup required, and what those requirements read now.
+   That is the question. The setup's name is not.
+2. bars - what has actually happened since, and whether volatility changed.
+3. lifecycle - whether the stop has already moved and what is already banked.
+4. structure, flow, macro - context, often unreadable.
+
+THE FOUR OUTCOMES.
+MAINTAIN     - the premise holds, or nothing you can see justifies acting.
+ADJUST_TP    - take profit sooner. Return a tp_* key NEARER than tp_0.
+ADJUST_SL    - reduce risk. Return an sl_* key TIGHTER than sl_0.
+PANIC_CLOSE  - on an "entry" review, this trade was not worth taking. On an
+               "ongoing" review, the premise is broken and waiting for the stop
+               is worse than paying the exit now.
+
+review decides which question you are answering. Read it first.
+
+review = "entry" - the FIRST look at a trade just taken. The question is
+whether it deserved to be taken at all on what you can see. Be willing to say
+no, and PANIC_CLOSE is how you say it. A setup already working against its own
+premise, entering into a level it has to clear to pay, or whose reason for
+existing is not visible in premise.conditions, is not worth its risk - answer
 PANIC_CLOSE. Do not extend it the benefit of the doubt because it is new.
 
-review = "ongoing" — the trade has been running and was judged worth taking.
-The question is only whether reality still supports the original premise.
-Prefer MAINTAIN here. Reserve PANIC_CLOSE for a genuine regime break; a trade
-being underwater is not one, because the stop was already sized for that.
+review = "ongoing" - the trade has been running and was judged worth taking.
+The question is only whether reality still supports the original premise. A
+trade being underwater is NOT a broken premise: the stop was sized for that. A
+broken premise looks like a named condition in premise.conditions having moved
+against the setup, volatility expanding well past what the stop was sized for
+(bars.atr_ratio_now_vs_entry), or a run of closes against the trade.
 
-MAINTAIN     - the premise holds. The default on an "ongoing" review.
-ADJUST_TP    - take profit sooner. Choose a tp_* key NEARER than tp_0.
-ADJUST_SL    - reduce risk. Choose an sl_* key TIGHTER than sl_0.
-PANIC_CLOSE  - on "entry", the trade was not worth taking. On "ongoing", the
-               premise is broken and waiting for the stop is worse than paying
-               the exit now.
+WHEN NOT TO TIGHTEN A STOP. This is the failure this lane has already measured
+on its own record. The SL menu always offers breakeven and lock levels once a
+trade is in profit, so "it is winning, lock it in" is always available and is
+usually wrong: it clips the winners that pay for the losers. Choose ADJUST_SL
+only when a NAMED condition has moved against the trade - not because it is in
+profit, and not because it has gone quiet. If lifecycle.breakeven_set is true
+the trade already has no risk and tightening further is pure downside. If your
+reason would be equally true of a trade you would happily hold, it is not a
+reason.
 
-Rules you must follow:
-- Return ONLY a key that appears in this position's own candidate list.
+RULES YOU MUST FOLLOW.
+- Return ONLY a key from THIS position's own candidate list. Keys from another
+  position's menu are refused.
 - choice must be null for MAINTAIN and PANIC_CLOSE.
-- Every distance is signed TOWARD the trade: positive is in its favour on both
-  a LONG and a SHORT. Do not re-derive direction.
-- A field marked readable:false means we could not observe it. It is not zero
-  and not neutral - reason about the trade without it and say so if it matters.
-- rationale is one sentence, under 140 characters, describing what changed.
+- If menu.sl_candidates_n is 1 there is no tighter stop to choose and
+  ADJUST_SL is unavailable. Same for tp.
+- A field carrying readable:false, or a null with a *_reason beside it, means we
+  could not observe it. It is not zero and not neutral. Reason without it, and
+  say so if it mattered.
+- premise.conditions carries `moved`, which is a CHANGE in the feature's own
+  units, not a verdict. No threshold in this payload was fitted to any window.
+- geometry.mfe_pct and mae_pct are tick-sampled, not intrabar. Treat them as
+  lower bounds on how far the trade actually travelled.
+- macro.btc_state_at_entry describes ENTRY. macro.btc_opposes_now is the live
+  read. Do not read one as the other.
+- rationale is one sentence under 140 characters naming WHAT CHANGED. "The
+  trade is in profit" is not what changed.
 - premise_broken names only reasons from the allowed list.
-
-Closing a position costs a round-trip fee of roughly 0.7% of margin, charged
-whether or not the exit was right. A MAINTAIN that turns out wrong costs the
-stop, which was already sized for. Weigh accordingly.
 """
 
 RESPONSE_SCHEMA: Dict[str, Any] = {
@@ -1110,6 +1201,11 @@ def parse_verdicts(
             # asking the arm again would stamp every entry review as ongoing
             # and silently empty the population this change exists to create.
             review_kind=(reviews or {}).get(signal_id, REVIEW_ONGOING),
+            # Read at issue, for THIS action's arm — not "is the lane armed"
+            # in general. A window where `sl` is armed and `tp` is not holds
+            # treatment rows and counterfactual rows side by side, and only a
+            # per-action stamp can separate them.
+            apply_armed=_arm_is_armed_now(action),
             snapshot_digest=snapshot.digest(),
             as_of_bar_ms=snapshot.as_of_bar_ms,
             issued_at=now,
@@ -1167,6 +1263,7 @@ async def sweep(
     task_factory: Any = None,
     level_getter: Any = None,
     pair_getter: Any = None,
+    btc_opposes: Any = None,
 ) -> Dict[str, Any]:
     """Advance every armed SIGNAL by at most one bar. Never blocks on the model.
 
@@ -1269,8 +1366,17 @@ async def sweep(
             bars_since_entry=_bars_since_entry(arm, series, trigger_tf, now),
             last_price=price,
             menu=menu,
-            macro=macro or {},
+            # Per SIGNAL, not per batch. `macro` arrived here as `{}` for the
+            # lane's whole life because no caller ever passed it; the batch
+            # parameter is kept for the macro_moved trigger and the per-signal
+            # block is what the model actually reads.
+            macro=_macro_for(sig, macro, btc_opposes, len(active)),
             instrument=_instrument_for(sig, pair_getter),
+            # The array the menu was just built from. Held on this tick and
+            # discarded until 2026-09-10: free, and the largest single thing
+            # the model was missing.
+            series=series,
+            premise=_premise_for(sig, series),
             now=now,
         )
         snapshot = _snap.with_menu(snapshot, menu)
@@ -1306,6 +1412,46 @@ async def sweep(
     }
 
 
+def _shared_block(n_positions: int) -> Dict[str, Any]:
+    """The economics, as FIELDS rather than as a sentence in the prompt.
+
+    The prompt used to say "closing costs roughly 0.7% of margin". That figure
+    is arithmetically right — 0.07% round trip at the 10x `PRE_TP_LEVERAGE`
+    assumption — and it sat inside a payload in which every single distance is
+    a PRICE percentage, with nothing saying the units differed. Against a 3.0%
+    stop the model read the exit as costing 0.7 of 3.0, roughly a quarter of
+    the risk, where in the payload's own units it costs 0.07 of 3.0 — about
+    2%. The cost of acting was overstated ten-fold in the only units the model
+    could compare against, which is a mechanical push toward MAINTAIN and away
+    from PANIC_CLOSE, and PANIC_CLOSE was chosen zero times in 480 rows.
+
+    Both numbers ship, named, so neither can be silently mistaken for the
+    other again.
+    """
+    from config import PRE_TP_FEE_PCT_ROUND_TRIP, PRE_TP_LEVERAGE
+
+    return {
+        "economics": {
+            "fee_round_trip_price_pct": round(float(PRE_TP_FEE_PCT_ROUND_TRIP), 4),
+            "fee_round_trip_margin_pct": round(
+                float(PRE_TP_FEE_PCT_ROUND_TRIP) * float(PRE_TP_LEVERAGE), 4
+            ),
+            "leverage_assumption": float(PRE_TP_LEVERAGE),
+            # No notional here on purpose. Sizing is PER USER and this lane is
+            # keyed on signals, so there is no signal-level notional to publish
+            # and a default would be a number nobody chose. What the model
+            # actually needs from sizing is that it is fixed-notional, which
+            # the note says.
+            "note": (
+                "Every distance in this payload is a PRICE percent; compare the "
+                "fee in those units. Sizing is fixed-notional, so R does not "
+                "equalise trades."
+            ),
+        },
+        "book": {"open_signals_in_this_batch": int(n_positions)},
+    }
+
+
 async def evaluate(
     batch: Dict[str, Tuple[_snap.Snapshot, _menu.Menu]],
     *,
@@ -1338,6 +1484,9 @@ async def evaluate(
         reviews = {sid: _review_kind_for(sid) for sid in batch}
         payload = {
             "schema": PROMPT_SCHEMA,
+            # One shared block for the whole batch: identical for every
+            # position, so it costs one cacheable prefix rather than N copies.
+            "shared": _shared_block(len(batch)),
             "positions": [
                 dict(snap.as_dict(), review=reviews[sid])
                 for sid, (snap, _m) in batch.items()
@@ -1529,11 +1678,38 @@ async def apply_verdict(
     now: Optional[float] = None,
     placer_factory: Any = None,
 ) -> str:
-    """Act on one verdict, re-validating every precondition against state NOW.
+    """Act on one verdict, and count what happened — whatever happened.
 
-    Returns the outcome name. Every refusal is counted; there is no path that
-    both declines to act and says nothing.
+    The counting lives HERE rather than at each return inside the body, and
+    that is the whole point. `_apply_verdict` has nine terminal states and one
+    of them (`no_positions`) had no counter, so a verdict that reached the
+    apply path and found nobody in the trade vanished: the panel read
+    `applied 0` beside twelve actionable ADJUST_SL verdicts and no refusal,
+    and the two readings a reader has to separate — *nobody was in this trade*
+    and *the apply path is broken* — were indistinguishable.
+
+    A wrapper is total by construction; a list of counted returns is a
+    hand-kept mirror of the control flow, which is the drift this repo has
+    paid for under six names. A return added to the body tomorrow is counted
+    without anyone remembering to count it.
     """
+    outcome = await _apply_verdict(
+        verdict, snapshot, menu, now=now, placer_factory=placer_factory
+    )
+    _count_in("apply_outcomes", str(outcome or "unnamed"))
+    return outcome
+
+
+async def _apply_verdict(
+    verdict: Verdict,
+    snapshot: _snap.Snapshot,
+    menu: _menu.Menu,
+    *,
+    now: Optional[float] = None,
+    placer_factory: Any = None,
+) -> str:
+    """The body. Every refusal here is ALSO named in `refusals`; the wrapper
+    above is what guarantees the outcome is counted at all."""
 
     now = _now() if now is None else now
 
@@ -1597,6 +1773,11 @@ async def apply_verdict(
         _refuse(REFUSE_INDEX_COLD)
         return REFUSE_INDEX_COLD
     if not positions:
+        # The index answered and the answer was "nobody". NOT a refusal: no
+        # user held this trade, so there was nothing to act on and nothing
+        # failed. Named and counted by the wrapper, because a lane with no
+        # subscribers in its signals and a lane whose apply path is dead
+        # produce the identical `applied 0`.
         return "no_positions"
 
     if verdict.action == PANIC_CLOSE:
@@ -1924,6 +2105,71 @@ def _build_menu_for(
     )
 
 
+def _premise_for(sig: Any, series: Any) -> Dict[str, Any]:
+    """What this trade required, joined to the entry stamp it already has.
+
+    `entry_features` keyed its stamp by `signal_id` precisely so a later reader
+    needs no resolver of its own — "before building a resolver, ask whether the
+    outcome you need is already recorded by something that owns it". This is
+    that lookup.
+    """
+    try:
+        from src import entry_features as _ef
+        from src.execution import ai_governor_premise as _prem
+
+        signal_id = str(getattr(sig, "signal_id", "") or "")
+        row = None
+        try:
+            row = _ef.get_ledger().row_for(signal_id)
+        except Exception as exc:  # noqa: BLE001
+            fail_open.record("ai_governor.premise_entry_row", exc)
+        block = _prem.build(
+            setup_class=str(getattr(sig, "setup_class", "") or ""),
+            signal=sig,
+            entry_row=row,
+            series=series,
+        )
+        refusal = block.get("refusal")
+        if refusal:
+            # Named and counted, never a silent generic sentence. A path with no
+            # thesis is a map miss, and the map is a floor.
+            _refuse(f"premise_{refusal}")
+        return block
+    except Exception as exc:  # noqa: BLE001
+        fail_open.record("ai_governor.premise_for", exc)
+        return {}
+
+
+def _macro_for(
+    sig: Any, batch_macro: Any, btc_opposes: Any, same_direction_open: int
+) -> Dict[str, Any]:
+    """Per-signal macro, with the live BTC read injected rather than imported.
+
+    ``btc_opposes`` is the monitor's own TTL-cached classifier — injected so
+    this module has no opinion about where BTC comes from, and so the read is
+    not taken a second time on a loop that already took it.
+    """
+    opposes: Optional[bool] = None
+    reason = ""
+    if btc_opposes is not None:
+        try:
+            opposes, reason = btc_opposes(sig)
+        except Exception as exc:  # noqa: BLE001
+            fail_open.record("ai_governor.btc_opposes", exc)
+            opposes, reason = None, ""
+    block = _snap.macro_for_signal(
+        sig,
+        opposes=opposes,
+        oppose_reason=reason,
+        same_direction_open=same_direction_open,
+    )
+    # Anything the caller passed for the whole batch rides along beside the
+    # per-signal half rather than replacing it.
+    for key, value in dict(batch_macro or {}).items():
+        block.setdefault(key, value)
+    return block
+
+
 def _instrument_for(sig: Any, pair_getter: Any) -> Dict[str, Any]:
     """The instrument X-ray block for this signal's symbol.
 
@@ -2145,6 +2391,11 @@ def build_diag() -> Dict[str, Any]:
         # fastest possible answer measured 7.3s.
         "verdict_age_floor": verdict_age_floor(),
         "health": health(),
+        # The apply funnel, published so the page can say WHY `applied` is
+        # what it is. `health()["apply_outcomes"]` carries it; this key is the
+        # explicit contract with ops so the panel is not reading a bucket by
+        # luck.
+        "apply_funnel": dict(health().get("apply_outcomes") or {}),
         "arms": arms_snapshot(),
         "ledger_rows": ledger.count(),
         "ledger_evicted": ledger.evicted,
