@@ -37,6 +37,13 @@
     "how_to_reproduce": {
       "payload_today": "scratchpad/mkpayload.py - drives the real producers",
       "menu_census": "scratchpad/menucensus.py - real bars from data.binance.vision (fapi answers 451 from this box; vision answers 200)"
+    },
+    "shipped": {
+      "pr": "mkmk749278/360-v2#1027",
+      "date": "2026-09-10",
+      "covers": "steps 2-6 of the wiring order",
+      "owner_directive": "purely observing it like live but to ops only; it should not touch users now; monitoring in ops should be like live",
+      "note": "This PR changes only what the model SEES. AI_GOV_APPLY_ENABLED is untouched by it and remains the owner's switch."
     }
   },
   "audit": {
@@ -2045,7 +2052,8 @@
         "what": "AI_GOV_ARMS_ENABLED=tp (drop sl and panic), or AI_GOV_APPLY_ENABLED=false. Measurement stays ON.",
         "why": "The paired card reads 0 better / 2 worse and -0.36%/trade on the only arm the model ever chooses. Applied is 0 today only because no governed signal has carried a position (AIG-008).",
         "owner_sign_off": true,
-        "ships": "config flip, no deploy"
+        "ships": "config flip, no deploy",
+        "status": "OWNER \u2014 flip ai_gov_apply_enabled OFF in ops Control -> Engine. Not shippable from a PR: it is a runtime tunable, and the config default is already false."
       },
       {
         "step": 2,
@@ -2053,7 +2061,8 @@
         "what": "AIG-008 and AIG-009.",
         "why": "Until these land, no panel can tell a working apply path from a dead one.",
         "owner_sign_off": false,
-        "ships": "engine PR"
+        "ships": "engine PR",
+        "status": "SHIPPED in #1027 (measurement only; apply untouched)"
       },
       {
         "step": 3,
@@ -2061,7 +2070,8 @@
         "what": "AIG-002. Pass macro= and macro_moved= at trade_monitor.py:1259; source btc_state / btc_state_factor off the Signal.",
         "why": "One call site. Turns an empty object into real context and makes the macro trigger reachable.",
         "owner_sign_off": false,
-        "ships": "engine PR, ~20 lines"
+        "ships": "engine PR, ~20 lines",
+        "status": "SHIPPED in #1027 (measurement only; apply untouched)"
       },
       {
         "step": 4,
@@ -2069,7 +2079,8 @@
         "what": "AIG-004. Fee as a field in price percent, prompt rewritten (system_prompt_v3 below). REDEFINITION: schema-3 rows are never pooled with schema-1 or schema-2. Filter, do not purge.",
         "why": "The cost of acting is currently overstated ten-fold in the only units the model can compare against.",
         "owner_sign_off": false,
-        "ships": "engine PR"
+        "ships": "engine PR",
+        "status": "SHIPPED in #1027 (measurement only; apply untouched)"
       },
       {
         "step": 5,
@@ -2077,7 +2088,8 @@
         "what": "AIG-006. build_snapshot takes series; emit the normalised bar rows plus ATR and streak.",
         "why": "Free - the sweep already holds it. Largest single information gain in the bundle.",
         "owner_sign_off": false,
-        "ships": "engine PR"
+        "ships": "engine PR",
+        "status": "SHIPPED in #1027 (measurement only; apply untouched)"
       },
       {
         "step": 6,
@@ -2085,7 +2097,8 @@
         "what": "AIG-001. Per-setup thesis table plus entry_features evaluated at entry and now.",
         "why": "Makes the question the prompt asks actually answerable. Biggest conceptual gain.",
         "owner_sign_off": false,
-        "ships": "engine PR"
+        "ships": "engine PR",
+        "status": "SHIPPED in #1027 (measurement only; apply untouched)"
       },
       {
         "step": 7,
@@ -2093,7 +2106,8 @@
         "what": "level_book summary (getter already passed), volume profile, structure_state, plus the Signal attributes.",
         "why": "All free. The level getter is already threaded into sweep for the menu.",
         "owner_sign_off": false,
-        "ships": "engine PR"
+        "ships": "engine PR",
+        "status": "not started"
       },
       {
         "step": 8,
@@ -2101,7 +2115,8 @@
         "what": "AIG-007. strategy_edge cell + a conditional table precomputed from signal_performance.json on a slow timer.",
         "why": "The field most likely to stop winner-clipping. Cached, O(1) on the hot path.",
         "owner_sign_off": false,
-        "ships": "engine PR"
+        "ships": "engine PR",
+        "status": "not started"
       },
       {
         "step": 9,
@@ -2109,7 +2124,8 @@
         "what": "AIG-003. A small reserved slice of DEPTH_MAX_SYMBOLS and AGGTRADE_MAX_SYMBOLS for symbols carrying an open governed signal.",
         "why": "Only item with a real marginal cost. Bounded by the governed set (5-12 arms), not by the book.",
         "owner_sign_off": true,
-        "ships": "engine PR + config"
+        "ships": "engine PR + config",
+        "status": "not started"
       },
       {
         "step": 10,
@@ -2117,7 +2133,8 @@
         "what": "AIG-005. tp_candidates_n / sl_candidates_n on every row; ops renders the distribution beside the verdict mix.",
         "why": "Until this exists, an all-zero ADJUST_TP column cannot be attributed to the prompt or to the menu.",
         "owner_sign_off": false,
-        "ships": "engine PR + ops PR"
+        "ships": "engine PR + ops PR",
+        "status": "not started"
       },
       {
         "step": 11,
@@ -2125,7 +2142,8 @@
         "what": "Run schema 3 dark (measurement ON, apply OFF) for a window proportional to the verdict rate, then read the paired card again.",
         "why": "The current paired n is 10. Nothing about arming should be decided from that either way.",
         "owner_sign_off": true,
-        "ships": "nothing - a wait"
+        "ships": "nothing - a wait",
+        "status": "not started"
       }
     ],
     "refutation_condition": "Stated before the work, per doctrine. If schema 3 runs a full window and the paired ADJUST_SL delta is still <= 0 with n above the sample floor, the governor does not improve exits on this book and the honest answer is to retire the arm rather than feed it more."
