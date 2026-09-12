@@ -115,6 +115,38 @@ server {
     root $WEB_ROOT;
     index index.html;
 
+    # Compression.  nginx's packaged default is \`gzip on\` with gzip_types
+    # left at its built-in value of text/html ALONE, and this block never
+    # overrode it — so for the whole life of this channel the 3 KB
+    # index.html was compressed and the two files that actually cost the
+    # visitor anything were not.  Measured against production 2026-09-13:
+    #
+    #     main.dart.js          3,768,038 B  ->  1,080,702 B gzipped  (-71%)
+    #     canvaskit/*.wasm      7,284,602 B      served raw
+    #
+    # That is ~11 MB of first load on a channel whose launch market is
+    # mobile India, and it is the leading suspect for the 23% of paid ad
+    # clicks (137 link clicks -> 106 loads) that never completed a load.
+    # gzip is enough here and needs no extra module; brotli would beat it
+    # but is not worth a custom nginx build for a static site this small.
+    gzip            on;
+    gzip_vary       on;
+    gzip_proxied    any;
+    gzip_comp_level 6;
+    gzip_min_length 1024;
+    # Explicit rather than inherited: the whole defect above was a default
+    # nobody had read.  text/html is always compressed and must not be
+    # listed here (nginx warns on the duplicate).
+    gzip_types
+        application/javascript
+        text/javascript
+        application/json
+        application/manifest+json
+        application/wasm
+        text/css
+        text/plain
+        image/svg+xml;
+
     # ACME challenges (lets-encrypt) need to reach the filesystem.
     location /.well-known/acme-challenge/ {
         root /var/www/html;
@@ -131,9 +163,13 @@ server {
     location / {
         # Flutter's bundle files (main.dart.js parts, canvaskit, assets)
         # are fingerprinted per build via the service-worker hash map, so
-        # a moderate cache is safe and saves the VPS re-serving ~2 MB per
-        # visit.  No SPA rewrite needed: the app uses hash-free
-        # single-document routing.
+        # a moderate cache is safe.  No SPA rewrite needed: the app uses
+        # hash-free single-document routing.
+        #
+        # This comment used to say the cache saves "~2 MB per visit".
+        # Measured 2026-09-13 it is ~11 MB uncompressed / ~3 MB with the
+        # gzip block above — a constant asserting a property of a moving
+        # system, which is why the figure is now dated and sourced.
         add_header Cache-Control "public, max-age=3600" always;
         try_files \$uri \$uri/ =404;
     }
