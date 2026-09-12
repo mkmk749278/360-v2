@@ -46,6 +46,14 @@ def _reset_cache(monkeypatch):
     # own _mode_state_stub fixture.
     from src.api import user_overrides as _uo
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "live")
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))("live")),
+    )
     # 2026-06-24: dispatch now gates hands-off execution on the AUTO tier
     # (B16 two-tier model).  These tests exercise dispatch *mechanics*
     # (notional, mode, pause, allowlists), not entitlement, so make the
@@ -1000,6 +1008,14 @@ def _mode_state_stub(monkeypatch):
         return "2026-05-24T00:00:00+00:00"
 
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", _resolve_mode)
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))(_resolve_mode(uid))),
+    )
     monkeypatch.setattr(_uo, "is_user_auto_paused_uid", _is_paused)
     monkeypatch.setattr(_uo, "pause_user_auto_trade_uid", _pause)
     signal_dispatch._consec_insufficient_margin.clear()

@@ -323,6 +323,12 @@ def reset_cache_for_test() -> None:
 
 _FANOUT_TOTALS: Dict[str, float] = defaultdict(float)
 
+#: The auto-trade modes this engine recognises.  Used only to bound the
+#: cardinality of the ``skip:mode:*`` counter keys — the gate itself
+#: compares against ``("live", "both")`` directly and is not driven by
+#: this set, so adding a mode here cannot widen what dispatches.
+_KNOWN_USER_MODES = frozenset({"live", "paper", "off", "both"})
+
 # Fan-outs (to a non-empty roster) tolerated with zero order attempts across
 # ALL users before the liveness probe flags a blackout.  ~15 paid signals/day
 # means 5 ≈ several hours of paid signals nobody's account even attempted.
@@ -789,15 +795,39 @@ async def dispatch_signal_to_active_users(
         # no dispatch_log row, no auto-pause accrual. This makes the
         # "Mode = live" indicator in the armed card the actual gate
         # rather than a status display divorced from behaviour.
+        #
+        # 2026-09-13: the skip now names WHICH world it is in. It used to
+        # note a bare ``skip:mode``, and ``resolve_user_mode_uid`` returns
+        # None for five structurally different reasons — store cold, user
+        # store cold, no user row, mode unset, or the read raised. So a
+        # fleet deliberately on paper and a process that cannot read the
+        # store produced the identical counter, on the gate that decides
+        # whether a paying Auto subscriber's order is placed. The
+        # auto_dispatch probe renders ``skip:*`` by removing the prefix,
+        # so the reason reaches the page with no change on that side.
+        #
+        # The DECISION is untouched: every branch below still skips and
+        # still fails closed per B12.
         from src.api import user_overrides as _uo
-        user_mode = _uo.resolve_user_mode_uid(uid)
+        user_mode, _mode_reason = _uo.resolve_user_mode_uid_detailed(uid)
         if not _manual and user_mode not in ("live", "both"):
-            log.info(
+            # Bound the key space: ``mode`` is a bare TEXT column with no
+            # CHECK constraint, and _FANOUT_TOTALS is a defaultdict keyed
+            # per distinct string, so an arbitrary stored value would grow
+            # it without bound.
+            if _mode_reason == _uo.MODE_REASON_OK:
+                detail = user_mode if user_mode in _KNOWN_USER_MODES else "unknown_value"
+            else:
+                detail = _mode_reason
+            unreadable = _mode_reason in _uo.MODE_UNREADABLE_REASONS
+            # WARNING when we could not ask — that is a fault, and it is
+            # indistinguishable from a deliberate opt-out at INFO.
+            (log.warning if unreadable else log.info)(
                 "signal_dispatch: skipping non-live user uid={} mode={} "
-                "signal_id={}",
-                uid, user_mode, signal_id,
+                "reason={} signal_id={}",
+                uid, user_mode, _mode_reason, signal_id,
             )
-            _note("skip:mode")
+            _note(f"skip:mode:{detail}")
             return False
 
         # Entitlement gate (B16 two-tier model, 2026-06-24).  Hands-off

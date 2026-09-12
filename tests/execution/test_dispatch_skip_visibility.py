@@ -51,6 +51,14 @@ def _reset(monkeypatch):
     })
     from src.api import user_overrides as _uo
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "live")
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))("live")),
+    )
     monkeypatch.setattr(signal_dispatch, "_resolve_user_tier", lambda uid: "auto")
     yield
     signal_dispatch.reset_cache_for_test()
@@ -82,6 +90,14 @@ async def _dispatch(monkeypatch, *, prefs, mode="live", tier="auto"):
     from src.execution import position_fsm
 
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: mode)
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))(mode)),
+    )
     monkeypatch.setattr(signal_dispatch, "_resolve_user_tier", lambda uid: tier)
     monkeypatch.setattr(
         _uo, "resolve_auto_trade_preferences_uid", lambda uid: prefs
@@ -152,8 +168,11 @@ async def test_preference_that_admits_the_signal_never_stamps(monkeypatch) -> No
 @pytest.mark.parametrize(
     "mode,tier,counter",
     [
-        ("paper", "auto", "skip:mode"),
-        ("off", "auto", "skip:mode"),
+        # 2026-09-13: the mode counter carries WHY it skipped, so a
+        # deliberate opt-out is distinguishable from a store this
+        # process could not read. Both still skip and still fail closed.
+        ("paper", "auto", "skip:mode:paper"),
+        ("off", "auto", "skip:mode:off"),
         ("live", "free", "skip:tier"),
     ],
 )

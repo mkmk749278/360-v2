@@ -47,6 +47,14 @@ def _reset_cache(monkeypatch):
     # so the interesting tests override them to *blocking* values.
     from src.api import user_overrides as _uo
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "live")
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))("live")),
+    )
     monkeypatch.setattr(signal_dispatch, "_resolve_user_tier", lambda uid: "auto")
     # No pre-existing position unless a test installs one.
     monkeypatch.setattr(
@@ -106,6 +114,14 @@ async def test_manual_take_skips_mode_gate(monkeypatch) -> None:
     the tap IS the consent the mode gate encodes for unattended orders."""
     from src.api import user_overrides as _uo
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "off")
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))("off")),
+    )
     from src.execution import position_fsm
     with patch.object(
         position_fsm, "place_signal", new_callable=AsyncMock
@@ -119,6 +135,14 @@ async def test_auto_path_still_blocked_by_mode_gate(monkeypatch) -> None:
     unattended fan-out — the manual bypass must not leak into auto."""
     from src.api import user_overrides as _uo
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "off")
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))("off")),
+    )
     with patch.object(
         signal_dispatch, "_active_uids", return_value=["fb-A"]
     ):
