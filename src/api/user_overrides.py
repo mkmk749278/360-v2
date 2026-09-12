@@ -2473,6 +2473,89 @@ def resolve_exit_mechanism_uid(firebase_uid: str) -> str:
         return EXIT_MECHANISM_DEFAULT
 
 
+#: Why the reason is bounded rather than free text: the dispatcher folds
+#: it into ``_FANOUT_TOTALS``, a ``defaultdict`` keyed per distinct string.
+#: ``mode`` is a bare ``TEXT`` column with no CHECK constraint, so an
+#: arbitrary value could otherwise grow that map without bound — one more
+#: counter-key lesson this repo has already paid for twice.
+MODE_REASON_OK = "ok"
+MODE_REASON_STORE_COLD = "store_cold"
+MODE_REASON_USER_STORE_COLD = "user_store_cold"
+MODE_REASON_NO_USER_ROW = "no_user_row"
+MODE_REASON_UNSET = "mode_unset"
+MODE_REASON_LOOKUP_FAILED = "lookup_failed"
+
+#: Reasons that mean **we could not ask**, as opposed to the user having
+#: chosen not to trade live.  The fan-out gate treats both the same way
+#: (fail closed, per B12) — this set exists so a surface can tell them
+#: apart, which is the whole point of the split.
+MODE_UNREADABLE_REASONS = frozenset({
+    MODE_REASON_STORE_COLD,
+    MODE_REASON_USER_STORE_COLD,
+    MODE_REASON_LOOKUP_FAILED,
+})
+
+
+def resolve_user_mode_uid_detailed(
+    firebase_uid: str,
+) -> Tuple[Optional[str], str]:
+    """Return ``(mode, reason)`` for ``firebase_uid``.
+
+    Added 2026-09-13.  ``resolve_user_mode_uid`` returned a bare ``None``
+    for **five structurally different worlds** — the overrides store was
+    never initialised in this process, the user store was cold, the user
+    has no row, the row carries no mode, or the read raised — and the
+    dispatcher folded all five into a single ``skip:mode`` counter.  So
+    *"236 users deliberately on paper"* and *"236 skips because this
+    process cannot read the store"* were the same number on the same
+    panel, on the fan-out that decides whether a paying Auto subscriber's
+    order is placed at all.
+
+    That is this repo's own rule — *unknown is not a value, and on the
+    money path it must never wear a value's caption* — and it is the
+    2026-09-02 blackout signature one gate over: when the Firestore
+    allowance ran out, ``list_active_uids`` returned empty and every
+    signal fanned out to zero users.  Had the roster survived and *this*
+    read gone blind instead, the counter would have read exactly what it
+    reads today.
+
+    **The gate's direction is unchanged.**  Every one of these still
+    skips, still fails closed, still matches B12 — capital preservation
+    over signal volume, so a transient outage cannot fire live orders.
+    Only the observability changes.
+    """
+    if _SINGLETON is None:
+        return None, MODE_REASON_STORE_COLD
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return None, MODE_REASON_USER_STORE_COLD
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return None, MODE_REASON_NO_USER_ROW
+        row = _SINGLETON.get_auto_trade(int(user.user_id))
+        mode = row.get("mode")
+        if isinstance(mode, str) and mode:
+            return mode.lower(), MODE_REASON_OK
+        return None, MODE_REASON_UNSET
+    except Exception as exc:
+        # WARNING, not debug: production log levels hide debug, so the one
+        # line naming a money-path read failure was invisible exactly when
+        # it mattered.  And a silently swallowed exception in a data path
+        # is a hard limit in this repo — fail-open behaviour stays, but the
+        # failure counts and pages through the feature-liveness watchdog.
+        from src import fail_open as _fail_open
+        _fail_open.record("user_overrides.resolve_user_mode_uid", exc)
+        log.warning(
+            "resolve_user_mode_uid: lookup FAILED for firebase_uid={} "
+            "({}: {}); failing closed as 'not live' — this is not the same "
+            "as the user choosing paper",
+            firebase_uid, type(exc).__name__, exc,
+        )
+        return None, MODE_REASON_LOOKUP_FAILED
+
+
 def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
     """Return the per-user auto-trade ``mode`` for ``firebase_uid``, or
     None when the user has no row / store is offline / lookup fails.
@@ -2488,29 +2571,12 @@ def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
     safe-by-default direction here matches B12 — capital preservation
     over signal volume — so a transient Firestore/SQLite outage can't
     accidentally fire live orders.
+
+    Thin wrapper over :func:`resolve_user_mode_uid_detailed`, which is
+    what any caller wanting to distinguish "the user chose paper" from
+    "we could not ask" should use instead.
     """
-    if _SINGLETON is None:
-        return None
-    try:
-        from src.api import users as _users
-        user_store = _users.get_singleton()
-        if user_store is None:
-            return None
-        user = user_store.get_by_firebase_uid(firebase_uid)
-        if user is None:
-            return None
-        row = _SINGLETON.get_auto_trade(int(user.user_id))
-        mode = row.get("mode")
-        if isinstance(mode, str) and mode:
-            return mode.lower()
-        return None
-    except Exception as exc:
-        log.debug(
-            "resolve_user_mode_uid: lookup failed for firebase_uid={} "
-            "({}); treating as 'not live'",
-            firebase_uid, type(exc).__name__,
-        )
-        return None
+    return resolve_user_mode_uid_detailed(firebase_uid)[0]
 
 
 def resolve_auto_trade_preferences_uid(

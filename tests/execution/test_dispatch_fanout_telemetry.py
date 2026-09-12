@@ -41,6 +41,14 @@ def _reset_cache(monkeypatch):
     })
     from src.api import user_overrides as _uo
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "live")
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))("live")),
+    )
     monkeypatch.setattr(signal_dispatch, "_resolve_user_tier", lambda uid: "auto")
     yield
     signal_dispatch.reset_cache_for_test()
@@ -90,6 +98,14 @@ async def test_mode_skips_count_as_skips_not_attempts(monkeypatch) -> None:
     mode gate → zero attempts, skip reason recorded."""
     from src.api import user_overrides as _uo
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "paper")
+    # The gate reads the detailed seam (reason-bearing) since
+    # 2026-09-13; keep both patched so any other consumer of the
+    # thin wrapper still sees the same answer.
+    monkeypatch.setattr(
+        _uo, "resolve_user_mode_uid_detailed",
+        lambda uid: ((lambda _m: (_m, _uo.MODE_REASON_OK if _m
+                      else _uo.MODE_REASON_UNSET))("paper")),
+    )
     with patch.object(signal_dispatch, "_active_uids", return_value=["fb-A", "fb-B"]):
         from src.execution import position_fsm
         with patch.object(position_fsm, "place_signal", new_callable=AsyncMock) as mp:
@@ -102,7 +118,12 @@ async def test_mode_skips_count_as_skips_not_attempts(monkeypatch) -> None:
     assert t["fanouts_with_users_total"] == 1
     assert t.get("attempts_total", 0) == 0
     assert t["skipped_total"] == 2
-    assert t["skip:mode"] == 2
+    # The fixture puts these users on "paper" — a deliberate choice,
+    # which the counter now names apart from an unreadable store.
+    assert t["skip:mode:paper"] == 2
+    assert "skip:mode" not in t, (
+        "the bare key would pool a user choice with a read failure"
+    )
 
 
 @pytest.mark.asyncio
