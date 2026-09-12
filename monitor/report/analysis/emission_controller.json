@@ -167,12 +167,12 @@
       "TREND_PULLBACK_EMA|min_samples": [
         "HOLD",
         "HOLD",
-        "HOLD"
+        "RAISE"
       ],
       "VOLUME_SURGE_BREAKOUT|suppress_negative": [
-        "DROP",
-        "DROP",
-        "DROP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "VOLUME_SURGE_BREAKOUT|min_samples": [
         "HOLD",
@@ -242,7 +242,7 @@
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157,
       "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251
     },
-    "cycle": 2319
+    "cycle": 2361
   },
   "ledger": [
     {
