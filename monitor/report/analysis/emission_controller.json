@@ -43,7 +43,7 @@
       },
       "TREND_PULLBACK_EMA": {
         "suppress_negative": false,
-        "min_samples": 15
+        "min_samples": null
       },
       "QUIET_COMPRESSION_BREAK": {
         "suppress_negative": false,
@@ -167,7 +167,7 @@
       "TREND_PULLBACK_EMA|min_samples": [
         "HOLD",
         "HOLD",
-        "RAISE"
+        "HOLD"
       ],
       "VOLUME_SURGE_BREAKOUT|suppress_negative": [
         "SKIP",
@@ -236,13 +236,13 @@
       "TREND_PULLBACK_EMA|suppress_negative": 362,
       "MOVER_AVWAP_SCALP|suppress_negative": 412,
       "QUIET_COMPRESSION_BREAK|suppress_negative": 848,
-      "TREND_PULLBACK_EMA|min_samples": 1365,
+      "TREND_PULLBACK_EMA|min_samples": 2369,
       "FAILED_AUCTION_RECLAIM|min_samples": 1745,
       "SR_FLIP_RETEST|min_samples": 1759,
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157,
       "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251
     },
-    "cycle": 2361
+    "cycle": 2405
   },
   "ledger": [
     {
@@ -1569,6 +1569,45 @@
       "ev_per_suppression_r": -0.6300891952185222,
       "n": 43,
       "routable": true
+    },
+    {
+      "strategy": "TREND_PULLBACK_EMA",
+      "param": "min_samples",
+      "old": 15,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=50)",
+      "verdict": "RAISE",
+      "ev_per_suppression_r": null,
+      "n": 50,
+      "routable": true
+    },
+    {
+      "strategy": "TREND_PULLBACK_EMA",
+      "param": "min_samples",
+      "old": 20,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=50)",
+      "verdict": "RAISE",
+      "ev_per_suppression_r": null,
+      "n": 50,
+      "routable": true
+    },
+    {
+      "strategy": "TREND_PULLBACK_EMA",
+      "param": "min_samples",
+      "old": 25,
+      "new": 30,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=50)",
+      "verdict": "RAISE",
+      "ev_per_suppression_r": null,
+      "n": 50,
+      "routable": true
     }
   ],
   "pending": [],
@@ -1605,8 +1644,7 @@
       "min_samples": 25
     },
     "TREND_PULLBACK_EMA": {
-      "suppress_negative": false,
-      "min_samples": 15
+      "suppress_negative": false
     },
     "QUIET_COMPRESSION_BREAK": {
       "suppress_negative": false
