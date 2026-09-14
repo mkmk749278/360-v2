@@ -1,48 +1,48 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 988,
-    "wins": 314,
-    "losses": 393,
-    "neutral": 281,
-    "win_rate_pct": 31.8,
-    "avg_pnl_pct": 0.2286
+    "n": 1029,
+    "wins": 325,
+    "losses": 416,
+    "neutral": 288,
+    "win_rate_pct": 31.6,
+    "avg_pnl_pct": 0.2136
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 257,
-    "wins": 55,
+    "n": 259,
+    "wins": 57,
     "losses": 86,
     "neutral": 116,
-    "win_rate_pct": 21.4,
-    "avg_pnl_pct": 0.233
+    "win_rate_pct": 22.0,
+    "avg_pnl_pct": 0.249
   },
   {
     "setup": "SR_FLIP_RETEST",
-    "n": 195,
-    "wins": 51,
+    "n": 197,
+    "wins": 53,
     "losses": 72,
     "neutral": 72,
-    "win_rate_pct": 26.2,
-    "avg_pnl_pct": 0.0322
+    "win_rate_pct": 26.9,
+    "avg_pnl_pct": 0.0463
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 125,
-    "wins": 27,
-    "losses": 61,
+    "n": 133,
+    "wins": 29,
+    "losses": 67,
     "neutral": 37,
-    "win_rate_pct": 21.6,
-    "avg_pnl_pct": -0.2751
+    "win_rate_pct": 21.8,
+    "avg_pnl_pct": -0.2948
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 120,
-    "wins": 33,
-    "losses": 49,
-    "neutral": 38,
-    "win_rate_pct": 27.5,
-    "avg_pnl_pct": 0.1467
+    "n": 130,
+    "wins": 38,
+    "losses": 53,
+    "neutral": 39,
+    "win_rate_pct": 29.2,
+    "avg_pnl_pct": 0.1778
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
@@ -55,21 +55,21 @@
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
-    "n": 99,
-    "wins": 21,
+    "n": 100,
+    "wins": 22,
     "losses": 46,
     "neutral": 32,
-    "win_rate_pct": 21.2,
-    "avg_pnl_pct": -0.101
+    "win_rate_pct": 22.0,
+    "avg_pnl_pct": -0.0868
   },
   {
     "setup": "BREAKDOWN_SHORT",
-    "n": 37,
+    "n": 38,
     "wins": 9,
-    "losses": 19,
+    "losses": 20,
     "neutral": 9,
-    "win_rate_pct": 24.3,
-    "avg_pnl_pct": 0.6372
+    "win_rate_pct": 23.7,
+    "avg_pnl_pct": 0.5484
   },
   {
     "setup": "VOLUME_SURGE_BREAKOUT",
@@ -82,12 +82,12 @@
   },
   {
     "setup": "TREND_PULLBACK_EMA",
-    "n": 24,
+    "n": 26,
     "wins": 4,
-    "losses": 7,
-    "neutral": 13,
-    "win_rate_pct": 16.7,
-    "avg_pnl_pct": 0.0038
+    "losses": 8,
+    "neutral": 14,
+    "win_rate_pct": 15.4,
+    "avg_pnl_pct": -0.0972
   },
   {
     "setup": "MEAN_REVERT",
