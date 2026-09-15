@@ -381,7 +381,8 @@ HistoricalDataStore + OrderFlowStore
       ↓
 Scanner (15s × 75 pairs) → 19 evaluators (17 live) → gate chain → scoring
       ↓
-SignalRouter → in-app Lumin feed (primary, B1) · FCM push topics · Telegram mirror
+SignalRouter → in-app Lumin feed (primary, B1) · FCM push topics
+                (Telegram broadcast channels: OFF since 2026-09-15, #1034)
       ↓
 ┌─────────────────────────────────────────────────────┐
 │ ENGINE CONTAINER                                    │
@@ -404,11 +405,17 @@ Binance REST API
 
 **Per-user settings:** API writes SQLite (shared volume) → engine reads at dispatch (fresh SELECT, WAL mode). Change takes effect on next signal dispatch.
 
-**Delivery surfaces (owner, 2026-07-25):** the **Lumin app is the primary surface for
-users** — that is where signals are managed and read. Telegram *works in India* (the
-old "banned in-region" claim in these docs was false) but remains a **mirror**, not the
-primary channel. **Telegram's wider role is a dedicated future session** — don't expand
-or re-architect Telegram routing as a side-effect of other work.
+**Delivery surfaces (owner, 2026-07-25; channels retired 2026-09-15):** the
+**Lumin app is the primary surface for users** — that is where signals are managed
+and read. Telegram *works in India* (the old "banned in-region" claim in these docs
+was false) but the **broadcast channels are OFF** (`TELEGRAM_SIGNALS_ENABLED`,
+default false, #1034): they had no audience, and until that change a Telegram send
+**gated** the money path rather than mirroring it.
+
+**The bot stays.** Admin alerts, the liveness pager, `/diag` and every other
+command, and OTP delivery address a chat rather than a channel and are untouched
+by that switch — control is still ops-only, alerting is still read-only, and both
+FCM push and Telegram remain acceptable paging paths.
 
 **Control vs alerting:** control (kill switch, auto-mode flips, manual close) is
 **ops-only** — it needs the audit trail. Alerting is read-only, so FCM push *and*
@@ -2592,6 +2599,47 @@ python -m src.main
   unbuilt: drain the diag queue on its own `BRPOP` task rather than on the
   telemetry loop — `safety_switch_bridge` is the pattern, and the argument is
   the same one that kept the kill switch off the 15s cycle.)
+
+- **A subsystem every document calls a "mirror" can be a prerequisite — the
+  noun in the docs is not the order of the call graph.** `CLAUDE.md`,
+  `ARCHITECTURE.md` and `OWNER_BRIEF` all describe Telegram as a mirror of the
+  app feed. In `SignalRouter._process` it ran **first**: channel lookup, send,
+  retry x3, and *both* failure modes `return` — so `_write_dispatch_log`,
+  `dispatch_signal_to_active_users` (where orders are placed), the
+  `_active_signals` book and `push_signal_published` all sat after a
+  third-party chat service. The code's own comment said so out loud
+  (*"three failed Telegram sends and the candidate is gone, never reaching
+  dispatch_signal_to_active_users or the app feed either"*) and nobody read it
+  as a finding, because **nobody audits the delivery path of a mirror**. Found
+  only because the owner asked for the thing to be *deleted* (2026-09-15,
+  #1034). The habit: when a change would remove a subsystem, read what sits
+  **after** it in the one function that matters before deciding it is
+  peripheral — and when a doc calls something a mirror, that is a claim about
+  ordering, so check it the same way you would check a constant.
+
+  Two corollaries, both about the shape of the fix:
+
+  - **Apply a subsystem-wide switch at the IDENTIFIER, not at each caller.**
+    ~14 sites post to those channels. Gating each is the deny-list shape this
+    repo has paid for under six names — silent by construction on the
+    fifteenth. Blanking `TELEGRAM_ACTIVE_CHANNEL_ID` / `TELEGRAM_FREE_CHANNEL_ID`
+    works because every one of those sites already refuses an unconfigured
+    channel, so *the off state is a state the code already supports*. I wrote
+    the per-site version first, across four files, and reverted it. The check
+    before choosing: is there exactly one place the thing is named, and does
+    every consumer already handle its absence?
+  - **…and when it does not, that site is the defect.** The single place
+    "unconfigured" was a **drop** rather than a skip is precisely where the
+    money path was hostage. Blanking the ids without inverting the router would
+    have stopped every signal in the engine — so the two halves had to ship
+    together, and the size of that consequence is the measure of the coupling.
+
+  Corollary on the counter: I shipped `telegram_bypassed_unmapped` to answer
+  *"was any path being suppressed by channel config?"*, then removed it before
+  commit. With all eight channels mapped to one id it can only ever read 100%
+  — **a counter that can only take one value describes its own definition, not
+  the book**, which is `zone_distance_atr`'s all-zero column with the sign
+  flipped.
 
 - **A counter key must not contain the separator the reporter partitions on.**
   `_drop` writes both `reason` and `reason:setup_class`, and `delivery_stats`

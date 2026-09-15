@@ -178,10 +178,43 @@ USER_DATA_STREAM_EVENTS: str = os.getenv(
 # Telegram
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+#: Telegram BROADCAST CHANNELS — off (2026-09-15, owner: "we are completely
+#: moved to app side … removing all telegram Channels signals updates etc, of
+#: course we do use telegram bot for commands and alerts").
+#:
+#: This switch covers the two public channels ONLY. The bot itself is
+#: untouched: admin alerts, the liveness pager, `/diag` and every other
+#: command, and OTP delivery all address a chat id that is not a channel and
+#: keep working exactly as before.
+#:
+#: It is applied by BLANKING the two channel identifiers below rather than by
+#: a check at each of the ~14 places that post to them. Every one of those
+#: sites already handles "this channel is not configured" — `if not
+#: TELEGRAM_FREE_CHANNEL_ID: return`, `post_to_active_channel`'s own guard,
+#: trade_monitor's `if not channel_id: return` — so the OFF state is a state
+#: the code already supports, and tomorrow's call site inherits it without
+#: anyone remembering. A hand-placed gate per site is the deny-list shape this
+#: repo has paid for under six names; it is silent by construction on the
+#: fifteenth site.
+#:
+#: The ONE site where "not configured" was not a skip is the reason this
+#: change is not config-only: `SignalRouter._process` DROPPED the candidate,
+#: before the dispatch log, `dispatch_signal_to_active_users`, the app feed
+#: and push. Blanking the ids without inverting that dependency would stop
+#: every signal in the engine. The two halves ship together.
+TELEGRAM_SIGNALS_ENABLED: bool = _safe_bool("TELEGRAM_SIGNALS_ENABLED", "false")
+
 # Active Trading channel — ALL signals from every scalp strategy are routed here.
-TELEGRAM_ACTIVE_CHANNEL_ID: str = os.getenv("TELEGRAM_ACTIVE_CHANNEL_ID", "")
+TELEGRAM_ACTIVE_CHANNEL_ID: str = (
+    os.getenv("TELEGRAM_ACTIVE_CHANNEL_ID", "") if TELEGRAM_SIGNALS_ENABLED else ""
+)
 # Free channel — receives one condensed preview signal per day (confidence ≥ 75).
-TELEGRAM_FREE_CHANNEL_ID: str = os.getenv("TELEGRAM_FREE_CHANNEL_ID", "")
+TELEGRAM_FREE_CHANNEL_ID: str = (
+    os.getenv("TELEGRAM_FREE_CHANNEL_ID", "") if TELEGRAM_SIGNALS_ENABLED else ""
+)
+#: NOT a channel — the owner's own chat. Deliberately outside the switch: the
+#: alerts and commands the owner asked to keep all go here.
 TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 
 # ---------------------------------------------------------------------------

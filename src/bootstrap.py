@@ -118,8 +118,25 @@ class Bootstrap:
             log.warning("Pre-flight: TELEGRAM_BOT_TOKEN is not set")
             ok = False
 
+        # Two different worlds share one empty string, and only one of them
+        # is a fault. With broadcast channels switched off (the 2026-09-15
+        # default) the id is blanked deliberately and signals reach the app
+        # feed, push and the order path exactly as before — warning "signals
+        # will not be delivered" there would send an operator to fix a
+        # variable that no longer decides anything.
+        import config as _cfg
         if not TELEGRAM_ACTIVE_CHANNEL_ID:
-            log.warning("Pre-flight: TELEGRAM_ACTIVE_CHANNEL_ID is not set — signals will not be delivered")
+            if _cfg.TELEGRAM_SIGNALS_ENABLED:
+                log.warning(
+                    "Pre-flight: TELEGRAM_ACTIVE_CHANNEL_ID is not set — "
+                    "broadcast channels are ON and nothing will be posted to them"
+                )
+            else:
+                log.info(
+                    "Pre-flight: Telegram broadcast channels are OFF "
+                    "(TELEGRAM_SIGNALS_ENABLED=false) — the app feed, push and "
+                    "auto-trade dispatch are unaffected"
+                )
 
         if not engine.pair_mgr.pairs:
             log.warning("Pre-flight: pair_mgr has no pairs loaded")

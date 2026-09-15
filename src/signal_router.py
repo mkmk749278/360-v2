@@ -31,6 +31,7 @@ from config import (
     MAX_CONCURRENT_SIGNALS_BOOK,
     MAX_CONCURRENT_SIGNALS_PER_CHANNEL,
     MAX_SAME_DIRECTION_GLOBAL,
+    TELEGRAM_SIGNALS_ENABLED,
     MAX_SAME_DIRECTION_PER_PATH,
     MAX_SAME_DIRECTION_CUMULATIVE,
     DIRECTION_CAP_MODE,
@@ -428,6 +429,11 @@ class SignalRouter:
         # the worst possible blank on this panel.
         self._direction_cap_counterfactual: Dict[str, int] = defaultdict(int)
         self._channel_cap_counterfactual: Dict[str, int] = defaultdict(int)
+        #: Signals that reached the dispatch log, the order fan-out and the
+        #: app feed with Telegram broadcast channels switched off. Published
+        #: beside the flag itself, because zero means two opposite things —
+        #: channels are on, or nothing has been routed yet.
+        self._telegram_bypassed = 0
         for _bucket in (
             "evaluated", "both_block", "global_only", "per_path_only",
             "neither_blocks",
@@ -1513,6 +1519,12 @@ class SignalRouter:
         return {
             "processed": self._processed_total,
             "delivered": self._delivered_total,
+            # Plain keys, deliberately: `delivery_stats` partitions
+            # `_drop_counters` on ":" and a key carrying the delimiter lands in
+            # the wrong table — the defect /system/redis and the throttle table
+            # have both already paid for. These are not drop counters at all.
+            "telegram_channels_enabled": bool(TELEGRAM_SIGNALS_ENABLED),
+            "telegram_bypassed": self._telegram_bypassed,
             "dropped": dropped,
             "delivery_rate": (
                 self._delivered_total / self._processed_total
@@ -1800,15 +1812,25 @@ class SignalRouter:
             )
         signal.risk_label = risk.risk_label
 
-        # Format and send to premium channel
-        channel_id = CHANNEL_TELEGRAM_MAP.get(signal.channel, "")
-        if not channel_id:
-            # Configuration, not a market condition — and it is silent by
-            # construction: no channel id means no delivery for EVERY candidate
-            # on that channel, forever, with nothing on any page to say so.
-            log.warning("No Telegram channel configured for {}", signal.channel)
-            return self._drop(signal, "no_channel_configured")
-
+        # Telegram broadcast channels — no longer IN FRONT of the money path.
+        #
+        # Until 2026-09-15 this block gated everything below it. A failed send,
+        # or an evaluator channel with no Telegram mapping, dropped the
+        # candidate outright — so it never reached the dispatch log,
+        # dispatch_signal_to_active_users, _active_signals or
+        # push_signal_published. The code's own comment said so: "three failed
+        # Telegram sends and the candidate is gone, never reaching
+        # dispatch_signal_to_active_users or the app feed either".
+        #
+        # That made a third-party chat service a single point of failure in
+        # front of ORDER EXECUTION and the primary user surface, while
+        # CLAUDE.md and ARCHITECTURE.md both describe it as a "mirror". Nobody
+        # audits the delivery path of a mirror, which is why it survived.
+        #
+        # With channels off the signal proceeds exactly as a delivered one
+        # does; the retry-and-lose machinery exists only while channels do.
+        # `text` is built unconditionally because _write_dispatch_log below
+        # consumes it whether or not anything was sent.
         text = self._format_signal(signal)
 
         # Append Cornix auto-execution block when enabled
@@ -1821,58 +1843,79 @@ class SignalRouter:
         except Exception as _exc:
             log.debug("Cornix format skipped: {}", _exc)
 
-        delivered = False
-        try:
-            delivered = await self._send_telegram(channel_id, text)
-        except Exception as exc:
-            log.warning(
-                "Signal delivery failed for {} {}: {}",
-                signal.channel,
-                signal.signal_id,
-                exc,
-            )
-        if not delivered:
-            retries = signal._delivery_retries
-            if retries < 2:
-                signal._delivery_retries = retries + 1
-                log.info(
-                    "Re-queuing {} {} (delivery attempt {}/3)",
+        if TELEGRAM_SIGNALS_ENABLED:
+            channel_id = CHANNEL_TELEGRAM_MAP.get(signal.channel, "")
+            if not channel_id:
+                # Configuration, not a market condition — and it is silent by
+                # construction: no channel id means no delivery for EVERY candidate
+                # on that channel, forever, with nothing on any page to say so.
+                log.warning("No Telegram channel configured for {}", signal.channel)
+                return self._drop(signal, "no_channel_configured")
+
+            delivered = False
+            try:
+                delivered = await self._send_telegram(channel_id, text)
+            except Exception as exc:
+                log.warning(
+                    "Signal delivery failed for {} {}: {}",
                     signal.channel,
                     signal.signal_id,
-                    retries + 2,
+                    exc,
                 )
-                await _delivery_sleep(2 ** retries)  # 1 s, 2 s for retries 0, 1
-                await self._queue.put(signal)
-            else:
-                # A permanently lost signal is the most serious outcome on this
-                # hop and was the least visible: three failed Telegram sends and
-                # the candidate is gone, never reaching `dispatch_signal_to_
-                # active_users` or the app feed either, with no counter anywhere.
-                # Stamped and counted like every other drop — a retry that is
-                # about to be re-queued is NOT stamped, because it has not been
-                # dropped yet and counting it would double-count the candidate.
-                self._drop(signal, "delivery_failed")
-                log.error(
-                    "Signal {} {} permanently lost after 3 delivery attempts",
-                    signal.channel,
-                    signal.signal_id,
-                )
-                # Notify admin about the lost signal (FINDING-023)
-                try:
-                    from src.telegram_bot import TelegramBot
-                    bot = getattr(self._send_telegram, "__self__", None)
-                    if isinstance(bot, TelegramBot):
-                        await bot.send_admin_alert(
-                            f"🚨 *Signal Lost*\n"
-                            f"Channel: {signal.channel}\n"
-                            f"Symbol: {signal.symbol}\n"
-                            f"Direction: {signal.direction.value}\n"
-                            f"Signal ID: {signal.signal_id}\n"
-                            f"Failed after 3 delivery attempts."
-                        )
-                except Exception:
-                    pass  # Best-effort — don't mask the original failure
-            return
+            if not delivered:
+                retries = signal._delivery_retries
+                if retries < 2:
+                    signal._delivery_retries = retries + 1
+                    log.info(
+                        "Re-queuing {} {} (delivery attempt {}/3)",
+                        signal.channel,
+                        signal.signal_id,
+                        retries + 2,
+                    )
+                    await _delivery_sleep(2 ** retries)  # 1 s, 2 s for retries 0, 1
+                    await self._queue.put(signal)
+                else:
+                    # A permanently lost signal is the most serious outcome on this
+                    # hop and was the least visible: three failed Telegram sends and
+                    # the candidate is gone, never reaching `dispatch_signal_to_
+                    # active_users` or the app feed either, with no counter anywhere.
+                    # Stamped and counted like every other drop — a retry that is
+                    # about to be re-queued is NOT stamped, because it has not been
+                    # dropped yet and counting it would double-count the candidate.
+                    self._drop(signal, "delivery_failed")
+                    log.error(
+                        "Signal {} {} permanently lost after 3 delivery attempts",
+                        signal.channel,
+                        signal.signal_id,
+                    )
+                    # Notify admin about the lost signal (FINDING-023)
+                    try:
+                        from src.telegram_bot import TelegramBot
+                        bot = getattr(self._send_telegram, "__self__", None)
+                        if isinstance(bot, TelegramBot):
+                            await bot.send_admin_alert(
+                                f"🚨 *Signal Lost*\n"
+                                f"Channel: {signal.channel}\n"
+                                f"Symbol: {signal.symbol}\n"
+                                f"Direction: {signal.direction.value}\n"
+                                f"Signal ID: {signal.signal_id}\n"
+                                f"Failed after 3 delivery attempts."
+                            )
+                    except Exception:
+                        pass  # Best-effort — don't mask the original failure
+                return
+        else:
+            # Counted, never silent — this is the number the watch window
+            # reads, and it must track `delivered` one for one.
+            #
+            # There is deliberately no "would have been unmapped" companion.
+            # `_build_channel_telegram_map` maps all eight evaluator channels
+            # to the single `TELEGRAM_ACTIVE_CHANNEL_ID`, so a channel was
+            # never unmapped on its own: `no_channel_configured` fired only
+            # when that one variable was unset, and then for EVERY candidate
+            # in the engine. A counter that can only ever read 100% is a
+            # claim about its own definition, not about the book.
+            self._telegram_bypassed += 1
         self._write_dispatch_log(signal, text)
         log.info(
             "Signal posted → {} | {} {}",
@@ -1918,8 +1961,8 @@ class SignalRouter:
             )
         except Exception:
             log.exception(
-                "Server-side dispatch raised — Telegram delivery already "
-                "succeeded; subscribers see the signal regardless"
+                "Server-side dispatch raised — the signal is already on the "
+                "app feed and the active book; subscribers see it regardless"
             )
 
         # ── Latency tracking ─────────────────────────────────────────────────

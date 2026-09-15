@@ -38,8 +38,17 @@ def _build_map(**env_overrides):
 
 class TestBuildChannelTelegramMap:
     def test_with_active_channel_routes_all_signals(self):
-        """When ACTIVE is set, all scalp channels → active_id."""
-        mapping = _build_map(TELEGRAM_ACTIVE_CHANNEL_ID="active_id")
+        """When ACTIVE is set AND broadcast channels are on, all scalp
+        channels → active_id.
+
+        The switch is named explicitly rather than inherited from the
+        default: from 2026-09-15 `TELEGRAM_SIGNALS_ENABLED` blanks the
+        channel id, so a test that did not say which world it is in would
+        be measuring the default instead of the routing.
+        """
+        mapping = _build_map(
+            TELEGRAM_SIGNALS_ENABLED="true", TELEGRAM_ACTIVE_CHANNEL_ID="active_id"
+        )
 
         for ch in _SCALP_CHANNELS:
             assert mapping[ch] == "active_id", f"{ch} should route to active_id"
@@ -51,10 +60,26 @@ class TestBuildChannelTelegramMap:
             assert mapping[ch] == "", f"{ch} should be empty when ACTIVE is unset"
 
     def test_active_set_routes_all_to_active(self):
-        """ACTIVE set → all nine channels route to active_id."""
-        mapping = _build_map(TELEGRAM_ACTIVE_CHANNEL_ID="active_id")
+        """ACTIVE set (and channels on) → all nine channels route to active_id."""
+        mapping = _build_map(
+            TELEGRAM_SIGNALS_ENABLED="true", TELEGRAM_ACTIVE_CHANNEL_ID="active_id"
+        )
         for ch in _SCALP_CHANNELS:
             assert mapping[ch] == "active_id"
+
+    def test_the_broadcast_switch_blanks_the_map_even_with_an_id_set(self):
+        """The 2026-09-15 debloat, pinned where the map is built.
+
+        The engine's `.env` keeps its channel id; the switch is what decides
+        whether anything reads it. Every consumer of this map already
+        handles an unconfigured channel, which is why the switch is applied
+        here rather than at each of the ~14 posting sites.
+        """
+        mapping = _build_map(TELEGRAM_ACTIVE_CHANNEL_ID="active_id")
+        for ch in _SCALP_CHANNELS:
+            assert mapping[ch] == "", (
+                f"{ch} still resolves to a chat id with broadcast channels off"
+            )
 
     def test_all_nine_channels_present(self):
         """The map always contains exactly 9 scalp channel keys."""
