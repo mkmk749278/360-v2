@@ -342,6 +342,33 @@ from live counters that both keyed users are on `off`/`paper` and nobody is on
 Reverting is `TELEGRAM_SIGNALS_ENABLED=true` in `.env` + redeploy; the
 production channel ids are still in the file, just unread.
 
+**One class of path is NOT yet exercised in production, and saying "confirmed"
+without naming it would be the unlabelled-inference failure.** The two signals
+above prove the *emission* side. `trade_monitor`'s channel posts —
+`_post_update` (TP/SL/BE events), `_post_dca_update`, `_post_pre_tp_alert` and
+the AI-written `_post_signal_closed` — only fire when a signal **closes** or
+reaches pre-TP, and nothing delivered since 10:00 has closed yet.
+
+The risk is low and the reason is structural rather than optimistic: every one
+of those four already early-returns on an empty `channel_id`, which is why the
+switch was applied by blanking the ids instead of gating each site — the off
+state is one they have always supported, and an unmapped channel has always
+skipped them. `_post_signal_closed` additionally guards *above* its
+content-engine call, so the model request is skipped too rather than generated
+and discarded.
+
+What to look at when the first one closes: nothing new should appear in the
+engine log from those four, `fail_open` should not gain a site, and the signal
+should still reach `signal_performance.json` — the close record is written by
+`trade_monitor` independently of any post. **A close is hours away, so this is
+recorded as a stated gap rather than left behind a check-in that could not
+observe it in the window.**
+
+**And one thing is unobservable today rather than unverified**: whether a live
+user's order still places. Nobody is on `live` (#1033), so no run of this
+engine can answer it. It becomes observable the moment the first user switches,
+and that is the run to watch — not a longer window on this one.
+
 **Ops shipped alongside and then needed a fix of its own.**
 
 - **#219** — the card. Three states for the flag (`not_reported` / `on` /
