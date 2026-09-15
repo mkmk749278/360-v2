@@ -291,6 +291,18 @@ async def _run() -> None:
     # request after a quiet period doesn't hit a stale snapshot.
     asyncio.create_task(engine.start(), name="redis_engine_refresh")
 
+    # ── User-lifecycle alerts ─────────────────────────────────────────
+    # This process records the four signup moments; the ENGINE container
+    # sends them, because it is the only one holding a live TelegramBot
+    # (see the OTP fallback above — same constraint, same reason). The pump
+    # is the hop between the two.
+    import config as _config
+    if _config.LIFECYCLE_ALERTS_ENABLED:
+        from src.api import lifecycle_events as _lifecycle
+        asyncio.create_task(
+            _lifecycle.pump(engine._redis), name="lifecycle_pump",
+        )
+
     # ── Thread pool ───────────────────────────────────────────────────
     loop = asyncio.get_running_loop()
     loop.set_default_executor(

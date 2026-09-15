@@ -128,6 +128,13 @@ TTL_SWITCH_RESULT = 120
 # that has just come back — by then they have taken another action.
 SWITCH_CMD_STALE_S = 30
 
+#: User-lifecycle alerts (2026-09-15). A Redis LIST of JSON envelopes pushed
+#: by the API container and drained by the engine's LifecycleAlertConsumer.
+#: Fire-and-forget by design: unlike the switch and take channels there is no
+#: result key, because nobody is waiting on a chat message and a signup must
+#: never block on one.
+KEY_CMD_LIFECYCLE = "snapshot:cmd:lifecycle"      # Redis LIST of JSON envelopes
+
 KEY_CMD_TAKE = "snapshot:cmd:take"                # Redis LIST of JSON envelopes
 KEY_TAKE_RESULT_PREFIX = "snapshot:take_result:"  # + request_id → JSON outcome
 TTL_TAKE_RESULT = 120   # result outlives the API's ~8s poll window comfortably

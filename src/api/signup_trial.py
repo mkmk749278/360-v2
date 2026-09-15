@@ -57,6 +57,7 @@ from src.utils import get_logger
 
 from .auth import effective_tier, tier_rank
 from .billing_play import is_entitled_snapshot
+from . import lifecycle_events
 from .play_purchases import PlayPurchaseStore
 from .referral_rewards import ReferralRewardsService
 from .user_overrides import UserOverridesStore
@@ -367,6 +368,12 @@ class SignupTrialService:
             user.user_id, self.tier, self.days, result.get("expires_at"),
         )
         fresh = await self._users.aget_by_id(user.user_id)
+        lifecycle_events.emit(
+            lifecycle_events.EVENT_TRIAL_CLAIMED,
+            user_id=user.user_id,
+            phone_e164=(fresh or user).phone_e164,
+            detail=f"{self.days}d {self.tier}",
+        )
         state = await self.state_for(fresh or user)
         return {"ok": True, "reason": None, **state}
 
