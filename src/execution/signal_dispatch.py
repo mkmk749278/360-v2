@@ -350,6 +350,42 @@ def dispatch_totals() -> Dict[str, float]:
     return dict(_FANOUT_TOTALS)
 
 
+#: Skip reasons that mean the system did what it was TOLD, not that it broke.
+#:
+#: The probe went red for 566 consecutive audit cycles on 2026-09-15 with
+#: "every user is being silently skipped" while both keyed users were simply
+#: set to off and paper. That is an alarming caption over a healthy subsystem,
+#: which this repo has paid for before: a red that can never be anything but
+#: red is a dead instrument — it means nothing, so it gets ignored, on the
+#: channel that also carries real faults.
+#:
+#: Deliberately an ALLOW-LIST. Anything absent — including a reason added
+#: tomorrow — keeps the probe red, so a new skip path cannot silently mute the
+#: one check that catches a dispatch blackout. Note what is NOT here:
+#: ``mode:lookup_failed`` / ``mode:store_cold`` / ``mode:user_store_cold`` are
+#: the unreadable worlds #1031 split out and are exactly the 2026-09-02
+#: blackout signature; ``auto_paused`` is a fleet stuck behind margin
+#: rejections; ``dup_guard_unavailable`` is a failed read.
+_DELIBERATE_SKIPS = frozenset({
+    "mode:off",        # the user chose not to auto-trade
+    "mode:paper",      # the user chose paper
+    "tier",            # not entitled — a billing state, not a fault
+    "path_pref",       # the user excluded this setup class
+    "regime_pref",     # the user excluded this entry regime
+    "already_active",  # the user already holds this symbol
+})
+
+
+def _classify_skips(skips: dict) -> tuple:
+    """Split observed skip reasons into (deliberate, faults).
+
+    ``skips`` is keyed without the ``skip:`` prefix, e.g. ``mode:off``.
+    """
+    deliberate = {k: v for k, v in skips.items() if k in _DELIBERATE_SKIPS}
+    faults = {k: v for k, v in skips.items() if k not in _DELIBERATE_SKIPS}
+    return deliberate, faults
+
+
 def auto_dispatch_health_check(
     state: Dict[str, Optional[float]],
     totals: Optional[Dict[str, float]] = None,
@@ -421,15 +457,34 @@ def auto_dispatch_health_check(
             for k, v in t.items()
             if k.startswith("skip:") and v > 0
         }
-        top = ", ".join(
-            f"{k}={v:.0f}"
-            for k, v in sorted(skips.items(), key=lambda kv: -kv[1])[:4]
-        ) or "none recorded"
+        deliberate, faults = _classify_skips(skips)
+
+        def _fmt(d):
+            return ", ".join(
+                f"{k}={v:.0f}"
+                for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:4]
+            )
+
+        if skips and not faults:
+            # Every skip is a setting somebody chose. Nothing is broken, and
+            # paging hourly about it is what trains an operator to ignore the
+            # channel. Still SAID, because "no user is on live" is a revenue
+            # fact worth reading on the healthy line.
+            return True, (
+                f"{skip_gap:.0f} signals fanned out to keyed users and none "
+                f"reached the order path — but every skip is a user setting, "
+                f"not a fault: {_fmt(deliberate)}. No user is on live."
+            )
+        # Lead with the faults: they are the actionable half, and sorting the
+        # pooled map by count buries a single lookup_failed under hundreds of
+        # deliberate skips.
         return False, (
             f"{skip_gap:.0f} signals fanned out to keyed users with ZERO "
             f"order attempts for anyone — every user is being silently "
-            f"skipped; check the fan-out summary log (cumulative skips: "
-            f"{top})"
+            f"skipped; check the fan-out summary log (faults: "
+            f"{_fmt(faults) or 'none recorded'}"
+            + (f"; also by choice: {_fmt(deliberate)}" if deliberate else "")
+            + ")"
         )
     # Publish the FUNNEL, not just the gap.  Until 2026-08-31 the healthy
     # message carried ``attempts`` and ``fanouts`` and nothing else, so

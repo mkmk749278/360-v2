@@ -225,15 +225,26 @@ class TestTheReasonReachesTheOperator:
     """
 
     def test_an_unreadable_store_reads_differently_from_a_user_choice(self):
+        """Updated 2026-09-15: the distinction is now stronger than wording.
+
+        #1031 made these two skips read as different SENTENCES. Live evidence
+        then showed the probe red for 566 audit cycles over two users on off
+        and paper, so the deliberate case no longer pages at all — it is
+        green, with the reason stated. The original property (an operator can
+        tell "chose paper" from "could not ask") is not weakened by that; it
+        is now carried by the verdict as well as the text, which is why the
+        ``not ok`` that used to live in the helper has moved into the two
+        assertions below.
+        """
         from src.execution import signal_dispatch as sd
 
-        def _detail(skip_key: str) -> str:
+        def _probe(skip_key: str):
             state: dict = {}
             sd.auto_dispatch_health_check(
                 state,
                 {"fanouts_with_users_total": 2.0, "attempts_total": 2.0},
             )
-            ok, detail = sd.auto_dispatch_health_check(
+            return sd.auto_dispatch_health_check(
                 state,
                 {
                     "fanouts_with_users_total": 8.0,
@@ -242,13 +253,14 @@ class TestTheReasonReachesTheOperator:
                 },
                 gap_threshold=5,
             )
-            assert not ok
-            return detail
 
-        chose_paper = _detail("skip:mode:paper")
-        could_not_ask = _detail("skip:mode:lookup_failed")
+        paper_ok, chose_paper = _probe("skip:mode:paper")
+        failed_ok, could_not_ask = _probe("skip:mode:lookup_failed")
 
+        assert paper_ok is True, "a user on paper is not a fault to page about"
+        assert failed_ok is False, "an unreadable store must still page"
         assert "mode:paper=9" in chose_paper
         assert "mode:lookup_failed=9" in could_not_ask
-        # The whole point: these two are no longer the same sentence.
+        # The whole point: these two are no longer the same sentence, and now
+        # not even the same verdict.
         assert chose_paper != could_not_ask
