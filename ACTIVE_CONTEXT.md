@@ -316,12 +316,44 @@ always defaulted `false`.
 will not be delivered"* (bootstrap pre-flight) and *"signals for this channel
 will be silently dropped"* ×8 (main.boot). Both now name their world.
 
-**Watch this deploy.** `/signals/router-drops` has a new card. With channels off
-`telegram_bypassed` must track `delivered` one for one; refutation condition
-stated before the merge: **if it stays flat while `delivered` climbs, the bypass
-branch is not being taken** — check `telegram_channels_enabled` in the same
-payload before forming any other theory. Reverting is `TELEGRAM_SIGNALS_ENABLED=true`
-in `.env` + redeploy; the production channel ids are still there, just unread.
+**Deployed 10:00:26 UTC and WATCHED — the condition is CONFIRMED on real
+traffic.** The refutation condition was stated before the merge: *if
+`telegram_bypassed` stays flat while `delivered` climbs, the bypass branch is
+not being taken.* Read off `/signals/router-drops` at 10:34, after two live
+signals:
+
+```
+processed 2 · delivered 2 · telegram_bypassed 2 · dropped 0
+telegram_channels_enabled  False
+```
+
+**`delivered` is the load-bearing number, and it is load-bearing because of
+where it sits.** `self._delivered_total += 1` is line 1986 — *downstream* of
+`_write_dispatch_log` (1919) and of `dispatch_signal_to_active_users` (1937),
+the order fan-out — with no `return` between them. So `delivered == 2` is
+direct evidence the dispatch call site ran twice, not an inference from the
+signal appearing somewhere. Had the branch not been taken, `bypassed` would
+have sat at 0 against `delivered` 2 and the card would read red with `gap 2`.
+
+No order was expected from those two and none is a fault: #1033 established
+from live counters that both keyed users are on `off`/`paper` and nobody is on
+`live`. `/system/liveness` ALL LINKS UP; engine container healthy, 0 restarts.
+
+Reverting is `TELEGRAM_SIGNALS_ENABLED=true` in `.env` + redeploy; the
+production channel ids are still in the file, just unread.
+
+**Ops shipped alongside and then needed a fix of its own.**
+
+- **#219** — the card. Three states for the flag (`not_reported` / `on` /
+  `off`), told apart by KEY PRESENCE rather than truthiness.
+- **#220** — *found by reading that card on production ten minutes later.*
+  The check was `bypassed == delivered`, **trivially true at 0 == 0**, so a
+  freshly restarted engine rendered a green *"tracks delivered"* over a
+  population that cannot support a verdict — and the counters reset on every
+  deploy, so that is the state the page is in exactly when somebody opens it
+  after a merge. It also contradicted this entry's own reasoning, which is the
+  sharpest form of the tell. Three states there too now: `nothing routed yet`
+  (amber) apart from *they track* and from *they diverge*.
 
 **Still open from this session's earlier work** (#1031/#1032/#1033 merged):
 
@@ -332,8 +364,10 @@ in `.env` + redeploy; the production channel ids are still there, just unread.
   no repo; with channels off it holds a formatted message nobody sent, so the
   name stops meaning what it says. A persisted key, so renaming it needs its own
   change.
-- **Phase 2 of the debloat, unstarted**: delete the Telegram channel-posting code
-  and `src/slack_packet.py` after the watch window.
+- **Phase 2 of the debloat, unstarted**: delete the Telegram channel-posting
+  code and `src/slack_packet.py`. The watch window is now closed and the
+  switch is confirmed working, so this is unblocked — it is a deletion, so it
+  wants its own change rather than riding anything.
 - **Liveness probes the owner selected and this session did not reach**:
   `ai_governor_blind` (investigated — the caption pools *"not wired"* with
   *"not subscribed"*; live diag reads 200/200 `not_subscribed` while the single
