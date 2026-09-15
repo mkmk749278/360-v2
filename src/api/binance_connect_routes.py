@@ -49,6 +49,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from src.utils import get_logger
 
+from . import lifecycle_events
 from .schemas import (
     BinanceConnectInfoResponse,
     BinanceConnectRequest,
@@ -300,6 +301,13 @@ def register(
             "binance_connect ok: firebase_uid={}, key_public_id_first8={}",
             firebase_uid,
             body.api_key[:8],
+        )
+        # The activation moment: a signup that never connects a key never
+        # trades. No key material in the alert — the first 8 chars are the
+        # public id the app already displays, and nothing else travels.
+        lifecycle_events.emit(
+            lifecycle_events.EVENT_KEY_CONNECTED,
+            detail=f"key {body.api_key[:8]}…",
         )
         return BinanceConnectResponse(
             ok=True,

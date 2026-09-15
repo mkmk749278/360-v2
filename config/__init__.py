@@ -4955,3 +4955,20 @@ AI_GOV_TRIGGER_R_BAND: float = _safe_float("AI_GOV_TRIGGER_R_BAND", "0.5")
 AI_GOV_TRIGGER_TP_PROXIMITY_PCT: float = _safe_float(
     "AI_GOV_TRIGGER_TP_PROXIMITY_PCT", "0.5"
 )
+
+
+# ---------------------------------------------------------------------------
+# User-lifecycle Telegram alerts (2026-09-15)
+# ---------------------------------------------------------------------------
+# Owner ask: a phone buzz on every new user, plus the three moments after it
+# that actually predict revenue. The api container records events; the engine
+# container — the only one holding a live TelegramBot — sends them.
+#
+# ``LIFECYCLE_ALERT_MAX_PER_MIN`` is a blast-radius cap, not a preference. A
+# signup burst (a viral reel, or a script) must not turn into an unbounded
+# run of Bot API calls; past the cap the engine coalesces into one summary
+# line and counts the suppression, so a flood reads as a flood rather than
+# as silence.
+LIFECYCLE_ALERTS_ENABLED: bool = _safe_bool("LIFECYCLE_ALERTS_ENABLED", "true")
+LIFECYCLE_ALERT_QUEUE_MAX: int = _safe_int("LIFECYCLE_ALERT_QUEUE_MAX", "500")
+LIFECYCLE_ALERT_MAX_PER_MIN: int = _safe_int("LIFECYCLE_ALERT_MAX_PER_MIN", "12")

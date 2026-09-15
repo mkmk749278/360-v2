@@ -875,6 +875,37 @@ class Bootstrap:
                     "throwable from the control plane even if the api "
                     "container loses its Firestore client"
                 )
+
+                # Lifecycle alerts — the engine end of the four signup
+                # moments the owner asked to be told about. Same reason as
+                # the bridge above: those events happen in the api container
+                # and the live TelegramBot exists only here, so a
+                # send_admin_alert() at the insert site would be a silent
+                # no-op in production.
+                #
+                # Flag-gated (unlike the safety switch): this is an alerting
+                # convenience, not a control, so it is allowed to be turned
+                # off. What it cannot do is run away — the per-minute vendor
+                # cap lives inside the consumer, spent per event examined.
+                import config as _cfg
+                if _cfg.LIFECYCLE_ALERTS_ENABLED and engine.telegram is not None:
+                    from src.execution.lifecycle_alert_bridge import (
+                        LifecycleAlertConsumer,
+                    )
+                    _lac = LifecycleAlertConsumer(
+                        engine._redis_client, engine.telegram,
+                    )
+                    tasks.append(
+                        asyncio.create_task(
+                            _lac.start(), name="lifecycle_alert_consumer",
+                        )
+                    )
+                    log.info(
+                        "Lifecycle alert consumer started — signup, "
+                        "onboarding, key-connect and trial events will "
+                        "reach the admin chat (cap {}/min)",
+                        _cfg.LIFECYCLE_ALERT_MAX_PER_MIN,
+                    )
             else:
                 # Default: single-process mode — API shares the engine's event loop.
                 tasks.append(

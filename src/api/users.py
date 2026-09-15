@@ -64,6 +64,8 @@ from typing import Optional
 
 from src.utils import get_logger
 
+from . import lifecycle_events
+
 log = get_logger("api.users")
 
 
@@ -310,6 +312,9 @@ class UserStore:
                 (phone_e164, _OWNER_TIER, now, now, now, now),
             )
             log.info("Bootstrapped owner: user_id=1, phone={}", phone_e164)
+            # No lifecycle alert: this row is the OPERATOR, created by a
+            # first-run bootstrap, not a customer who joined. Alerting here
+            # would put a "new user" buzz on every fresh deployment.
             return self.get_by_id(1)
 
     # ---- reads ----------------------------------------------------------
@@ -368,6 +373,14 @@ class UserStore:
                     f"user vanished after insert: phone={phone_e164!r}"
                 )
             log.info("Created user: user_id={}, phone={}", user.user_id, phone_e164)
+            # Tied to the successful INSERT rather than to the caller, so a
+            # path added later cannot create a user without announcing one.
+            # Safe inside the lock: emit() is a bounded deque append that
+            # cannot block or raise (see lifecycle_events).
+            lifecycle_events.emit(
+                lifecycle_events.EVENT_SIGNUP,
+                user_id=user.user_id, phone_e164=phone_e164,
+            )
             return user
 
     def get_or_create_by_firebase_uid(
@@ -432,6 +445,10 @@ class UserStore:
             log.info(
                 "Created user via Firebase: user_id={}, phone={}, firebase_uid={}",
                 user.user_id, phone_e164, firebase_uid,
+            )
+            lifecycle_events.emit(
+                lifecycle_events.EVENT_SIGNUP,
+                user_id=user.user_id, phone_e164=phone_e164,
             )
             return user
 
@@ -596,6 +613,15 @@ class UserStore:
                 "Profile updated: user_id={}, display={!r}, onboarded={}",
                 user_id, new_display, updated.onboarded_at is not None,
             )
+            # Only the TRANSITION, never the state: profile edits are
+            # idempotent and a user who changes their display name later
+            # would otherwise re-announce onboarding every time.
+            if existing.onboarded_at is None and updated.onboarded_at is not None:
+                lifecycle_events.emit(
+                    lifecycle_events.EVENT_ONBOARDED,
+                    user_id=user_id, phone_e164=existing.phone_e164,
+                    detail=(new_country or None),
+                )
             return updated
 
     def set_telegram_chat_id(self, user_id: int, chat_id: Optional[str]) -> None:
