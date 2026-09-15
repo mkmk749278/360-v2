@@ -47,6 +47,19 @@ def router(queue, sent_messages, monkeypatch):
     return SignalRouter(queue=queue, send_telegram=mock_send, format_signal=mock_format)
 
 
+
+def _telegram_channels_on(monkeypatch):
+    """Pin the Telegram broadcast flag ON for a test about that machinery.
+
+    `TELEGRAM_SIGNALS_ENABLED` defaults to False from 2026-09-15: the
+    broadcast channels no longer sit in front of the dispatch log, the order
+    fan-out or the app feed. The retry-and-lose path below is unchanged and
+    still runs when channels are on, so the tests that exercise it say which
+    world they are in rather than inheriting a default that has now moved.
+    Verified by reverting: every one of them fails without this line.
+    """
+    monkeypatch.setattr(signal_router_module, "TELEGRAM_SIGNALS_ENABLED", True)
+
 def _make_signal(channel="360_SCALP", symbol="BTCUSDT", direction=Direction.LONG, confidence=85):
     return Signal(
         channel=channel,
@@ -81,6 +94,7 @@ class TestSignalRouter:
 
     @pytest.mark.asyncio
     async def test_send_exception_cleans_up_and_router_continues(self, monkeypatch):
+        _telegram_channels_on(monkeypatch)
         for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
             monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, channel, "premium")
 
@@ -545,6 +559,7 @@ class TestSignalRouter:
 
     @pytest.mark.asyncio
     async def test_failed_send_does_not_leave_active_signal_or_lock(self, queue, sent_messages, monkeypatch):
+        _telegram_channels_on(monkeypatch)
         monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SCALP", "premium")
 
         async def failed_send(_chat_id: str, _text: str):
@@ -575,6 +590,7 @@ class TestSignalRouter:
     @pytest.mark.asyncio
     async def test_failed_delivery_requeues_signal(self, monkeypatch):
         """A failed delivery re-queues the signal (appears back in queue)."""
+        _telegram_channels_on(monkeypatch)
         for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
             monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, channel, "premium")
 
@@ -620,6 +636,7 @@ class TestSignalRouter:
     @pytest.mark.asyncio
     async def test_failed_delivery_permanent_loss_after_max_retries(self, monkeypatch):
         """Signal is permanently dropped (with log) after 3 failed delivery attempts."""
+        _telegram_channels_on(monkeypatch)
         for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
             monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, channel, "premium")
 
@@ -687,6 +704,7 @@ class TestSignalRouter:
 
     @pytest.mark.asyncio
     async def test_successful_dispatch_writes_dispatch_log(self, queue, router, sent_messages, monkeypatch, tmp_path):
+        _telegram_channels_on(monkeypatch)
         monkeypatch.chdir(tmp_path)
         sig = _make_signal(confidence=90)
         sig.signal_id = "TEST-DISPATCH-LOG"
@@ -1931,6 +1949,7 @@ class TestTheUnstampedRouterExits:
     ):
         """No channel id means no delivery for EVERY candidate on that channel,
         forever, and nothing anywhere said so."""
+        _telegram_channels_on(monkeypatch)
         monkeypatch.setitem(
             signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SCALP", ""
         )
@@ -1959,6 +1978,7 @@ class TestTheUnstampedRouterExits:
         re-queued retry has not been dropped yet, and stamping it would
         double-count the candidate the way the enqueue funnel already does.
         """
+        _telegram_channels_on(monkeypatch)
         monkeypatch.setitem(
             signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SCALP", "premium"
         )

@@ -65,7 +65,15 @@ def _make_router(
     monkeypatch,
     channel: str = "360_SCALP",
 ) -> tuple[asyncio.Queue, SignalRouter]:
-    """Build a router wired to a recording mock sender."""
+    """Build a router wired to a recording mock sender.
+
+    Broadcast channels are pinned ON. From 2026-09-15 they default off and
+    the router bypasses the Telegram block entirely, so `sent_messages`
+    would be empty whatever the staleness gate decided — the assertions in
+    this file would then pass or fail for a reason that has nothing to do
+    with the gate they are named after.
+    """
+    monkeypatch.setattr(signal_router_module, "TELEGRAM_SIGNALS_ENABLED", True)
     for ch in (
         "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
         "360_SCALP_VWAP",

@@ -1636,7 +1636,23 @@ class CryptoSignalEngine:
     async def boot(self) -> None:
         # Warn operators about misconfigured Telegram channel IDs so that
         # signals are not silently dropped by the signal router.
-        for chan_name, chan_id in CHANNEL_TELEGRAM_MAP.items():
+        #
+        # Only while broadcast channels are ON. With them off (the 2026-09-15
+        # default) the ids are blanked deliberately, the router bypasses the
+        # Telegram block entirely and nothing is dropped — so this warning
+        # would fire eight times at every boot with a sentence that is false,
+        # which is the alarming-caption-over-a-healthy-subsystem failure.
+        import config as _boot_cfg
+        if not _boot_cfg.TELEGRAM_SIGNALS_ENABLED:
+            log.info(
+                "STARTUP: Telegram broadcast channels are OFF — signals go to "
+                "the app feed, push and auto-trade dispatch only"
+            )
+        for chan_name, chan_id in (
+            CHANNEL_TELEGRAM_MAP.items()
+            if _boot_cfg.TELEGRAM_SIGNALS_ENABLED
+            else ()
+        ):
             if not chan_id:
                 log.warning(
                     "⚠️  STARTUP: Telegram channel ID for '%s' is not configured "
