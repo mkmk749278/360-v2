@@ -271,6 +271,78 @@ exist.
 
 ---
 
+## SESSION 148 2026-09-15 — Telegram was not a mirror, it was in front of the orders
+
+The owner asked for a debloat: *"we are completely moved to app side … removing
+all telegram Channels signals updates etc, of course we do use telegram bot for
+commands and alerts and also no need of slack too"*. Reading `_process` to do it
+found something the docs had been wrong about for months.
+
+**`SignalRouter._process` sent to Telegram BEFORE the money path.** Channel
+lookup → send → retry ×3, and *both* failure modes `return`. Everything
+downstream sat after that return: `_write_dispatch_log` (1876),
+`dispatch_signal_to_active_users` (1893 — where orders are placed),
+`_active_signals` (1944), `push_signal_published` (2000). The code's own comment
+said it: *"three failed Telegram sends and the candidate is gone, never reaching
+dispatch_signal_to_active_users or the app feed either"*. Meanwhile `CLAUDE.md`
+and `ARCHITECTURE.md` both call Telegram a **mirror** — and nobody audits the
+delivery path of a mirror, which is why a third-party chat service sat in front
+of paying users' orders for months.
+
+Second finding, and it shaped the counters: **`no_channel_configured` was never
+per-path.** `_build_channel_telegram_map` maps all eight evaluator channels to
+the single `TELEGRAM_ACTIVE_CHANNEL_ID`, so that drop fired only when that one
+variable was unset — and then for *every* candidate in the engine.
+
+**Shipped (#1034, engine; #219, ops).** The router builds the message
+unconditionally and puts the channel lookup, the unmapped drop and the whole
+send/retry/lose block behind `TELEGRAM_SIGNALS_ENABLED`. The switch is applied
+by **blanking** `TELEGRAM_ACTIVE_CHANNEL_ID` / `TELEGRAM_FREE_CHANNEL_ID` rather
+than by a check at each of the ~14 posting sites — every one of those already
+refuses an unconfigured channel, so the off state is one the code supports and
+the fifteenth site inherits it. I wrote the per-site version first, in four
+files, and reverted it.
+
+The two halves cannot be separated: **blanking the ids without inverting the
+router would stop every signal in the engine**, which is the measure of how
+load-bearing the old ordering was.
+
+`TELEGRAM_ADMIN_CHAT_ID` is deliberately outside the switch, so admin alerts,
+the liveness pager, `/diag` and OTP delivery are untouched — that is the half
+the owner asked to keep. Slack needed nothing: `SLACK_PACKET_ENABLED` has
+always defaulted `false`.
+
+**Two boot messages would have become false** with channels off — *"signals
+will not be delivered"* (bootstrap pre-flight) and *"signals for this channel
+will be silently dropped"* ×8 (main.boot). Both now name their world.
+
+**Watch this deploy.** `/signals/router-drops` has a new card. With channels off
+`telegram_bypassed` must track `delivered` one for one; refutation condition
+stated before the merge: **if it stays flat while `delivered` climbs, the bypass
+branch is not being taken** — check `telegram_channels_enabled` in the same
+payload before forming any other theory. Reverting is `TELEGRAM_SIGNALS_ENABLED=true`
+in `.env` + redeploy; the production channel ids are still there, just unread.
+
+**Still open from this session's earlier work** (#1031/#1032/#1033 merged):
+
+- **`LifecycleAlertConsumer.health()` and `lifecycle_events.stats()` are read by
+  nothing.** Written in #1032, no ops surface. My own instance of this repo's
+  commonest defect, named in the same session that shipped it.
+- **`dispatch_log.json`'s `telegram_text`** is written by the router and read by
+  no repo; with channels off it holds a formatted message nobody sent, so the
+  name stops meaning what it says. A persisted key, so renaming it needs its own
+  change.
+- **Phase 2 of the debloat, unstarted**: delete the Telegram channel-posting code
+  and `src/slack_packet.py` after the watch window.
+- **Liveness probes the owner selected and this session did not reach**:
+  `ai_governor_blind` (investigated — the caption pools *"not wired"* with
+  *"not subscribed"*; live diag reads 200/200 `not_subscribed` while the single
+  production call site never passes `book_getter`/`flow_getter`, so the split
+  has to land before the wiring), `range_fade_emission`, `tuned_variants`,
+  `entry_feature_inputs`.
+
+---
+
 ## SESSION 147 2026-09-09 — the governor became a mechanism with its own running book, and was finally asked the question
 
 Two owner asks, both shipped: *"make AI governor a separate mechanism / signal

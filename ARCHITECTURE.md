@@ -42,7 +42,11 @@ We run a 24/7 crypto-futures scalping signal engine and the products around it.
    **19 evaluators (17 live)** per eligible pair, pushes survivors through a gate chain,
    and scores them 0–100. Exact counts and where they're set: **§9**.
 3. **Deliver** — A+ (80+) and B (65–79) go to the in-app Lumin feed (primary surface),
-   with FCM push and a Telegram mirror. Below 65 is dropped.
+   with FCM push. Below 65 is dropped. The Telegram **broadcast channels are OFF**
+   (`TELEGRAM_SIGNALS_ENABLED`, default false since 2026-09-15, #1034) — and until
+   that change they were not a mirror at all: the send ran *before* the dispatch
+   log, the order fan-out and the app feed, and a failure took the candidate off
+   all three. The **bot** is unaffected (alerts, commands, OTP).
 4. **Execute** — for subscribers who armed auto-trade, each signal is dispatched
    per-user into a Position FSM that places real Binance orders through an isolated
    signing service.
@@ -117,7 +121,7 @@ graph TD
     ROUTER["SignalRouter<br/>cooldowns · correlation lock · concurrency caps · staleness"]
     FEED["In-app Lumin feed<br/>PRIMARY"]
     FCM["FCM topics<br/>signals · alerts"]
-    TG["Telegram mirror"]
+    TG["Telegram channels<br/>OFF since #1034"]
   end
 
   subgraph EXEC["4 · EXECUTE  (per armed user)"]
