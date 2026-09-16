@@ -271,6 +271,85 @@ exist.
 
 ---
 
+## SESSION 149 2026-09-16 — Phase 2 of the debloat: the Slack lane is deleted
+
+The owner asked whether Slack had been cleared with Telegram. It had not:
+#1034 switched the Telegram channels off and Session 148's own note recorded
+why Slack needed no work — *"`SLACK_PACKET_ENABLED` has always defaulted
+`false`"*. Inert, therefore untouched, therefore still 1,237 lines in the tree
+with a live credential injected into the VPS `.env` on every deploy. He chose
+full removal.
+
+**Deleted (#TBD):** `src/slack_packet.py` (687) and its tests (550); the three
+`ai_governor` enqueue/drain helpers and their three call sites; the
+`read.slack_packet` and `action.slack_test_post` catalog entries with both
+their functions; the seven-constant config block; the `slack_packet_enabled`
+tunable; the `.env.example` block; the deploy's secret injection. Engine-wide
+grep for `slack_packet|SLACK_PACKET` returns only the two guards below.
+`9324 passed, 58 skipped` and `ruff` clean.
+
+**Removing the injection is not cleaning the box, and that is the half a
+deletion forgets.** The last deploy already wrote `SLACK_PACKET_WEBHOOK_URL`
+into the VPS `.env`, and that URL is a write capability on the channel. Nothing
+reads it now — which makes it a dangling credential rather than a live path,
+and a credential no code reads is exactly the one nobody audits. The deploy
+carries `sed -i '/^SLACK_PACKET_/d' .env` for one run, pinned by a test, and
+the comment says when to drop it. *Preventing the defect is not repairing it*,
+at the credential instead of at the orphaned brackets.
+
+**What the removal actually buys, stated plainly because the tempting claim is
+wrong.** Zero CPU, zero memory, zero Firestore reads, zero Binance calls, zero
+latency: the lane was default-OFF for its whole life and never ran a cycle. The
+gains are one credential off the trading box, the loss of
+`action.slack_test_post` (the only path that posted *regardless* of the switch,
+by design), three dead branches out of a live measurement lane, and two fewer
+rows on the surfaces read during an incident. It is debloat plus a credential,
+not a performance change.
+
+**One repair fell out of it.** The D1 config block had been inserted *between*
+`AI_GOV_TRIGGER_R_BAND`'s explanatory comment and the constant itself, so that
+comment had been documenting the wrong constant since D1 shipped. Deleting the
+block reunited them — a seam nobody could see, found only by cutting through it.
+
+**The measured findings are KEPT, not rewritten.** §6.3 of
+`PLAN_AI_TRADE_GOVERNOR_V2` gets a DELETED banner and the D1 phase row is
+struck; everything below stays. §6.2a is why nobody re-runs the wake test —
+both engine → analyst routes are measured dead (the Claude Slack app runs a
+session under the account of the PERSON who mentioned it, and a webhook message
+has no person; the session-scoped inbound webhook answers 401). *Deleting that
+record is how it gets re-derived.* Read the channel choice as history, the
+measurement as standing.
+
+**The guard was narrowed, not deleted.**
+`test_a_write_capability_secret_is_masked_in_the_deploy_log` was pinned to the
+Slack webhook by name. Its subject is gone and its property is not, so it is
+re-pointed at `GH_PAT`. Beside it,
+`test_the_slack_lane_is_gone_and_the_box_is_purged` asserts the injection is
+absent, the purge is present, the module does not exist and `.env.example` is
+clean — the guard against a silent re-arm, which would put a live capability
+back on a box whose engine has no reader for it.
+
+**OPEN — a finding, not a fix, and it is worth more than the deletion.** With
+Slack gone, `GH_PAT` is the **only** masked secret in `deploy.yml`.
+`BINANCE_API_SECRET`, `TELEGRAM_BOT_TOKEN` and `NOWPAYMENTS_IPN_SECRET` are
+interpolated into a shell script whose stdout is relayed into the Actions log
+with no `::add-mask::`. That is a larger exposure than the webhook ever was.
+Not fixed here: it changes the deploy for a live trading box and wants its own
+change, and *a finding and a fix are separate deliverables*.
+
+**Still open from Session 148, unchanged by this:** the Telegram
+channel-posting code itself (the other half of Phase 2 — a bigger cut, since
+~14 sites sit behind the blanked channel ids), `dispatch_log.json`'s
+`telegram_text` key, and `LifecycleAlertConsumer.health()` read by nothing.
+
+**Owner action, outside the repo:** revoke the Slack incoming webhook in the
+Slack app config, and delete the `SLACK_PACKET_WEBHOOK_URL` /
+`SLACK_PACKET_CHANNEL_ID` Actions secrets. Neither is reachable from a session
+— the purge clears the box, but a secret left in GitHub is a capability still
+live in Slack.
+
+---
+
 ## SESSION 148 2026-09-15 — Telegram was not a mirror, it was in front of the orders
 
 The owner asked for a debloat: *"we are completely moved to app side … removing
@@ -391,10 +470,13 @@ and that is the run to watch — not a longer window on this one.
   no repo; with channels off it holds a formatted message nobody sent, so the
   name stops meaning what it says. A persisted key, so renaming it needs its own
   change.
-- **Phase 2 of the debloat, unstarted**: delete the Telegram channel-posting
-  code and `src/slack_packet.py`. The watch window is now closed and the
-  switch is confirmed working, so this is unblocked — it is a deletion, so it
-  wants its own change rather than riding anything.
+- **Phase 2 of the debloat — the Slack half is DONE (Session 149,
+  2026-09-16); the Telegram half is not.** `src/slack_packet.py` and its whole
+  surface are deleted. Still to cut: the Telegram channel-posting code itself,
+  which is the bigger half — ~14 posting sites sit behind the blanked channel
+  ids, and `TELEGRAM_ADMIN_CHAT_ID` must survive it untouched (admin alerts,
+  the liveness pager, `/diag`, OTP). It is a deletion, so it wants its own
+  change rather than riding anything.
 - **Liveness probes the owner selected and this session did not reach**:
   `ai_governor_blind` (investigated — the caption pools *"not wired"* with
   *"not subscribed"*; live diag reads 200/200 `not_subscribed` while the single

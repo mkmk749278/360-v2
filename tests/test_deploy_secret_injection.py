@@ -97,42 +97,60 @@ def test_a_write_capability_secret_is_masked_in_the_deploy_log():
     """The derived check above proves a secret is DELIVERED. It says nothing
     about whether delivering it prints it.
 
-    `SLACK_PACKET_WEBHOOK_URL` is a write capability on the channel — anyone
-    holding it can post as Lumin Engine — and the deploy step interpolates it
-    into a shell script whose stdout is relayed back into the Actions log. So
-    the mask is the guard, and it is pinned by name rather than derived,
+    This guard was written for `SLACK_PACKET_WEBHOOK_URL`, which was a write
+    capability on the owner's channel. That lane was deleted on 2026-09-16, so
+    the instance is gone and the PROPERTY is not: the deploy step interpolates
+    secrets into a shell script whose stdout is relayed back into the Actions
+    log, and a capability secret must be masked before it can be echoed.
+
+    Re-pointed at `GH_PAT` rather than deleted — narrow an invariant whose
+    subject changed, do not drop it. Pinned by name rather than derived,
     because "which secrets are capabilities" is a judgement about each one and
     not a property of the file.
 
-    Engine-side the same URL is stripped from the ops payload and from
-    anything handed to `fail_open` (`slack_packet._redact`); this is the third
-    surface, one repo out.
+    Known gap, deliberately NOT fixed here: `BINANCE_API_SECRET`,
+    `TELEGRAM_BOT_TOKEN` and `NOWPAYMENTS_IPN_SECRET` are delivered by this
+    same workflow and are NOT masked. That is a finding about the deploy, and a
+    finding and a fix are separate deliverables — widening the mask set touches
+    the deploy for a live trading box and wants its own change.
     """
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert "secrets.SLACK_PACKET_WEBHOOK_URL" in text, (
-        "deploy.yml no longer delivers the webhook — is this guard stale?"
+    assert "secrets.GH_PAT" in text, (
+        "deploy.yml no longer delivers GH_PAT — is this guard stale?"
     )
-    assert "::add-mask::${{ secrets.SLACK_PACKET_WEBHOOK_URL }}" in text, (
-        "the webhook URL reaches the deploy log unmasked"
+    assert "::add-mask::${{ secrets.GH_PAT }}" in text, (
+        "a write-capability secret reaches the deploy log unmasked"
     )
 
 
-def test_the_slack_lane_ships_disarmed():
-    """A new outbound loop on the trading box is armed by the owner, not by a
-    deploy.
+def test_the_slack_lane_is_gone_and_the_box_is_purged():
+    """The Slack packet lane was deleted on 2026-09-16 (owner: the app is the
+    only surface, "no need of slack too").
 
-    2026-09-01: a default-ON sweep got this IP rate-limited off Binance and
-    took auto-trade down for every paid user for about four hours. Delivering
-    the credential must not also switch the lane on — the two are separate
-    decisions and the second one is his.
+    Two halves, and the second is the one a deletion normally forgets.
+    Removing the injection stops the secret being DELIVERED; it does not clean
+    the box, because the last deploy already wrote
+    `SLACK_PACKET_WEBHOOK_URL` into the VPS `.env` and that URL is a write
+    capability on the channel. A credential no code reads is exactly the one
+    nobody audits, so the deploy purges the keys it used to write.
+
+    This is also the guard against a silent re-arm: re-adding the injection
+    without re-adding the lane would put a live capability back on a box whose
+    engine has no reader for it.
     """
-    env_example = (REPO / ".env.example").read_text(encoding="utf-8")
-    assert "SLACK_PACKET_ENABLED=false" in env_example, (
-        "the bootstrap .env would arm the Slack lane on a fresh VPS"
-    )
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "SLACK_PACKET_ENABLED=true" not in workflow, (
-        "the deploy arms the lane; arming is the owner's, from /control"
+    assert "secrets.SLACK_PACKET_WEBHOOK_URL" not in workflow, (
+        "the deploy delivers a webhook for a lane that no longer exists"
+    )
+    assert "sed -i '/^SLACK_PACKET_/d' .env" in workflow, (
+        "the deploy no longer purges the stale Slack keys from the VPS .env"
+    )
+    assert not (REPO / "src" / "slack_packet.py").exists(), (
+        "src/slack_packet.py is back — the lane was deleted, not disabled"
+    )
+    env_example = (REPO / ".env.example").read_text(encoding="utf-8")
+    assert "SLACK_PACKET" not in env_example, (
+        "the bootstrap .env still declares the deleted lane's keys"
     )
 
 

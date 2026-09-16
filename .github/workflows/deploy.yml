@@ -136,36 +136,20 @@ jobs:
               && sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}|" .env \
               || echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> .env
 
-            # Slack packet poster (D1, docs/PLAN_AI_TRADE_GOVERNOR_V2.md §6.3).
-            # Same pattern and the same reason as GEMINI_API_KEY above: a repo
-            # secret does NOT reach the engine on its own, and that one sat in
-            # the repo's secrets doing nothing until somebody noticed the ops
-            # page still reading NOT CONFIGURED.
+            # Slack packet poster (D1) — REMOVED 2026-09-16. The owner moved
+            # every surface to the app and ruled the lane out; `slack_packet.py`,
+            # its config, its tunable and its two diag entries are gone.
             #
-            # The URL is a WRITE CAPABILITY on the channel — anyone holding it
-            # can post as Lumin Engine — so it is masked here, and engine-side
-            # `slack_packet._redact` strips it from the ops payload AND from
-            # anything handed to `fail_open`, because aiohttp puts the dialled
-            # URL into the string form of a connection error.
+            # This purge line exists because deleting the injection is not the
+            # same as cleaning the box: the last deploy already wrote
+            # SLACK_PACKET_WEBHOOK_URL into the VPS `.env`, and that URL is a
+            # write capability on the channel. Nothing reads it now, so it is a
+            # dangling credential on disk rather than a live path — but a
+            # credential no code reads is exactly the one nobody audits.
             #
-            # Empty secret is a supported state, not a failure: the lane reads
-            # `not_configured`, enqueues nothing, makes no call, and the ops
-            # panel names which of the two halves is missing.
-            #
-            # NOTE the direction of authority: these lines make the GitHub
-            # secret the source of truth, so a value edited by hand on the VPS
-            # is overwritten on the next deploy. That is deliberate — one
-            # writer — but it means "I set it on the box and it vanished" is
-            # expected behaviour rather than a bug.
-            echo "::add-mask::${{ secrets.SLACK_PACKET_WEBHOOK_URL }}"
-
-            grep -q "^SLACK_PACKET_WEBHOOK_URL=" .env \
-              && sed -i "s|^SLACK_PACKET_WEBHOOK_URL=.*|SLACK_PACKET_WEBHOOK_URL=${{ secrets.SLACK_PACKET_WEBHOOK_URL }}|" .env \
-              || echo "SLACK_PACKET_WEBHOOK_URL=${{ secrets.SLACK_PACKET_WEBHOOK_URL }}" >> .env
-
-            grep -q "^SLACK_PACKET_CHANNEL_ID=" .env \
-              && sed -i "s|^SLACK_PACKET_CHANNEL_ID=.*|SLACK_PACKET_CHANNEL_ID=${{ secrets.SLACK_PACKET_CHANNEL_ID }}|" .env \
-              || echo "SLACK_PACKET_CHANNEL_ID=${{ secrets.SLACK_PACKET_CHANNEL_ID }}" >> .env
+            # It is idempotent and safe to keep. Drop it once a deploy has run
+            # with it and the keys are confirmed absent from `.env` on the box.
+            sed -i '/^SLACK_PACKET_/d' .env
 
             # ── Rebuild and restart all containers ───────────────────────────
             # deploy.sh reads API_PROCESS_ISOLATED from .env and selects the

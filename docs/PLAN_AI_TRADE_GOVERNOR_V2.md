@@ -370,7 +370,21 @@ That last line is an **override channel and never a link in the chain** (§6.2),
 which is exactly the standing this document already required of anything
 session-bound.
 
-### 6.3 Slack as the reporting surface
+### 6.3 Slack as the reporting surface — ~~SHIPPED~~ **DELETED 2026-09-16**
+
+> **The lane is gone.** The owner debloated every non-app surface
+> (2026-09-15: *"we are completely moved to app side … also no need of slack
+> too"*) and D1 was deleted the next day: `src/slack_packet.py`, its config
+> block, the `slack_packet_enabled` tunable, the `read.slack_packet` and
+> `action.slack_test_post` catalog entries, and the deploy's secret injection.
+> The webhook was never armed in production — `SLACK_PACKET_ENABLED` defaulted
+> `false` for the lane's whole life — so nothing measured was lost.
+>
+> **The section is kept, not rewritten.** Everything below is the reasoning and
+> the *measurement* that produced the decision, and §6.2a in particular is why
+> nobody should re-run the wake test: both engine → analyst routes are measured
+> dead. Deleting that record is how it gets re-derived. Read the rest as
+> history — the channel choice no longer applies, the findings still do.
 
 Chosen by the owner. Three properties earn it over GitHub:
 
@@ -564,7 +578,7 @@ Concretely, and in the same PR as the code:
 | Phase | Ships | Gate |
 |---|---|---|
 | **D0** | Blindness columns (§3.3) · scoring harness (§7) · Lane A stamps (§8) · menu reads the Level Book (§3.2) | Normal PR — no model involved, nothing on the money path |
-| **D1** | Slack channel + engine packet poster. Packets posted, theses recorded, scored, applied to nothing. ~~Polling analyst~~ — see §6.2b | Owner arms after one watched cycle |
+| ~~**D1**~~ | ~~Slack channel + engine packet poster~~ — **DELETED 2026-09-16.** Shipped default-OFF and never armed; removed with the rest of the non-app surfaces on the owner's debloat ruling (§6.3). The theses it would have reported are recorded and scored regardless — that half lives in the governor's own ledger and its ops page, not in a chat channel | Closed by owner ruling |
 | ~~**D2**~~ | ~~Event-driven fresh session per signal~~ — **STRUCK 2026-09-04.** The wake test ran and answered no (§6.2a); there is no path by which the engine wakes a session, so the analyst is in-process or it does not exist | Closed by measurement |
 | **D3** | Deep lane with the §9.1 tool stack, news last | Owner sign-off |
 | **D4** | Activate one arm — `ADJUST_TP` or `HAND_TO_TRAIL`, both fully decidable — owner's account first | **Owner sign-off** against a scored window |
@@ -591,8 +605,7 @@ AI_GOV_DEEP_MAX_USD_PER_DAY     float  default 10.0    # mandatory here, unlike 
 AI_GOV_DEEP_TIMEOUT_SEC         float  default 180.0
 AI_GOV_DEEP_MAX_PASSES_PER_SIG  int    default 3
 AI_GOV_DEEP_TOOLS               str    default "xray,structure,candles"   # news added last
-AI_GOV_SLACK_WEBHOOK_URL        secret deploy-injected; never logged
-AI_GOV_SLACK_CHANNEL_ID         str    default ""
+# (Slack keys removed 2026-09-16 with the D1 lane — see §6.3)
 AI_GOV_TRAIL_HANDOFF_MECHANISM  str    choices {sar, atr}   # owner-set, gates D4
 ```
 
