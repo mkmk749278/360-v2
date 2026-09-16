@@ -412,19 +412,6 @@ def _ai_governor(ctx: Ctx) -> Dict[str, Any]:
     return _aig.build_diag()
 
 
-def _slack_packet(ctx: Ctx) -> Dict[str, Any]:
-    """The Slack report lane: armed or not, what Slack said, what is queued.
-
-    Carries no secret. `webhook_configured` answers whether a URL EXISTS, which
-    is the only question the page needs and the only answer safe to give it —
-    the URL is a write capability on the channel and a read-only guest can
-    reach this entry.
-    """
-    from src import slack_packet as _sp
-
-    return _sp.build_diag()
-
-
 def _ai_governor_scorecard(ctx: Ctx) -> Dict[str, Any]:
     """Every governor thesis against what the signal actually did.
 
@@ -601,14 +588,6 @@ for _e in (
           "the closed-signal record off disk and belongs in its own entry, so "
           "the arms and bounds stay readable when the record is large or slow.",
           _ai_governor),
-    Entry("read.slack_packet", "Slack packet poster", "read",
-          "Whether the report lane is armed, whether a webhook URL is set, what "
-          "is queued, and what Slack itself said on the last few posts — the "
-          "status code alone cannot separate a bad payload from a dead channel. "
-          "Four lane states, because 'armed but no URL' is neither working nor "
-          "broken. Never carries the webhook URL: it is a write capability on "
-          "the channel and this entry is guest-readable.",
-          _slack_packet),
     Entry("read.ai_governor_scorecard", "AI Governor scorecard", "read",
           "Every governor thesis graded against the closed-signal record — one "
           "thesis per signal, per arm, with the MAINTAIN baseline computed on "
@@ -765,39 +744,7 @@ def _reseed_symbol(ctx: Ctx) -> Dict[str, Any]:
             "result": str(seed(symbol))[:400]}
 
 
-def _slack_test_post(ctx: Ctx) -> Dict[str, Any]:
-    """Send ONE test message to the Slack channel, now.
-
-    Exists because the lane's own arming rule requires a watched cycle and the
-    real trigger is a delivered signal — roughly sixteen a day. Waiting for one
-    means discovering a bad webhook at the moment the lane is meant to start
-    being useful, which is the opposite of a watched cycle.
-
-    It is the only path that does not consult `slack_packet_enabled`, and the
-    switch's actual property is untouched: the engine still posts nothing on its
-    own while it is off (`enqueue`, `drain` and `spawn_drain` all refuse).
-    Bounded to one message per invocation, spending the same hourly budget.
-    """
-    from src import slack_packet as _sp
-
-    return _sp.dispatch_test_post(note=str(ctx.args.get("note") or "")[:140])
-
-
 for _e in (
-    Entry("action.slack_test_post", "Slack — send one test message", "action",
-          "Post a single, clearly-marked test message to the configured Slack "
-          "channel without waiting for a delivered signal. Refuses by name if no "
-          "webhook URL reached this container. Read `read.slack_packet` "
-          "afterwards for the outcome — it lands in the same counters the real "
-          "lane writes, so this exercises the instrument as well as the "
-          "transport.",
-          _slack_test_post,
-          effect="Sends ONE message to the Slack channel the webhook was created "
-                 "for. Reversible by deleting that message. Touches no order, no "
-                 "position and no signal. It is deliberately NOT gated on "
-                 "`slack_packet_enabled`, because a lane armed only after a "
-                 "watched cycle needs a way to produce one; the switch still "
-                 "stops the engine posting on its own."),
     Entry("action.flush_ledgers", "Flush measurement ledgers", "action",
           "Force every measurement ledger to persist what it holds in memory.",
           _flush_ledgers,
