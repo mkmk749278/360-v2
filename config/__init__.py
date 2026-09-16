@@ -109,10 +109,6 @@ def validate_critical_env_vars() -> None:
             "ℹ️  TELEGRAM_ADMIN_CHAT_ID configured: length=%d, starts=%r ends=%r",
             len(_aid), _aid[:2], _aid[-2:],
         )
-    if not TELEGRAM_ACTIVE_CHANNEL_ID:
-        logging.warning(
-            "⚠️  TELEGRAM_ACTIVE_CHANNEL_ID is not set — signals will not be delivered."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -179,42 +175,10 @@ USER_DATA_STREAM_EVENTS: str = os.getenv(
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-#: Telegram BROADCAST CHANNELS — off (2026-09-15, owner: "we are completely
-#: moved to app side … removing all telegram Channels signals updates etc, of
-#: course we do use telegram bot for commands and alerts").
-#:
-#: This switch covers the two public channels ONLY. The bot itself is
-#: untouched: admin alerts, the liveness pager, `/diag` and every other
-#: command, and OTP delivery all address a chat id that is not a channel and
-#: keep working exactly as before.
-#:
-#: It is applied by BLANKING the two channel identifiers below rather than by
-#: a check at each of the ~14 places that post to them. Every one of those
-#: sites already handles "this channel is not configured" — `if not
-#: TELEGRAM_FREE_CHANNEL_ID: return`, `post_to_active_channel`'s own guard,
-#: trade_monitor's `if not channel_id: return` — so the OFF state is a state
-#: the code already supports, and tomorrow's call site inherits it without
-#: anyone remembering. A hand-placed gate per site is the deny-list shape this
-#: repo has paid for under six names; it is silent by construction on the
-#: fifteenth site.
-#:
-#: The ONE site where "not configured" was not a skip is the reason this
-#: change is not config-only: `SignalRouter._process` DROPPED the candidate,
-#: before the dispatch log, `dispatch_signal_to_active_users`, the app feed
-#: and push. Blanking the ids without inverting that dependency would stop
-#: every signal in the engine. The two halves ship together.
-TELEGRAM_SIGNALS_ENABLED: bool = _safe_bool("TELEGRAM_SIGNALS_ENABLED", "false")
-
-# Active Trading channel — ALL signals from every scalp strategy are routed here.
-TELEGRAM_ACTIVE_CHANNEL_ID: str = (
-    os.getenv("TELEGRAM_ACTIVE_CHANNEL_ID", "") if TELEGRAM_SIGNALS_ENABLED else ""
-)
-# Free channel — receives one condensed preview signal per day (confidence ≥ 75).
-TELEGRAM_FREE_CHANNEL_ID: str = (
-    os.getenv("TELEGRAM_FREE_CHANNEL_ID", "") if TELEGRAM_SIGNALS_ENABLED else ""
-)
-#: NOT a channel — the owner's own chat. Deliberately outside the switch: the
-#: alerts and commands the owner asked to keep all go here.
+#: The owner's own chat — NOT a channel. The broadcast channels were deleted
+#: on 2026-09-16 ("no subscribers in telegram channels"); this is where the
+#: bot the owner kept addresses him: admin alerts, the liveness pager, every
+#: command, and OTP delivery.
 TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 
 # ---------------------------------------------------------------------------
@@ -958,10 +922,6 @@ WHALE_ALERT_API_KEY: str = os.getenv("WHALE_ALERT_API_KEY", "")
 
 # Etherscan (free tier, 5 calls/sec) — https://etherscan.io/apis
 ETHERSCAN_API_KEY: str = os.getenv("ETHERSCAN_API_KEY", "")
-
-# Cornix auto-execution signal formatting
-# When true, a Cornix-compatible block is appended to SPOT/GEM/SWING signals
-CORNIX_FORMAT_ENABLED: bool = _safe_bool("CORNIX_FORMAT_ENABLED", "false")
 
 # Dynamic SL/TP based on ATR percentile, market regime, and pair tier (PR_07).
 # Set to "false" to revert to the static signal_params.py behaviour for safety.
@@ -2644,28 +2604,6 @@ CHANNEL_EMOJIS: Dict[str, str] = {
     "360_SCALP": "⚡",
 }
 
-def _build_channel_telegram_map() -> Dict[str, str]:
-    """Build the channel → Telegram chat-ID mapping.
-
-    All nine scalp strategy channels route to the single
-    ``TELEGRAM_ACTIVE_CHANNEL_ID``.  Each message header already contains the
-    specific signal type (e.g. RANGE FADE, FVG RETEST) so subscribers can
-    distinguish setups within the one channel.
-    """
-    active = TELEGRAM_ACTIVE_CHANNEL_ID
-    return {
-        "360_SCALP":            active,
-        "360_SCALP_FVG":        active,
-        "360_SCALP_CVD":        active,
-        "360_SCALP_VWAP":       active,
-        "360_SCALP_DIVERGENCE": active,
-        "360_SCALP_SUPERTREND": active,
-        "360_SCALP_ICHIMOKU":   active,
-        "360_SCALP_ORDERBLOCK": active,
-    }
-
-
-CHANNEL_TELEGRAM_MAP: Dict[str, str] = _build_channel_telegram_map()
 
 # ---------------------------------------------------------------------------
 # WebSocket settings
@@ -4077,26 +4015,11 @@ SUPPRESSION_TELEMETRY_MAX_EVENTS: int = _safe_int("SUPPRESSION_TELEMETRY_MAX_EVE
 # ---------------------------------------------------------------------------
 # PR2 — AI Engagement Layer
 # ---------------------------------------------------------------------------
-#: Master switch — enable/disable the content engine entirely.
-CONTENT_ENGINE_ENABLED: bool = _safe_bool("CONTENT_ENGINE_ENABLED", "true")
-#: Enable/disable the radar channel evaluator.
-RADAR_CHANNEL_ENABLED: bool = _safe_bool("RADAR_CHANNEL_ENABLED", "true")
-#: Enable/disable the silence breaker (auto-post when channel is quiet).
-SILENCE_BREAKER_ENABLED: bool = _safe_bool("SILENCE_BREAKER_ENABLED", "true")
-#: Minimum confidence score to trigger a radar alert (free channel).
+#: Minimum confidence score for the scanner's observe-only radar evaluation
+#: pass. NOT the deleted free-channel radar alert — that whole lane went with
+#: the Telegram channels on 2026-09-16. This one is read by
+#: `scanner.__init__` and governs soft-disabled channel scoring.
 RADAR_ALERT_MIN_CONFIDENCE: int = _safe_int("RADAR_ALERT_MIN_CONFIDENCE", "65")
-#: Confidence score at which "watching closely" variant is used for radar alerts.
-RADAR_ALERT_WATCHING_CLOSELY_CONFIDENCE: int = _safe_int("RADAR_ALERT_WATCHING_CLOSELY_CONFIDENCE", "70")
-#: Per-symbol cooldown (seconds) between radar alerts for the same symbol.
-RADAR_PER_SYMBOL_COOLDOWN_SECONDS: int = _safe_int("RADAR_PER_SYMBOL_COOLDOWN_SECONDS", "900")
-#: Maximum number of radar alerts posted per hour (cross-symbol rate limit).
-RADAR_MAX_PER_HOUR: int = _safe_int("RADAR_MAX_PER_HOUR", "3")
-#: TTL (seconds) for an open radar watch before it auto-expires (default 4 h).
-RADAR_WATCH_TTL_SECONDS: int = _safe_int("RADAR_WATCH_TTL_SECONDS", "14400")
-#: Hours of channel silence before the silence breaker auto-posts content.
-SILENCE_BREAKER_HOURS: int = _safe_int("SILENCE_BREAKER_HOURS", "3")
-#: GPT model used for content generation (gpt-4o-mini is cost-efficient and fast).
-CONTENT_GPT_MODEL: str = os.getenv("CONTENT_GPT_MODEL", "gpt-4o-mini")
 
 # ---------------------------------------------------------------------------
 # Funding rate gate — soft penalty/boost thresholds (item 13)

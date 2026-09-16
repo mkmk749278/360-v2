@@ -79,25 +79,14 @@ def queue() -> asyncio.Queue:
 
 @pytest.fixture
 def router(queue, sent_messages, monkeypatch):
-    for channel in (
-        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP",
-        "360_SCALP_DIVERGENCE", "360_SCALP_SUPERTREND",
-        "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
-    ):
-        monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, channel, "premium")
-    monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SWING", "premium")
+    """A plain router.
 
-    # Set up a free channel ID so WATCHLIST posts can be captured.
-    monkeypatch.setattr(signal_router_module, "TELEGRAM_FREE_CHANNEL_ID", "free_channel")
-
-    async def mock_send(chat_id: str, text: str) -> bool:
-        sent_messages.append((chat_id, text))
-        return True
-
-    def mock_format(sig: Signal) -> str:
-        return f"Signal: {sig.channel} {sig.symbol} {sig.direction.value}"
-
-    return SignalRouter(queue=queue, send_telegram=mock_send, format_signal=mock_format)
+    Previously this mapped all eight evaluator channels onto a Telegram id and
+    set a free-channel id so channel posts could be captured. Both channels
+    were deleted on 2026-09-16; tier alignment is observed on the router's own
+    state, which is where it was always the real assertion.
+    """
+    return SignalRouter(queue=queue)
 
 
 # ---------------------------------------------------------------------------

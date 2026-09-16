@@ -33,7 +33,6 @@ def _make_handler(**kwargs) -> CommandHandler:
         ws_futures=None,
         tasks=[],
         boot_time=0.0,
-        free_channel_limit=2,
         alert_subscribers=set(),
     )
     defaults.update(kwargs)

@@ -71,8 +71,7 @@ def _build_monitor(active, tracker=None, send=None):
     data_store.ticks = {}
     monitor = TradeMonitor(
         data_store=data_store,
-        send_telegram=send or _default_send,
-        get_active_signals=lambda: dict(active),
+                get_active_signals=lambda: dict(active),
         remove_signal=lambda sid: removed.append(sid),
         update_signal=MagicMock(),
         performance_tracker=tracker,
@@ -151,57 +150,6 @@ class TestWedgedCloseRecovery:
         assert removed.count(sig.signal_id) >= 1
 
 
-class TestPostUpdateNeverAbortsAClose:
-    """The raiser itself: a subscriber post must not cost the record."""
-
-    async def test_telegram_failure_does_not_abort_the_close(self, monkeypatch):
-        monkeypatch.setattr(
-            "src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "-100123"}
-        )
-        tracker = MagicMock()
-
-        async def _boom(chat_id, text):
-            raise TimeoutError("telegram timed out")
-
-        sig = _make_signal(status="ACTIVE")
-        monitor, removed, _ = _build_monitor(
-            {sig.signal_id: sig}, tracker, send=_boom
-        )
-        # Drive the real SL path: price through the stop on both wick and mark.
-        sig.current_price = sig.stop_loss * 0.99
-        monkeypatch.setattr(
-            monitor, "_candle_extremes",
-            lambda symbol: (sig.stop_loss * 0.99, sig.stop_loss * 0.99),
-        )
-
-        await monitor._evaluate_signal(sig)
-
-        assert tracker.record_outcome.call_count == 1, (
-            "the outcome must be recorded even though the Telegram post raised"
-        )
-        assert removed == [sig.signal_id], (
-            "and the signal must leave the active book, freeing direction budget"
-        )
-
-    async def test_post_update_swallows_and_counts_the_failure(self, monkeypatch):
-        monkeypatch.setattr(
-            "src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "-100123"}
-        )
-        from src import fail_open
-
-        fail_open.reset()
-
-        async def _boom(chat_id, text):
-            raise TimeoutError("telegram timed out")
-
-        sig = _make_signal()
-        monitor, _, _ = _build_monitor({sig.signal_id: sig}, None, send=_boom)
-
-        await monitor._post_update(sig, "🔴 EXIT")  # must not raise
-
-        assert "trade_monitor._post_update" in fail_open.snapshot(), (
-            "a fail-open except must count, never swallow silently"
-        )
 
 
 class TestOneBadSignalCostsOneSignal:

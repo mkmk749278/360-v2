@@ -19,27 +19,22 @@ import json
 import os
 import time
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import (
     ALL_CHANNELS,
     CHANNEL_CAP_MODE,
     CHANNEL_COOLDOWN_SECONDS,
-    CHANNEL_TELEGRAM_MAP,
     MAX_CONCURRENT_SIGNALS_BOOK,
     MAX_CONCURRENT_SIGNALS_PER_CHANNEL,
     MAX_SAME_DIRECTION_GLOBAL,
-    TELEGRAM_SIGNALS_ENABLED,
     MAX_SAME_DIRECTION_PER_PATH,
     MAX_SAME_DIRECTION_CUMULATIVE,
     DIRECTION_CAP_MODE,
     MAX_SIGNAL_HOLD_SECONDS,
     SIGNAL_EXPIRY_ENABLED,
-    SIGNAL_TYPE_LABELS,
-    TELEGRAM_ACTIVE_CHANNEL_ID,
-    TELEGRAM_FREE_CHANNEL_ID,
 )
 from src.channels.base import LIVE_STATUSES, TERMINAL_STATUSES, Signal
 from src.correlation import check_correlation_limit
@@ -50,7 +45,6 @@ from src.smc import Direction
 from src.utils import get_logger
 from src.ai_engine.predictor import SignalPredictor, PredictionFeatures
 from src.ai_engine.scorer import AIConfidenceScorer
-from src.cornix_formatter import format_cornix_signal
 
 log = get_logger("signal_router")
 
@@ -353,13 +347,9 @@ class SignalRouter:
     def __init__(
         self,
         queue: Any,
-        send_telegram: Callable[[str, str], Coroutine],
-        format_signal: Callable[[Signal], str],
         redis_client: Optional[RedisClient] = None,
     ) -> None:
         self._queue = queue
-        self._send_telegram = send_telegram
-        self._format_signal = format_signal
         self._redis = redis_client
         self._active_signals: Dict[str, Signal] = {}
         # Signals found in the persisted state carrying a TERMINAL status: a
@@ -367,7 +357,6 @@ class SignalRouter:
         # this after ``restore()`` and records each one, so the trade reaches
         # the closed-signal record instead of vanishing on restart.
         self.restored_terminal_signals: List[Signal] = []
-        self._daily_best: List[Signal] = []  # for free channel
         self._position_lock: Dict[str, Direction] = {}  # symbol → direction
         # Reconcile counters — see _reconcile_position_lock.  Cumulative
         # since boot and deliberately not reset: an orphan dropped at
@@ -379,14 +368,7 @@ class SignalRouter:
         # (symbol, channel) → UTC timestamp of last signal completion
         self._cooldown_timestamps: Dict[Tuple[str, str], datetime] = {}
         self._running = False
-        self._free_limit: int = 2  # max daily free signals
         self._risk_mgr = RiskManager()
-        # Free-channel highlight rate limiting
-        self._highlight_count_today: int = 0
-        self._highlight_date: Optional[date] = None
-        # Free-signal daily tracking: keyed by user-facing group ("active")
-        self._free_signals_today: Dict[str, bool] = {}
-        self._free_signal_date: Optional[date] = None
         # Detect whether queue.get() supports a timeout keyword argument
         self._queue_has_timeout = "timeout" in inspect.signature(queue.get).parameters
         # AI Trade Observer (optional — set after construction in main.py)
@@ -429,11 +411,6 @@ class SignalRouter:
         # the worst possible blank on this panel.
         self._direction_cap_counterfactual: Dict[str, int] = defaultdict(int)
         self._channel_cap_counterfactual: Dict[str, int] = defaultdict(int)
-        #: Signals that reached the dispatch log, the order fan-out and the
-        #: app feed with Telegram broadcast channels switched off. Published
-        #: beside the flag itself, because zero means two opposite things —
-        #: channels are on, or nothing has been routed yet.
-        self._telegram_bypassed = 0
         for _bucket in (
             "evaluated", "both_block", "global_only", "per_path_only",
             "neither_blocks",
@@ -894,99 +871,10 @@ class SignalRouter:
     # live current_price > 0 requirement.
     _PULSE_MAX_REASONABLE_PNL_PCT: float = 30.0
 
-    async def _signal_pulse_loop(self) -> None:
-        """Post a one-liner status pulse for every active open signal every SIGNAL_PULSE_INTERVAL_SECONDS."""
-        from config import SIGNAL_PULSE_INTERVAL_SECONDS
-        while self._running:
-            await asyncio.sleep(30)
-            if not TELEGRAM_ACTIVE_CHANNEL_ID:
-                continue
-            now_ts = time.time()
-            for sid, sig in list(self._active_signals.items()):
-                if sig.status not in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
-                    continue
-                last_pulse = getattr(sig, "_last_pulse_time", 0.0)
-                if now_ts - last_pulse < SIGNAL_PULSE_INTERVAL_SECONDS:
-                    continue
-                try:
-                    # Require a live current_price supplied by the trade monitor.
-                    # Do NOT fall back to sig.entry: using the entry price as a
-                    # proxy would always show 0% PnL and hide stale-state bugs.
-                    current_price = sig.current_price
-                    if current_price <= 0:
-                        log.debug(
-                            "Signal pulse skipped for {} – current_price not yet populated",
-                            sig.symbol,
-                        )
-                        continue
-
-                    direction = sig.direction
-
-                    # Validate TP1 direction before computing distances.  If TP1
-                    # is on the wrong side of entry the signal state is corrupted;
-                    # emit a warning and suppress rather than post bad numbers.
-                    if direction == Direction.LONG:
-                        if sig.tp1 <= sig.entry:
-                            log.warning(
-                                "Signal pulse skipped for {} LONG – TP1 {:.8f} <= entry {:.8f} (invalid state)",
-                                sig.symbol, sig.tp1, sig.entry,
-                            )
-                            continue
-                        pnl_pct = (current_price - sig.entry) / sig.entry * 100
-                        tp1_dist = (sig.tp1 - current_price) / sig.entry * 100 if sig.tp1 > 0 else 0.0
-                    else:
-                        if sig.tp1 >= sig.entry:
-                            log.warning(
-                                "Signal pulse skipped for {} SHORT – TP1 {:.8f} >= entry {:.8f} (invalid state)",
-                                sig.symbol, sig.tp1, sig.entry,
-                            )
-                            continue
-                        pnl_pct = (sig.entry - current_price) / sig.entry * 100
-                        tp1_dist = (current_price - sig.tp1) / sig.entry * 100 if sig.tp1 > 0 else 0.0
-
-                    # Sanity-check PnL magnitude.  An unleveraged raw move beyond
-                    # _PULSE_MAX_REASONABLE_PNL_PCT almost certainly indicates a
-                    # stale or cross-symbol current_price.  Suppress the pulse
-                    # rather than post a number that contradicts the eventual
-                    # close message.
-                    if abs(pnl_pct) > self._PULSE_MAX_REASONABLE_PNL_PCT:
-                        log.warning(
-                            "Signal pulse skipped for {} {} – implausible PnL {:.2f}%"
-                            " (entry={} current={}). State likely stale or corrupted.",
-                            sig.symbol, direction.value, pnl_pct, sig.entry, current_price,
-                        )
-                        continue
-
-                    # Clamp tp1_dist to 0 when TP1 has already been crossed.
-                    # Negative "TP1 in" is meaningless to users.
-                    tp1_dist = max(tp1_dist, 0.0)
-
-                    sl_pct = abs(current_price - sig.stop_loss) / sig.entry * 100 if sig.stop_loss > 0 else 999.0
-                    if sl_pct <= 0.0:
-                        thesis = "broken"
-                    elif sl_pct <= 0.5:
-                        thesis = "weakening"
-                    else:
-                        thesis = "intact"
-                    direction_word = "LONG" if direction == Direction.LONG else "SHORT"
-                    log.debug(
-                        "Signal pulse: {} {} entry={} current={} pnl={:.2f}% tp1_dist={:.2f}%",
-                        sig.symbol, direction_word, sig.entry, current_price, pnl_pct, tp1_dist,
-                    )
-                    text = (
-                        f"📡 {sig.symbol} {direction_word} — still open\n"
-                        f"P&L: {pnl_pct:+.2f}% | TP1 in {tp1_dist:.2f}%\n"
-                        f"Thesis: {thesis}"
-                    )
-                    await self._send_telegram(TELEGRAM_ACTIVE_CHANNEL_ID, text)
-                    sig._last_pulse_time = now_ts
-                except Exception as exc:
-                    log.debug("Signal pulse failed for {}: {}", sig.symbol, exc)
 
     async def start(self) -> None:
         self._running = True
         log.info("Signal router started")
-        asyncio.create_task(self._signal_pulse_loop())
         _cleanup_counter = 0
         while self._running:
             try:
@@ -1025,7 +913,7 @@ class SignalRouter:
     # Processing
     # ------------------------------------------------------------------
 
-    def _write_dispatch_log(self, signal: Signal, text: str) -> None:
+    def _write_dispatch_log(self, signal: Signal) -> None:
         """Append a dispatch record to data/dispatch_log.json (rolling cap)."""
         from pathlib import Path
 
@@ -1048,7 +936,6 @@ class SignalRouter:
             "market_phase": getattr(signal, "market_phase", None),
             "entry_regime": getattr(signal, "entry_regime", None) or None,
             "entry_regime_15m": getattr(signal, "entry_regime_15m", None) or None,
-            "telegram_text": text,
         }
         try:
             dispatch_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1519,12 +1406,6 @@ class SignalRouter:
         return {
             "processed": self._processed_total,
             "delivered": self._delivered_total,
-            # Plain keys, deliberately: `delivery_stats` partitions
-            # `_drop_counters` on ":" and a key carrying the delimiter lands in
-            # the wrong table — the defect /system/redis and the throttle table
-            # have both already paid for. These are not drop counters at all.
-            "telegram_channels_enabled": bool(TELEGRAM_SIGNALS_ENABLED),
-            "telegram_bypassed": self._telegram_bypassed,
             "dropped": dropped,
             "delivery_rate": (
                 self._delivered_total / self._processed_total
@@ -1812,111 +1693,25 @@ class SignalRouter:
             )
         signal.risk_label = risk.risk_label
 
-        # Telegram broadcast channels — no longer IN FRONT of the money path.
+        # Telegram broadcast channels were DELETED here on 2026-09-16 (owner:
+        # "no subscribers in telegram channels" — the app is the only surface).
         #
-        # Until 2026-09-15 this block gated everything below it. A failed send,
-        # or an evaluator channel with no Telegram mapping, dropped the
-        # candidate outright — so it never reached the dispatch log,
-        # dispatch_signal_to_active_users, _active_signals or
-        # push_signal_published. The code's own comment said so: "three failed
-        # Telegram sends and the candidate is gone, never reaching
-        # dispatch_signal_to_active_users or the app feed either".
+        # Worth keeping the history, because it is the reason this spot is
+        # sensitive. Until 2026-09-15 a channel send sat at exactly this point
+        # and gated everything below it: a failed send, or an evaluator channel
+        # with no Telegram mapping, dropped the candidate outright, so it never
+        # reached the dispatch log, `dispatch_signal_to_active_users`,
+        # `_active_signals` or `push_signal_published`. The code's own comment
+        # said it — "three failed Telegram sends and the candidate is gone" —
+        # while CLAUDE.md and ARCHITECTURE.md both called Telegram a mirror,
+        # and nobody audits the delivery path of a mirror.
         #
-        # That made a third-party chat service a single point of failure in
-        # front of ORDER EXECUTION and the primary user surface, while
-        # CLAUDE.md and ARCHITECTURE.md both describe it as a "mirror". Nobody
-        # audits the delivery path of a mirror, which is why it survived.
-        #
-        # With channels off the signal proceeds exactly as a delivered one
-        # does; the retry-and-lose machinery exists only while channels do.
-        # `text` is built unconditionally because _write_dispatch_log below
-        # consumes it whether or not anything was sent.
-        text = self._format_signal(signal)
-
-        # Append Cornix auto-execution block when enabled
-        try:
-            from config import CORNIX_FORMAT_ENABLED
-            if CORNIX_FORMAT_ENABLED:
-                cornix_block = format_cornix_signal(signal)
-                if cornix_block:
-                    text = text + "\n\n" + cornix_block
-        except Exception as _exc:
-            log.debug("Cornix format skipped: {}", _exc)
-
-        if TELEGRAM_SIGNALS_ENABLED:
-            channel_id = CHANNEL_TELEGRAM_MAP.get(signal.channel, "")
-            if not channel_id:
-                # Configuration, not a market condition — and it is silent by
-                # construction: no channel id means no delivery for EVERY candidate
-                # on that channel, forever, with nothing on any page to say so.
-                log.warning("No Telegram channel configured for {}", signal.channel)
-                return self._drop(signal, "no_channel_configured")
-
-            delivered = False
-            try:
-                delivered = await self._send_telegram(channel_id, text)
-            except Exception as exc:
-                log.warning(
-                    "Signal delivery failed for {} {}: {}",
-                    signal.channel,
-                    signal.signal_id,
-                    exc,
-                )
-            if not delivered:
-                retries = signal._delivery_retries
-                if retries < 2:
-                    signal._delivery_retries = retries + 1
-                    log.info(
-                        "Re-queuing {} {} (delivery attempt {}/3)",
-                        signal.channel,
-                        signal.signal_id,
-                        retries + 2,
-                    )
-                    await _delivery_sleep(2 ** retries)  # 1 s, 2 s for retries 0, 1
-                    await self._queue.put(signal)
-                else:
-                    # A permanently lost signal is the most serious outcome on this
-                    # hop and was the least visible: three failed Telegram sends and
-                    # the candidate is gone, never reaching `dispatch_signal_to_
-                    # active_users` or the app feed either, with no counter anywhere.
-                    # Stamped and counted like every other drop — a retry that is
-                    # about to be re-queued is NOT stamped, because it has not been
-                    # dropped yet and counting it would double-count the candidate.
-                    self._drop(signal, "delivery_failed")
-                    log.error(
-                        "Signal {} {} permanently lost after 3 delivery attempts",
-                        signal.channel,
-                        signal.signal_id,
-                    )
-                    # Notify admin about the lost signal (FINDING-023)
-                    try:
-                        from src.telegram_bot import TelegramBot
-                        bot = getattr(self._send_telegram, "__self__", None)
-                        if isinstance(bot, TelegramBot):
-                            await bot.send_admin_alert(
-                                f"🚨 *Signal Lost*\n"
-                                f"Channel: {signal.channel}\n"
-                                f"Symbol: {signal.symbol}\n"
-                                f"Direction: {signal.direction.value}\n"
-                                f"Signal ID: {signal.signal_id}\n"
-                                f"Failed after 3 delivery attempts."
-                            )
-                    except Exception:
-                        pass  # Best-effort — don't mask the original failure
-                return
-        else:
-            # Counted, never silent — this is the number the watch window
-            # reads, and it must track `delivered` one for one.
-            #
-            # There is deliberately no "would have been unmapped" companion.
-            # `_build_channel_telegram_map` maps all eight evaluator channels
-            # to the single `TELEGRAM_ACTIVE_CHANNEL_ID`, so a channel was
-            # never unmapped on its own: `no_channel_configured` fired only
-            # when that one variable was unset, and then for EVERY candidate
-            # in the engine. A counter that can only ever read 100% is a
-            # claim about its own definition, not about the book.
-            self._telegram_bypassed += 1
-        self._write_dispatch_log(signal, text)
+        # #1034 inverted the ordering and put the machinery behind
+        # TELEGRAM_SIGNALS_ENABLED. That left the hazard one env var away, and
+        # the documented revert for #1034 was to set it back to true. Removing
+        # the machinery is what makes the property structural instead of
+        # switched off: there is no longer any code here to re-enable.
+        self._write_dispatch_log(signal)
         log.info(
             "Signal posted → {} | {} {}",
             signal.channel,
@@ -2042,14 +1837,6 @@ class SignalRouter:
         # dispatch path (push_notifications never blocks and never raises).
         push_signal_published(signal)
 
-        # Track for daily free-channel picks
-        self._daily_best.append(signal)
-        self._daily_best.sort(key=lambda s: s.confidence, reverse=True)
-        self._trim_daily_best()
-
-        # Publish a condensed version to the free channel (Phase 4)
-        await self._maybe_publish_free_signal(signal)
-
         # Notify AI Trade Observer — capture market state at signal publish time
         if self.observer is not None:
             try:
@@ -2068,121 +1855,17 @@ class SignalRouter:
             except Exception as exc:
                 log.debug("on_signal_routed callback error: {}", exc)
 
-    async def _send_photo(self, channel_id: str, photo_bytes: bytes) -> bool:
-        """Send a chart image to *channel_id*.
-
-        Uses the TelegramBot instance if available via _send_telegram, otherwise
-        calls send_photo directly on a TelegramBot instance.
-        """
-        try:
-            from src.telegram_bot import TelegramBot
-            # Retrieve the bot instance bound to _send_telegram if possible
-            bot = getattr(self._send_telegram, "__self__", None)
-            if isinstance(bot, TelegramBot):
-                return await bot.send_photo(channel_id, photo_bytes)
-            # Fall back to creating a transient bot (token taken from env)
-            tmp_bot = TelegramBot()
-            return await tmp_bot.send_photo(channel_id, photo_bytes)
-        except Exception as exc:
-            log.warning("_send_photo failed: {}", exc)
-            return False
 
     # ------------------------------------------------------------------
     # Free-channel publication (call once/day or on demand)
     # ------------------------------------------------------------------
 
-    def _trim_daily_best(self) -> None:
-        """Trim ``_daily_best`` to the current free-signal limit."""
-        self._daily_best = self._daily_best[:self._free_limit]
 
-    def set_free_limit(self, limit: int) -> None:
-        """Update the maximum number of daily free signals."""
-        self._free_limit = max(0, limit)
-        self._trim_daily_best()
 
-    async def publish_free_signals(self) -> None:
-        """Post the top free signals of the day to the free channel.
 
-        .. deprecated::
-            Use :meth:`publish_daily_recap` instead.  This method is kept for
-            backward compatibility (tests reference it).
-        """
-        if not self._daily_best or not TELEGRAM_FREE_CHANNEL_ID:
-            return
-        for sig in self._daily_best:
-            text = self._format_signal(sig)
-            header = "🆓 *FREE SIGNAL OF THE DAY* 🆓\n\n"
-            footer = (
-                "\n\n📚 _Tip: Scalping requires discipline. "
-                "Always use a stop-loss and manage risk._"
-            )
-            await self._send_telegram(TELEGRAM_FREE_CHANNEL_ID, header + text + footer)
-        self._daily_best.clear()
 
-    async def publish_highlight(self, sig: Signal, tp_level: int, tp_pnl_pct: float) -> None:
-        """Post a winning trade highlight to the free channel.
 
-        Called by the trade monitor when a signal hits TP2 or higher.
-        Rate-limited to ``_FREE_HIGHLIGHT_MAX_PER_DAY`` highlights per day.
-        """
-        if not TELEGRAM_FREE_CHANNEL_ID:
-            return
-        if tp_level < _FREE_HIGHLIGHT_MIN_TP:
-            return
 
-        # Daily rate limit
-        today = date.today()
-        if self._highlight_date != today:
-            self._highlight_date = today
-            self._highlight_count_today = 0
-        if self._highlight_count_today >= _FREE_HIGHLIGHT_MAX_PER_DAY:
-            log.debug(
-                "Free highlight daily limit reached ({}/{})",
-                self._highlight_count_today,
-                _FREE_HIGHLIGHT_MAX_PER_DAY,
-            )
-            return
-
-        text = self._format_highlight(sig, tp_level, tp_pnl_pct)
-        try:
-            await self._send_telegram(TELEGRAM_FREE_CHANNEL_ID, text)
-            self._highlight_count_today += 1
-            log.info(
-                "Posted free highlight: {} {} TP{} +{:.2f}%",
-                sig.symbol, sig.direction.value, tp_level, tp_pnl_pct,
-            )
-            log.info(
-                "free_channel_post source=signal_highlight severity=HIGH symbol={}",
-                sig.symbol,
-            )
-        except Exception as exc:
-            log.warning("Failed to post free highlight: {}", exc)
-
-    def _format_highlight(self, sig: Signal, tp_level: int, tp_pnl_pct: float) -> str:
-        """Delegate highlight formatting to TelegramBot."""
-        from src.telegram_bot import TelegramBot
-        return TelegramBot.format_highlight_message(sig, tp_level, tp_pnl_pct)
-
-    async def publish_daily_recap(self, performance_tracker: Any) -> None:
-        """Post the daily performance recap to the free channel."""
-        if not TELEGRAM_FREE_CHANNEL_ID:
-            return
-
-        summary = performance_tracker.get_daily_summary(window_days=1)
-        if summary["total"] == 0:
-            return  # No trades today, skip
-
-        text = self._format_daily_recap(summary)
-        try:
-            await self._send_telegram(TELEGRAM_FREE_CHANNEL_ID, text)
-            log.info("Posted daily recap to free channel")
-        except Exception as exc:
-            log.warning("Failed to post daily recap: {}", exc)
-
-    def _format_daily_recap(self, summary: Any) -> str:
-        """Delegate daily recap formatting to TelegramBot."""
-        from src.telegram_bot import TelegramBot
-        return TelegramBot.format_daily_recap(summary)
 
     # ------------------------------------------------------------------
     # Free channel – condensed signal (Phase 4)
@@ -2202,169 +1885,13 @@ class SignalRouter:
     # storytelling but no preview signals; signals below paid threshold
     # (65 confidence) drop cleanly at the scanner gate.
 
-    async def _maybe_publish_free_signal(self, signal: Signal) -> None:
-        """Publish a condensed version of the signal to the free channel.
 
-        Only posts once per calendar day, and only when confidence >= 75.
-        """
-        if not TELEGRAM_FREE_CHANNEL_ID:
-            return
-
-        # Reset tracking on a new day
-        today = date.today()
-        if self._free_signal_date != today:
-            self._free_signal_date = today
-            self._free_signals_today = {}
-
-        group = self._free_channel_group(signal.channel)
-        if self._free_signals_today.get(group):
-            return  # Already posted for this group today
-        if signal.confidence < 75:
-            return  # Only show high-confidence signals for free
-
-        text = self._format_condensed_free(signal)
-        try:
-            await self._send_telegram(TELEGRAM_FREE_CHANNEL_ID, text)
-            self._free_signals_today[group] = True
-            log.info(
-                "Posted free condensed signal ({} group): {} {}",
-                group, signal.symbol, signal.direction.value,
-            )
-        except Exception as exc:
-            log.warning("Failed to post condensed free signal: {}", exc)
-
-    def _format_condensed_free(self, signal: Signal) -> str:
-        """Format a condensed free-channel version of a signal (Entry/SL/TP1 only)."""
-        from src.telegram_bot import TelegramBot
-        from src.utils import fmt_price
-
-        chan_emojis = {
-            "360_SCALP":            "⚡",
-            "360_SCALP_FVG":        "⚡",
-            "360_SCALP_CVD":        "⚡",
-            "360_SCALP_VWAP":       "⚡",
-            "360_SCALP_DIVERGENCE": "⚡",
-            "360_SCALP_SUPERTREND": "⚡",
-            "360_SCALP_ICHIMOKU":   "⚡",
-            "360_SCALP_ORDERBLOCK": "⚡",
-        }
-        emoji = chan_emojis.get(signal.channel, "📡")
-        chan_name = TelegramBot._CHANNEL_DISPLAY_NAME.get(signal.channel, signal.channel)
-        # Show signal type in the free-channel preview header too.
-        if signal.setup_class and signal.setup_class != "UNCLASSIFIED":
-            type_suffix = " │ " + signal.setup_class.replace("_", " ")
-        else:
-            type_suffix = ""
-        dir_word = signal.direction.value
-
-        def _pct(price: float) -> str:
-            if signal.entry and signal.entry != 0:
-                pct = (price - signal.entry) / signal.entry * 100
-                return f"{pct:+.2f}%"
-            return ""
-
-        lines = [
-            "🆓 *FREE SIGNAL PREVIEW* 🆓",
-            "",
-            f"{emoji} *{TelegramBot._escape_md(chan_name + type_suffix)}* │ *{TelegramBot._escape_md(signal.symbol)}* │ *{dir_word}*",
-            TelegramBot._escape_md("━" * 24),
-            "",
-            f"📍 Entry: `{fmt_price(signal.entry)}`",
-            f"🛑 SL: `{fmt_price(signal.stop_loss)}` ({TelegramBot._escape_md(_pct(signal.stop_loss))})",
-            f"🎯 TP1: `{fmt_price(signal.tp1)}` ({TelegramBot._escape_md(_pct(signal.tp1))})",
-            "",
-            "🔒 _Premium members see TP2, TP3 and full analysis_",
-            "📲 _Join our premium channel for real-time signals_",
-        ]
-        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Scoreboard (Phase 3)
     # ------------------------------------------------------------------
 
-    async def publish_scoreboard(self, performance_tracker: Any) -> None:
-        """Post the weekly win-rate scoreboard to the free channel."""
-        if not TELEGRAM_FREE_CHANNEL_ID:
-            return
 
-        scoreboard = performance_tracker.get_channel_scoreboard(window_days=7)
-        if not scoreboard:
-            return
-
-        text = self._format_scoreboard(scoreboard)
-        try:
-            await self._send_telegram(TELEGRAM_FREE_CHANNEL_ID, text)
-            log.info("Posted weekly scoreboard to free channel")
-        except Exception as exc:
-            log.warning("Failed to post scoreboard: {}", exc)
-
-    @staticmethod
-    def _format_scoreboard(scoreboard: Dict[str, Any]) -> str:
-        """Format the weekly scoreboard for Telegram."""
-        chan_emojis = {
-            "360_SCALP":            "⚡",
-            "360_SCALP_FVG":        "⚡",
-            "360_SCALP_CVD":        "⚡",
-            "360_SCALP_VWAP":       "⚡",
-            "360_SCALP_DIVERGENCE": "⚡",
-            "360_SCALP_SUPERTREND": "⚡",
-            "360_SCALP_ICHIMOKU":   "⚡",
-            "360_SCALP_ORDERBLOCK": "⚡",
-        }
-        chan_labels = {
-            "360_SCALP":            "Scalp",
-            "360_SCALP_FVG":        "Scalp FVG",
-            "360_SCALP_CVD":        "Scalp CVD",
-            "360_SCALP_VWAP":       "Scalp VWAP",
-            "360_SCALP_DIVERGENCE": "Scalp Divergence",
-            "360_SCALP_SUPERTREND": "Scalp Supertrend",
-            "360_SCALP_ICHIMOKU":   "Scalp Ichimoku",
-            "360_SCALP_ORDERBLOCK": "Scalp Orderblock",
-        }
-        separator = "━" * 30
-        lines = [
-            "📊 *360 Crypto — Weekly Performance*",
-            separator,
-            "",
-        ]
-
-        total_wins = 0
-        total_losses = 0
-
-        for channel in [
-            "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
-            "360_SCALP_VWAP",
-            "360_SCALP_DIVERGENCE", "360_SCALP_SUPERTREND",
-            "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
-        ]:
-            data = scoreboard.get(channel)
-            if not data:
-                continue
-            emoji = chan_emojis.get(channel, "📡")
-            label = chan_labels.get(channel, channel)
-            wins = data["wins"]
-            losses = data["losses"]
-            win_rate = data["win_rate"]
-            avg_pnl = data["avg_pnl"]
-            total_wins += wins
-            total_losses += losses
-            wr_str = f"({win_rate:.0f}%)"
-            lines.append(
-                f"{emoji} {label}:  {wins}W / {losses}L  {wr_str}  Avg {avg_pnl:+.1f}%"
-            )
-
-        # Grand total
-        grand_total = total_wins + total_losses
-        grand_wr = round(total_wins / grand_total * 100, 1) if grand_total > 0 else 0.0
-        lines.extend([
-            separator,
-            f"Total: {total_wins}W / {total_losses}L ({grand_wr:.1f}%)",
-            "",
-            "📈 _Join our premium channels for real-time signals._",
-            "⏰ _Updated every Sunday._",
-        ])
-
-        return "\n".join(lines)
 
     @property
     def active_signals(self) -> Dict[str, Signal]:
@@ -2386,62 +1913,6 @@ class SignalRouter:
                     setattr(sig, k, v)
             self._schedule_persist()
 
-    async def _notify_signal_expiry(self, sig: Signal, now: datetime) -> None:
-        """Post a Telegram notification when a signal expires.
-
-        Sends to ``TELEGRAM_ACTIVE_CHANNEL_ID`` so subscribers know what happened
-        to the signal instead of it silently disappearing.  When the engine's
-        ``on_signal_expired`` callback has stamped a close price and realised
-        P&L on the signal, surface them honestly — auto-trade users in
-        particular need to see at what price the position closed.  Falls back
-        to a "no P&L" line only when the entry was never filled (no
-        ``current_price`` ever recorded).
-        """
-        if not TELEGRAM_ACTIVE_CHANNEL_ID:
-            return
-        try:
-            direction_emoji = "🟢" if sig.direction == Direction.LONG else "🔴"
-            setup_label = SIGNAL_TYPE_LABELS.get(sig.setup_class, sig.setup_class)
-            age_secs = (now - sig.timestamp).total_seconds()
-            hours = int(age_secs // 3600)
-            minutes = int((age_secs % 3600) // 60)
-
-            current_price = float(getattr(sig, "current_price", 0.0) or 0.0)
-            entry = float(getattr(sig, "entry", 0.0) or 0.0)
-            pnl_pct = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
-            entry_was_reached = current_price > 0 and entry > 0 and abs(
-                current_price - entry
-            ) > 1e-9 or pnl_pct != 0.0
-
-            lines = [
-                f"⏰ Signal Expired — {sig.symbol}",
-                "",
-                f"{direction_emoji} {sig.direction.value} | {setup_label}",
-            ]
-            if entry_was_reached:
-                pnl_sign = "+" if pnl_pct >= 0 else ""
-                lines += [
-                    "Max-hold reached. Position auto-closed at market.",
-                    "",
-                    f"📍 Entry: {entry}",
-                    f"🏁 Closed at: {current_price}",
-                    f"📊 P&L: {pnl_sign}{pnl_pct:.2f}%",
-                    f"⏱ Time held: {hours}h {minutes}m",
-                    f"📊 Confidence was: {sig.confidence:.0f}",
-                ]
-            else:
-                lines += [
-                    "Entry was not reached within the validity window.",
-                    "",
-                    f"📍 Entry: {entry}",
-                    f"⏱ Time held: {hours}h {minutes}m",
-                    f"📊 Confidence was: {sig.confidence:.0f}",
-                    "",
-                    "No fill — no P&L recorded.",
-                ]
-            await self._send_telegram(TELEGRAM_ACTIVE_CHANNEL_ID, "\n".join(lines))
-        except Exception as exc:
-            log.debug("Signal expiry notification failed for {}: {}", sig.symbol, exc)
 
     def cleanup_expired(self) -> int:
         """Remove signals that have exceeded their max hold duration.
@@ -2500,15 +1971,6 @@ class SignalRouter:
                 "Auto-expired signal {} {} {} (exceeded max hold)",
                 signal_id, sig.symbol, sig.channel,
             )
-            # Post expiry notification to Telegram (fire-and-forget).
-            # Reads sig.current_price and sig.pnl_pct that on_signal_expired
-            # may have just stamped, so the message includes a real outcome
-            # instead of "No P&L recorded".
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._notify_signal_expiry(sig, now))
-            except RuntimeError:
-                pass
 
         if expired_ids:
             self._schedule_persist()

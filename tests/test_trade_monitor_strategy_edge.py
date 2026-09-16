@@ -52,7 +52,6 @@ def _build_monitor(edge_store) -> TradeMonitor:
 
     return TradeMonitor(
         data_store=data_store,
-        send_telegram=_send,
         get_active_signals=lambda: {},
         remove_signal=lambda sid: None,
         update_signal=MagicMock(),

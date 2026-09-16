@@ -63,8 +63,7 @@ def _monitor(active, tracker=None, send=None):
     ds.ticks = {}
     mon = TradeMonitor(
         data_store=ds,
-        send_telegram=send or _ok_send,
-        get_active_signals=lambda: dict(active),
+                get_active_signals=lambda: dict(active),
         remove_signal=lambda sid: removed.append(sid),
         update_signal=MagicMock(),
         performance_tracker=tracker,
@@ -74,26 +73,6 @@ def _monitor(active, tracker=None, send=None):
 
 
 class TestManualClose:
-    async def test_telegram_failure_does_not_cost_the_record(self, monkeypatch):
-        monkeypatch.setattr(
-            "src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "-100999"}
-        )
-        tracker = MagicMock()
-
-        async def _boom(chat_id, text):
-            raise TimeoutError("telegram down")
-
-        sig = _make_signal()
-        mon, removed = _monitor({sig.signal_id: sig}, tracker, send=_boom)
-        monkeypatch.setattr(mon, "_latest_price", lambda symbol: 99.0)
-
-        res = await mon.close_signal_manual(sig.signal_id, reason="owner")
-
-        assert tracker.record_outcome.call_count == 1, (
-            "the record must be written even though the Telegram post failed"
-        )
-        assert res["recorded"] is True
-        assert removed == [sig.signal_id]
 
     async def test_a_close_that_cannot_record_is_not_removed(self, monkeypatch):
         """Removing an unrecorded close is what makes the loss permanent."""
@@ -129,8 +108,7 @@ class TestManualClose:
 class TestRestoreVocabulary:
     def _router(self):
         return SignalRouter(
-            queue=MagicMock(), send_telegram=AsyncMock(), format_signal=MagicMock()
-        )
+            queue=MagicMock(), )
 
     @pytest.mark.parametrize("status", sorted(LIVE_STATUSES))
     def test_live_signals_are_restored(self, status):
@@ -265,8 +243,7 @@ class TestRestoreDrain:
         live = _make_signal(signal_id="BNB-1", status="TP1_HIT", symbol="BNBUSDT")
 
         router = SignalRouter(
-            queue=MagicMock(), send_telegram=AsyncMock(), format_signal=MagicMock()
-        )
+            queue=MagicMock(), )
         router._absorb_restored({
             wedged.signal_id: _signal_to_dict(wedged),
             live.signal_id: _signal_to_dict(live),
@@ -291,8 +268,7 @@ class TestRestoreDrain:
         monkeypatch.setattr("src.main.save_history", lambda *_a, **_k: None)
         tracker = MagicMock()
         router = SignalRouter(
-            queue=MagicMock(), send_telegram=AsyncMock(), format_signal=MagicMock()
-        )
+            queue=MagicMock(), )
         sig = _make_signal(signal_id="D-1", status="SL_HIT")
         router._absorb_restored({sig.signal_id: _signal_to_dict(sig)})
         eng = _engine(_monitor({}, tracker)[0], router=router)

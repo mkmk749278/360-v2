@@ -41,12 +41,14 @@ We run a 24/7 crypto-futures scalping signal engine and the products around it.
 2. **Generate** — a scanner sweeps continuously (back-to-back cycles, 1s pause), runs
    **19 evaluators (17 live)** per eligible pair, pushes survivors through a gate chain,
    and scores them 0–100. Exact counts and where they're set: **§9**.
-3. **Deliver** — A+ (80+) and B (65–79) go to the in-app Lumin feed (primary surface),
-   with FCM push. Below 65 is dropped. The Telegram **broadcast channels are OFF**
-   (`TELEGRAM_SIGNALS_ENABLED`, default false since 2026-09-15, #1034) — and until
-   that change they were not a mirror at all: the send ran *before* the dispatch
-   log, the order fan-out and the app feed, and a failure took the candidate off
-   all three. The **bot** is unaffected (alerts, commands, OTP).
+3. **Deliver** — A+ (80+) and B (65–79) go to the in-app Lumin feed (the only
+   user surface), with FCM push. Below 65 is dropped. The Telegram **broadcast
+   channels were DELETED** on 2026-09-16 (#1037, owner: *"no subscribers in
+   telegram channels"*). Until #1034 they were not a mirror at all: the send ran
+   *before* the dispatch log, the order fan-out and the app feed, and a failure
+   took the candidate off all three. #1034 put that behind a flag; #1037 removed
+   the code, so the property is structural rather than flag-guarded. The **bot**
+   is unaffected (alerts, commands, OTP).
 4. **Execute** — for subscribers who armed auto-trade, each signal is dispatched
    per-user into a Position FSM that places real Binance orders through an isolated
    signing service.
@@ -121,7 +123,6 @@ graph TD
     ROUTER["SignalRouter<br/>cooldowns · correlation lock · concurrency caps · staleness"]
     FEED["In-app Lumin feed<br/>PRIMARY"]
     FCM["FCM topics<br/>signals · alerts"]
-    TG["Telegram channels<br/>OFF since #1034"]
   end
 
   subgraph EXEC["4 · EXECUTE  (per armed user)"]
@@ -147,7 +148,7 @@ graph TD
   PM --> SCAN
   HDS & OFS --> SCAN
   SCAN --> EVAL --> GATE --> WORLD --> SCORE --> Q --> ROUTER
-  ROUTER --> FEED & FCM & TG
+  ROUTER --> FEED & FCM
   ROUTER --> DISP --> FSM --> SIGN --> BIN
   WORKER & MARK & RECON & TM --> FSM
   BIN -.->|"user data stream"| WORKER

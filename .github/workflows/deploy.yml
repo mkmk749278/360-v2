@@ -93,8 +93,6 @@ jobs:
 
             # Telegram
             sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}|" .env
-            sed -i "s|^TELEGRAM_ACTIVE_CHANNEL_ID=.*|TELEGRAM_ACTIVE_CHANNEL_ID=${{ secrets.TELEGRAM_ACTIVE_CHANNEL_ID }}|" .env
-            sed -i "s|^TELEGRAM_FREE_CHANNEL_ID=.*|TELEGRAM_FREE_CHANNEL_ID=${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}|" .env
             sed -i "s|^TELEGRAM_ADMIN_CHAT_ID=.*|TELEGRAM_ADMIN_CHAT_ID=${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}|" .env
 
             # Binance API keys (update if line exists, append if not)
@@ -150,6 +148,14 @@ jobs:
             # It is idempotent and safe to keep. Drop it once a deploy has run
             # with it and the keys are confirmed absent from `.env` on the box.
             sed -i '/^SLACK_PACKET_/d' .env
+
+            # Telegram BROADCAST CHANNEL ids — deleted 2026-09-16 with the
+            # channels themselves. Same reasoning as the Slack purge above:
+            # the last deploy wrote them into this .env, nothing reads them
+            # now, and a value no code reads is the one nobody audits. The
+            # BOT token and the ADMIN chat id are untouched — commands, the
+            # liveness pager and OTP all still need them.
+            sed -i '/^TELEGRAM_ACTIVE_CHANNEL_ID=/d;/^TELEGRAM_FREE_CHANNEL_ID=/d;/^TELEGRAM_SIGNALS_ENABLED=/d' .env
 
             # ── Rebuild and restart all containers ───────────────────────────
             # deploy.sh reads API_PROCESS_ISOLATED from .env and selects the

@@ -28,8 +28,7 @@ def _make_handler(**kwargs) -> CommandHandler:
         ws_futures=None,
         tasks=[],
         boot_time=0.0,
-        free_channel_limit=2,
-        alert_subscribers=set(),
+                alert_subscribers=set(),
     )
     defaults.update(kwargs)
     return CommandHandler(**defaults)
@@ -162,13 +161,6 @@ class TestAdminCommands:
             await handler._handle_command("/subscribe_alerts", ADMIN_CHAT_ID)
         assert ADMIN_CHAT_ID in subs
 
-    @pytest.mark.asyncio
-    async def test_set_free_channel_limit_allows_zero(self):
-        handler = _make_handler()
-        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
-            await handler._handle_command("/set_free_channel_limit 0", ADMIN_CHAT_ID)
-        assert handler.free_channel_limit == 0
-        handler._router.set_free_limit.assert_called_once_with(0)
 
 
 class TestUserCommands:

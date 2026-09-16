@@ -11,11 +11,10 @@ import json
 import os
 import time
 import numpy as np
-from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from config import (
     ALL_CHANNELS,
-    CHANNEL_TELEGRAM_MAP,
     INVALIDATION_ADVERSE_EXCURSION_FRACTION,
     INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP,
     INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_BY_SETUP,
@@ -79,19 +78,13 @@ from src.performance_tracker import entry_sl_distance_pct, shipped_sl_distance_p
 from src.push_notifications import push_signal_outcome
 from src.smc import Direction
 from src.stat_filter import CohortEdgeStore, SignalOutcome
-from src.utils import fmt_price, fmt_ts, get_logger, utcnow
+from src.utils import get_logger, utcnow
 
 log = get_logger("trade_monitor")
 
 # Minimum absolute PnL (%) before SL/TP evaluation is allowed.
 # Prevents false stops from stale prices or floating-point noise.
 _ZERO_PNL_THRESHOLD_PCT = 0.01
-_STOP_OUTCOME_MESSAGES = {
-    "SL_HIT": "🔴 SL HIT",
-    "BREAKEVEN_EXIT": "⚪ BREAKEVEN EXIT",
-    "PROFIT_LOCKED": "🟢 PROFIT LOCKED",
-    "EXPIRED": "⏰ EXPIRED",
-}
 # Seconds of grace after a DCA entry before invalidation checks are allowed.
 # Gives the averaged position time to develop without being killed prematurely.
 _DCA_GRACE_SECONDS = 600
@@ -277,7 +270,6 @@ class TradeMonitor:
     def __init__(
         self,
         data_store: HistoricalDataStore,
-        send_telegram: Callable[[str, str], Coroutine],
         get_active_signals: Callable[[], Dict[str, Signal]],
         remove_signal: Callable[[str], None],
         update_signal: Callable[[str], None],
@@ -302,7 +294,6 @@ class TradeMonitor:
         #: instrument X-ray reports a named unknown rather than an ordinary
         #: instrument.
         self._pair_getter = None
-        self._send = send_telegram
         self._get_signals = get_active_signals
         # Monitor start wall-clock (monotonic) — the post-boot grace anchor
         # for the never-WS-stamped staleness case in ``_candle_stale``.
@@ -2244,9 +2235,7 @@ class TradeMonitor:
         await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp1)
         self._set_realized_pnl(sig, sig.tp1)
         self._apply_final_outcome(sig, hit_tp=1, hit_sl=False)
-        await self._post_update(sig, "🎯 TP1 HIT ✅ — full close (100%)")
         self._record_outcome(sig, hit_tp=1, hit_sl=False)
-        await self._post_signal_closed(sig, is_tp=True, tp_label="TP1", close_price=sig.tp1)
         self._remove(sig.signal_id)
 
     async def close_signal_manual(
@@ -2310,7 +2299,6 @@ class TradeMonitor:
         # that a future edit to either cannot reach the removal decision below.
         try:
             await self._broker_close_full(sig, reason=reason, fill_price=fill)
-            await self._post_update(sig, f"🛑 CLOSED (manual — {reason})")
         except Exception as _exc:
             fail_open.record("trade_monitor.close_signal_manual", _exc)
         if recorded:
@@ -2402,16 +2390,12 @@ class TradeMonitor:
             if getattr(sig, "entry_never_filled", False):
                 sig.pnl_pct = 0.0
                 sig.status = "EXPIRED"
-                await self._post_update(
-                    sig, "⏰ EXPIRED (entry never filled — no position taken)"
-                )
                 self._record_outcome(sig, hit_tp=0, hit_sl=False, expired=True)
                 await self._broker_close_full(sig, reason="expired", fill_price=price)
                 self._remove(sig.signal_id)
                 return
             self._set_realized_pnl(sig, price)
             sig.status = "EXPIRED"
-            await self._post_update(sig, "⏰ EXPIRED (max hold time reached)")
             self._record_outcome(sig, hit_tp=0, hit_sl=False, expired=True)  # BUG FIX
             await self._broker_close_full(sig, reason="expired", fill_price=price)
             self._remove(sig.signal_id)
@@ -2485,9 +2469,7 @@ class TradeMonitor:
                                 sig.symbol, exc,
                             )
                         _dca_broker_ok = _dca_order_id is not None
-                    if _dca_broker_ok:
-                        await self._post_dca_update(sig)
-                    else:
+                    if not _dca_broker_ok:
                         log.warning(
                             "DCA broker execution failed for %s %s — "
                             "Telegram DCA notification suppressed (no Entry-1 "
@@ -2503,7 +2485,6 @@ class TradeMonitor:
                 sig.symbol, sig.signal_id, sig.stop_loss, sig.entry,
             )
             sig.status = "CANCELLED"
-            await self._post_update(sig, "⚠️ CANCELLED (invalid SL)")
             await self._broker_close_full(sig, reason="cancelled", fill_price=price)
             self._remove(sig.signal_id)
             return
@@ -2513,7 +2494,6 @@ class TradeMonitor:
                 sig.symbol, sig.signal_id, sig.stop_loss, sig.entry,
             )
             sig.status = "CANCELLED"
-            await self._post_update(sig, "⚠️ CANCELLED (invalid SL)")
             await self._broker_close_full(sig, reason="cancelled", fill_price=price)
             self._remove(sig.signal_id)
             return
@@ -2656,11 +2636,6 @@ class TradeMonitor:
                         if _valid_min > 0 and age_secs > _valid_min * 60:
                             sig.pnl_pct = 0.0
                             sig.status = "EXPIRED"
-                            await self._post_update(
-                                sig,
-                                "⏰ EXPIRED (entry never filled within the "
-                                f"{_valid_min}-minute validity window)",
-                            )
                             self._record_outcome(
                                 sig, hit_tp=0, hit_sl=False, expired=True
                             )
@@ -2716,11 +2691,8 @@ class TradeMonitor:
             if sig.first_sl_touch_timestamp is None:
                 sig.first_sl_touch_timestamp = utcnow()
             self._set_realized_pnl(sig, sig.stop_loss)
-            outcome_label = self._apply_final_outcome(sig, hit_tp=0, hit_sl=True)
-            outcome_event = _STOP_OUTCOME_MESSAGES.get(outcome_label, "🔴 EXIT")
-            await self._post_update(sig, outcome_event)
+            self._apply_final_outcome(sig, hit_tp=0, hit_sl=True)
             self._record_outcome(sig, hit_tp=0, hit_sl=True)
-            await self._post_signal_closed(sig, is_tp=False)
             await self._broker_close_full(
                 sig, reason="sl_hit", fill_price=sig.stop_loss
             )
@@ -2769,7 +2741,6 @@ class TradeMonitor:
                 )
             except Exception as exc:  # noqa: BLE001 — audit must never break the close
                 log.debug("invalidation_audit.record_invalidation failed for {}: {}", sig.symbol, exc)
-            await self._post_update(sig, f"🔄 INVALIDATED ({invalidation_reason})")
             self._record_outcome(sig, hit_tp=0, hit_sl=False)
             await self._broker_close_full(
                 sig, reason="invalidated", fill_price=capped_price
@@ -2802,10 +2773,6 @@ class TradeMonitor:
                             entry_price=sig.entry, exit_price=sig.tp3,
                             direction=sig.direction.value,
                         )
-                        await self._post_update(
-                            sig,
-                            "🎯🎯🎯 TP3 CLEARED — runner riding, trail owns the exit",
-                        )
                 else:
                     if sig.first_tp_touch_timestamp is None:
                         sig.first_tp_touch_timestamp = utcnow()
@@ -2827,16 +2794,13 @@ class TradeMonitor:
                     await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
                     self._set_realized_pnl(sig, sig.tp3)
                     self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
-                    await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
                     self._record_outcome(sig, hit_tp=3, hit_sl=False)
-                    await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
                     self._remove(sig.signal_id)
                     return
             if _c_high > 0 and _c_high >= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP2_HIT"
-                await self._post_update(sig, "🎯🎯 TP2 HIT")
                 # Snapshot best-TP PnL for signal quality stats (never
                 # downgrade a runner's TP3-cleared stamp).
                 if sig.best_tp_hit < 2:
@@ -2895,13 +2859,6 @@ class TradeMonitor:
                     _tp1_frac = self._runner_bank(
                         sig, _runner_policy.RUNNER_TP1_BANK_FRACTION, sig.tp1
                     )
-                    await self._post_update(
-                        sig,
-                        "🎯 TP1 HIT ✅ — banked "
-                        f"{_tp1_frac * 100:.0f}%, runner riding (trail active)",
-                    )
-                else:
-                    await self._post_update(sig, "🎯 TP1 HIT ✅")
                 # Snapshot best-TP PnL for signal quality stats (only if TP2 not already hit)
                 if sig.best_tp_hit < 1:
                     sig.best_tp_hit = 1
@@ -2935,10 +2892,6 @@ class TradeMonitor:
                             entry_price=sig.entry, exit_price=sig.tp3,
                             direction=sig.direction.value,
                         )
-                        await self._post_update(
-                            sig,
-                            "🎯🎯🎯 TP3 CLEARED — runner riding, trail owns the exit",
-                        )
                 else:
                     if sig.first_tp_touch_timestamp is None:
                         sig.first_tp_touch_timestamp = utcnow()
@@ -2960,16 +2913,13 @@ class TradeMonitor:
                     await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
                     self._set_realized_pnl(sig, sig.tp3)
                     self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
-                    await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
                     self._record_outcome(sig, hit_tp=3, hit_sl=False)
-                    await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
                     self._remove(sig.signal_id)
                     return
             if _c_low > 0 and _c_low <= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP2_HIT"
-                await self._post_update(sig, "🎯🎯 TP2 HIT")
                 # Snapshot best-TP PnL for signal quality stats (never
                 # downgrade a runner's TP3-cleared stamp).
                 if sig.best_tp_hit < 2:
@@ -3027,13 +2977,6 @@ class TradeMonitor:
                     _tp1_frac = self._runner_bank(
                         sig, _runner_policy.RUNNER_TP1_BANK_FRACTION, sig.tp1
                     )
-                    await self._post_update(
-                        sig,
-                        "🎯 TP1 HIT ✅ — banked "
-                        f"{_tp1_frac * 100:.0f}%, runner riding (trail active)",
-                    )
-                else:
-                    await self._post_update(sig, "🎯 TP1 HIT ✅")
                 # Snapshot best-TP PnL for signal quality stats (only if TP2 not already hit)
                 if sig.best_tp_hit < 1:
                     sig.best_tp_hit = 1
@@ -3156,37 +3099,6 @@ class TradeMonitor:
             if new_sl < sig.stop_loss:
                 sig.stop_loss = round(new_sl, 8)
 
-    async def _post_dca_update(self, sig: Signal) -> None:
-        """Post a Telegram notification when DCA Entry 2 is taken."""
-        channel_id = CHANNEL_TELEGRAM_MAP.get(sig.channel, "")
-        if not channel_id:
-            return
-
-        chan_emojis = {
-            "360_SCALP": "⚡",
-        }
-        chan_emoji = chan_emojis.get(sig.channel, "📡")
-        dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"
-        chan_cfg = next((c for c in ALL_CHANNELS if c.name == sig.channel), None)
-        rr_str = ""
-        if chan_cfg is not None:
-            rr_parts = [f"{r}R" for r in chan_cfg.tp_ratios]
-            rr_str = " / ".join(rr_parts)
-
-        lines = [
-            "📊 DCA ENTRY 2",
-            f"{chan_emoji} *{_escape_md(sig.channel)}* | {_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
-            f"💰 Entry 1: `{fmt_price(sig.original_entry)}` → Entry 2: `{fmt_price(sig.entry_2 if sig.entry_2 is not None else 0.0)}`",
-            f"📊 Avg Entry: `{fmt_price(sig.avg_entry)}`",
-            f"🎯 New TP1: `{fmt_price(sig.tp1)}` | TP2: `{fmt_price(sig.tp2)}`",
-            f"🛑 SL: `{fmt_price(sig.stop_loss)}` (unchanged)",
-        ]
-        if rr_str:
-            lines.append(f"📏 New R:R preserved at {rr_str}")
-        lines.append(f"⏰ {fmt_ts()}")
-
-        text = "\n".join(lines)
-        await self._send(channel_id, text)
 
     async def _broker_close_full(
         self,
@@ -3253,103 +3165,7 @@ class TradeMonitor:
                 sig.symbol, reason, exc,
             )
 
-    async def _post_update(self, sig: Signal, event: str) -> None:
-        channel_id = CHANNEL_TELEGRAM_MAP.get(sig.channel, "")
-        if not channel_id:
-            return
 
-        chan_emojis = {
-            "360_SCALP": "⚡",
-        }
-        chan_emoji = chan_emojis.get(sig.channel, "📡")
-        dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"
-
-        lines = [
-            f"{event}",
-            f"{chan_emoji} *{_escape_md(sig.channel)}* | {_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
-            f"💰 Entry: `{fmt_price(sig.entry)}` → Current: `{fmt_price(sig.current_price)}`",
-            f"📊 PnL: *{sig.pnl_pct:+.2f}%*",
-            f"🛡️ SL: `{fmt_price(sig.stop_loss)}`",
-            f"🤖 Confidence: *{sig.confidence:.0f}%*",
-        ]
-        if sig.trailing_active and sig.trailing_desc:
-            lines.append(f"💹 Trailing Active ({_escape_md(sig.trailing_desc)})")
-        lines.append(f"⏰ {fmt_ts()}")
-
-        text = "\n".join(lines)
-        # Fail-open (2026-08-24).  This is the FIRST await on every terminal
-        # close path, it runs AFTER ``sig.status`` has been mutated to the
-        # terminal label, and it had no handler of any kind -- so a Telegram
-        # timeout propagated out of ``_evaluate_signal``, past
-        # ``_record_outcome`` and ``_remove``, and wedged the signal for good.
-        # ``_check_all`` gathers without ``return_exceptions``, so it also cut
-        # that cycle short for every other signal and skipped the sweeps below
-        # the gather.  A subscriber post is never worth either.
-        try:
-            await self._send(channel_id, text)
-        except Exception as exc:  # noqa: BLE001 -- a post must not abort a close
-            from src import fail_open
-            fail_open.record("trade_monitor._post_update", exc)
-            log.warning(
-                "Telegram update post failed for {} {}: {}",
-                sig.symbol, sig.signal_id, exc,
-            )
-
-    async def _post_pre_tp_alert(
-        self,
-        sig: Signal,
-        favourable_pct: float,
-        net_pct: float,
-        *,
-        partial_fraction: float = 0.0,
-        partial_executed: bool = False,
-    ) -> None:
-        """Dedicated, eye-catching Pre-TP alert — bypasses the generic update
-        template so subscribers don't scroll past it as a routine status post.
-
-        Doctrine (OWNER_BRIEF §3.2 / §3.2a, 2026-05-17): Pre-TP is the PRIMARY
-        exit mechanism, not a safety net.  When the auto-trader is enabled
-        and the broker accepted a partial close, the alert reports the
-        realised fraction *and* the residual SL-to-breakeven move.  When the
-        broker is disabled (signal-only mode) or the partial close didn't
-        execute, the alert falls back to the pre-2026-05-17 SL-to-breakeven
-        framing — but never with the misleading "Banked +X%" wording from
-        before this PR.
-        """
-        channel_id = CHANNEL_TELEGRAM_MAP.get(sig.channel, "")
-        if not channel_id:
-            return
-        dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"
-        sep = "━" * 24
-        if partial_executed and partial_fraction > 0:
-            pct_closed = int(round(partial_fraction * 100))
-            pct_residual = 100 - pct_closed
-            text = "\n".join([
-                "⚡ *PRE-TP PARTIAL CLOSE* ⚡",
-                sep,
-                f"{_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
-                "",
-                f"💰 Closed *{pct_closed}%* of position at *+{favourable_pct:.2f}%* raw",
-                f"💵 Realised net @ {PRE_TP_LEVERAGE:.0f}x: *{net_pct * partial_fraction:+.2f}%* on margin",
-                f"🛡️ Residual {pct_residual}% rides to TP1 — SL → breakeven `{fmt_price(sig.entry)}`",
-                "",
-                "✅ Risk-managed — banked profit + remaining position protected",
-                f"⏰ {fmt_ts()}",
-            ])
-        else:
-            text = "\n".join([
-                "⚡ *PRE-TP TRIGGER* ⚡",
-                sep,
-                f"{_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
-                "",
-                f"💰 Favourable move: *+{favourable_pct:.2f}%* raw",
-                f"💵 Net @ {PRE_TP_LEVERAGE:.0f}x: *{net_pct:+.2f}%* (after fees, if exited now)",
-                f"🛡️ SL → breakeven `{fmt_price(sig.entry)}`",
-                "",
-                "_Signal-only mode — auto-trade not enabled; close manually to bank._",
-                f"⏰ {fmt_ts()}",
-            ])
-        await self._send(channel_id, text)
 
     async def _check_pre_tp_grab(
         self, sig: Signal, c_high: float, c_low: float
@@ -3616,58 +3432,6 @@ class TradeMonitor:
         else:
             sig.stop_loss = min(sig.stop_loss, entry)
 
-        try:
-            await self._post_pre_tp_alert(
-                sig,
-                favourable_pct,
-                net_pct,
-                partial_fraction=grab_fraction,
-                partial_executed=partial_executed,
-            )
-        except Exception as exc:
-            log.warning("Pre-TP active-channel post failed for %s: %s", sig.symbol, exc)
-
-        # Free-channel storytelling — paid-tier only.  WATCHLIST tier was
-        # removed in the app-era doctrine reset; every signal that reaches
-        # trade_monitor is now paid (≥65 confidence).  Message reflects what
-        # actually happened on the broker — no "banked" wording when nothing
-        # was banked.
-        try:
-            from config import TELEGRAM_FREE_CHANNEL_ID
-            if TELEGRAM_FREE_CHANNEL_ID:
-                if partial_executed:
-                    pct_closed = int(round(grab_fraction * 100))
-                    pct_residual = 100 - pct_closed
-                    realised_net = net_pct * grab_fraction
-                    if full_close:
-                        free_msg = (
-                            f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
-                            f"Closed 100% at +{favourable_pct:.2f}% raw "
-                            f"\\({net_pct:+.2f}% realised net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
-                            f"_Position fully banked._"
-                        )
-                    else:
-                        free_msg = (
-                            f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
-                            f"Closed {pct_closed}% at +{favourable_pct:.2f}% raw "
-                            f"\\({realised_net:+.2f}% realised net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
-                            f"_{pct_residual}% rides to TP1 — SL at breakeven._"
-                        )
-                else:
-                    free_msg = (
-                        f"⚡ *Quick Move — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
-                        f"Hit +{favourable_pct:.2f}% raw "
-                        f"\\({net_pct:+.2f}% net @ {PRE_TP_LEVERAGE:.0f}x if exited now\\)\n"
-                        f"_SL moved to breakeven — auto-trader off, exit manually to bank._"
-                    )
-                await self._send(TELEGRAM_FREE_CHANNEL_ID, free_msg)
-                log.info(
-                    "free_channel_post source=pre_tp severity=HIGH symbol=%s",
-                    sig.symbol,
-                )
-        except Exception as exc:
-            log.warning("Pre-TP free-channel post failed for %s: %s", sig.symbol, exc)
-
         log.info(
             "pre_tp_fire %s %s [%s] threshold=%.3f source=%s atr_last=%s "
             "leverage=%.1fx net=%.2f age=%.0fs partial_executed=%s "
@@ -3701,86 +3465,3 @@ class TradeMonitor:
 
         return True
 
-    async def _post_signal_closed(
-        self,
-        sig: Signal,
-        is_tp: bool,
-        tp_label: str = "TP",
-        close_price: Optional[float] = None,
-    ) -> None:
-        """Generate and send an AI-written signal-closed post.
-
-        Posts to the active (paid) channel and mirrors to the free channel as
-        social-proof storytelling (Phase 5).  WATCHLIST tier was removed in
-        the app-era doctrine reset; every signal that reaches here is paid
-        (≥65 confidence).  SL hits get equal visibility per B3.
-
-        Best-effort fire-and-forget — failures are logged but never raise.
-        """
-        if self.engine_context_fn is None:
-            return
-        try:
-            from src import content_engine  # local import to avoid circular at module level
-            from config import (
-                TELEGRAM_ACTIVE_CHANNEL_ID,
-                TELEGRAM_FREE_CHANNEL_ID,
-                CONTENT_ENGINE_ENABLED,
-            )
-            if not CONTENT_ENGINE_ENABLED or not TELEGRAM_ACTIVE_CHANNEL_ID:
-                return
-
-            engine_ctx = self.engine_context_fn()
-            hold_sec = (utcnow() - sig.timestamp).total_seconds() if hasattr(sig, "timestamp") and sig.timestamp else 0
-            entry = sig.original_entry if hasattr(sig, "original_entry") and sig.original_entry else sig.entry
-            actual_close = close_price if close_price is not None else sig.current_price
-
-            # Calculate R multiple
-            risk = abs(entry - sig.stop_loss)
-            if is_tp and risk > 0:
-                r_multiple = abs(actual_close - entry) / risk
-            else:
-                r_multiple = -1.0
-
-            signal_data = {
-                "symbol": sig.symbol,
-                "direction": sig.direction.value,
-                "entry_price": entry,
-                "close_price": actual_close,
-                "sl_price": sig.stop_loss,
-                "tp_label": tp_label,
-                "r_multiple": round(r_multiple, 2),
-                "pnl_pct": round(sig.pnl_pct, 2),
-                "setup_name": getattr(sig, "setup_class", ""),
-                "hold_duration": f"{int(hold_sec // 60)}min",
-            }
-
-            text = await content_engine.generate_signal_closed_post(
-                signal_data=signal_data,
-                is_tp=is_tp,
-                engine_context=engine_ctx,
-            )
-            if not text:
-                return
-            await self._send(TELEGRAM_ACTIVE_CHANNEL_ID, text)
-
-            # Phase 5 — mirror paid-tier closes to free channel for social proof.
-            if (
-                TELEGRAM_FREE_CHANNEL_ID
-                and TELEGRAM_FREE_CHANNEL_ID != TELEGRAM_ACTIVE_CHANNEL_ID
-            ):
-                header = (
-                    "📣 *Paid Signal Result*\n"
-                    "_Live trade just closed on the paid channel:_\n\n"
-                )
-                try:
-                    await self._send(TELEGRAM_FREE_CHANNEL_ID, header + text)
-                    log.info(
-                        "free_channel_post source=signal_close severity=HIGH symbol=%s",
-                        sig.symbol,
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "Free-channel close mirror failed for %s: %s", sig.symbol, exc
-                    )
-        except Exception as exc:
-            log.warning("Signal-closed post failed for %s: %s", sig.symbol, exc)

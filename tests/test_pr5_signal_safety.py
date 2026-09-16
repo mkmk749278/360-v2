@@ -426,7 +426,6 @@ class TestDynamicPairCount:
             ws_futures=None,
             tasks=[],
             boot_time=0.0,
-            free_channel_limit=2,
             alert_subscribers=set(),
         )
         handler._router.active_signals = {}
@@ -460,7 +459,6 @@ class TestDynamicPairCount:
             ws_futures=None,
             tasks=[],
             boot_time=0.0,
-            free_channel_limit=2,
             alert_subscribers=set(),
         )
         await handler._handle_command("/ask BULLAUSDT", "999999")

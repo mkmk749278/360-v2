@@ -829,7 +829,6 @@ def _build_invalidation_test_monitor(sig, candles_close=None, regime_detector=No
 
     return _TradeMonitor(
         data_store=data_store,
-        send_telegram=mock_send,
         get_active_signals=lambda: {sig.signal_id: sig},
         remove_signal=lambda sid: None,
         update_signal=_MagicMock(),

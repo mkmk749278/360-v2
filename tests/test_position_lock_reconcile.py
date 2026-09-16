@@ -77,8 +77,6 @@ def _make_signal(
 def _router() -> SignalRouter:
     return SignalRouter(
         queue=MagicMock(),
-        send_telegram=MagicMock(),
-        format_signal=lambda sig: "stub",
         redis_client=None,
     )
 

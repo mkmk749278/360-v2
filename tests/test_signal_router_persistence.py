@@ -64,8 +64,6 @@ def _make_router_no_redis() -> SignalRouter:
     """Construct a router without Redis — exercises the JSON fallback path."""
     return SignalRouter(
         queue=MagicMock(),
-        send_telegram=MagicMock(),
-        format_signal=lambda sig: "stub",
         redis_client=None,
     )
 

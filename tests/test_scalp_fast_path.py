@@ -65,31 +65,20 @@ def _make_router(
     monkeypatch,
     channel: str = "360_SCALP",
 ) -> tuple[asyncio.Queue, SignalRouter]:
-    """Build a router wired to a recording mock sender.
+    """Build a router for the staleness-gate assertions in this file.
 
-    Broadcast channels are pinned ON. From 2026-09-15 they default off and
-    the router bypasses the Telegram block entirely, so `sent_messages`
-    would be empty whatever the staleness gate decided — the assertions in
-    this file would then pass or fail for a reason that has nothing to do
-    with the gate they are named after.
+    This used to pin the Telegram broadcast channels ON and assert on
+    `sent_messages`, because with channels off the router bypassed the send
+    and the list was empty whatever the gate decided — so the tests would
+    have passed for a reason unrelated to the gate they are named after.
+
+    The channels were deleted on 2026-09-16, so there is no send to pin and
+    no `sent_messages` to read. The gate is now observed where it actually
+    acts: `_active_signals` and the drop counters. `sent_messages` is still
+    accepted so the call sites do not all have to change, and is unused.
     """
-    monkeypatch.setattr(signal_router_module, "TELEGRAM_SIGNALS_ENABLED", True)
-    for ch in (
-        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
-        "360_SCALP_VWAP",
-    ):
-        monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, ch, "premium")
-
-    async def mock_send(chat_id: str, text: str):
-        sent_messages.append((chat_id, text))
-        return True
-
     queue: asyncio.Queue = asyncio.Queue()
-    router = SignalRouter(
-        queue=queue,
-        send_telegram=mock_send,
-        format_signal=lambda s: f"Signal: {s.channel} {s.symbol}",
-    )
+    router = SignalRouter(queue=queue)
     return queue, router
 
 
@@ -188,8 +177,10 @@ class TestStaleSignalGateTimeBased:
         sig = _make_scalp_signal(detected_at=time.time())
         await queue.put(sig)
         await _run_router(router)
+        # Admission to the active book IS the gate's decision. This used to
+        # also assert a Telegram send; the channels were deleted on
+        # 2026-09-16 and that assertion was always the weaker of the two.
         assert sig.signal_id in router.active_signals
-        assert len(sent) >= 1
 
     @pytest.mark.asyncio
     async def test_stale_scalp_signal_is_suppressed(self, monkeypatch):

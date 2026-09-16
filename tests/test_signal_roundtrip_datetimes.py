@@ -105,7 +105,6 @@ class TestRestoredSignalCanBeRecorded:
         ds.ticks = {}
         return TradeMonitor(
             data_store=ds,
-            send_telegram=AsyncMock(),
             get_active_signals=lambda: {},
             remove_signal=lambda sid: None,
             update_signal=MagicMock(),
@@ -137,7 +136,7 @@ class TestRestoredSignalCanBeRecorded:
         mon = self._monitor(tracker)
 
         router = SignalRouter(
-            queue=MagicMock(), send_telegram=AsyncMock(), format_signal=MagicMock()
+            queue=MagicMock()
         )
         sig = _fully_stamped_signal()
         router._absorb_restored({sig.signal_id: _signal_to_dict(sig)})

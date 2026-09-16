@@ -321,7 +321,6 @@ def _monitor(age_seconds, close=100.0, signals=None):
     data_store.ticks = {}
     return TradeMonitor(
         data_store=data_store,
-        send_telegram=MagicMock(),
         get_active_signals=lambda: (signals or {}),
         remove_signal=MagicMock(),
         update_signal=MagicMock(),

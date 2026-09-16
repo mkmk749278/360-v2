@@ -88,8 +88,7 @@ def _build_monitor(active, tracker=None):
     data_store.ticks = {}
     monitor = TradeMonitor(
         data_store=data_store,
-        send_telegram=mock_send,
-        get_active_signals=lambda: dict(active),
+                get_active_signals=lambda: dict(active),
         remove_signal=lambda sid: removed.append(sid),
         update_signal=MagicMock(),
         performance_tracker=tracker,
@@ -121,18 +120,6 @@ class TestMonitorExpiryNoFill:
         # this never-filled signal (no-op when nothing is open).
         monitor._broker_close_full.assert_awaited_once()
 
-    async def test_no_fill_expiry_message_says_never_filled(self, monkeypatch):
-        monkeypatch.setitem(
-            __import__("src.trade_monitor", fromlist=["CHANNEL_TELEGRAM_MAP"]).CHANNEL_TELEGRAM_MAP,
-            "360_SCALP",
-            "test-channel",
-        )
-        sig = _make_signal(zone=True, filled=False)
-        monitor, _, sent = _build_monitor({sig.signal_id: sig})
-
-        await monitor._evaluate_signal(sig)
-
-        assert any("entry never filled" in text for _, text in sent)
 
     async def test_filled_signal_expiry_unchanged(self):
         tracker = MagicMock()
@@ -279,8 +266,7 @@ class TestAutoExecutionEntryFillGate:
         data_store.ticks = {}
         monitor = TradeMonitor(
             data_store=data_store,
-            send_telegram=AsyncMock(),
-            get_active_signals=lambda: {sig.signal_id: sig},
+                        get_active_signals=lambda: {sig.signal_id: sig},
             remove_signal=MagicMock(),
             update_signal=MagicMock(),
             order_manager=order_manager,
@@ -337,8 +323,7 @@ class TestStatFilterExclusion:
         data_store.ticks = {}
         monitor = TradeMonitor(
             data_store=data_store,
-            send_telegram=AsyncMock(),
-            get_active_signals=lambda: {sig.signal_id: sig},
+                        get_active_signals=lambda: {sig.signal_id: sig},
             remove_signal=MagicMock(),
             update_signal=MagicMock(),
             stat_filter=stat,
@@ -358,8 +343,7 @@ class TestStatFilterExclusion:
         data_store.ticks = {}
         monitor = TradeMonitor(
             data_store=data_store,
-            send_telegram=AsyncMock(),
-            get_active_signals=lambda: {sig.signal_id: sig},
+                        get_active_signals=lambda: {sig.signal_id: sig},
             remove_signal=MagicMock(),
             update_signal=MagicMock(),
             stat_filter=stat,
@@ -385,8 +369,7 @@ class TestFillWindowEnforcement:
         data_store.ticks = {}
         monitor = TradeMonitor(
             data_store=data_store,
-            send_telegram=AsyncMock(),
-            get_active_signals=lambda: {sig.signal_id: sig},
+                        get_active_signals=lambda: {sig.signal_id: sig},
             remove_signal=MagicMock(),
             update_signal=MagicMock(),
             performance_tracker=tracker,

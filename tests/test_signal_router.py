@@ -34,8 +34,6 @@ def queue():
 
 @pytest.fixture
 def router(queue, sent_messages, monkeypatch):
-    for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
-        monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, channel, "premium")
 
     async def mock_send(chat_id: str, text: str):
         sent_messages.append((chat_id, text))
@@ -44,7 +42,7 @@ def router(queue, sent_messages, monkeypatch):
     def mock_format(sig: Signal) -> str:
         return f"Signal: {sig.channel} {sig.symbol} {sig.direction.value}"
 
-    return SignalRouter(queue=queue, send_telegram=mock_send, format_signal=mock_format)
+    return SignalRouter(queue=queue, )
 
 
 
@@ -58,7 +56,6 @@ def _telegram_channels_on(monkeypatch):
     world they are in rather than inheriting a default that has now moved.
     Verified by reverting: every one of them fails without this line.
     """
-    monkeypatch.setattr(signal_router_module, "TELEGRAM_SIGNALS_ENABLED", True)
 
 def _make_signal(channel="360_SCALP", symbol="BTCUSDT", direction=Direction.LONG, confidence=85):
     return Signal(
@@ -92,59 +89,6 @@ class TestSignalRouter:
 
         assert sig.signal_id in router.active_signals
 
-    @pytest.mark.asyncio
-    async def test_send_exception_cleans_up_and_router_continues(self, monkeypatch):
-        _telegram_channels_on(monkeypatch)
-        for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
-            monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, channel, "premium")
-
-        queue = asyncio.Queue()
-
-        # Patch _delivery_sleep (not asyncio.sleep) so re-queue delays don't slow
-        # the test without affecting the test's own asyncio.sleep() calls.
-        # BTC will be re-queued twice (retries 0→1, 1→2) then permanently lost.
-        # Order of send calls: BTC attempt1 (RuntimeError), ETH attempt1 (True),
-        # BTC attempt2/retry1 (RuntimeError), BTC attempt3/retry2 (RuntimeError → permanent loss).
-        async def instant_sleep(_secs):
-            pass
-
-        monkeypatch.setattr(signal_router_module, "_delivery_sleep", instant_sleep)
-
-        send_results = [RuntimeError("telegram down"), True, RuntimeError("down"), RuntimeError("down")]
-
-        async def flaky_send(chat_id: str, text: str):
-            result = send_results.pop(0)
-            if isinstance(result, Exception):
-                raise result
-            return result
-
-        router = SignalRouter(
-            queue=queue,
-            send_telegram=flaky_send,
-            format_signal=lambda sig: f"Signal: {sig.channel} {sig.symbol} {sig.direction.value}",
-        )
-
-        failed = _make_signal(symbol="BTCUSDT", confidence=90)
-        failed.signal_id = "TEST-BTC-FAIL"
-        succeeded = _make_signal(symbol="ETHUSDT", confidence=90)
-        succeeded.signal_id = "TEST-ETH-OK"
-        await queue.put(failed)
-        await queue.put(succeeded)
-
-        task = asyncio.create_task(router.start())
-        # Allow enough time for both queued signals and all BTC retries to complete.
-        await asyncio.sleep(0.5)
-        await router.stop()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        assert "TEST-BTC-FAIL" not in router.active_signals
-        assert failed.symbol not in router._position_lock
-        assert "TEST-ETH-OK" in router.active_signals
-        assert router._position_lock[succeeded.symbol] == succeeded.direction
 
     @pytest.mark.asyncio
     async def test_low_confidence_filtered(self, queue, router, sent_messages):
@@ -247,9 +191,7 @@ class TestSignalRouter:
         await queue2.put(sig2)
         router2 = SignalRouter(
             queue=queue2,
-            send_telegram=router._send_telegram,
-            format_signal=router._format_signal,
-        )
+                                )
         # Copy the cooldown state over so router2 sees the active cooldown
         router2._cooldown_timestamps = dict(router._cooldown_timestamps)
 
@@ -557,177 +499,10 @@ class TestSignalRouter:
         assert "TEST-SCALP-OVERFLOW" not in router.active_signals
         assert router.delivery_stats()["drops_by_reason"].get("per_channel_cap") == 1
 
-    @pytest.mark.asyncio
-    async def test_failed_send_does_not_leave_active_signal_or_lock(self, queue, sent_messages, monkeypatch):
-        _telegram_channels_on(monkeypatch)
-        monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SCALP", "premium")
-
-        async def failed_send(_chat_id: str, _text: str):
-            sent_messages.append(("failed", "attempt"))
-            return False
-
-        router = SignalRouter(
-            queue=queue,
-            send_telegram=failed_send,
-            format_signal=lambda sig: f"Signal: {sig.signal_id}",
-        )
-        sig = _make_signal(confidence=90)
-        sig.signal_id = "TEST-SEND-FAIL"
-
-        await queue.put(sig)
-        task = asyncio.create_task(router.start())
-        await asyncio.sleep(0.2)
-        await router.stop()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        assert "TEST-SEND-FAIL" not in router.active_signals
-        assert sig.symbol not in router._position_lock
-
-    @pytest.mark.asyncio
-    async def test_failed_delivery_requeues_signal(self, monkeypatch):
-        """A failed delivery re-queues the signal (appears back in queue)."""
-        _telegram_channels_on(monkeypatch)
-        for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
-            monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, channel, "premium")
-
-        # Patch _delivery_sleep to be instant
-        async def instant_sleep(_secs):
-            pass
-
-        monkeypatch.setattr(signal_router_module, "_delivery_sleep", instant_sleep)
-
-        queue = asyncio.Queue()
-        send_call_count = [0]
-
-        # Always fail to deliver; we stop the router after the first failure+requeue
-        async def always_fail(_chat_id: str, _text: str):
-            send_call_count[0] += 1
-            return False
-
-        router = SignalRouter(
-            queue=queue,
-            send_telegram=always_fail,
-            format_signal=lambda sig: f"Signal: {sig.signal_id}",
-        )
-
-        sig = _make_signal(confidence=90)
-        sig.signal_id = "TEST-REQUEUE"
-        await queue.put(sig)
-
-        task = asyncio.create_task(router.start())
-        # Give enough time for first attempt + one re-queue cycle
-        await asyncio.sleep(0.3)
-        await router.stop()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        # Signal was attempted at least once and re-queued (retry counter incremented)
-        assert send_call_count[0] >= 1
-        assert sig._delivery_retries >= 1
-        assert "TEST-REQUEUE" not in router.active_signals
-
-    @pytest.mark.asyncio
-    async def test_failed_delivery_permanent_loss_after_max_retries(self, monkeypatch):
-        """Signal is permanently dropped (with log) after 3 failed delivery attempts."""
-        _telegram_channels_on(monkeypatch)
-        for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
-            monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, channel, "premium")
-
-        async def instant_sleep(_secs):
-            pass
-
-        monkeypatch.setattr(signal_router_module, "_delivery_sleep", instant_sleep)
-
-        queue = asyncio.Queue()
-        send_call_count = [0]
-
-        async def always_fail(_chat_id: str, _text: str):
-            send_call_count[0] += 1
-            return False
-
-        router = SignalRouter(
-            queue=queue,
-            send_telegram=always_fail,
-            format_signal=lambda sig: f"Signal: {sig.signal_id}",
-        )
-
-        sig = _make_signal(confidence=90)
-        sig.signal_id = "TEST-PERMANENT-LOSS"
-        await queue.put(sig)
-
-        task = asyncio.create_task(router.start())
-        # Allow sufficient time for all 3 attempts (2 sends + permanent loss on 3rd)
-        await asyncio.sleep(0.5)
-        await router.stop()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        # All 3 send attempts completed (2 re-queues + final permanent loss)
-        assert send_call_count[0] == 3
-        assert sig._delivery_retries == 2
-        assert "TEST-PERMANENT-LOSS" not in router.active_signals
-        assert sig.symbol not in router._position_lock
 
 
-        sig = _make_signal(confidence=95)
-        router._daily_best = [sig]
-        router.set_free_limit(0)
-        assert router._daily_best == []
 
-    @pytest.mark.asyncio
-    async def test_publish_free_signals_respects_zero_limit(self, sent_messages):
-        async def mock_send(chat_id: str, text: str):
-            sent_messages.append((chat_id, text))
-            return True
 
-        router = SignalRouter(
-            queue=asyncio.Queue(),
-            send_telegram=mock_send,
-            format_signal=lambda sig: f"Signal: {sig.signal_id}",
-        )
-        router._daily_best = [_make_signal(confidence=95)]
-        router.set_free_limit(0)
-
-        await router.publish_free_signals()
-
-        assert sent_messages == []
-
-    @pytest.mark.asyncio
-    async def test_successful_dispatch_writes_dispatch_log(self, queue, router, sent_messages, monkeypatch, tmp_path):
-        _telegram_channels_on(monkeypatch)
-        monkeypatch.chdir(tmp_path)
-        sig = _make_signal(confidence=90)
-        sig.signal_id = "TEST-DISPATCH-LOG"
-
-        await queue.put(sig)
-        task = asyncio.create_task(router.start())
-        for _ in range(30):
-            if sent_messages:
-                break
-            await asyncio.sleep(0.02)
-        await router.stop()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        dispatch_log_path = tmp_path / "data" / "dispatch_log.json"
-        assert dispatch_log_path.exists()
-        payload = json.loads(dispatch_log_path.read_text(encoding="utf-8"))
-        assert isinstance(payload, list)
-        assert payload[-1]["signal_id"] == "TEST-DISPATCH-LOG"
-        assert payload[-1]["telegram_text"] == sent_messages[-1][1]
 
 
 class TestCorrelationThrottle:
@@ -749,8 +524,6 @@ class TestCorrelationThrottle:
         import src.signal_router as sr_mod
         monkeypatch.setattr(sr_mod, "DIRECTION_CAP_MODE", "global")
         monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", cap)
-        for ch in ("360_SCALP",):
-            monkeypatch.setitem(sr_mod.CHANNEL_TELEGRAM_MAP, ch, "premium")
 
         async def mock_send(chat_id: str, text: str):
             sent_messages.append((chat_id, text))
@@ -758,9 +531,7 @@ class TestCorrelationThrottle:
 
         return SignalRouter(
             queue=queue,
-            send_telegram=mock_send,
-            format_signal=lambda sig: f"Signal: {sig.channel} {sig.symbol}",
-        )
+                                )
 
     @pytest.mark.asyncio
     async def test_below_cap_allows_signal(self, monkeypatch):
@@ -958,9 +729,7 @@ class TestRedisPersistence:
 
         router = SignalRouter(
             queue=asyncio.Queue(),
-            send_telegram=mock_send,
-            format_signal=lambda sig: f"Signal: {sig.signal_id}",
-            redis_client=mock_redis,
+                                    redis_client=mock_redis,
         )
         return router
 
@@ -1054,9 +823,7 @@ class TestRedisPersistence:
 
         router = SignalRouter(
             queue=asyncio.Queue(),
-            send_telegram=mock_send,
-            format_signal=lambda sig: f"Signal: {sig.signal_id}",
-            redis_client=None,
+                                    redis_client=None,
         )
         # Must not raise
         await router._persist_state()
@@ -1069,9 +836,7 @@ class TestRedisPersistence:
 
         router = SignalRouter(
             queue=asyncio.Queue(),
-            send_telegram=mock_send,
-            format_signal=lambda sig: f"Signal: {sig.signal_id}",
-            redis_client=None,
+                                    redis_client=None,
         )
         # Must not raise and must leave state empty
         await router.restore()
@@ -1214,67 +979,6 @@ class TestCleanupExpired:
 # ---------------------------------------------------------------------------
 
 
-class TestExpiryTelegramMessage:
-    """_notify_signal_expiry must surface real outcome data when the engine's
-    on_signal_expired callback has stamped a close price + realised P&L."""
-
-    @pytest.mark.asyncio
-    async def test_message_shows_close_price_and_pnl_when_stamped(self, queue):
-        """Stamped sig.current_price + sig.pnl_pct → message includes both."""
-        sent: list = []
-
-        async def _send(chat_id: str, text: str):
-            sent.append((chat_id, text))
-            return True
-
-        router = SignalRouter(
-            queue=queue,
-            send_telegram=_send,
-            format_signal=lambda sig: "",
-        )
-        sig = _make_signal(channel="360_SCALP", symbol="SOLUSDT")
-        sig.entry = 86.99
-        sig.current_price = 87.45
-        sig.pnl_pct = 0.53
-        sig.confidence = 80.0
-
-        with patch("src.signal_router.TELEGRAM_ACTIVE_CHANNEL_ID", "CH"):
-            await router._notify_signal_expiry(sig, datetime.now(timezone.utc))
-
-        assert len(sent) == 1
-        text = sent[0][1]
-        assert "Closed at: 87.45" in text
-        assert "+0.53%" in text or "0.53%" in text
-        assert "No P&L recorded" not in text
-        assert "Position auto-closed at market" in text or "auto-closed" in text
-
-    @pytest.mark.asyncio
-    async def test_message_falls_back_for_unfilled_entry(self, queue):
-        """Entry never reached → keep the legacy "no P&L" message but with
-        clearer copy ("No fill — no P&L recorded")."""
-        sent: list = []
-
-        async def _send(chat_id: str, text: str):
-            sent.append((chat_id, text))
-            return True
-
-        router = SignalRouter(
-            queue=queue,
-            send_telegram=_send,
-            format_signal=lambda sig: "",
-        )
-        sig = _make_signal(channel="360_SCALP", symbol="SOLUSDT")
-        sig.entry = 86.99
-        sig.current_price = 0.0  # never recorded
-        sig.pnl_pct = 0.0
-        sig.confidence = 80.0
-
-        with patch("src.signal_router.TELEGRAM_ACTIVE_CHANNEL_ID", "CH"):
-            await router._notify_signal_expiry(sig, datetime.now(timezone.utc))
-
-        text = sent[0][1]
-        assert "No fill" in text or "Entry was not reached" in text
-        assert "Closed at" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -1295,9 +999,7 @@ class TestStartLoopCallsCleanup:
 
         router = SignalRouter(
             queue=queue,
-            send_telegram=mock_send,
-            format_signal=lambda sig: "",
-        )
+                                )
         # Monkey-patch cleanup_expired to record calls
         original = router.cleanup_expired
 
@@ -1351,166 +1053,8 @@ class TestStartLoopCallsCleanup:
         assert sig.signal_id not in router._active_signals
 
 
-class TestPublishHighlight:
-    """Tests for SignalRouter.publish_highlight() – rate limit and min TP."""
-
-    @pytest.fixture
-    def router_with_free(self, queue, sent_messages, monkeypatch):
-        """Router with TELEGRAM_FREE_CHANNEL_ID configured."""
-        import src.signal_router as m
-        monkeypatch.setattr(m, "TELEGRAM_FREE_CHANNEL_ID", "free_channel")
-        for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
-            monkeypatch.setitem(m.CHANNEL_TELEGRAM_MAP, channel, "premium")
-
-        async def mock_send(chat_id: str, text: str):
-            sent_messages.append((chat_id, text))
-            return True
-
-        def mock_format(sig):
-            return f"Signal: {sig.symbol}"
-
-        return SignalRouter(queue=queue, send_telegram=mock_send, format_signal=mock_format)
-
-    def _make_sig(self):
-        return _make_signal()
-
-    @pytest.mark.asyncio
-    async def test_highlight_posted_to_free_channel(self, router_with_free, sent_messages):
-        sig = self._make_sig()
-        await router_with_free.publish_highlight(sig, 2, 0.62)
-        assert any(chat_id == "free_channel" for chat_id, _ in sent_messages)
-
-    @pytest.mark.asyncio
-    async def test_highlight_skipped_for_tp1(self, router_with_free, sent_messages):
-        sig = self._make_sig()
-        await router_with_free.publish_highlight(sig, 1, 0.31)
-        assert sent_messages == []
-
-    @pytest.mark.asyncio
-    async def test_highlight_rate_limit_respected(self, router_with_free, sent_messages):
-        sig = self._make_sig()
-        # Post 4 highlights (max)
-        for _ in range(4):
-            await router_with_free.publish_highlight(sig, 2, 0.62)
-        # 5th should be blocked
-        await router_with_free.publish_highlight(sig, 2, 0.62)
-        free_msgs = [m for m in sent_messages if m[0] == "free_channel"]
-        assert len(free_msgs) == 4
-
-    @pytest.mark.asyncio
-    async def test_highlight_daily_reset(self, router_with_free, sent_messages):
-        import datetime as dt
-        sig = self._make_sig()
-        # Simulate yesterday's limit
-        router_with_free._highlight_count_today = 4
-        yesterday = dt.date.today() - dt.timedelta(days=1)
-        router_with_free._highlight_date = yesterday
-
-        # First post on new day should succeed
-        await router_with_free.publish_highlight(sig, 2, 0.62)
-        free_msgs = [m for m in sent_messages if m[0] == "free_channel"]
-        assert len(free_msgs) == 1
-        assert router_with_free._highlight_count_today == 1
-
-    @pytest.mark.asyncio
-    async def test_highlight_tp3_posted(self, router_with_free, sent_messages):
-        sig = self._make_sig()
-        await router_with_free.publish_highlight(sig, 3, 1.25)
-        free_msgs = [m for m in sent_messages if m[0] == "free_channel"]
-        assert len(free_msgs) == 1
-
-    @pytest.mark.asyncio
-    async def test_highlight_not_posted_when_no_free_channel_id(
-        self, queue, sent_messages, monkeypatch
-    ):
-        import src.signal_router as m
-        monkeypatch.setattr(m, "TELEGRAM_FREE_CHANNEL_ID", "")
-
-        async def mock_send(chat_id, text):
-            sent_messages.append((chat_id, text))
-            return True
-
-        r = SignalRouter(queue=queue, send_telegram=mock_send, format_signal=lambda s: "")
-        sig = self._make_sig()
-        await r.publish_highlight(sig, 2, 0.62)
-        assert sent_messages == []
-
-    @pytest.mark.asyncio
-    async def test_highlight_message_contains_tp_level(self, router_with_free, sent_messages):
-        sig = self._make_sig()
-        await router_with_free.publish_highlight(sig, 2, 0.62)
-        _, text = sent_messages[-1]
-        assert "TP2" in text
 
 
-class TestPublishDailyRecap:
-    """Tests for SignalRouter.publish_daily_recap()."""
-
-    @pytest.fixture
-    def router_with_free(self, queue, sent_messages, monkeypatch):
-        import src.signal_router as m
-        monkeypatch.setattr(m, "TELEGRAM_FREE_CHANNEL_ID", "free_channel")
-        for channel in ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"):
-            monkeypatch.setitem(m.CHANNEL_TELEGRAM_MAP, channel, "premium")
-
-        async def mock_send(chat_id, text):
-            sent_messages.append((chat_id, text))
-            return True
-
-        return SignalRouter(queue=queue, send_telegram=mock_send, format_signal=lambda s: "")
-
-    @pytest.mark.asyncio
-    async def test_recap_skipped_when_no_trades(self, router_with_free, sent_messages):
-        mock_tracker = MagicMock()
-        mock_tracker.get_daily_summary.return_value = {
-            "total": 0, "wins": 0, "losses": 0, "breakeven": 0,
-            "win_rate": 0.0, "avg_pnl": 0.0, "best_trade": None, "top_trades": [],
-        }
-        await router_with_free.publish_daily_recap(mock_tracker)
-        assert sent_messages == []
-
-    @pytest.mark.asyncio
-    async def test_recap_posted_to_free_channel(self, router_with_free, sent_messages):
-        mock_tracker = MagicMock()
-        mock_tracker.get_daily_summary.return_value = {
-            "total": 5, "wins": 4, "losses": 1, "breakeven": 0,
-            "win_rate": 80.0, "avg_pnl": 1.2, "best_trade": None, "top_trades": [],
-        }
-        await router_with_free.publish_daily_recap(mock_tracker)
-        free_msgs = [m for m in sent_messages if m[0] == "free_channel"]
-        assert len(free_msgs) == 1
-
-    @pytest.mark.asyncio
-    async def test_recap_contains_stats(self, router_with_free, sent_messages):
-        mock_tracker = MagicMock()
-        mock_tracker.get_daily_summary.return_value = {
-            "total": 10, "wins": 7, "losses": 2, "breakeven": 1,
-            "win_rate": 77.8, "avg_pnl": 1.5, "best_trade": None, "top_trades": [],
-        }
-        await router_with_free.publish_daily_recap(mock_tracker)
-        _, text = sent_messages[-1]
-        assert "10" in text
-        assert "RECAP" in text
-
-    @pytest.mark.asyncio
-    async def test_recap_not_posted_when_no_free_channel_id(
-        self, queue, sent_messages, monkeypatch
-    ):
-        import src.signal_router as m
-        monkeypatch.setattr(m, "TELEGRAM_FREE_CHANNEL_ID", "")
-
-        async def mock_send(chat_id, text):
-            sent_messages.append((chat_id, text))
-            return True
-
-        r = SignalRouter(queue=queue, send_telegram=mock_send, format_signal=lambda s: "")
-        mock_tracker = MagicMock()
-        mock_tracker.get_daily_summary.return_value = {
-            "total": 5, "wins": 4, "losses": 1, "breakeven": 0,
-            "win_rate": 80.0, "avg_pnl": 1.2, "best_trade": None, "top_trades": [],
-        }
-        await r.publish_daily_recap(mock_tracker)
-        assert sent_messages == []
 
 
 class TestRouterDropTelemetry:
@@ -1657,9 +1201,7 @@ class TestRouterDeliveryCensusIsPublished:
 
         return SignalRouter(
             queue=MagicMock(),
-            send_telegram=MagicMock(),
-            format_signal=lambda sig: "stub",
-            redis_client=None,
+                                    redis_client=None,
         )
 
     def test_the_stats_carry_the_per_setup_breakdown(self):
@@ -1943,64 +1485,7 @@ class TestTheUnstampedRouterExits:
         drops = router.delivery_stats()["drops_by_reason"]
         assert drops.get("risk_manager_rr_floor") == 1
 
-    @pytest.mark.asyncio
-    async def test_an_unconfigured_channel_is_counted_not_silent(
-        self, queue, sent_messages, monkeypatch
-    ):
-        """No channel id means no delivery for EVERY candidate on that channel,
-        forever, and nothing anywhere said so."""
-        _telegram_channels_on(monkeypatch)
-        monkeypatch.setitem(
-            signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SCALP", ""
-        )
 
-        async def mock_send(_chat_id, _text):
-            sent_messages.append(("sent", _text))
-            return True
-
-        r = SignalRouter(
-            queue=queue, send_telegram=mock_send, format_signal=lambda s: "x"
-        )
-        sig = _make_signal(symbol="NOCHANUSDT", confidence=90)
-        sig.signal_id = "NO-CHANNEL"
-        await self._run(r, queue, sig)
-
-        assert "NO-CHANNEL" not in r.active_signals
-        assert r.delivery_stats()["drops_by_reason"].get("no_channel_configured") == 1
-
-    @pytest.mark.asyncio
-    async def test_a_permanently_lost_signal_is_counted_once_not_per_retry(
-        self, queue, monkeypatch
-    ):
-        """The most serious outcome on this hop and the least visible.
-
-        Counted ONCE, at the point the candidate is actually abandoned — a
-        re-queued retry has not been dropped yet, and stamping it would
-        double-count the candidate the way the enqueue funnel already does.
-        """
-        _telegram_channels_on(monkeypatch)
-        monkeypatch.setitem(
-            signal_router_module.CHANNEL_TELEGRAM_MAP, "360_SCALP", "premium"
-        )
-
-        async def instant_sleep(_secs):
-            pass
-
-        monkeypatch.setattr(signal_router_module, "_delivery_sleep", instant_sleep)
-
-        async def always_fails(_chat_id, _text):
-            return False
-
-        r = SignalRouter(
-            queue=queue, send_telegram=always_fails, format_signal=lambda s: "x"
-        )
-        sig = _make_signal(symbol="LOSTUSDT", confidence=90)
-        sig.signal_id = "DELIVERY-LOST"
-        await self._run(r, queue, sig)
-
-        assert "DELIVERY-LOST" not in r.active_signals
-        drops = r.delivery_stats()["drops_by_reason"]
-        assert drops.get("delivery_failed") == 1, "counted once, after the last retry"
 
     def test_the_reason_classifier_buckets_by_cause_not_by_numbers(self):
         """`risk.reason` interpolates the values, so using it as a counter key

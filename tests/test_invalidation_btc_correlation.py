@@ -56,7 +56,6 @@ def _build_monitor(active: Dict[str, Signal]) -> TradeMonitor:
 
     return TradeMonitor(
         data_store=data_store,
-        send_telegram=_mock_send,
         get_active_signals=lambda: dict(active),
         remove_signal=lambda sid: None,
         update_signal=MagicMock(),

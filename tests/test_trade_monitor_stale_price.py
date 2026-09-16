@@ -47,7 +47,6 @@ def _monitor(age_seconds, candle_close=_STALE_CLOSE):
     data_store.ticks = {}
     return TradeMonitor(
         data_store=data_store,
-        send_telegram=MagicMock(),
         get_active_signals=lambda: {},
         remove_signal=MagicMock(),
         update_signal=MagicMock(),

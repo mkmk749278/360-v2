@@ -105,7 +105,6 @@ def _build_monitor(*, regime_label: str = "TRENDING_DOWN") -> TradeMonitor:
     ds.ticks = {}
     return TradeMonitor(
         data_store=ds,
-        send_telegram=AsyncMock(return_value=True),
         get_active_signals=lambda: {},
         remove_signal=lambda sid: None,
         update_signal=MagicMock(),

@@ -271,6 +271,121 @@ exist.
 
 ---
 
+## SESSION 150 2026-09-16 — the Telegram channels are deleted, and the bot is untouched
+
+Owner, after the Slack removal: *"Clean up everything no subscribers in telegram
+channels, keep only two bots to use commands, know liveness, etc"*. That is the
+second half of Session 148's Phase 2, and the answer to both questions he had
+asked earlier in the session (reorder-and-keep vs delete; what the removal buys).
+
+**The property that was actually bought.** #1034 inverted the ordering and put
+the send/retry/lose block behind `TELEGRAM_SIGNALS_ENABLED` — so the hazard was
+one env var away, and `ACTIVE_CONTEXT` recorded the revert for #1034 as *setting
+that flag back to true*. **The documented rollback for the fix restored the
+bug.** #1037 removes the machinery: a chat service can no longer stand in front
+of a paying user's order because there is no code left to stand there.
+`test_telegram_is_gone_from_the_money_path.py` pins that on the AST and was
+verified against `origin/main` — every guard in it fails on the pre-fix tree.
+
+**The finding that justified the whole change, and nobody had looked.**
+`CONTENT_ENGINE_ENABLED` defaults **true**, `ContentScheduler` was wired and
+running, every generator takes `use_gpt=True`, and `_run_task` **generates
+before it posts**:
+
+    text = await self._generate(task_name, engine_ctx)   # paid GPT call
+    if "free" in channels: await self._post_free(text)   # silent no-op
+
+All five scheduled tasks post to `["free"]` / `["active","free"]`, both blanked
+by #1034. So since that merge the engine had been making **~4 paid GPT-4o-mini
+calls a day (29/week)** to write market commentary that was generated,
+discarded and read by nobody. Cheap per call and wrong in principle, against a
+standing *"we don't want to generate any bills"*. **Yesterday's safe design —
+blank the ids, because every posting site already refuses an unconfigured
+channel — is exactly what orphaned the producer silently.** A switch applied at
+the identifier cannot tell a consumer to stop computing.
+
+**Deleted, 3,342 lines against 167:** the router's `_process` send block, seven
+channel publishers (`_signal_pulse_loop`, `publish_free_signals`,
+`publish_highlight`, `publish_daily_recap`, `_maybe_publish_free_signal`,
+`publish_scoreboard`, `_notify_signal_expiry`) and their dead free-channel
+state; `trade_monitor`'s four posters (`_post_update` and its **20** call sites,
+`_post_dca_update`, `_post_pre_tp_alert`, `_post_signal_closed`) plus the
+free-channel storytelling block; five whole modules with no importer left
+(`scheduler`, `content_engine`, `formatter`, `free_watch_service`,
+`cornix_formatter`) and `src/prompts/`; the bot's channel posters and every
+signal-message formatter; the config block, the map, `CHANNEL_TELEGRAM_MAP`, the
+`/set_free_channel_limit` command and its plumbing; the boot pre-flight and the
+boot test message; the deploy's channel secrets, plus a purge of the stale keys
+from the VPS `.env` (same reasoning as the Slack webhook).
+
+**The safety argument is that it is a runtime no-op, and it is checkable.** The
+channel map is built from `TELEGRAM_ACTIVE_CHANNEL_ID`, which has been `""`
+since #1034 — so every one of those ~26 call sites was already returning on its
+first line. Nothing deleted could have executed.
+
+**`telegram_bot.py` 825 → 355 lines, keeping exactly what the owner asked for:**
+`send_message` (OTP + command replies), `send_admin_alert` (liveness pager),
+`send_document`, `poll_commands`. `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_ADMIN_CHAT_ID` are untouched, and a test asserts all four survive —
+a cleanup that took the pager with it would be worse than the clutter, because
+a dead pager sends no message.
+
+**Four things this session got wrong before getting them right**, all worth
+keeping:
+
+- **`ast.parse` said OK over a real bug.** A line-range deletion left an
+  orphaned `log.warning(..., exc)` referencing an undefined name, indented
+  *inside* the SL-to-breakeven branch of `_check_pre_tp_grab`. The indentation
+  happened to be valid, so the syntax check passed; `ruff`'s F821 is what caught
+  it. **Syntax-valid is not correct**, on the money path, for the second time
+  this repo has recorded the linter beating the suite.
+- **A blanket "delete any function mentioning a deleted name" pass deleted
+  FIXTURES.** 558 failures became 160, then stalled at 76 with `fixture 'router'
+  not found` — because the sweep removed `@pytest.fixture def router(...)` along
+  with the tests. Restored the files and redid the pass restricted to `test_*`
+  functions, stripping kwargs from helpers instead. **A test unit and a test
+  helper need opposite treatment**, and only the first is named for what it is.
+- **Regex surgery broke on `lambda`.** `format_signal=lambda s: ""` became
+  `queue=queue s: ""`. Replaced the pattern with a paren-depth scan. The two
+  fixtures it had mangled beyond repair were rewritten by hand rather than
+  patched further — at some point another regex is the wrong tool.
+- **A rotted assertion, failing in the flattering direction.**
+  `test_telegram_not_in_front_of_dispatch.py`'s last guard ended
+  `raise AssertionError("no if TELEGRAM_SIGNALS_ENABLED: branch in _process —
+  the fix has been reverted")`. Deleting the branch made it fail *claiming the
+  fix had been reverted*. **An assertion whose premise the diff removes reports
+  the opposite of what happened.** Narrowed, not deleted — this repo's own rule,
+  and the grep for the invariant's old words is what found it.
+
+**Two real tests were re-pointed rather than deleted**, because their property
+outlived their observable: the terminal-status race now counts
+`_broker_close_full` (the money-path action, a strictly better observable than a
+chat message — verified by disabling the guard and watching it go red), and the
+staleness gate now asserts admission to `_active_signals` rather than a send.
+
+`ruff` clean. **9,002 passed, 58 skipped, 0 failed** (`test_deployment.py`: 6
+passed separately).
+
+**Deliberately NOT done:** `src/formatter.py`'s deletion removes the only
+non-channel text formatter in the engine; nothing imported it. And the scanner's
+`radar_only` rollout state and `RADAR_ALERT_MIN_CONFIDENCE` **stay** — that is
+an observe-only evaluation pass over soft-disabled channels, a different
+mechanism that merely shares the word "radar", and the config comment now says
+so.
+
+**Still open, unchanged:** `dispatch_log.json`'s `telegram_text` is gone with
+the formatter that filled it (one writer, and its only reader was a test);
+`LifecycleAlertConsumer.health()` still has no ops surface; and `deploy.yml`
+still delivers `BINANCE_API_SECRET`, `TELEGRAM_BOT_TOKEN` and
+`NOWPAYMENTS_IPN_SECRET` **unmasked** — the Session 149 finding, still a finding.
+
+**Ops:** `/signals/router-drops` reads `telegram_bypassed` /
+`telegram_channels_enabled`, which the engine no longer publishes. The card
+degrades to its own `not_reported` branch rather than breaking, and is removed
+in the paired ops change.
+
+---
+
 ## SESSION 149 2026-09-16 — Phase 2 of the debloat: the Slack lane is deleted
 
 The owner asked whether Slack had been cleared with Telegram. It had not:

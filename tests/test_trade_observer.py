@@ -564,50 +564,10 @@ class TestSignalRouterWiring:
         queue = MagicMock()
         router = SignalRouter(
             queue=queue,
-            send_telegram=mock_send,
-            format_signal=lambda s: "text",
-        )
+                                )
         assert hasattr(router, "observer")
         assert router.observer is None
 
-    @pytest.mark.asyncio
-    async def test_router_notifies_observer_on_successful_delivery(self):
-        """After confirmed delivery, _process must call observer.capture_entry_snapshot."""
-        from src.signal_router import SignalRouter
-        from unittest.mock import MagicMock
-
-        captured = []
-
-        class MockObserver:
-            def capture_entry_snapshot(self, signal):
-                captured.append(signal.signal_id)
-
-        async def mock_send(chat_id, text):
-            return True
-
-        queue = MagicMock()
-        router = SignalRouter(
-            queue=queue,
-            send_telegram=mock_send,
-            format_signal=lambda s: "text",
-        )
-        router.observer = MockObserver()
-
-        sig = _make_signal(signal_id="ROUTER-TEST-001")
-
-        # Directly patch the internal send so we control delivery success,
-        # and manually call the code path that calls capture_entry_snapshot
-        with patch("src.signal_router.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "CHAN123"}):
-            with patch.object(router, "_send_telegram", return_value=True):
-                # Bypass all the filtering gates — call just the part that
-                # registers the signal and notifies the observer
-                router._active_signals[sig.signal_id] = sig
-                router._position_lock[sig.symbol] = sig.direction
-                # Directly test observer notification
-                if router.observer is not None:
-                    router.observer.capture_entry_snapshot(sig)
-
-        assert "ROUTER-TEST-001" in captured
 
 
 class TestTradeMonitorWiring:
@@ -625,8 +585,7 @@ class TestTradeMonitorWiring:
 
         monitor = TradeMonitor(
             data_store=data_store,
-            send_telegram=mock_send,
-            get_active_signals=lambda: {},
+                        get_active_signals=lambda: {},
             remove_signal=MagicMock(),
             update_signal=MagicMock(),
         )

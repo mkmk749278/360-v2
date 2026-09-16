@@ -382,7 +382,7 @@ HistoricalDataStore + OrderFlowStore
 Scanner (15s × 75 pairs) → 19 evaluators (17 live) → gate chain → scoring
       ↓
 SignalRouter → in-app Lumin feed (primary, B1) · FCM push topics
-                (Telegram broadcast channels: OFF since 2026-09-15, #1034)
+                (Telegram broadcast channels: DELETED 2026-09-16, #1037)
       ↓
 ┌─────────────────────────────────────────────────────┐
 │ ENGINE CONTAINER                                    │
@@ -405,17 +405,28 @@ Binance REST API
 
 **Per-user settings:** API writes SQLite (shared volume) → engine reads at dispatch (fresh SELECT, WAL mode). Change takes effect on next signal dispatch.
 
-**Delivery surfaces (owner, 2026-07-25; channels retired 2026-09-15):** the
-**Lumin app is the primary surface for users** — that is where signals are managed
-and read. Telegram *works in India* (the old "banned in-region" claim in these docs
-was false) but the **broadcast channels are OFF** (`TELEGRAM_SIGNALS_ENABLED`,
-default false, #1034): they had no audience, and until that change a Telegram send
-**gated** the money path rather than mirroring it.
+**Delivery surfaces (owner, 2026-07-25; channels DELETED 2026-09-16):** the
+**Lumin app is the only surface for users** — that is where signals are managed
+and read. Telegram *works in India* (the old "banned in-region" claim in these
+docs was false); the **broadcast channels are gone** (owner: *"no subscribers in
+telegram channels"*, #1037). #1034 had switched them off behind
+`TELEGRAM_SIGNALS_ENABLED`; #1037 removed the machinery, so a chat service can
+no longer stand in front of the money path *by construction* rather than by a
+flag — and the documented revert for #1034 was to set that flag back to true.
+
+Deleted with them, because a channel was each one's only destination: the
+content scheduler and its GPT content engine (which had been making ~4 paid
+calls a day into a void since #1034), the free-watch radar service, the Cornix
+block, the signal pulse loop, the daily recap and weekly scoreboard, and the
+four `trade_monitor` channel posters. If daily AI commentary or radar alerts are
+ever wanted in the app, that is a **new feature to spec**, not a revert.
 
 **The bot stays.** Admin alerts, the liveness pager, `/diag` and every other
-command, and OTP delivery address a chat rather than a channel and are untouched
-by that switch — control is still ops-only, alerting is still read-only, and both
-FCM push and Telegram remain acceptable paging paths.
+command, and OTP delivery address a chat rather than a channel and were never
+part of the channel path — control is still ops-only, alerting is still
+read-only, and both FCM push and Telegram remain acceptable paging paths.
+`telegram_bot.py` keeps exactly `send_message`, `send_admin_alert`,
+`send_document` and `poll_commands`.
 
 **Control vs alerting:** control (kill switch, auto-mode flips, manual close) is
 **ops-only** — it needs the audit trail. Alerting is read-only, so FCM push *and*
@@ -439,7 +450,8 @@ Telegram are both acceptable paging paths.
 | Pattern catalog | `src/chart_patterns.py` |
 | Pair universe | `src/pair_manager.py` |
 | Trade monitor (backstop) | `src/trade_monitor.py` |
-| Telegram routing | `src/signal_router.py`, `src/telegram_bot.py` |
+| Signal routing (router layer: cooldowns, correlation lock, caps, staleness) | `src/signal_router.py` |
+| Telegram BOT — commands, admin alerts, liveness pager, OTP (no channels) | `src/telegram_bot.py` |
 | Config tunables | `config/__init__.py` |
 | Per-user dispatch | `src/execution/signal_dispatch.py` |
 | Position FSM | `src/execution/position_fsm.py` |
