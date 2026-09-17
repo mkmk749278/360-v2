@@ -399,57 +399,13 @@ class TestBootstrapBootMessage:
             _tasks=[],
         )
 
-    @pytest.mark.asyncio
-    @patch("src.bootstrap.spot_rate_limiter")
-    @patch("src.bootstrap.futures_rate_limiter")
-    @patch("src.bootstrap.BinanceClient")
-    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
-    @patch("src.bootstrap.TELEGRAM_ACTIVE_CHANNEL_ID", "-100123456")
-    @patch("config.validate_critical_env_vars")
-    async def test_boot_sends_test_message_to_active_channel(
-        self, _vcv, _bc, _frl, _srl,
-    ):
-        """boot() sends a boot test message to TELEGRAM_ACTIVE_CHANNEL_ID."""
-        engine = self._make_full_boot_engine(pair_count=3)
-        bootstrap = Bootstrap(engine)
-        with patch.object(bootstrap, "start_websockets", AsyncMock()), \
-             patch.object(bootstrap, "preflight_check", AsyncMock(return_value=True)), \
-             patch.object(bootstrap, "launch_runtime_tasks", return_value=[]):
-            await bootstrap.boot()
 
-        engine.telegram.send_message.assert_awaited_once()
-        call_args = engine.telegram.send_message.call_args
-        assert call_args[0][0] == "-100123456"
-        msg = call_args[0][1]
-        assert "ENGINE BOOT TEST" in msg
-        assert "Scanning 3 pairs" in msg
 
     @pytest.mark.asyncio
     @patch("src.bootstrap.spot_rate_limiter")
     @patch("src.bootstrap.futures_rate_limiter")
     @patch("src.bootstrap.BinanceClient")
     @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
-    @patch("src.bootstrap.TELEGRAM_ACTIVE_CHANNEL_ID", "")
-    @patch("config.validate_critical_env_vars")
-    async def test_boot_skips_test_message_when_channel_not_set(
-        self, _vcv, _bc, _frl, _srl,
-    ):
-        """boot() must NOT call send_message when TELEGRAM_ACTIVE_CHANNEL_ID is empty."""
-        engine = self._make_full_boot_engine()
-        bootstrap = Bootstrap(engine)
-        with patch.object(bootstrap, "start_websockets", AsyncMock()), \
-             patch.object(bootstrap, "preflight_check", AsyncMock(return_value=True)), \
-             patch.object(bootstrap, "launch_runtime_tasks", return_value=[]):
-            await bootstrap.boot()
-
-        engine.telegram.send_message.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    @patch("src.bootstrap.spot_rate_limiter")
-    @patch("src.bootstrap.futures_rate_limiter")
-    @patch("src.bootstrap.BinanceClient")
-    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
-    @patch("src.bootstrap.TELEGRAM_ACTIVE_CHANNEL_ID", "-100123456")
     @patch("config.validate_critical_env_vars")
     async def test_boot_continues_when_test_message_fails(
         self, _vcv, _bc, _frl, _srl,

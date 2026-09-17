@@ -86,8 +86,6 @@ from src.websocket_manager import WebSocketManager
 from src.redis_client import RedisClient
 from src.signal_queue import SignalQueue
 from src.state_cache import StateCache
-from src.scheduler import ContentScheduler
-from src.free_watch_service import FreeWatchService
 from config import (
     MOVER_IGNITION_ENABLED,
     MOVER_IGNITION_WINDOW_SEC,
@@ -104,7 +102,6 @@ from config import (
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     CIRCUIT_BREAKER_STARTUP_GRACE_SECONDS,
     CIRCUIT_BREAKER_RESUME_AFTER_COOLDOWN,
-    CHANNEL_TELEGRAM_MAP,
     ONCHAIN_API_KEY,
     PERFORMANCE_TRACKER_PATH,
     AUTO_EXECUTION_MODE,
@@ -167,8 +164,6 @@ class CryptoSignalEngine:
         self._state_cache = StateCache(self._redis_client)
         self.router = SignalRouter(
             queue=self._signal_queue,
-            send_telegram=self.telegram.send_message,
-            format_signal=TelegramBot.format_signal,
             redis_client=self._redis_client,
         )
 
@@ -305,7 +300,6 @@ class CryptoSignalEngine:
 
         self.monitor = TradeMonitor(
             data_store=self.data_store,
-            send_telegram=self.telegram.send_message,
             get_active_signals=lambda: self.router.active_signals,
             remove_signal=self._remove_and_archive,
             update_signal=self.router.update_signal,
@@ -347,13 +341,11 @@ class CryptoSignalEngine:
 
         # Macro Watchdog – async background task for global market-event alerts
         # Polls news, Fear & Greed index, and uses OpenAI to detect significant
-        # macro events (FOMC, wars, token listings) and sends alerts to Telegram.
-        # HIGH/CRITICAL severity events also broadcast to the free channel as
-        # subscriber-visible breaking news (paid-conversion funnel content).
-        # MEDIUM/LOW severity stays admin-only.
+        # macro events (FOMC, wars, token listings) and sends alerts to the
+        # owner's chat. The HIGH/CRITICAL free-channel broadcast was removed
+        # with the channels on 2026-09-16; every severity is admin-only now.
         self._macro_watchdog = MacroWatchdog(
             send_alert=self.telegram.send_admin_alert,
-            send_to_free=self.telegram.post_to_free_channel,
             openai_evaluator=self._openai_evaluator,
         )
 
@@ -483,7 +475,6 @@ class CryptoSignalEngine:
             log.warning(f"signal_history TP reconciliation failed: {exc}")
         self._boot_time: float = 0.0          # time.monotonic() — for uptime
         self._boot_wall_time: float = 0.0     # time.time()      — for ISO display
-        self._free_channel_limit: int = 2  # max free signals published per day
         self._alert_subscribers: Set[str] = set()  # admin IDs subscribed to alerts
 
         # Scanner (dependency-injected)
@@ -543,11 +534,6 @@ class CryptoSignalEngine:
             ),
         )
 
-        # Wire the free-channel highlight callback so the monitor posts winning
-        # trades (TP2+) to the free channel in real-time.
-        self.monitor.on_highlight_callback = lambda sig, tp, pnl: asyncio.ensure_future(
-            self.router.publish_highlight(sig, tp, pnl)
-        )
         # Wire lifecycle outcome callback so scanner observability can attribute
         # final outcomes back to setup family/path.
         self.monitor.on_lifecycle_outcome_callback = self._scanner.on_signal_lifecycle_outcome
@@ -556,24 +542,7 @@ class CryptoSignalEngine:
         # signal-closed (TP/SL hit) AI posts are generated and sent automatically.
         self.monitor.engine_context_fn = self._get_engine_context
 
-        # PR2: Content scheduler — fires daily briefings, session opens, weekly card.
-        self._content_scheduler = ContentScheduler(
-            post_to_free=self.telegram.post_to_free_channel,
-            post_to_active=self.telegram.post_to_active_channel,
-            engine_context_fn=self._get_engine_context,
-        )
-
-        # Free-channel radar watch lifecycle service.
-        # Tracks radar_alert posts and resolves them when a paid signal matches
-        # or when the watch TTL expires.  market_watch is NOT tracked here.
-        self._free_watch_service = FreeWatchService(
-            send_free=self.telegram.post_to_free_channel,
-            redis_client=self._redis_client,
-        )
-        # Wire radar candidate callback: scanner → watch creation + free posting.
-        self._scanner.on_radar_candidate = self._handle_radar_candidate
         # Wire paid-signal callback: router → watch resolution.
-        self.router.on_signal_routed = self._free_watch_service.on_paid_signal
         # Wire expired-signal callback: router.cleanup_expired → engine handler.
         # Without this, expired signals get dropped from active_signals with no
         # status flip / no archive / no broker close — broker positions stay
@@ -598,7 +567,6 @@ class CryptoSignalEngine:
             tasks=self._tasks,
             boot_time=self._boot_time,
             boot_wall_time=self._boot_wall_time,
-            free_channel_limit=self._free_channel_limit,
             alert_subscribers=self._alert_subscribers,
             restart_callback=self._restart_tasks,
             ai_insight_fn=get_ai_insight,
@@ -758,7 +726,6 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning(f"signal_history flush failed: {exc}")
         self.router.remove_signal(signal_id)
-        self._content_scheduler.update_last_post()
 
     def _handle_signal_expiry(self, sig: "Signal", now: "datetime") -> None:
         """Finalise an expired signal: P&L, status, archive, broker close, perf.
@@ -1574,52 +1541,6 @@ class CryptoSignalEngine:
             "is_active_market": False,
         }
 
-    async def _handle_radar_candidate(
-        self,
-        symbol: str,
-        source_channel: str,
-        bias: str,
-        setup_name: str,
-        waiting_for: str,
-        confidence: int,
-    ) -> None:
-        """Handle a new radar candidate from the scanner.
-
-        Generates a radar_alert message, posts it to the free channel, and
-        creates a tracked watch via FreeWatchService.  This is intentionally
-        only called for actual radar_alert candidates — market_watch posts
-        must NOT flow through here.
-        """
-        from src.content_engine import generate_content
-
-        # Attempt to create a tracked watch first; if deduplicated, skip posting.
-        watch = await self._free_watch_service.create_watch(
-            symbol=symbol,
-            source_channel=source_channel,
-            bias=bias,
-            setup_name=setup_name,
-            waiting_for=waiting_for,
-            confidence=confidence,
-        )
-        if watch is None:
-            # Deduplicated or cooldown — do not re-post the radar alert.
-            return
-
-        # Generate and post the free-channel radar alert.
-        try:
-            ctx = {
-                "symbol": symbol,
-                "bias": bias,
-                "confidence": confidence,
-                "waiting_for": waiting_for,
-                "setup_name": setup_name,
-                "is_active_market": False,
-            }
-            text = await generate_content("radar_alert", ctx, use_gpt=False)
-            if text:
-                await self.telegram.post_to_free_channel(text)
-        except Exception as exc:
-            log.debug("Radar alert post failed for {}: {}", symbol, exc)
 
     # ------------------------------------------------------------------
     # Pre-flight checks (delegated to Bootstrap)
@@ -1642,25 +1563,6 @@ class CryptoSignalEngine:
         # Telegram block entirely and nothing is dropped — so this warning
         # would fire eight times at every boot with a sentence that is false,
         # which is the alarming-caption-over-a-healthy-subsystem failure.
-        import config as _boot_cfg
-        if not _boot_cfg.TELEGRAM_SIGNALS_ENABLED:
-            log.info(
-                "STARTUP: Telegram broadcast channels are OFF — signals go to "
-                "the app feed, push and auto-trade dispatch only"
-            )
-        for chan_name, chan_id in (
-            CHANNEL_TELEGRAM_MAP.items()
-            if _boot_cfg.TELEGRAM_SIGNALS_ENABLED
-            else ()
-        ):
-            if not chan_id:
-                log.warning(
-                    "⚠️  STARTUP: Telegram channel ID for '%s' is not configured "
-                    "(CHANNEL_TELEGRAM_MAP[%s] is empty). Signals for this channel "
-                    "will be silently dropped. Set the corresponding env variable "
-                    "in .env before starting the engine.",
-                    chan_name, chan_name,
-                )
         await self._bootstrap.boot()
         # Sync boot_time to command handler after boot sets it.
         # ``_boot_time`` is monotonic (for uptime); ``_boot_wall_time`` is
@@ -1862,36 +1764,7 @@ class CryptoSignalEngine:
     # Free-channel, pair-refresh, snapshot loops
     # ------------------------------------------------------------------
 
-    async def _free_channel_loop(self) -> None:
-        """Publish daily performance recap every 24 hours."""
-        while True:
-            await asyncio.sleep(86_400)
-            try:
-                await self.router.publish_daily_recap(self._performance_tracker)
-            except Exception as exc:
-                log.error("Free channel publish error: %s", exc)
 
-    async def _weekly_scoreboard_loop(self) -> None:
-        """Publish weekly scoreboard every Sunday at ~00:00 UTC."""
-        import datetime
-        while True:
-            now = datetime.datetime.now(datetime.timezone.utc)
-            # Compute seconds until next Sunday 00:00 UTC (weekday 6 = Sunday)
-            days_until_sunday = (6 - now.weekday()) % 7
-            next_sunday = (now + datetime.timedelta(days=days_until_sunday)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            wait_secs = (next_sunday - now).total_seconds()
-            # If we are already past or very close to the target time (<60 s), push to
-            # the following Sunday to avoid posting multiple times in the same window.
-            if wait_secs < 60:
-                next_sunday += datetime.timedelta(days=7)
-                wait_secs = (next_sunday - now).total_seconds()
-            await asyncio.sleep(max(wait_secs, 1))
-            try:
-                await self.router.publish_scoreboard(self._performance_tracker)
-            except Exception as exc:
-                log.error("Weekly scoreboard publish error: %s", exc)
 
     async def _daily_performance_report_loop(self) -> None:
         """Auto-generate an HTML performance report every 24 hours (feature 5)."""

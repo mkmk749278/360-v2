@@ -106,7 +106,6 @@ class CommandHandler:
         ws_futures: Optional[Any],
         tasks: List[asyncio.Task],
         boot_time: float,
-        free_channel_limit: int,
         alert_subscribers: Set[str],
         boot_wall_time: float = 0.0,
         restart_callback: Optional[Callable] = None,
@@ -134,7 +133,6 @@ class CommandHandler:
         self._tasks = tasks
         self.boot_time = boot_time
         self.boot_wall_time = boot_wall_time
-        self.free_channel_limit = free_channel_limit
         self._alert_subscribers = alert_subscribers
         self._restart_callback = restart_callback
         self._ai_insight_fn = ai_insight_fn
@@ -229,7 +227,6 @@ class CommandHandler:
         self._bt_slippage_pct = ctx.bt_slippage_pct
         self._bt_lookahead = ctx.bt_lookahead
         self._bt_min_window = ctx.bt_min_window
-        self.free_channel_limit = ctx.free_channel_limit
 
     def _make_context(self, chat_id: str, is_admin: bool) -> CommandContext:
         return CommandContext(
@@ -255,7 +252,6 @@ class CommandHandler:
             restart_callback=self._restart_callback,
             ai_insight_fn=self._ai_insight_fn,
             symbols_fn=self._symbols_fn,
-            free_channel_limit=self.free_channel_limit,
             trade_observer=self._trade_observer,
             alert_subscribers=self._alert_subscribers,
             stat_filter=self._stat_filter,

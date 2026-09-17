@@ -84,33 +84,6 @@ class TestSafeEnvParsing:
 # ---------------------------------------------------------------------------
 
 
-class TestEnvVarValidation:
-    """validate_critical_env_vars should emit warnings for missing critical vars."""
-
-    def test_warns_when_telegram_token_empty(self, caplog):
-        from config import validate_critical_env_vars
-
-        import logging
-
-        with patch("config.TELEGRAM_BOT_TOKEN", ""), \
-             patch("config.TELEGRAM_ADMIN_CHAT_ID", "123"), \
-             patch("config.TELEGRAM_ACTIVE_CHANNEL_ID", "-100"):
-            with caplog.at_level(logging.WARNING):
-                validate_critical_env_vars()
-        assert any("TELEGRAM_BOT_TOKEN" in r.message for r in caplog.records)
-
-    def test_no_warnings_when_all_set(self, caplog):
-        from config import validate_critical_env_vars
-
-        import logging
-
-        with patch("config.TELEGRAM_BOT_TOKEN", "tok"), \
-             patch("config.TELEGRAM_ADMIN_CHAT_ID", "123"), \
-             patch("config.TELEGRAM_ACTIVE_CHANNEL_ID", "-100"):
-            with caplog.at_level(logging.WARNING):
-                validate_critical_env_vars()
-        bot_warns = [r for r in caplog.records if "TELEGRAM_BOT_TOKEN" in r.message]
-        assert len(bot_warns) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -79,7 +79,6 @@ def _build_monitor(*, order_manager=None, data_store=None,
     send = AsyncMock(return_value=True)
     monitor = TradeMonitor(
         data_store=data_store or MagicMock(),
-        send_telegram=send,
         get_active_signals=lambda: {},
         remove_signal=lambda sid: None,
         update_signal=MagicMock(),

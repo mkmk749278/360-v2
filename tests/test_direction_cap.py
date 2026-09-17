@@ -38,8 +38,6 @@ def _router() -> SignalRouter:
 
     return SignalRouter(
         queue=asyncio.Queue(),
-        send_telegram=_send,
-        format_signal=lambda sig: f"Signal: {sig.symbol}",
     )
 
 

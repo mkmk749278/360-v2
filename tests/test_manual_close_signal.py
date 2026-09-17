@@ -57,7 +57,6 @@ def _build_monitor(active, price=None):
     data_store.ticks = {}
     monitor = TradeMonitor(
         data_store=data_store,
-        send_telegram=mock_send,
         get_active_signals=lambda: dict(active),
         remove_signal=lambda sid: removed.append(sid),
         update_signal=MagicMock(),

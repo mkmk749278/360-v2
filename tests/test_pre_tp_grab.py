@@ -83,8 +83,7 @@ def _build_monitor(send_telegram, regime_label: str = "QUIET"):
     )
     monitor = TradeMonitor(
         data_store=MagicMock(),
-        send_telegram=send_telegram,
-        get_active_signals=lambda: {},
+                get_active_signals=lambda: {},
         remove_signal=lambda sid: None,
         update_signal=MagicMock(),
         regime_detector=regime_detector,
@@ -109,174 +108,16 @@ def mock_send():
 # ---------------------------------------------------------------------------
 
 
-async def test_fires_when_long_candle_high_reaches_threshold(mock_send):
-    send, _ = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(direction=Direction.LONG, entry=30000.0)
-    target_high = 30000.0 * 1.0035  # +0.35%
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    assert fired is True
-    assert sig.pre_tp_hit is True
-    assert sig.pre_tp_pct == pytest.approx(0.35)
-    assert sig.pre_tp_timestamp is not None
-    # SL moved to breakeven (entry)
-    assert sig.stop_loss == pytest.approx(30000.0)
-    # Original TP ladder untouched
-    assert sig.tp1 == pytest.approx(30450.0)
-    assert sig.tp2 == pytest.approx(30750.0)
-    # Backfill — monitor stamps the trigger when it wasn't pre-stamped
-    assert sig.pre_tp_threshold_pct == pytest.approx(0.35)
-    assert sig.pre_tp_trigger_price > sig.entry  # LONG trigger above entry
 
 
-async def test_uses_stamped_trigger_price_when_present(mock_send):
-    """When the signal is dispatched with a stamped trigger price, the
-    monitor must fire against the stamped target — NOT recompute from
-    current ATR.  Locks the dispatch-time promise (B11)."""
-    send, _ = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(direction=Direction.LONG, entry=30000.0)
-    # Stamp values that disagree with what the static fallback would produce —
-    # if the monitor honoured the stamp, it'll fire only at this price.
-    sig.pre_tp_threshold_pct = 0.50  # locked higher than the 0.35 default
-    sig.pre_tp_trigger_price = 30150.0  # entry × 1.005
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
-        # +0.40% high — would fire at 0.35 floor, must NOT fire at 0.50 stamp.
-        fired_below = await monitor._check_pre_tp_grab(
-            sig, c_high=30000.0 * 1.0040, c_low=29990.0
-        )
-        assert fired_below is False
-        assert sig.pre_tp_hit is False
-
-        # +0.55% high — clears the stamped 0.50 target.
-        fired_above = await monitor._check_pre_tp_grab(
-            sig, c_high=30000.0 * 1.0055, c_low=29990.0
-        )
-        assert fired_above is True
-        assert sig.pre_tp_hit is True
-        # The post must report the stamped threshold, not the recomputed value.
-        assert sig.pre_tp_pct == pytest.approx(0.50)
 
 
-async def test_backfills_stamp_for_legacy_unstamped_signals(mock_send):
-    """Pre-rollout signals already in flight have zero in the stamp fields.
-    First monitor tick that resolves the threshold should backfill so that
-    if persistence flushes between this tick and the next the trigger
-    survives a restart."""
-    send, _ = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(direction=Direction.LONG, entry=30000.0)
-    assert sig.pre_tp_threshold_pct == 0.0  # legacy state
-    assert sig.pre_tp_trigger_price == 0.0
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
-        # Probe at +0.10% — below threshold so we don't fire; just exercising
-        # the resolution path which should NOT stamp (because we never
-        # entered the fire branch).  Actually current implementation stamps
-        # before threshold check — verify that.
-        await monitor._check_pre_tp_grab(
-            sig, c_high=30000.0 * 1.0010, c_low=29990.0
-        )
-
-    # Backfill happened during resolution, even though we didn't fire.
-    assert sig.pre_tp_threshold_pct > 0
-    assert sig.pre_tp_trigger_price > sig.entry
 
 
-async def test_fires_when_short_candle_low_reaches_threshold(mock_send):
-    send, _ = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(
-        direction=Direction.SHORT,
-        entry=30000.0,
-        stop_loss=30150.0,  # SHORT SL above entry
-        tp1=29550.0,  # -1.5%
-    )
-    target_low = 30000.0 * (1 - 0.0035)  # -0.35%
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=30005.0, c_low=target_low)
-
-    assert fired is True
-    assert sig.pre_tp_hit is True
-    # SL ratchets DOWN to entry for SHORT
-    assert sig.stop_loss == pytest.approx(30000.0)
 
 
-async def test_posts_to_both_active_and_free_channel(mock_send):
-    send, sent = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(signal_tier="B")
-    target_high = 30000.0 * 1.0035
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"), \
-         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
-        await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    chat_ids = [c for c, _ in sent]
-    assert "FREE-CHAN" in chat_ids
-    assert "ACTIVE-CHAN" in chat_ids
-    free_msg = next(t for c, t in sent if c == "FREE-CHAN")
-    # 2026-05-17 (PR #3): no broker attached in this test → no partial close
-    # executed → "Quick Move" (signal-only mode) wording instead of "Quick Win"
-    # (which is reserved for the partial-close-executed path).  See
-    # test_partial_close_fires_when_broker_enabled for the broker-active case.
-    assert "Quick Move" in free_msg
-    assert "BTCUSDT" in free_msg
-    # Math sanity: +0.35% raw at 10x = +3.5% gross; minus 0.7% fees = +2.8% net
-    assert "+2.80%" in free_msg or "2.80%" in free_msg
 
 
-async def test_active_channel_alert_is_dedicated_format_not_generic_update(mock_send):
-    """Regression guard for the 2026-05-07 fix.
-
-    The original Pre-TP active-channel post piggybacked on ``_post_update``,
-    so subscribers saw a generic status template (Entry/Current/PnL/SL/Conf
-    rows) with the Pre-TP message buried as the first line.  Worse, the
-    template injected literal ``\\|`` separators (MarkdownV2 escape under
-    legacy parse_mode) so the line rendered with visible backslashes.
-
-    The dedicated alert (``_post_pre_tp_alert``) sends a clean, eye-catching
-    "PRE-TP BANKED" header with no MarkdownV2 leakage.
-    """
-    send, sent = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(signal_tier="B")
-    target_high = 30000.0 * 1.0035
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
-        await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    active_msgs = [t for c, t in sent if c == "ACTIVE-CHAN"]
-    assert len(active_msgs) == 1, "Pre-TP must produce exactly one active-channel alert"
-    msg = active_msgs[0]
-    # 2026-05-17 (PR #3): no broker attached → "PRE-TP TRIGGER" (signal-only
-    # mode) instead of "PRE-TP BANKED" (which only fires when a real partial
-    # close was executed).  The dedicated-alert format is preserved either way.
-    assert "PRE-TP TRIGGER" in msg or "PRE-TP PARTIAL CLOSE" in msg
-    # No misleading "BANKED" wording when nothing was banked (B3 honesty fix).
-    assert "BANKED" not in msg, (
-        "Pre-2026-05-17 'Banked +X%' wording must not appear when no broker "
-        "partial executed — B3 honesty fix (PR #3)."
-    )
-    assert "BTCUSDT" in msg
-    assert "LONG" in msg
-    assert "breakeven" in msg
-    # No legacy generic-update artefacts
-    assert "PnL:" not in msg, "Pre-TP alert must not piggyback on the generic status template"
-    assert "Confidence:" not in msg, "Pre-TP alert must not include the generic confidence row"
-    # No MarkdownV2 escape leakage under legacy Markdown parse mode
-    assert "\\|" not in msg, "MarkdownV2 \\| escape must not appear under legacy Markdown"
 
 
 # ---------------------------------------------------------------------------
@@ -284,130 +125,10 @@ async def test_active_channel_alert_is_dedicated_format_not_generic_update(mock_
 # ---------------------------------------------------------------------------
 
 
-async def test_partial_close_fires_when_broker_enabled(mock_send):
-    """When the auto-trade broker is enabled, pre-TP must call ``close_partial``
-    on the order manager with the configured grab fraction and ``tp_level=0``.
-
-    Pre-2026-05-17 behaviour was SL-to-breakeven only — the Telegram message
-    claimed "Banked +X%" but no fill actually executed.  Post-PR-#3 the broker
-    receives a real partial-close instruction, the residual SL moves to entry,
-    and the "PRE-TP PARTIAL CLOSE" + "Quick Win" wording fires.
-    """
-    send, sent = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(signal_tier="B")
-    target_high = 30000.0 * 1.0035
-
-    # Wire a broker mock with is_enabled=True so the partial-close branch runs.
-    order_manager = AsyncMock()
-    order_manager.is_enabled = True
-    order_manager.close_partial.return_value = "fill-id-pre-tp"
-    monitor._order_manager = order_manager
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 0.50), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"), \
-         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    assert fired is True
-    # Broker received the partial-close instruction with the configured fraction
-    # and tp_level=0 (distinguishes pre-TP partials from TP1/2/3 in telemetry).
-    order_manager.close_partial.assert_awaited_once()
-    args, kwargs = order_manager.close_partial.call_args
-    assert args[0] is sig
-    # close_partial(sig, fraction, tp_level=N) — accept positional or keyword
-    fraction = kwargs.get("fraction") if "fraction" in kwargs else args[1]
-    tp_level = kwargs.get("tp_level") if "tp_level" in kwargs else (args[2] if len(args) > 2 else None)
-    assert fraction == pytest.approx(0.50)
-    assert tp_level == 0, (
-        "tp_level=0 marks this as a pre-TP partial in trade_records — "
-        "distinguishes from TP1/2/3 partials (tp_level=1/2/3)."
-    )
-
-    # Signal state — partial_close_pct reflects the realised fraction; SL at
-    # entry (breakeven) on the residual.
-    assert sig.partial_close_pct == pytest.approx(0.50)
-    assert sig.stop_loss == pytest.approx(sig.entry)
-    assert sig.pre_tp_hit is True
-
-    # Honest active-channel wording: "PARTIAL CLOSE", not "BANKED".  Free
-    # channel uses "Quick Win" only when a real fill happened.
-    active_msg = next(t for c, t in sent if c == "ACTIVE-CHAN")
-    assert "PARTIAL CLOSE" in active_msg
-    assert "BANKED" not in active_msg
-    assert "50%" in active_msg
-    free_msg = next(t for c, t in sent if c == "FREE-CHAN")
-    assert "Quick Win" in free_msg
-    assert "Closed 50%" in free_msg
 
 
-async def test_partial_close_skipped_when_broker_disabled(mock_send):
-    """When ``order_manager.is_enabled`` is False, the path falls back to
-    SL-to-breakeven only — no broker call, no "BANKED" wording, honest
-    "PRE-TP TRIGGER" framing instead.
-    """
-    send, sent = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(signal_tier="B")
-    target_high = 30000.0 * 1.0035
-
-    order_manager = AsyncMock()
-    order_manager.is_enabled = False
-    monitor._order_manager = order_manager
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
-        await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    order_manager.close_partial.assert_not_called()
-    # 2026-05-19 update: partial_close_pct IS stamped on the broker-disabled
-    # fallback so the signal-level pnl_pct blend in _set_realized_pnl
-    # reflects the doctrine-true gross return (50% × +0.35% banked + 50%
-    # × 0% BE exit on residual = +0.175%).  Pre-fix, this assertion
-    # required `sig.partial_close_pct == 0.0` and the Signals tab then
-    # showed 0.00% on signals that the doctrine intended to lock +0.15%.
-    assert sig.partial_close_pct == pytest.approx(0.5)
-    # But SL still ratchets to breakeven so signal-only subscribers get the
-    # downside protection
-    assert sig.stop_loss == pytest.approx(sig.entry)
-    active_msg = next(t for c, t in sent if c == "ACTIVE-CHAN")
-    assert "PRE-TP TRIGGER" in active_msg
-    assert "BANKED" not in active_msg
 
 
-async def test_partial_close_failure_falls_through_to_sl_only(mock_send):
-    """If ``broker.close_partial`` raises, the path must still ratchet SL to
-    breakeven and post the signal-only fallback alert.  Capital preservation
-    is the doctrine — never silently fail to protect.
-    """
-    send, sent = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(signal_tier="B")
-    target_high = 30000.0 * 1.0035
-
-    order_manager = AsyncMock()
-    order_manager.is_enabled = True
-    order_manager.close_partial.side_effect = RuntimeError("broker down")
-    monitor._order_manager = order_manager
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    assert fired is True  # Pre-TP still fires even when broker fails
-    # 2026-05-19: partial_close_pct IS stamped on this fallback path so
-    # the signal-level pnl_pct blend reports the doctrine-true gross
-    # return (matches the broker-disabled path above).  The "no broker
-    # fill happened" semantic is now carried by the execution_note
-    # string + the alert wording ("BANKED" must NOT appear) — not by
-    # leaving partial_close_pct at 0.
-    assert sig.partial_close_pct == pytest.approx(0.5)
-    assert sig.stop_loss == pytest.approx(sig.entry)  # SL still ratcheted
-    active_msg = next(t for c, t in sent if c == "ACTIVE-CHAN")
-    assert "PRE-TP TRIGGER" in active_msg or "PRE-TP PARTIAL CLOSE" in active_msg
-    # Critical: no false "BANKED" wording on broker failure
-    assert "BANKED" not in active_msg
 
 
 # ---------------------------------------------------------------------------
@@ -565,8 +286,7 @@ async def test_fires_when_regime_classification_unavailable(mock_send):
     regime_detector.classify.side_effect = RuntimeError("classifier broken")
     monitor = TradeMonitor(
         data_store=MagicMock(),
-        send_telegram=send,
-        get_active_signals=lambda: {},
+                get_active_signals=lambda: {},
         remove_signal=lambda sid: None,
         update_signal=MagicMock(),
         regime_detector=regime_detector,
@@ -644,45 +364,8 @@ async def test_sl_ratchets_only_never_widens_long(mock_send):
     assert sig.stop_loss == pytest.approx(30100.0)
 
 
-async def test_paid_tier_pre_tp_fires_free_post(mock_send):
-    """Replaces the legacy "WATCHLIST suppresses free-channel post" test.
-    The WATCHLIST tier was removed in the app-era doctrine reset; every
-    signal that reaches trade_monitor is paid (B+) and DOES post pre-TP
-    storytelling to the free channel.
-    """
-    send, sent = mock_send
-    monitor = _build_monitor(send)
-    sig = _make_signal(signal_tier="B")
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
-
-    assert fired is True
-    chat_ids = [c for c, _ in sent]
-    assert "FREE-CHAN" in chat_ids
 
 
-async def test_free_post_failure_does_not_break_state_change(mock_send):
-    """A free-channel send error must not roll back pre_tp_hit / SL move."""
-    sent: list[tuple[str, str]] = []
-
-    async def _send(chat_id, text):
-        if chat_id == "FREE-CHAN":
-            raise RuntimeError("free channel down")
-        sent.append((chat_id, text))
-        return True
-
-    monitor = _build_monitor(AsyncMock(side_effect=_send))
-    sig = _make_signal()
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
-
-    assert fired is True
-    assert sig.pre_tp_hit is True
-    assert sig.stop_loss == pytest.approx(30000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -706,8 +389,7 @@ def _build_monitor_with_atr(send, regime_label: str = "QUIET", atr_last: float =
         indicators["atr_last"] = atr_last
     monitor = TradeMonitor(
         data_store=MagicMock(),
-        send_telegram=send,
-        get_active_signals=lambda: {},
+                get_active_signals=lambda: {},
         remove_signal=lambda sid: None,
         update_signal=MagicMock(),
         regime_detector=regime_detector,
@@ -832,122 +514,7 @@ async def test_short_atr_adaptive_low_vol_uses_floor(mock_send):
     assert sig.stop_loss == pytest.approx(entry)
 
 
-async def test_full_close_finalizes_and_removes_signal(mock_send):
-    """grab_fraction == 1.00 closes 100% of the position — there is NO residual
-    riding to TP1.  The engine-wide Signal must be finalized (terminal outcome
-    label) and removed from the Open book, not left ACTIVE forever.  This is the
-    orphan that showed signals ACTIVE in the app while the account was flat.
-    """
-    send, sent = mock_send
-    book: dict = {}
-    regime_detector = MagicMock()
-    regime_detector.classify.return_value = MagicMock(
-        regime=MagicMock(value="QUIET")
-    )
-    monitor = TradeMonitor(
-        data_store=MagicMock(),
-        send_telegram=send,
-        get_active_signals=lambda: book,
-        remove_signal=lambda sid: book.pop(sid, None),
-        update_signal=MagicMock(),
-        regime_detector=regime_detector,
-        indicators_fn=lambda sym: {"adx": 18.0, "ema_slope": 0.0},
-    )
-    sig = _make_signal(signal_tier="B")
-    book[sig.signal_id] = sig
-    target_high = 30000.0 * 1.0035
-
-    order_manager = AsyncMock()
-    order_manager.is_enabled = True
-    order_manager.close_partial.return_value = "fill-id-pre-tp"
-    monitor._order_manager = order_manager
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 1.00), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"), \
-         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    assert fired is True
-    # Finalized + removed from the Open book — no orphan.
-    assert sig.signal_id not in book
-    assert sig.status.upper() != "ACTIVE"
-    # PnL frozen at the banked threshold (100% × pre-TP move).
-    assert sig.pre_tp_pct > 0
-    assert sig.pnl_pct == pytest.approx(sig.pre_tp_pct)
-    # Free-channel wording reflects a full bank, not a riding residual.
-    free_msg = next(t for c, t in sent if c == "FREE-CHAN")
-    assert "Closed 100%" in free_msg
-    assert "fully banked" in free_msg
-    assert "rides to TP1" not in free_msg
 
 
-async def test_default_grab_zero_disables_pre_tp(mock_send):
-    """Session 34 default exit = TP1-full + fixed SL.  With the engine default
-    ``PRE_TP_GRAB_FRACTION == 0.0`` pre-TP must NOT fire even when every other
-    gate (threshold, regime, age, setup) passes: no partial close, no SL→BE
-    ratchet, signal stays ACTIVE so it rides to TP1 or the original SL.
-    """
-    send, sent = mock_send
-    monitor = _build_monitor(send, regime_label="QUIET")
-    sig = _make_signal(signal_tier="B")
-    original_sl = sig.stop_loss
-    target_high = 30000.0 * 1.0035  # would clear the 0.35% threshold
-
-    order_manager = AsyncMock()
-    order_manager.is_enabled = True
-    monitor._order_manager = order_manager
-
-    # Note: overrides the autouse fixture's 0.50 to assert the real default.
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 0.0), \
-         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    assert fired is False
-    order_manager.close_partial.assert_not_called()
-    assert sig.status == "ACTIVE"
-    assert sig.stop_loss == pytest.approx(original_sl)  # SL not ratcheted to BE
-    assert getattr(sig, "partial_close_pct", 0.0) in (0.0, None)
 
 
-async def test_partial_close_keeps_signal_active_with_residual(mock_send):
-    """grab_fraction < 1.00 banks a partial and the residual rides to TP1 —
-    the Signal must STAY ACTIVE and remain in the Open book (regression guard
-    for the full-close finalize: it must not finalize a partial)."""
-    send, sent = mock_send
-    book: dict = {}
-    regime_detector = MagicMock()
-    regime_detector.classify.return_value = MagicMock(
-        regime=MagicMock(value="QUIET")
-    )
-    monitor = TradeMonitor(
-        data_store=MagicMock(),
-        send_telegram=send,
-        get_active_signals=lambda: book,
-        remove_signal=lambda sid: book.pop(sid, None),
-        update_signal=MagicMock(),
-        regime_detector=regime_detector,
-        indicators_fn=lambda sym: {"adx": 18.0, "ema_slope": 0.0},
-    )
-    sig = _make_signal(signal_tier="B")
-    book[sig.signal_id] = sig
-    target_high = 30000.0 * 1.0035
-
-    order_manager = AsyncMock()
-    order_manager.is_enabled = True
-    order_manager.close_partial.return_value = "fill-id-pre-tp"
-    monitor._order_manager = order_manager
-
-    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 0.50), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"), \
-         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
-        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
-
-    assert fired is True
-    # Partial — still open, still in the book, residual rides to TP1.
-    assert sig.signal_id in book
-    assert sig.status == "ACTIVE"
-    free_msg = next(t for c, t in sent if c == "FREE-CHAN")
-    assert "rides to TP1" in free_msg

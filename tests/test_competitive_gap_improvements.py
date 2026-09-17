@@ -205,37 +205,3 @@ class TestPerformanceReport:
 # ===========================================================================
 
 
-class TestCornixFormatWiring:
-    """format_cornix_signal produces valid output; CORNIX_FORMAT_ENABLED gates it."""
-
-    def test_cornix_signal_format_basic(self) -> None:
-        from src.cornix_formatter import format_cornix_signal
-        sig = _make_signal(channel="360_SCALP")
-        result = format_cornix_signal(sig)
-        assert "Entry Targets:" in result
-        assert "Stop Targets:" in result
-        assert "Leverage:" in result
-
-    def test_cornix_signal_format_includes_symbol(self) -> None:
-        from src.cornix_formatter import format_cornix_signal
-        sig = _make_signal(symbol="ETHUSDT", channel="360_SCALP_CVD")
-        result = format_cornix_signal(sig)
-        assert "ETHUSDT" in result
-
-    def test_cornix_disabled_by_default(self) -> None:
-        """CORNIX_FORMAT_ENABLED defaults to false — no Cornix block unless opted-in."""
-        import config
-        # The default .env.example should have this false
-        assert hasattr(config, "CORNIX_FORMAT_ENABLED")
-
-    def test_cornix_leverages_by_channel(self) -> None:
-        from src.cornix_formatter import format_cornix_signal
-        for channel, expected_leverage in [
-            ("360_SCALP", "20x"),
-            ("360_SCALP_FVG", "15x"),
-            ("360_SCALP_CVD", "15x"),
-            ("360_SCALP_VWAP", "15x"),
-        ]:
-            sig = _make_signal(channel=channel)
-            result = format_cornix_signal(sig)
-            assert expected_leverage in result, f"{channel} should have {expected_leverage}"

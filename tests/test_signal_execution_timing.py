@@ -256,75 +256,6 @@ class TestScalpChannelEntryZone:
 # Phase 4: Telegram format – entry zone and validity window
 # ---------------------------------------------------------------------------
 
-class TestTelegramFormatEntryZone:
-    """format_signal() must display entry zone when populated."""
-
-    def test_no_zone_shows_exact_entry(self):
-        sig = _make_signal(entry=30000.0)
-        text = TelegramBot.format_signal(sig)
-        assert "📍 Entry:" in text
-        assert "Entry Zone" not in text
-
-    def test_zone_shows_entry_zone_not_exact_entry_line(self):
-        sig = _make_signal(
-            entry=30000.0,
-            entry_zone_low=29970.0,
-            entry_zone_high=30030.0,
-        )
-        text = TelegramBot.format_signal(sig)
-        assert "Entry Zone" in text
-
-    def test_zone_shows_low_and_high_prices(self):
-        sig = _make_signal(
-            entry=30000.0,
-            entry_zone_low=29970.0,
-            entry_zone_high=30030.0,
-        )
-        text = TelegramBot.format_signal(sig)
-        # Both zone boundary prices should appear
-        assert "29,970" in text or "29970" in text
-        assert "30,030" in text or "30030" in text
-
-    def test_zone_shows_mid_reference(self):
-        """Mid-point reference line must appear when zone is shown."""
-        sig = _make_signal(
-            entry=30000.0,
-            entry_zone_low=29970.0,
-            entry_zone_high=30030.0,
-        )
-        text = TelegramBot.format_signal(sig)
-        assert "Mid" in text
-
-    def test_validity_line_present_when_valid_for_minutes_set(self):
-        sig = _make_signal(valid_for_minutes=15)
-        text = TelegramBot.format_signal(sig)
-        assert "Valid for" in text
-        assert "15" in text
-
-    def test_validity_shows_execution_limit_order(self):
-        sig = _make_signal(valid_for_minutes=15, execution_type="LIMIT_ZONE")
-        text = TelegramBot.format_signal(sig)
-        assert "LIMIT ORDER" in text
-
-    def test_validity_minutes_correct_for_spot(self):
-        sig = _make_signal(channel="360_SPOT", valid_for_minutes=240)
-        text = TelegramBot.format_signal(sig)
-        assert "240" in text
-
-    def test_sl_and_tp_still_present(self):
-        """Core SL and TP levels must still appear in the message."""
-        sig = _make_signal(
-            entry=30000.0,
-            stop_loss=29850.0,
-            tp1=30150.0,
-            tp2=30300.0,
-            entry_zone_low=29970.0,
-            entry_zone_high=30030.0,
-        )
-        text = TelegramBot.format_signal(sig)
-        assert "🛑 SL" in text
-        assert "🎯 TP1" in text
-        assert "🎯 TP2" in text
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +280,7 @@ class TestTradeMonitorLifespanValues:
 
         monitor = TradeMonitor(
             data_store=data_store,
-            send_telegram=mock_send,
-            get_active_signals=lambda: dict(active),
+                        get_active_signals=lambda: dict(active),
             remove_signal=lambda sid: removed.append(sid),
             update_signal=MagicMock(),
         )

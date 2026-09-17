@@ -8,14 +8,12 @@ WebSocket connection setup, pre-flight checks, and graceful shutdown.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import os
 import time
 from typing import Any, List
 
 from config import (
     TELEGRAM_BOT_TOKEN,
-    TELEGRAM_ACTIVE_CHANNEL_ID,
     TOP50_FUTURES_ONLY,
     MOVER_IGNITION_ENABLED,
 )
@@ -118,26 +116,6 @@ class Bootstrap:
             log.warning("Pre-flight: TELEGRAM_BOT_TOKEN is not set")
             ok = False
 
-        # Two different worlds share one empty string, and only one of them
-        # is a fault. With broadcast channels switched off (the 2026-09-15
-        # default) the id is blanked deliberately and signals reach the app
-        # feed, push and the order path exactly as before — warning "signals
-        # will not be delivered" there would send an operator to fix a
-        # variable that no longer decides anything.
-        import config as _cfg
-        if not TELEGRAM_ACTIVE_CHANNEL_ID:
-            if _cfg.TELEGRAM_SIGNALS_ENABLED:
-                log.warning(
-                    "Pre-flight: TELEGRAM_ACTIVE_CHANNEL_ID is not set — "
-                    "broadcast channels are ON and nothing will be posted to them"
-                )
-            else:
-                log.info(
-                    "Pre-flight: Telegram broadcast channels are OFF "
-                    "(TELEGRAM_SIGNALS_ENABLED=false) — the app feed, push and "
-                    "auto-trade dispatch are unaffected"
-                )
-
         if not engine.pair_mgr.pairs:
             log.warning("Pre-flight: pair_mgr has no pairs loaded")
             ok = False
@@ -197,10 +175,6 @@ class Bootstrap:
             restored = await engine.circuit_breaker.restore_state(engine._redis_client)
             if restored:
                 log.info("Circuit breaker state restored from Redis")
-
-        # 0d. Restore free-channel radar watch state from Redis.
-        if hasattr(engine, "_free_watch_service"):
-            await engine._free_watch_service.restore()
 
         # 0e. Restore active-signal state — Redis if available, JSON fallback
         # otherwise.  Without this, every engine restart silently dropped
@@ -321,26 +295,6 @@ class Bootstrap:
 
         await engine.telegram.send_admin_alert("✅ Engine booted successfully")
 
-        # Send a boot test message to the active channel so operators can
-        # visually confirm the bot is connected and has posting permission.
-        if TELEGRAM_ACTIVE_CHANNEL_ID:
-            boot_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            pair_count = len(engine.pair_mgr.pairs)
-            test_msg = (
-                "🧪 *ENGINE BOOT TEST*\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "✅ Bot is connected and posting to this channel\n"
-                f"⏰ Booted at: {boot_utc}\n"
-                f"🔍 Scanning {pair_count} pairs\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "_(This is a test message, not a trading signal)_"
-            )
-            try:
-                await engine.telegram.send_message(TELEGRAM_ACTIVE_CHANNEL_ID, test_msg)
-                log.info("Boot test message sent to active channel")
-            except Exception as exc:
-                log.warning("Failed to send boot test message to active channel: {}", exc)
-
         log.info("=== Engine RUNNING ===")
 
     def launch_runtime_tasks(self) -> list[asyncio.Task]:
@@ -368,8 +322,6 @@ class Bootstrap:
                 engine._handle_command,
                 on_new_member=engine._welcome_new_member,
             )),
-            asyncio.create_task(engine._free_channel_loop()),
-            asyncio.create_task(engine._weekly_scoreboard_loop()),
             asyncio.create_task(engine._snapshot_loop()),
             # Deferred persistence for the Layer-C edge matrix.  Without this
             # task ``persist=False`` in trade_monitor would mean "never saved
@@ -384,12 +336,7 @@ class Bootstrap:
             asyncio.create_task(engine._liquidation_flush_loop()),
             asyncio.create_task(engine._daily_performance_report_loop()),
             asyncio.create_task(engine._trade_observer.start()),
-            asyncio.create_task(engine._content_scheduler.run(), name="content_scheduler"),
         ]
-
-        # Free-watch lifecycle — start the background expiry-check loop.
-        if hasattr(engine, "_free_watch_service"):
-            tasks.append(asyncio.create_task(engine._free_watch_service.start()))
 
         # Market Alerts sweep (Pulse → Alerts feed + FCM) — own task so it
         # can never slow the scanner loop.

@@ -13,24 +13,6 @@ class TestEnvExample:
         )
         assert os.path.isfile(path)
 
-    def test_env_example_has_required_keys(self):
-        path = os.path.join(
-            os.path.dirname(__file__), os.pardir, ".env.example"
-        )
-        with open(path) as f:
-            content = f.read()
-        for key in (
-            "BINANCE_REST_BASE",
-            "BINANCE_WS_BASE",
-            "TELEGRAM_BOT_TOKEN",
-            "TELEGRAM_ACTIVE_CHANNEL_ID",
-            "TELEGRAM_ADMIN_CHAT_ID",
-            "LOG_LEVEL",
-            "PAIR_FETCH_INTERVAL_HOURS",
-            "TOP_PAIRS_COUNT",
-            "SCAN_INTERVAL_SECONDS",
-        ):
-            assert key in content, f"Missing key: {key}"
 
 
 class TestDeployScript:

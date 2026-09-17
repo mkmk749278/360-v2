@@ -188,25 +188,6 @@ async def handle_force_update_ai(args: List[str], ctx: CommandContext) -> None:
 
 
 @registry.command(
-    "/set_free_channel_limit",
-    admin=True,
-    group="engine",
-    help_text="Set free channel daily signal limit",
-)
-async def handle_set_free_channel_limit(args: List[str], ctx: CommandContext) -> None:
-    if not args:
-        await ctx.reply("Usage: /set\\_free\\_channel\\_limit <n>")
-        return
-    try:
-        limit = int(args[0])
-        ctx.free_channel_limit = max(0, limit)
-        ctx.router.set_free_limit(ctx.free_channel_limit)
-        await ctx.reply(f"✅ Free channel daily signal limit set to {ctx.free_channel_limit}")
-    except ValueError:
-        await ctx.reply("❌ Value must be an integer.")
-
-
-@registry.command(
     "/suppressed",
     aliases=["/suppression"],
     admin=True,
