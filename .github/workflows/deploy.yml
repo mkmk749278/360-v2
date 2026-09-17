@@ -24,22 +24,47 @@ jobs:
 
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
+        # Every secret the remote script needs arrives as an ENVIRONMENT
+        # VARIABLE, not interpolated into the script's text. Two reasons, and
+        # neither is about log masking — GitHub already redacts registered
+        # secrets from logs automatically, and `::add-mask::` only re-registers
+        # the same exact string.
+        #
+        # 1. A value interpolated into shell SOURCE has to survive shell
+        #    quoting. A secret containing a double quote would have broken the
+        #    whole script; one containing `&` or `\` silently corrupted the
+        #    `.env` line it was written to (see `put_env` below).
+        # 2. The vendor's own caveat is that automatic redaction "is not
+        #    guaranteed" once a value is transformed. A value that never enters
+        #    the command text cannot be transformed by the command text.
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          VPS_DEPLOY_PUBKEY: ${{ secrets.VPS_DEPLOY_PUBKEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NOWPAYMENTS_API_KEY: ${{ secrets.NOWPAYMENTS_API_KEY }}
+          NOWPAYMENTS_IPN_SECRET: ${{ secrets.NOWPAYMENTS_IPN_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: 22
           request_pty: true
+          envs: GH_PAT,VPS_DEPLOY_PUBKEY,TELEGRAM_BOT_TOKEN,TELEGRAM_ADMIN_CHAT_ID,BINANCE_API_KEY,BINANCE_API_SECRET,OPENAI_API_KEY,NOWPAYMENTS_API_KEY,NOWPAYMENTS_IPN_SECRET,GEMINI_API_KEY
           script: |
             set -euo pipefail
 
             # Mask the PAT so it never appears in plain text in workflow logs.
             # NOTE: GH_PAT must be added as a repo secret (Settings → Secrets →
             # Actions → New secret, name: GH_PAT, value: a GitHub PAT with repo scope).
-            echo "::add-mask::${{ secrets.GH_PAT }}"
+            echo "::add-mask::$GH_PAT"
 
             # ── Bootstrap: re-authorize deploy key (survives OS reinstall) ──────
-            DEPLOY_PUBKEY="${{ secrets.VPS_DEPLOY_PUBKEY }}"
+            DEPLOY_PUBKEY="$VPS_DEPLOY_PUBKEY"
             if [ -n "$DEPLOY_PUBKEY" ]; then
               mkdir -p ~/.ssh
               chmod 700 ~/.ssh
@@ -54,14 +79,14 @@ jobs:
             # ── Bootstrap: clone repo if missing (fresh VPS / OS reinstall) ─────
             if [ ! -d ~/360-v2/.git ]; then
               echo "ℹ️  Fresh VPS detected — cloning repository..."
-              git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/mkmk749278/360-v2.git ~/360-v2
+              git clone "https://x-access-token:${GH_PAT}@github.com/mkmk749278/360-v2.git" ~/360-v2
             fi
 
             cd ~/360-v2
 
             # Update remote to use token auth (handles existing clones that lost
             # credentials when the repo switched to private)
-            git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/mkmk749278/360-v2.git
+            git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/mkmk749278/360-v2.git"
 
             # Pull latest code
             git fetch origin main
@@ -90,49 +115,72 @@ jobs:
             fi
 
             # ── Inject/update all secrets in place ──────────────────────────────
+            #
+            # `put_env KEY VALUE` replaces (or appends) one `.env` line, and the
+            # VALUE never passes through a sed replacement.
+            #
+            # THE DEFECT THIS REPLACES, because it was silent and it was on the
+            # credential path. Every key here was written with
+            #
+            #     sed -i "s|^KEY=.*|KEY=$VALUE|" .env
+            #
+            # and in a sed REPLACEMENT `&` expands to the whole match while `\`
+            # escapes. Measured, not reasoned: a secret of `abc&def` landed in
+            # `.env` as `abcBINANCE_API_SECRET=olddef`, and one containing a
+            # backslash-n split the file into two lines with a bogus second
+            # entry. Nothing errored, `set -e` never fired, the deploy printed
+            # "✅ Deploy complete" — and the engine then could not authenticate,
+            # with no instrument anywhere saying why. A value containing `|`
+            # broke the expression outright, and one containing a double quote
+            # broke the surrounding shell line.
+            #
+            # The sed below addresses only the KEY, which is a literal this
+            # workflow controls, so no secret is ever parsed as sed syntax;
+            # printf writes the value verbatim.
+            #
+            # Behaviour is otherwise UNCHANGED, deliberately. An empty secret
+            # still writes `KEY=`, exactly as before: the comments on
+            # NOWPAYMENTS ("empty → a clean 503") and GEMINI ("empty is a
+            # supported state") say that is wanted, and nothing here can tell
+            # which of the others the owner has set. Making a missing secret a
+            # hard deploy failure would block every deploy if that guess were
+            # wrong, which is worse than the fault it would catch.
+            put_env() {
+              key="$1"
+              value="$2"
+              touch .env
+              sed -i "/^${key}=/d" .env
+              printf '%s=%s\n' "$key" "$value" >> .env
+            }
 
-            # Telegram
-            sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}|" .env
-            sed -i "s|^TELEGRAM_ADMIN_CHAT_ID=.*|TELEGRAM_ADMIN_CHAT_ID=${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}|" .env
+            # Telegram BOT — commands, admin alerts, the liveness pager, OTP.
+            # The broadcast channels were deleted 2026-09-16 (#1037); these two
+            # address the owner's own chat and are not channel ids.
+            put_env TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+            put_env TELEGRAM_ADMIN_CHAT_ID "$TELEGRAM_ADMIN_CHAT_ID"
 
-            # Binance API keys (update if line exists, append if not)
-            grep -q "^BINANCE_API_KEY=" .env \
-              && sed -i "s|^BINANCE_API_KEY=.*|BINANCE_API_KEY=${{ secrets.BINANCE_API_KEY }}|" .env \
-              || echo "BINANCE_API_KEY=${{ secrets.BINANCE_API_KEY }}" >> .env
+            # Binance — the engine's own account keys.
+            put_env BINANCE_API_KEY "$BINANCE_API_KEY"
+            put_env BINANCE_API_SECRET "$BINANCE_API_SECRET"
 
-            grep -q "^BINANCE_API_SECRET=" .env \
-              && sed -i "s|^BINANCE_API_SECRET=.*|BINANCE_API_SECRET=${{ secrets.BINANCE_API_SECRET }}|" .env \
-              || echo "BINANCE_API_SECRET=${{ secrets.BINANCE_API_SECRET }}" >> .env
+            put_env OPENAI_API_KEY "$OPENAI_API_KEY"
 
-            # OpenAI API key (update if line exists, append if not)
-            grep -q "^OPENAI_API_KEY=" .env \
-              && sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}|" .env \
-              || echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
+            # NOWPayments (web billing crypto rail — Phase 3). A GitHub secret
+            # does not reach the engine unless injected here. Empty secret → the
+            # crypto rail refuses at runtime with a clean 503, never a crash.
+            put_env NOWPAYMENTS_API_KEY "$NOWPAYMENTS_API_KEY"
+            put_env NOWPAYMENTS_IPN_SECRET "$NOWPAYMENTS_IPN_SECRET"
 
-            # NOWPayments (web billing crypto rail — Phase 3).  These are the
-            # engine-side secrets; GitHub secrets don't reach the engine unless
-            # injected here (same pattern as Binance/OpenAI above).  Empty secret
-            # → the crypto rail refuses at runtime with a clean 503, never a crash.
-            grep -q "^NOWPAYMENTS_API_KEY=" .env \
-              && sed -i "s|^NOWPAYMENTS_API_KEY=.*|NOWPAYMENTS_API_KEY=${{ secrets.NOWPAYMENTS_API_KEY }}|" .env \
-              || echo "NOWPAYMENTS_API_KEY=${{ secrets.NOWPAYMENTS_API_KEY }}" >> .env
-
-            grep -q "^NOWPAYMENTS_IPN_SECRET=" .env \
-              && sed -i "s|^NOWPAYMENTS_IPN_SECRET=.*|NOWPAYMENTS_IPN_SECRET=${{ secrets.NOWPAYMENTS_IPN_SECRET }}|" .env \
-              || echo "NOWPAYMENTS_IPN_SECRET=${{ secrets.NOWPAYMENTS_IPN_SECRET }}" >> .env
-
-            # Gemini — the AI Trade Governor's provider (docs/PLAN_AI_TRADE_GOVERNOR.md).
-            # Same pattern, and the same reason: a GitHub repository secret does
-            # NOT reach the engine on its own.  The key was added to the repo's
-            # secrets on 2026-09-03 and would have sat there doing nothing until
-            # somebody noticed the ops page still reading NOT CONFIGURED.
+            # Gemini — the AI Trade Governor's provider
+            # (docs/PLAN_AI_TRADE_GOVERNOR.md). Same reason: a repository secret
+            # does NOT reach the engine on its own — this key sat in the repo's
+            # secrets doing nothing until somebody noticed the ops page still
+            # reading NOT CONFIGURED.
             #
             # Empty secret is a supported state, not a failure: `llm_client`
             # returns `not_configured`, the governor makes no call, and the ops
             # page says so under its own name.
-            grep -q "^GEMINI_API_KEY=" .env \
-              && sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}|" .env \
-              || echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> .env
+            put_env GEMINI_API_KEY "$GEMINI_API_KEY"
 
             # Slack packet poster (D1) — REMOVED 2026-09-16. The owner moved
             # every surface to the app and ruled the lane out; `slack_packet.py`,
