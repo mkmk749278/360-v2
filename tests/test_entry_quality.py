@@ -285,6 +285,90 @@ class TestRejectBudget:
         assert eq.get_budget().allows() is True
         eq.reset_state()
 
+    # ----------------------------------------------------------------- #
+    # Which rule spent the cap (2026-09-17)
+    #
+    # The alert this window raises used to print only the aggregate
+    # fraction, and the two worlds it covers have OPPOSITE next moves:
+    # `profile_reject` (live by default, measured at 0 of 900 in its first
+    # window) starting to bite is a finding about the book's pair mix, while
+    # a rule armed from ops doing what its own rationale predicted means the
+    # cap was sized for a different rule. Owner's pager on 2026-09-17 read
+    # "70/200 recent decisions rejected" and could name neither.
+    # ----------------------------------------------------------------- #
+
+    def test_the_window_says_which_rule_spent_it(self):
+        b = eq.RejectBudget(window=10, max_frac=1.0)
+        b.record(True, by="profile_reject")
+        b.record(True, by="profile_reject")
+        b.record(True, by="session_quality")
+        b.record(False, by=None)
+        snap = b.snapshot()
+        assert snap["recent_rejected_by"] == {"profile_reject": 2, "session_quality": 1}
+        assert sum(snap["recent_rejected_by"].values()) == snap["recent_rejected"], (
+            "the attribution must sum to the cap's own numerator, or the two "
+            "numbers on the page describe different populations"
+        )
+
+    def test_a_held_back_rejection_is_named_apart_from_one_that_fired(self):
+        """Never pooled, for the reason ``enforced_by`` and ``would_reject_by``
+        are separate fields: one is a trade that was killed, the other a rule
+        the cap refused. Pooling would put rows the cap PROTECTED into the
+        numerator the cap is judged on."""
+        b = eq.RejectBudget(window=10, max_frac=1.0)
+        b.record(True, by="profile_reject")
+        b.record(False, suspended=True, by="session_quality")
+        snap = b.snapshot()
+        assert snap["recent_rejected_by"] == {"profile_reject": 1}
+        assert snap["recent_suspended_by"] == {"session_quality": 1}
+        assert snap["recent_rejected"] == 1, "a held-back rejection must not enter the cap"
+
+    def test_a_plain_pass_attributes_to_no_rule(self):
+        """(False, None) is a genuine pass; (False, "key") is a rule the cap
+        refused. If a pass carried a key the two would be indistinguishable and
+        the suspended map would fill up with candidates nothing objected to."""
+        b = eq.RejectBudget(window=10, max_frac=1.0)
+        for _ in range(5):
+            b.record(False, by=None)
+        snap = b.snapshot()
+        assert snap["recent_rejected_by"] == {}
+        assert snap["recent_suspended_by"] == {}
+
+    def test_attribution_survives_the_real_decide_path(self):
+        """End to end, because the call site is where the key can be read off
+        the wrong object: while the cap is spent ``decision.enforced_by`` is
+        None by construction, so attributing from it would credit every
+        held-back rejection to nobody — the exact blind spot being closed."""
+        eq.reset_state()
+        params = _params(
+            max_reject_frac=0.35,
+            budget_window=20,
+            rules=(_rule("profile_reject", live=True),),
+        )
+        for _ in range(20):
+            eq.decide({"profile_would_reject": True}, "MOVER_TREND_PULLBACK", params)
+        snap = eq.get_budget().snapshot()
+        assert eq.get_budget().allows() is False
+        assert snap["recent_rejected_by"].get("profile_reject", 0) > 0, (
+            "the rule that suppressed is unnamed"
+        )
+        assert snap["recent_suspended_by"].get("profile_reject", 0) > 0, (
+            "the rule the cap held back is unnamed — this is what the pager needs"
+        )
+        eq.reset_state()
+
+    def test_the_cap_arithmetic_is_unchanged_by_the_attribution(self):
+        """The window entry gained a field; the fraction must not have moved.
+        Pinned explicitly because the bool is now inside a tuple, and
+        ``if entry`` on a tuple is always true — a mistake that would make the
+        gate suspend itself permanently on its first decision."""
+        b = eq.RejectBudget(window=10, max_frac=0.35)
+        for _ in range(3):
+            b.record(True, by="profile_reject")
+        assert b.allows() is True, "3/10 is under a 0.35 cap"
+        b.record(True, by="profile_reject")
+        assert b.allows() is False, "4/10 is over it"
+
     def test_a_shadow_only_window_does_not_consume_the_budget(self):
         """The cap exists to protect live output. Spending it on decisions that
         were never going to suppress would suspend a gate that had done

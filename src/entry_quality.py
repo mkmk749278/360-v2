@@ -654,7 +654,14 @@ class RejectBudget:
     def __init__(self, window: int = 200, max_frac: float = 0.35) -> None:
         self._window = max(10, int(window))
         self._max_frac = max(0.0, min(1.0, float(max_frac)))
-        self._recent: Deque[bool] = deque(maxlen=self._window)
+        # One entry per enforcement-eligible decision:
+        #   (rejected, by)
+        # ``by`` is the rule KEY the decision turned on — the one that
+        # suppressed when ``rejected``, or the one the cap held back when not.
+        # The bool alone is what the cap arithmetic reads, exactly as before;
+        # the key exists because the alert that fires on this window could not
+        # say which rule spent it (see ``snapshot``).
+        self._recent: Deque[Tuple[bool, Optional[str]]] = deque(maxlen=self._window)
         self._lock = threading.Lock()
         self.suspended_total = 0
         self.enforced_total = 0
@@ -690,12 +697,26 @@ class RejectBudget:
                 denom = self._window
             else:
                 denom = len(self._recent)
-            return (sum(1 for v in self._recent if v) / denom) < self._max_frac
+            rejected = sum(1 for entry in self._recent if entry[0])
+            return (rejected / denom) < self._max_frac
 
-    def record(self, rejected: bool, *, suspended: bool = False) -> None:
-        """Book one enforcement-eligible decision."""
+    def record(
+        self,
+        rejected: bool,
+        *,
+        suspended: bool = False,
+        by: Optional[str] = None,
+    ) -> None:
+        """Book one enforcement-eligible decision.
+
+        ``by`` is the rule key the decision turned on, and it is recorded for
+        both outcomes: the rule that suppressed, and the rule that wanted to
+        and was held back.  It changes no arithmetic — the cap still reads the
+        boolean — and exists because the page and the pager that fire on this
+        window could not previously say which rule spent it.
+        """
         with self._lock:
-            self._recent.append(bool(rejected))
+            self._recent.append((bool(rejected), by or None))
             self.considered_total += 1
             if rejected:
                 self.enforced_total += 1
@@ -703,15 +724,46 @@ class RejectBudget:
                 self.suspended_total += 1
 
     def snapshot(self) -> Dict[str, Any]:
+        """The window, and WHICH RULE spent it.
+
+        The two attribution maps are kept apart for the same reason
+        ``enforced_by`` and ``would_reject_by`` are separate fields on a
+        decision: one describes a trade that was killed and the other a rule
+        that wanted to and was refused.  Pooling them would put rows the cap
+        *protected* into the numerator the cap is measured on.
+
+        * ``recent_rejected_by`` sums to ``recent_rejected`` — it is the cap's
+          own numerator, broken down.
+        * ``recent_suspended_by`` is over the same window and enters no
+          fraction. While the gate is over budget this is the map that says
+          which rule keeps asking, and it was the missing half of every alert
+          this cap has ever raised.
+        """
         with self._lock:
             n = len(self._recent)
-            rejected = sum(1 for v in self._recent if v)
+            rejected = 0
+            by_rejected: Dict[str, int] = {}
+            by_suspended: Dict[str, int] = {}
+            for was_rejected, key in self._recent:
+                if was_rejected:
+                    rejected += 1
+                    if key:
+                        by_rejected[key] = by_rejected.get(key, 0) + 1
+                elif key:
+                    # Not rejected, yet a rule is named: the cap held it back.
+                    by_suspended[key] = by_suspended.get(key, 0) + 1
             return {
                 "window": self._window,
                 "max_reject_frac": self._max_frac,
                 "recent_decisions": n,
                 "recent_rejected": rejected,
                 "recent_reject_frac": (rejected / n) if n else None,
+                "recent_rejected_by": dict(
+                    sorted(by_rejected.items(), key=lambda kv: (-kv[1], kv[0]))
+                ),
+                "recent_suspended_by": dict(
+                    sorted(by_suspended.items(), key=lambda kv: (-kv[1], kv[0]))
+                ),
                 "considered_total": self.considered_total,
                 "enforced_total": self.enforced_total,
                 "suspended_total": self.suspended_total,
@@ -829,14 +881,23 @@ def decide(
 
     if provisional.enforced_by is None:
         # A pass, and it belongs in the window: it is what lets a spent budget
-        # recover.
-        _budget.record(False)
+        # recover. No rule is named, which is what distinguishes it from a
+        # rejection the cap held back — that one carries its rule key.
+        _budget.record(False, by=None)
         _counters.record(provisional)
         return provisional
 
     allowed = _budget.allows()
     decision = evaluate(features, setup_class, p, budget_allows=allowed)
-    _budget.record(decision.enforced_by is not None, suspended=not allowed)
+    # `provisional`, not `decision`: while the cap is spent `decision.enforced_by`
+    # is None by construction, so reading the key off it would attribute every
+    # held-back rejection to nobody — which is precisely the blind spot this
+    # attribution exists to close.
+    _budget.record(
+        decision.enforced_by is not None,
+        suspended=not allowed,
+        by=provisional.enforced_by,
+    )
     _counters.record(decision)
     return decision
 
