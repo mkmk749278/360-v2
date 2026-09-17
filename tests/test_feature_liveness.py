@@ -548,3 +548,122 @@ class TestTruthReportSection:
         md = format_truth_report_markdown({}, {})
         assert "## Feature Liveness & Fail-Open Telemetry" in md
         assert "no liveness manifest" in md
+
+
+# --------------------------------------------------------------------------- #
+# The over-cap page must name the rule (2026-09-17)
+#
+# The owner's pager read, verbatim:
+#
+#   entry_quality_effective — entry-quality gate is over its blast-radius cap
+#   (70/200 recent decisions rejected, cap 0.35) — suppression is held back
+#   and the rule reads as passing
+#
+# Every number in that sentence is right and it cannot be acted on. Only
+# `profile_reject` is live by default, and its first live window was measured
+# at 0 of 900 — so either that rule has started biting (a finding about the
+# book's pair mix) or a rule armed from ops is doing what its own rationale
+# predicted (`session_quality`: "would move roughly half the delivered book"),
+# in which case the cap was sized for a different rule. Opposite next moves,
+# and the attribution was sitting in the window unread.
+#
+# `place_failed` on the trail governor and the AI governor's four bare counts
+# are the same defect: a counter is not a cause.
+# --------------------------------------------------------------------------- #
+
+
+def _entry_quality_probe():
+    """Extract the real probe body from ``main.py`` and make it callable.
+
+    Driving the shipped closure rather than re-implementing its message, for
+    the reason this repo has paid for twice: a test that asserts a sentence it
+    wrote itself asserts the author's assumption back at them.
+    """
+    import ast
+    from typing import Any as _Any, Dict as _Dict, List as _List, Tuple as _Tuple
+
+    tree = ast.parse(Path("src/main.py").read_text(encoding="utf-8"))
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_entry_quality_effective"
+    )
+    fn.col_offset = 0
+    module = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(module)
+    ns = {"Tuple": _Tuple, "List": _List, "Dict": _Dict, "Any": _Any}
+    exec(compile(module, "<probe>", "exec"), ns)
+    return ns["_entry_quality_effective"]
+
+
+def test_the_over_cap_page_names_the_rule_that_spent_the_window(monkeypatch):
+    """Everything below the entry point is the real producer.
+
+    Only ``from_config`` is redirected — the params envelope. The snapshot, the
+    budget, the counters and the decisions are all the shipping code, so the
+    message is assembled from keys the engine actually publishes rather than
+    from a shape this test invented.
+    """
+    from src import entry_quality as eq
+
+    eq.reset_state()
+    params = eq.EntryQualityParams(
+        enabled=True,
+        live=True,
+        max_reject_frac=0.35,
+        budget_window=20,
+        rules=(
+            eq.RuleParams(
+                rule=eq.RULES_BY_KEY["profile_reject"], live=True, threshold=0.0
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        eq.EntryQualityParams, "from_config", classmethod(lambda cls: params)
+    )
+
+    # Spend the cap through the real decision path.
+    for _ in range(40):
+        eq.decide({"profile_would_reject": True}, "MOVER_TREND_PULLBACK", params)
+    assert eq.get_budget().allows() is False, "the cap did not bite — test setup is wrong"
+
+    ok, detail = _entry_quality_probe()()
+    assert ok is False, f"a gate parked over its cap must page: {detail}"
+    assert "profile_reject" in detail, (
+        "the page says the gate is over budget and cannot say which rule spent "
+        f"it — the whole defect: {detail}"
+    )
+    assert "Window spent by" in detail and "Held back in this window" in detail, (
+        "the two populations must be named apart: one is a trade that was "
+        f"killed, the other a rule the cap refused: {detail}"
+    )
+    eq.reset_state()
+
+
+def test_the_over_cap_page_still_lists_the_live_rules(monkeypatch):
+    """The success branch printed the armed rules and the failure branch did
+    not — so the list was withheld exactly when it was needed. Which rules are
+    armed is half of "is this state expected"."""
+    from src import entry_quality as eq
+
+    eq.reset_state()
+    params = eq.EntryQualityParams(
+        enabled=True,
+        live=True,
+        max_reject_frac=0.35,
+        budget_window=20,
+        rules=(
+            eq.RuleParams(
+                rule=eq.RULES_BY_KEY["profile_reject"], live=True, threshold=0.0
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        eq.EntryQualityParams, "from_config", classmethod(lambda cls: params)
+    )
+    for _ in range(40):
+        eq.decide({"profile_would_reject": True}, "MOVER_TREND_PULLBACK", params)
+
+    ok, detail = _entry_quality_probe()()
+    assert ok is False
+    assert "Live rules: profile_reject" in detail, detail
+    eq.reset_state()

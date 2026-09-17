@@ -3994,14 +3994,34 @@ class CryptoSignalEngine:
                     )
 
                 budget = snap.get("budget") or {}
+                live_rules = [r.get("key") for r in (snap.get("rules") or []) if r.get("live")]
                 if not _eq.get_budget().allows() and int(budget.get("suspended_total") or 0) > 0:
+                    # NAME THE RULE. The first version of this message printed
+                    # only the aggregate fraction, and the two worlds it covers
+                    # have opposite next moves: `profile_reject` (the only
+                    # live-by-default rule, measured at 0 of 900 in its first
+                    # window) starting to bite is a finding about the book's
+                    # pair mix, while a rule armed from ops doing what its own
+                    # rationale predicted means the cap was sized for a
+                    # different rule and the choice is widen-or-unarm.
+                    #
+                    # Both maps are already in the snapshot; the old message
+                    # discarded them. `place_failed` on the trail governor and
+                    # the AI governor's four bare counts are the same defect —
+                    # a counter is not a cause.
+                    spent = budget.get("recent_rejected_by") or {}
+                    asking = budget.get("recent_suspended_by") or {}
+                    def _fmt(m: Dict[str, Any]) -> str:
+                        return ", ".join(f"{k}={v}" for k, v in m.items()) or "none attributed"
                     return False, (
                         "entry-quality gate is over its blast-radius cap "
                         f"({budget.get('recent_rejected')}/{budget.get('recent_decisions')} "
                         f"recent decisions rejected, cap {budget.get('max_reject_frac')}) "
-                        "— suppression is held back and the rule reads as passing"
+                        "— suppression is held back and the rule reads as passing. "
+                        f"Window spent by: {_fmt(spent)}. "
+                        f"Held back in this window: {_fmt(asking)}. "
+                        f"Live rules: {','.join(str(k) for k in live_rules) or 'none'}"
                     )
-                live_rules = [r.get("key") for r in (snap.get("rules") or []) if r.get("live")]
                 return True, (
                     f"{evaluated} evaluated, "
                     f"{totals.get('enforced_total')} suppressed, "
