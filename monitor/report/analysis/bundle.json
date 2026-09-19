@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T05:06:50.725070+00:00",
-  "generated_at_ts": 1789708010.72507,
+  "generated_at": "2026-09-19T04:57:46.676560+00:00",
+  "generated_at_ts": 1789793866.6765602,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "d801d595e45c27bec57e9c54bd34c786120ecce3",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 10770,
-    "strategy_matrix_scored_cells": 3130,
+    "strategy_matrix_cells": 10852,
+    "strategy_matrix_scored_cells": 3170,
     "performance_setups": 15,
     "suppression_gates": 0
   },
