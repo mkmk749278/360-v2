@@ -271,6 +271,81 @@ exist.
 
 ---
 
+## SESSION 151 2026-09-19 — the app's bottom bar did nothing, and a live order never said what it could cost
+
+**App-side only** (`lumin-app` #158). The engine is untouched: no dispatch, no
+sizing, no evaluator, no flag. Recorded here because this file is where a
+session ends, and because two of the five findings are the shapes this repo
+already has rules for, arriving one repo out.
+
+The owner handed over a combined end-user UX handoff (43 sections, 20 numbered
+priorities) and asked for the app to be entered and examined. It was: the web
+channel built locally with Firebase's documented test-number switch, signed in
+against the **live** engine, per `docs/AI_AGENT_APP_ACCESS.md`. Every finding
+below was seen on screen before it was written and after it was fixed.
+
+**Tapping the active bottom tab did nothing at all.** `NavShell._onSelect`
+early-returned on `i == _index`. The five tabs live in an `IndexedStack`, so a
+feed scrolled deep stayed deep, and the only way back to the newest signal was
+to drag through the whole thing — while the control every phone user reaches
+for sat under their thumb doing nothing. Confirmed live before the fix:
+scrolled the Signals feed to yesterday's closed signals, tapped Signals,
+nothing moved. All five tabs now implement a `ScrollToTop` contract reached
+through the same `GlobalKey` the foreground-refresh hook already uses.
+
+**The Menu opened on two adverts and no settings.** Sixteen rows under four
+headings with the upgrade and invite banners above all of them, so the first
+row a user could reach was `Pre-TP grab` — a control meaningless until you
+already auto-trade — above `Profile` and `Subscription`. Ten rows in five
+groups now, the five auto-trade pages behind one row and the three legal links
+behind another, banners below.
+
+**A live order asked for a bare "Confirm", over five numbers about position
+SIZE and none about COST.** Wallet equity, position size, leverage, notional,
+quantity — and the one figure a user actually decides from, what the trade
+loses if the stop fills, was derivable from what was on screen and stated
+nowhere. It leads the card now, in USDT and as stop distance, on both
+execution paths.
+
+Two decisions worth keeping, both this repo's own rules:
+
+- **"Planned", not "maximum", and the sheet says a gap can exceed it.** A stop
+  is an instruction to the exchange, not a guarantee. `CLAUDE.md`'s rule is
+  that reassuring copy is the dangerous direction on a money screen; calling
+  this figure a maximum is exactly that error.
+- **It refuses rather than returning zero.** On a breakeven-ratcheted stop
+  (`sig.sl == sig.entry` after a pre-TP fires) it renders nothing. `$0.00`
+  beside a real order invites the reader to believe the trade cannot lose.
+
+**Two seams of the usual shape.** `Shimmer` exists in this app precisely
+because a flat grey placeholder reads as stuck — its own docstring says it
+replaced one users perceived that way — and the Trade and paper skeletons were
+never wired to it, while Alerts and Charts showed a bare spinner on an empty
+page. Written, and read by nobody.
+
+**And one caught by trying to look at it.** The planned-loss figure had
+thirteen tests on its arithmetic and none on its rendering, because the review
+sheet needs Binance keys, per-user settings, an `AppConfigScope` and an Assist
+entitlement — the free test account reaches the paywall instead. Rather than
+ship an unverified claim, the row became a public widget that pumps in a test,
+and was rendered against a real signal's geometry before being called done.
+*A correct number behind a layout nobody rendered* is the same defect as a
+panel nobody can reach.
+
+**Open, and deliberately not decided here.** The handoff's §6 asks to reduce
+promotional repetition. The same "Automate your signals" banner renders on
+Pulse, Signals, Trade **and** Menu, and `upsell_banners._dismissedSlots` keys
+dismissal **per slot** — so closing it on one tab leaves it on the other
+three, and all four return next launch. That is a revenue-surface decision and
+the owner's, not mine; the banner was moved below the Menu's settings and
+otherwise left alone. Making dismissal global is a small change on his word.
+
+Also untouched from the handoff's P0: the signal-card hierarchy rework (§9)
+and API error recovery (§16), plus the P1/P2 list. They are worth their own
+change rather than being rushed in behind these.
+
+---
+
 ## SESSION 150 2026-09-16 — the Telegram channels are deleted, and the bot is untouched
 
 Owner, after the Slack removal: *"Clean up everything no subscribers in telegram
