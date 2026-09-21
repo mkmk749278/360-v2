@@ -1622,8 +1622,37 @@ def build_agents(engine: Any) -> List[AgentStat]:
     active = list(router.active_signals.values()) if router is not None else []
     lifecycle = _lifecycle_stats_by_setup(active + history)
 
+    # The roster is the map PLUS any setup class that has actually shipped a
+    # signal, and the second half is not a nicety.
+    #
+    # ``_PATH_TO_SETUP`` is hand-maintained and keyed by the telemetry path
+    # token, which is genuinely not the setup class for several entries
+    # (FUNDING_EXTREME -> FUNDING_EXTREME_SIGNAL, STANDARD ->
+    # LIQUIDITY_SWEEP_REVERSAL, TREND_PULLBACK -> TREND_PULLBACK_EMA), so it
+    # cannot simply be replaced by the enum.  But iterating it ALONE makes
+    # this endpoint a deny-list: silent by construction on the next setup
+    # class somebody adds.  Measured 2026-09-21 it carried 19 of the enum's
+    # 29, and the ten missing ones include MULTI_STRATEGY_CONFLUENCE, which
+    # ``Scanner`` assigns to signals it enqueues today.  A subscriber looking
+    # up a strategy they had just been sent found no card for it.
+    #
+    # So a setup outside the map earns a row by having lifecycle history —
+    # the population that would be harmed, rather than the one that happens
+    # to be convenient.  A setup nobody has ever seen a signal from stays
+    # out, because ten permanently empty cards on a subscriber-facing list
+    # are worse than the gap they would fill.  Its telemetry counters are 0
+    # because there is no per-path counter for it, which is a fact about the
+    # instrument and not about the setup.
+    extra = {
+        sc
+        for sc in lifecycle
+        if sc and sc not in {v.upper() for v in _PATH_TO_SETUP.values()}
+    }
+    roster: List[tuple[str, str]] = list(_PATH_TO_SETUP.items())
+    roster += [(sc, sc) for sc in sorted(extra)]
+
     items: List[AgentStat] = []
-    for path_token, setup_class in _PATH_TO_SETUP.items():
+    for path_token, setup_class in roster:
         bucket = lifecycle.get(setup_class.upper(), {})
         items.append(
             AgentStat(
