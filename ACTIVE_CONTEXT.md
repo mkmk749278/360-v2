@@ -271,6 +271,85 @@ exist.
 
 ---
 
+## SESSION 152 2026-09-21 — the app kept quoting figures about this engine that it could not check
+
+**App-side, plus one engine display endpoint** (`lumin-app` #159, `360-v2`
+#1041). Nothing touches dispatch, sizing, an evaluator or a flag; the engine
+change is `build_agents`, which serves `/api/agents` and nothing routes on it.
+
+The session started as the last open P0 from the UX handoff (§9/§10, the
+signal card's hierarchy) and turned into a sweep, because building the card
+surfaced a class underneath it: **several app surfaces were stating numbers
+about this engine that the app has no way to verify, and every one of them
+was wrong.**
+
+Five of the six were found by signing into the live web build and reading
+what it renders, not by reading code. Each had passing tests, none crashed,
+and each produced a full-looking screen describing something untrue — the
+seam shape this file already records under seven names, arriving in the repo
+that a paying subscriber actually looks at.
+
+**The one worth an engine reader's attention: the confidence badge.**
+
+`scanner/__init__.py` writes `sig.quality_tier` **once**, from
+`setup_score.quality_tier` — the component total at the moment the setup is
+scored (≥90 A+, ≥82 A, ≥74 B, else C). It then rewrites `sig.confidence`
+**twelve more times** before the candidate reaches the queue: the
+chart-pattern bonus, `apply_confidence_decay`, the composite rescore, the
+structural-flow score, the price-action and distance penalties, a ×0.85
+haircut, the transition boost and the confluence boost. **The tier is never
+regraded against any of them.**
+
+Both halves are defensible on their own. Together they mean the pair is
+routinely non-monotonic, and the app was printing them as one reading —
+`CONFIDENCE 73.9 · A` — over a sheet saying *"scored out of 100 and graded A+
+to C"*. The live feed carried `65.9 · A`, `81.5 · C` and `90.5 · B` on screen
+together. A subscriber reading that has to conclude one of the two numbers is
+broken; both are correct and they describe different moments.
+
+**The app repair is presentational and stops there deliberately.** The letter
+now sits under its own caption and the sheet says it is a separate stamp.
+Regrading the tier engine-side changes what the money path scores on and is
+owner-sign-off territory — recorded here as an open question, not shipped as
+a fix. The question for the owner is whether `quality_tier` should be
+recomputed from the final `confidence` at enqueue, or whether the
+component-total grade is the one that is actually wanted and `confidence` is
+the field that has drifted away from it.
+
+**The engine defect fixed here.** `build_agents` iterated `_PATH_TO_SETUP`
+alone — hand-maintained, keyed by the telemetry path token — so a setup class
+absent from it got **no row at all**. It carried 19 of `SetupClass`'s 29, and
+the ten missing include `MULTI_STRATEGY_CONFLUENCE`, which `Scanner` assigns
+to signals it enqueues today. A subscriber could be sent one and find no card
+for the strategy that produced it. The map cannot just be replaced by the
+enum (the path token genuinely differs for `FUNDING_EXTREME`, `STANDARD` and
+`TREND_PULLBACK`), so the roster is the union of the map and any setup class
+with lifecycle history — the population that would be harmed, rather than the
+one that is convenient, and no empty cards for setups nobody has seen.
+
+**The rest, in one line each.** The app's Agents page iterated its own
+*description* table while fetching the engine's roster, so the two paths that
+dominate the delivered feed had no card and their stats were unreachable. The
+outcome card rendered `max_favorable_excursion_pct` and ignored
+`max_adverse_excursion_pct`, which the engine has published all along — the
+flattering half of a two-sided measurement, alone, on a money screen; the
+first card opened after the fix read Live −0.97% against a **worst of
+−2.80%**. `Generated` — a per-scan-cycle counter, as `AgentStat`'s own
+docstring says — sat under a *"LAST 24h"* heading beside `Closed 25`, so a
+~15-second window was read as a day. *"15 AI analysts"* appeared three times,
+sourced from a table of app-side copy rather than from this engine. And an
+unplaceable regime rendered as *"Quiet"* with no segment lit.
+
+**One process note, because it is the same lesson twice in one session.** The
+first guard against the stale analyst count was scoped to the file where the
+count had been noticed; the Menu's copy of it was still on screen an hour
+later. A guard scoped to where a defect was seen is silent by construction on
+the next place it lives — which is this file's own rule, broken by the fix
+for it. Every guard added in that PR is now derived from a tree sweep, and
+each was verified by reverting the fix and watching it go red.
+
+---
+
 ## SESSION 151 2026-09-19 — the app's bottom bar did nothing, and a live order never said what it could cost
 
 **App-side only** (`lumin-app` #158). The engine is untouched: no dispatch, no
