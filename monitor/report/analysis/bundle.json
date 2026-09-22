@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-21T05:22:27.837872+00:00",
-  "generated_at_ts": 1789968147.8378718,
+  "generated_at": "2026-09-22T05:20:15.366871+00:00",
+  "generated_at_ts": 1790054415.3668706,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "947a3a03727acbc265dc301bf2bf105afb99b741",
+  "git_sha": "2a5c338960dc4e579d7a2d0f6173593c2d753018",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 10999,
-    "strategy_matrix_scored_cells": 3239,
+    "strategy_matrix_cells": 11066,
+    "strategy_matrix_scored_cells": 3274,
     "performance_setups": 15,
     "suppression_gates": 0
   },
@@ -61,6 +61,13 @@
     "weakest_cells": [
       {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
+        "context_key": "ASIA/VOLATILE_EXPANSION/NORMAL/BTC_RISING",
+        "edge_r": -16.073621520906745,
+        "n": 32,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "MOVER_TREND_PULLBACK@TUNED",
         "context_key": "NY/MARKDOWN/EXPANDED/BTC_FALLING",
         "edge_r": -2.513397887503132,
         "n": 19,
@@ -85,13 +92,6 @@
         "context_key": "OFF_HOURS/QUIET/NORMAL/BTC_NEUTRAL",
         "edge_r": -1.5313073832715764,
         "n": 15,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "MOVER_AVWAP_SCALP@SAREXIT",
-        "context_key": "OVERLAP/MARKUP/CASCADE/BTC_RISING",
-        "edge_r": -1.5065169688180795,
-        "n": 24,
         "verdict": "NEGATIVE"
       }
     ],
