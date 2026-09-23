@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Literal
+from typing import Any, Dict, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +183,14 @@ class SignResponse:
     binance_body: Any = None  # dict | list | None
     error_code: str = ""
     error_message: str = ""
+    # Binance's ``X-MBX-USED-WEIGHT-1M`` header from the signed call, i.e. the
+    # WHOLE IP's request weight over the trailing minute (2026-09-23). Tri-state
+    # on purpose: ``None`` means "not reported" — a signing service predating
+    # the field, a call that never reached Binance, or a response without the
+    # header — and must never be read as zero usage. Carries no secret material:
+    # it is a response header, and the secret only ever travels in the request
+    # HMAC.
+    used_weight_1m: Optional[int] = None
 
     def to_json_line(self) -> bytes:
         return (json.dumps(asdict(self), separators=(",", ":"))).encode("utf-8") + b"\n"
@@ -199,6 +207,7 @@ class SignResponse:
             binance_body=data.get("binance_body"),
             error_code=str(data.get("error_code", "")),
             error_message=str(data.get("error_message", "")),
+            used_weight_1m=_optional_int(data.get("used_weight_1m")),
         )
 
     @classmethod
@@ -208,6 +217,7 @@ class SignResponse:
         *,
         binance_status: int,
         binance_body: Any,
+        used_weight_1m: Optional[int] = None,
     ) -> "SignResponse":
         """Construct a success response — terse helper for handler code."""
         return cls(
@@ -215,6 +225,7 @@ class SignResponse:
             ok=True,
             binance_status=binance_status,
             binance_body=binance_body,
+            used_weight_1m=used_weight_1m,
         )
 
     @classmethod
@@ -226,6 +237,7 @@ class SignResponse:
         message: str,
         binance_status: int = 0,
         binance_body: Any = None,
+        used_weight_1m: Optional[int] = None,
     ) -> "SignResponse":
         """Construct an error response — terse helper for handler code."""
         return cls(
@@ -235,4 +247,15 @@ class SignResponse:
             error_message=message,
             binance_status=binance_status,
             binance_body=binance_body,
+            used_weight_1m=used_weight_1m,
         )
+
+
+def _optional_int(raw: Any) -> Optional[int]:
+    """Absent or unparseable stays ``None`` — never coerced to 0."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None

@@ -163,6 +163,10 @@ class BinanceClient:
                                 resp.headers.get("x-mbx-used-weight"),
                             )
                             self._rate_limiter.update_from_header(raw_weight)
+                            if self.market == "futures":
+                                # Measurement only — the census never throttles.
+                                from src import ip_weight_census as _ipw
+                                _ipw.record_public(raw_weight)
                             if raw_weight is not None:
                                 try:
                                     self._used_weight = int(raw_weight)

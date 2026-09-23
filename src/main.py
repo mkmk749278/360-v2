@@ -3122,6 +3122,18 @@ class CryptoSignalEngine:
             min_streak=2,
         ))
 
+        from src import ip_weight_census as _ipw
+
+        fl.add_predicate(PredicateProbe(
+            name="binance_ip_weight",
+            # One whitelisted IP, 2,400 weight/min on futures, and the
+            # 2026-09-01 outage was that budget spent on per-user GETs. Pages
+            # when a recent minute peaked past 80% of it, or when Binance
+            # throttled a signed call within the hour.
+            fn=_ipw.budget_health,
+            min_streak=1,
+        ))
+
         fl.add_predicate(PredicateProbe(
             name="position_lock_integrity",
             fn=_position_lock_integrity,
