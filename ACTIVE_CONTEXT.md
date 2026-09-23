@@ -4,6 +4,28 @@
 
 ---
 
+## OPEN, LIVE NOW — an uncached Firestore read is back in the monitor loop, at 2x the ceiling
+
+Present tense because it is still true as this session ends; **no fix has shipped**
+(it sits on an exit path, so it waits on owner sign-off). Found 2026-09-23 via the
+ops guest console [verified]: `read.firestore_projection` measured **104,170
+reads/day at 1 member**, of which `position_state.get_position` is **102,882** —
+twice the 50,000/day ceiling behind the 2 Sep outage. Projection at 1,000 members:
+103M/day.
+
+Caller chain [verified in code]: `trade_monitor._check_per_user_invalidation`
+(every 5s tick, every open signal) → `signal_dispatch.get_fsm_positions_for_signal`
+(added with #981) → one uncached `get_position` **per active uid**, including
+paper-mode users who cannot hold a position. Every exception is swallowed at
+`log.debug` with no `fail_open.record`, so a quota refusal on this path is silent.
+
+Fix shape: skip uids with no open position via a generation-gated index
+(`pretp_dispatcher._default_positions_for_symbol` is the reference), record the
+swallowed exceptions, and probe reads/day against 50,000. Open question for the
+owner: GCP → Firestore → Usage says whether the excess is being billed or refused.
+
+---
+
 ## OPEN, LIVE NOW — the delivered book turned negative on 2026-08-30 and nobody knows why
 
 Present tense because it is still true as this session ends, and it is the
@@ -277,18 +299,20 @@ exist.
 owner's doc *"Lumin System & Business Audit — Sep 2026"*. Headlines, so the next
 session does not re-derive them:
 
-- **The book's edge is the business risk.** Tape-priced 30d edge was +0.048%/trade
-  net of a 0.07% round trip; recorded post-30-Aug is −0.113%/trade before any drift
-  correction. At 37 trades/day an Auto subscriber's P&L is dominated by the sign of
-  that number, not by the ₹2000 fee (illustrative, $100 notional).
+- **Corrected the same day with live data** (ops guest, `/track-record/trades.csv`):
+  rebased at the dispatch-time price, the book since 9 Sep is **+0.115%/trade net**
+  (n=687, normal 95% range −0.13 to +0.36) after **−0.273%** for 30 Aug–8 Sep
+  (n=90). Recovered, still undecided. `read.path_scorecard`: MVRTP LONG **EARNS**
+  (n=737), MVAVW SHORT **LOSES** (n=65, −0.640%, CI −1.155 to −0.143) and is the
+  engine's only retirement candidate.
+- **No live auto-trading at all** [verified, `read.dispatch_funnel`]: 82 fan-outs
+  in ~50h, 0 placed, all 164 user-skips `mode:paper`.
 - **Live gate silently not enforcing** [verified, liveness run 35822918516]:
   `entry_quality` is over its blast-radius cap (70/200 rejected, cap 0.35), so
   `session_quality` suppression is held back and reads as passing.
 - **#1026 has paged every hour since 9 Sep.** Four of five items are chronic
   (streaks 396–469): `entry_feature_inputs`, `edge_reconciliation`,
   `tuned_variants`, `ai_governor_blind`. The real, new item sits in the same list.
-- **MOVER_AVWAP_SCALP** is negative on every measure (recorded −0.245% n=177,
-  tape −0.467% n=42): the clearest retirement candidate. Owner sign-off.
 - **App, first ten seconds** [verified live, headless Chromium]: 3.1–4.2s to first
   frame, blank splash; welcome screen ~55% empty; consent checkboxes near-invisible
   (`welcome_consent_page.dart` overrides the theme border with `cardBorder`);
@@ -297,8 +321,8 @@ session does not re-derive them:
   45 bare spinners, ~10 pages render raw `'$e'` to users, Signals polls prices
   every 5s even when hidden or backgrounded.
 
-**Open owner questions:** subscriber count and churn; Auto posture while the edge is
-≤ 0; retire MOVER_AVWAP_SCALP; the entry-quality cap; `quality_tier` vs
+**Open owner questions:** sign-off for the Firestore fix; billed or refused; why
+every user is on paper, and subscriber count and churn; retire MOVER_AVWAP_SCALP; the entry-quality cap; `quality_tier` vs
 `confidence`; legal review of the live USDT rail; approval for the app polish PR.
 
 ---
