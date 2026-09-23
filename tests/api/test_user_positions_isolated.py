@@ -332,3 +332,19 @@ def test_the_published_row_is_the_slim_projection():
     ps.put_position(_position("u1", "sig-s", ps.PositionState.OPEN))
     [row] = ps.user_book("u1")["open"]
     assert set(row) == set(ps.BOOK_FIELDS)
+
+
+def test_a_ring_failure_never_breaks_the_fsm_write(monkeypatch):
+    """The ring is display-only and runs inside put_position: a failure there
+    is counted and swallowed, and the position write still completes."""
+    from src import fail_open
+
+    def _boom(_p):
+        raise RuntimeError("ring broke")
+
+    monkeypatch.setattr(ps, "_closed_ring_push_locked", _boom)
+    seen = []
+    monkeypatch.setattr(fail_open, "record", lambda site, exc: seen.append(site))
+    ps.put_position(_position("u1", "sig-f", ps.PositionState.CLOSED))
+    assert seen == ["position_state.closed_ring"]
+    assert ps.get_write_generation() == 1

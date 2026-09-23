@@ -533,7 +533,14 @@ def _index_put_locked(position: "Position") -> None:
             bucket.pop(sid, None)
             if not bucket:
                 _index.pop(uid, None)
-        _closed_ring_push_locked(position)
+        # Display-only.  This runs inside the FSM's write path, after the
+        # Firestore write succeeded, so it must never raise into it.
+        try:
+            _closed_ring_push_locked(position)
+        except Exception as exc:  # noqa: BLE001
+            from src import fail_open as _fail_open
+
+            _fail_open.record("position_state.closed_ring", exc)
     else:
         _index.setdefault(uid, {})[sid] = position
 
