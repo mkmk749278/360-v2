@@ -783,6 +783,55 @@ class RedisEngineFacade:
             return None
         return parsed if isinstance(parsed, dict) else None
 
+    async def read_user_positions(self, firebase_uid: str) -> tuple:
+        """``(book, state)`` — this user's position book as the ENGINE holds it.
+
+        ``state`` has three values, because an empty book has three causes:
+
+        * ``"reporting"`` — the engine is publishing and this is the user's
+          book.  An empty ``open`` list really does mean nothing is open.
+        * ``"not_reported"`` — the engine is publishing and holds nothing for
+          this user (never traded, or nothing since this Redis began).  Also
+          an honest "nothing open".
+        * ``"unavailable"`` — no meta key (engine not publishing, or an engine
+          that predates it), Redis down, or a malformed payload.  Nothing may
+          be inferred, and the caller must not render it as an empty account.
+        """
+        if not self._redis.available:
+            return None, "unavailable"
+        client = self._redis.client
+        meta = await client.get(_store.KEY_USER_POSITIONS_META)
+        if meta is None:
+            return None, "unavailable"
+        raw = await client.hget(_store.KEY_USER_POSITIONS, firebase_uid)
+        if raw is None:
+            # Absent field, two causes.  If the engine has published books and
+            # the hash itself is gone (evicted under allkeys-lru, or a Redis
+            # flush), this user's book may well hold open positions: that is
+            # "unavailable", and the engine republishes on its next pass.
+            meta_obj = _store.decode(meta)
+            published = isinstance(meta_obj, dict) and bool(
+                meta_obj.get("users_published")
+            )
+            if published and not await client.exists(_store.KEY_USER_POSITIONS):
+                return None, "unavailable"
+            return None, "not_reported"
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            log.warning("redis_engine.read_user_positions: malformed payload")
+            return None, "unavailable"
+        if not isinstance(parsed, dict):
+            return None, "unavailable"
+        return parsed, "reporting"
+
+    async def request_closed_seed(self, firebase_uid: str) -> bool:
+        """Ask the engine to seed this user's closed history (idempotent SET)."""
+        if not self._redis.available or not firebase_uid:
+            return False
+        await self._redis.client.sadd(_store.KEY_CMD_SEED_CLOSED, firebase_uid)
+        return True
+
     def published_signal(self, signal_id: str) -> Optional[dict]:
         """Best-effort lookup of one signal dict from ``snapshot:signals_all``
         for pre-validation (existence / is_open) before enqueueing a take.

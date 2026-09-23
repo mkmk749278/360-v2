@@ -37,6 +37,10 @@ _CYCLE_INTERVAL_S   = 15   # ≈ one scan cycle
 # expired key must mean "the engine stopped publishing", and it stops meaning
 # that the moment a healthy quiet account can let it lapse.
 _EXCHANGE_REFRESH_S = 45
+#: Closed-history seeds per writer cycle.  Each is one bounded Firestore query
+#: (<= position_state.CLOSED_RING documents), so this caps the burst after a
+#: fresh Redis at a few dozen reads per 15s, however many users open the app.
+_SEED_CLOSED_PER_CYCLE = 3
 _ACTIVITY_INTERVAL_S = 30
 _AGENTS_INTERVAL_S   = 60
 
@@ -141,6 +145,13 @@ class SnapshotWriter:
         #: so a quiet account costs nothing between changes.
         self._exchange_positions_gen: int = -1
         self._exchange_positions_at: float = 0.0
+        #: Per-user position book (see ``_write_user_positions``).  The restore
+        #: runs once, on the first pass after the live index is serving.
+        self._user_books_restored: bool = False
+        self.user_book_counters: dict[str, int] = {
+            "published": 0, "restored_users": 0, "seeded": 0,
+            "seed_failed": 0, "restore_failed": 0,
+        }
         # Dedicated 1-thread pool for Pydantic serialisation — keeps heavy
         # model-construction off the engine's main asyncio event loop.
         self._executor = _TPE(max_workers=1, thread_name_prefix="snapshot-writer")
@@ -293,6 +304,8 @@ class SnapshotWriter:
             await self._write_position_marks()
         with self._timing("exchange_positions"):
             await self._write_exchange_positions()
+        with self._timing("user_positions"):
+            await self._write_user_positions()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             with self._timing("activity"):
                 await self._write_activity()
@@ -595,6 +608,124 @@ class SnapshotWriter:
             log.exception(
                 "snapshot_writer: failed to write exchange positions"
             )
+
+    async def _write_user_positions(self) -> None:
+        """Publish each user's position book for the api container.
+
+        Why this exists: the api container never initialises
+        ``position_state``, so the Trade tab's open-positions card and the
+        position half of signal-outcomes read empty in production from the
+        day each shipped (see ``position_state`` "Per-user book").
+
+        Cost.  Redis only, for users whose book CHANGED since the last pass
+        (the index marks them); nothing on a quiet book.  Firestore is read
+        solely by ``_drain_closed_seeds``, at most a few bounded queries per
+        cycle and at most once per user, because the hash this writes has no
+        TTL and is what a restarted engine restores its rings from.
+        """
+        if not self._redis.available:
+            return
+        try:
+            from src.execution import position_state as _ps
+
+            if not _ps.index_active():
+                # A cold engine publishes no meta, so the api reads
+                # "unavailable" rather than an empty account.
+                return
+            client = self._redis.client
+            if not self._user_books_restored:
+                await self._restore_user_books(_ps)
+                self._user_books_restored = True
+            await self._drain_closed_seeds(_ps)
+            if self.user_book_counters["published"] > 0 and not await client.exists(
+                _store.KEY_USER_POSITIONS
+            ):
+                # Evicted under allkeys-lru, or Redis flushed.  The engine
+                # still holds every book in memory, so republish all of them
+                # rather than let the api read "not reported" for users with
+                # open positions.
+                self.user_book_counters["republished_after_loss"] = (
+                    self.user_book_counters.get("republished_after_loss", 0) + 1
+                )
+                _ps.mark_all_dirty()
+            dirty = _ps.take_dirty_uids()
+            now = time.time()
+            if dirty:
+                mapping = {}
+                for uid in dirty:
+                    book = _ps.user_book(uid)
+                    if book is None:
+                        continue
+                    book["stamped_at"] = now
+                    mapping[uid] = _store.encode(book)
+                if mapping:
+                    await client.hset(_store.KEY_USER_POSITIONS, mapping=mapping)
+                    self.user_book_counters["published"] += len(mapping)
+            await client.set(
+                _store.KEY_USER_POSITIONS_META,
+                _store.encode({
+                    "stamped_at": now,
+                    "closed_ring": _ps.CLOSED_RING,
+                    # Lets the reader tell "no book for this user" from
+                    # "the whole hash is gone" (see read_user_positions).
+                    "users_published": self.user_book_counters["published"] > 0,
+                    "counters": dict(self.user_book_counters),
+                }),
+                ex=_store.TTL_USER_POSITIONS_META,
+            )
+        except Exception:
+            log.exception("snapshot_writer: failed to write user positions")
+
+    async def _restore_user_books(self, _ps: Any) -> None:
+        """Restore closed rings from the book the previous process published.
+
+        Without this every deploy would forget every user's closed history and
+        the seed path would re-read it from Firestore — at 1,000 members, a
+        per-deploy cost measured in tens of thousands of reads.
+        """
+        try:
+            raw = await self._redis.client.hgetall(_store.KEY_USER_POSITIONS)
+        except Exception:
+            self.user_book_counters["restore_failed"] += 1
+            log.exception("snapshot_writer: user-book restore read failed")
+            return
+        for key, value in (raw or {}).items():
+            uid = key.decode() if isinstance(key, bytes) else str(key)
+            book = _store.decode(value.decode() if isinstance(value, bytes) else value)
+            if not isinstance(book, dict):
+                continue
+            _ps.restore_closed(
+                uid, book.get("closed") or [], bool(book.get("closed_seeded")),
+            )
+            self.user_book_counters["restored_users"] += 1
+        # Users held only in the live index still need a first publish.
+        _ps.mark_all_dirty()
+
+    async def _drain_closed_seeds(self, _ps: Any) -> None:
+        """Seed closed history for users the api asked about.  Bounded."""
+        for _ in range(_SEED_CLOSED_PER_CYCLE):
+            try:
+                raw = await self._redis.client.spop(_store.KEY_CMD_SEED_CLOSED)
+            except Exception:
+                log.exception("snapshot_writer: seed queue read failed")
+                return
+            if raw is None:
+                return
+            uid = raw.decode() if isinstance(raw, bytes) else str(raw)
+            if not uid or _ps.is_closed_seeded(uid):
+                continue
+            try:
+                rows = await asyncio.to_thread(
+                    _ps.list_recent_closed_positions_for_user,
+                    uid,
+                    limit=_ps.CLOSED_RING,
+                )
+            except Exception:
+                self.user_book_counters["seed_failed"] += 1
+                log.exception("snapshot_writer: closed seed failed uid={}", uid)
+                continue
+            _ps.seed_closed(uid, rows)
+            self.user_book_counters["seeded"] += 1
 
     async def _write_engine_state(self) -> None:
         try:

@@ -189,6 +189,97 @@ async def _exchange_book(
     )
 
 
+async def _user_positions(
+    get_engine: Optional[Callable[[], Any]],
+    firebase_uid: str,
+    *,
+    want_closed: bool,
+    closed_limit: int = 25,
+) -> tuple[list, list, str, bool]:
+    """``(open, closed, state, closed_complete)`` for one user.
+
+    Where the positions come from depends on which process serves this
+    request, and until 2026-09-23 only one of the two was handled: in isolated
+    mode (production) this container never initialises ``position_state``, so
+    every caller took the ``_db is None`` branch and returned nothing — the
+    Trade tab's open-positions card and the signal cards' own outcomes read
+    empty from the day they shipped.  In that mode the ENGINE publishes each
+    user's book to Redis and this reads it.
+
+    ``state`` is ``_ps``-in-process ``"reporting"``, or the Redis reader's
+    three-valued answer (see ``RedisEngineFacade.read_user_positions``).
+    ``"unavailable"`` returns empty lists that the caller must NOT render as
+    an empty account.  ``closed_complete`` is False while the user's closed
+    history has not been seeded; a seed is requested and the next read has it.
+
+    Raises :class:`HTTPException` 503 when the in-process store raises, as
+    the endpoints always did.
+    """
+    from src.execution import position_state as _ps
+
+    if _ps._db is not None:
+        try:
+            open_positions = await asyncio.to_thread(
+                _ps.list_positions_for_user, firebase_uid
+            )
+            closed_positions = (
+                await asyncio.to_thread(
+                    _ps.list_recent_closed_positions_for_user,
+                    firebase_uid,
+                    limit=closed_limit,
+                )
+                if want_closed
+                else []
+            )
+        except _ps.PositionStateNotInitialisedError:
+            return [], [], "unavailable", False
+        except Exception:
+            log.exception(
+                "_user_positions: position-store read failed uid={}", firebase_uid,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not reach the position store. Please retry.",
+            )
+        return list(open_positions), list(closed_positions), "reporting", True
+
+    engine = get_engine() if get_engine is not None else None
+    reader = getattr(engine, "read_user_positions", None)
+    if reader is None:
+        return [], [], "unavailable", False
+    try:
+        book, state = await reader(firebase_uid)
+    except Exception:
+        log.warning("_user_positions: snapshot read failed", exc_info=True)
+        return [], [], "unavailable", False
+    if state == "unavailable":
+        return [], [], "unavailable", False
+
+    def _parse(rows: Any) -> list:
+        out = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                out.append(_ps.from_wire(row))
+            except Exception:  # noqa: BLE001 — one bad row must not blank the rest
+                log.warning("_user_positions: skipping malformed row")
+        return out
+
+    book = book or {}
+    open_positions = [p for p in _parse(book.get("open")) if not _ps.is_terminal(p.state)]
+    closed_positions = [p for p in _parse(book.get("closed")) if _ps.is_terminal(p.state)]
+    complete = bool(book.get("closed_seeded"))
+    if want_closed and not complete:
+        seeder = getattr(engine, "request_closed_seed", None)
+        if seeder is not None:
+            try:
+                await seeder(firebase_uid)
+            except Exception:
+                log.warning("_user_positions: seed request failed", exc_info=True)
+    return open_positions, closed_positions[:closed_limit], state, complete
+
+
 def _unrealized(side: str, entry: float, mark: float, qty: float) -> tuple:
     """``(pnl_usd, pnl_pct)`` on the position, or ``(None, None)``.
 
@@ -804,8 +895,6 @@ def register(
         — a real state (the feed dropped the symbol) that must not read as a
         price of zero.
         """
-        from src.execution import position_state as _ps
-
         firebase_uid = _extract_firebase_uid(identity)
         if firebase_uid is None:
             raise HTTPException(
@@ -813,32 +902,12 @@ def register(
                 detail="Auto-trade positions requires Firebase sign-in.",
             )
 
-        if not _ps._db:
-            # position_state not initialised — engine ran without
-            # the server-side execution stack.  Empty list is the
-            # safe-default response; the app renders "no open
-            # positions" which is doctrinally accurate (the engine
-            # isn't tracking any).
-            return {"positions": []}
-
-        try:
-            # list_positions_for_user does a synchronous Firestore
-            # .stream() — run it off the event loop so a slow Firestore
-            # round-trip doesn't freeze every other request.
-            positions = await asyncio.to_thread(
-                _ps.list_positions_for_user, firebase_uid
-            )
-        except _ps.PositionStateNotInitialisedError:
-            return {"positions": []}
-        except Exception:
-            log.exception(
-                "auto_trade_positions: Firestore read failed uid={}",
-                firebase_uid,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Could not reach the position store. Please retry.",
-            )
+        # In-process store in single-process mode, the engine's published
+        # book in isolated mode.  ``positions_state`` rides the envelope so an
+        # engine that is not publishing never reads as an empty account.
+        positions, _closed, positions_state, _ = await _user_positions(
+            get_engine, firebase_uid, want_closed=False,
+        )
 
         marks, stamped_at = await _live_marks(get_engine)
         exchange, ex_stamped_at, ex_state = await _exchange_book(
@@ -954,7 +1023,9 @@ def register(
         # account is the most important thing this endpoint can say, and it
         # was invisible on every surface we have.
         unmanaged = []
-        if ex_state == "reporting":
+        # Only when we know what the ENGINE holds: with the managed set
+        # unreadable, every exchange position would be mislabelled unmanaged.
+        if ex_state == "reporting" and positions_state != "unavailable":
             for symbol, ex_row in exchange.items():
                 if symbol in seen_symbols or not ex_row.get("is_open"):
                     continue
@@ -985,6 +1056,9 @@ def register(
         return {
             "positions": rows,
             "unmanaged": unmanaged,
+            # Three states, never two (see ``_user_positions``).  Only
+            # ``"unavailable"`` means the empty list above proves nothing.
+            "positions_state": positions_state,
             # About the READ, not about any row — see the docstring.
             "marks_stamped_at": stamped_at,
             "marks_age_sec": (
@@ -1104,40 +1178,13 @@ def register(
         closed_window = 0
         events_window = 0
 
-        # --- positions (open from the index, closed from the bounded read)
-        if _ps._db is not None:
-            try:
-                open_positions = await asyncio.to_thread(
-                    _ps.list_positions_for_user, firebase_uid
-                )
-            except _ps.PositionStateNotInitialisedError:
-                open_positions = []
-            except Exception:
-                log.exception(
-                    "signal_outcomes: open-position read failed uid={}",
-                    firebase_uid,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Could not reach the position store. Please retry.",
-                )
-            try:
-                closed_positions = await asyncio.to_thread(
-                    _ps.list_recent_closed_positions_for_user,
-                    firebase_uid,
-                    limit=limit,
-                )
-            except _ps.PositionStateNotInitialisedError:
-                closed_positions = []
-            except Exception:
-                log.exception(
-                    "signal_outcomes: closed-position read failed uid={}",
-                    firebase_uid,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Could not reach the position store. Please retry.",
-                )
+        # --- positions: the in-process store, or the engine's published book
+        open_positions, closed_positions, positions_state, closed_complete = (
+            await _user_positions(
+                get_engine, firebase_uid, want_closed=True, closed_limit=limit,
+            )
+        )
+        if positions_state != "unavailable":
             closed_window = len(closed_positions)
             for p in list(closed_positions) + list(open_positions):
                 terminal = _ps.is_terminal(p.state)
@@ -1212,8 +1259,18 @@ def register(
         )
         return {
             "outcomes": ordered,
+            # ``"unavailable"``: the position half could not be read, so a
+            # placed signal with no row here says nothing about its outcome.
+            "positions_state": positions_state,
+            # False while this user's closed history is still being seeded;
+            # the window below then undercounts and the next read fills it.
+            "closed_complete": closed_complete,
             "closed_window": closed_window,
-            "closed_truncated": closed_window >= limit,
+            # The published book holds at most CLOSED_RING per user, so a
+            # full ring is a truncated window even under a larger ``limit``.
+            "closed_truncated": closed_window >= (
+                limit if _ps._db is not None else min(limit, _ps.CLOSED_RING)
+            ),
             "events_window": events_window,
             "events_truncated": events_window >= limit,
         }
