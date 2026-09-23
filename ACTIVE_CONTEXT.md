@@ -4,42 +4,38 @@
 
 ---
 
-## OPEN until verified on the box — the uncached Firestore read in the monitor loop
+## VERIFIED 2026-09-23 — the uncached Firestore read in the monitor loop (#1042)
 
-**Fix in #1042 (owner-approved 2026-09-23); open until the post-deploy census
-says it worked.** Found via the ops guest console [verified]:
-`read.firestore_projection` measured **104,170 reads/day at 1 member**, of which
-`position_state.get_position` was **102,882** — twice the 50,000/day ceiling
-behind the 2 Sep outage.
+**Closed on the box.** `read.firestore_projection` via the ops guest console at
+~12:12 UTC, engine uptime 6,503s (1h48m, i.e. the #1042 deploy) [measured]:
 
-Cause [verified in code]: `trade_monitor._check_per_user_invalidation` (every
-5s tick, every open signal) → `signal_dispatch.get_fsm_positions_for_signal` →
-one `get_position` **per active uid**. `get_position` serves only a HIT from the
-live-position index; every uid with no live position on the signal (every paper
-user) fell through to a billed read. Its exceptions were swallowed at
-`log.debug`.
+| | Before (#1042) | After |
+|---|---|---|
+| Total reads/day, 1 member | **104,170** | **1,445** |
+| `position_state.get_position` | **102,882** | **106** |
 
-What #1042 does: the sweep reads `position_state.index_live_positions_for_signal`
-(the index already holds every live position write-through, so a miss is an
-authoritative "none"), still filtered to active uids and in their order; the
-per-uid read survives only while the index is inactive, and its failures now
-reach `fail_open`. New probe `firestore_read_budget` pages past 80% of 50,000/day.
+The 50,000/day ceiling is now used at ~3%. `read.fail_open` returned no sites,
+so the index path's new `fail_open` fallback has not fired. The
+`firestore_read_budget` probe keys off the same total, so at 1,445 it reads OK
+by construction [inferred — no catalog entry exposes the liveness table].
 
-**Deployed 2026-09-23 10:24:59 UTC** (`0b5d3ab`, deploy run success). First
-liveness run after it (10:55 UTC) was clean: heartbeat 1s, breaker healthy, 7
-open signals priced, **57 probes / 0 alerting** — 57 is the new
-`firestore_read_budget` registering. That reading is not the verification: the
-restart reset every probe's streak, and the census averages over uptime.
+**Follow-up, a finding only (no fix yet): `position_state.index_resync` is the
+next lead, and the projection understates it.** It is the largest site at
+278/day, and the projection scales it to 278,000/day at 1,000 members on the
+premise of one document per member. The code (`resync_index`) is ONE
+`collection_group` query over every non-terminal position on a ~5-minute timer,
+and it bills `max(docs, 1)`. Today there are zero live positions, so the 278 is
+the floor, not the load. At the target it bills **one read per open position
+per resync**: 1,000 members × N open positions × ~288/day. At N≈3 that is
+~860k/day, over **17x the ceiling**, from a defensive rebuild that exists only to
+bound drift [inferred from code + measured cadence]. Candidate directions for
+owner review: lengthen the timer, gate it on a write generation the way #609
+did, or resync one user per tick. A money-path index change is dark-first.
 
-**To close this entry:** ≥1h after the deploy, `read.firestore_projection` on
-the diag console must show `position_state.get_position` near zero and the
-total well under 50,000/day, and `firestore_read_budget` must read OK. If the
-total is still high, the next site in the census is the lead — do not re-derive
-this one. Open question for the owner either way: GCP → Firestore → Usage says
-whether the excess was being billed or refused.
+Still open for the owner: GCP → Firestore → Usage says whether the 2 Sep excess
+was billed or refused.
 
 ---
-
 
 ## OPEN, LIVE NOW — the delivered book turned negative on 2026-08-30 and nobody knows why
 
