@@ -4,27 +4,36 @@
 
 ---
 
-## OPEN, LIVE NOW — an uncached Firestore read is back in the monitor loop, at 2x the ceiling
+## OPEN until verified on the box — the uncached Firestore read in the monitor loop
 
-Present tense because it is still true as this session ends; **no fix has shipped**
-(it sits on an exit path, so it waits on owner sign-off). Found 2026-09-23 via the
-ops guest console [verified]: `read.firestore_projection` measured **104,170
-reads/day at 1 member**, of which `position_state.get_position` is **102,882** —
-twice the 50,000/day ceiling behind the 2 Sep outage. Projection at 1,000 members:
-103M/day.
+**Fix in #1042 (owner-approved 2026-09-23); open until the post-deploy census
+says it worked.** Found via the ops guest console [verified]:
+`read.firestore_projection` measured **104,170 reads/day at 1 member**, of which
+`position_state.get_position` was **102,882** — twice the 50,000/day ceiling
+behind the 2 Sep outage.
 
-Caller chain [verified in code]: `trade_monitor._check_per_user_invalidation`
-(every 5s tick, every open signal) → `signal_dispatch.get_fsm_positions_for_signal`
-(added with #981) → one uncached `get_position` **per active uid**, including
-paper-mode users who cannot hold a position. Every exception is swallowed at
-`log.debug` with no `fail_open.record`, so a quota refusal on this path is silent.
+Cause [verified in code]: `trade_monitor._check_per_user_invalidation` (every
+5s tick, every open signal) → `signal_dispatch.get_fsm_positions_for_signal` →
+one `get_position` **per active uid**. `get_position` serves only a HIT from the
+live-position index; every uid with no live position on the signal (every paper
+user) fell through to a billed read. Its exceptions were swallowed at
+`log.debug`.
 
-Fix shape: skip uids with no open position via a generation-gated index
-(`pretp_dispatcher._default_positions_for_symbol` is the reference), record the
-swallowed exceptions, and probe reads/day against 50,000. Open question for the
-owner: GCP → Firestore → Usage says whether the excess is being billed or refused.
+What #1042 does: the sweep reads `position_state.index_live_positions_for_signal`
+(the index already holds every live position write-through, so a miss is an
+authoritative "none"), still filtered to active uids and in their order; the
+per-uid read survives only while the index is inactive, and its failures now
+reach `fail_open`. New probe `firestore_read_budget` pages past 80% of 50,000/day.
+
+**To close this entry:** ≥1h after the deploy, `read.firestore_projection` on
+the diag console must show `position_state.get_position` near zero and the
+total well under 50,000/day, and `firestore_read_budget` must read OK. If the
+total is still high, the next site in the census is the lead — do not re-derive
+this one. Open question for the owner either way: GCP → Firestore → Usage says
+whether the excess was being billed or refused.
 
 ---
+
 
 ## OPEN, LIVE NOW — the delivered book turned negative on 2026-08-30 and nobody knows why
 

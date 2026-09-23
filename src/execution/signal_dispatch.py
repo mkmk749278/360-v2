@@ -2098,24 +2098,37 @@ def get_fsm_positions_for_signal(
     Used by the per-user tight-mode invalidation check in TradeMonitor so
     it can iterate users without importing position_state directly.  Returns
     an empty list when position_state is not initialised or no positions exist.
+
+    Called once per open signal on every TradeMonitor tick (5s), so it is a
+    hot loop.  It is answered from the in-memory live-position index: a
+    per-uid ``get_position`` bills a Firestore read for every uid WITHOUT a
+    live position (the common case — paper users, users the signal never
+    placed for), which measured 102,882 reads/day at one member on
+    2026-09-23, twice the 50,000/day ceiling.  The per-uid read survives only
+    as the fallback while the index is inactive (boot hydration failed, or a
+    process that never enables it).
     """
+    from src import fail_open
     from src.execution import position_state as _ps
 
     if not _ps.is_initialised():
         return []
 
+    active = _active_uids()
+    indexed = _ps.index_live_positions_for_signal(signal_id)
+    if indexed is not None:
+        return [(uid, indexed[uid]) for uid in active if uid in indexed]
+
     result = []
-    for uid in _active_uids():
+    for uid in active:
         try:
             pos = _ps.get_position(uid, signal_id)
         except _ps.PositionNotFoundError:
             continue
         except Exception as exc:
-            log.debug(
-                "get_fsm_positions_for_signal: get_position failed "
-                "uid={} signal_id={} exc={}",
-                uid, signal_id, exc,
-            )
+            # Fail-open (the caller treats a missing row as "nothing to
+            # invalidate"), but counted: a quota refusal here was silent.
+            fail_open.record("signal_dispatch.get_fsm_positions_for_signal", exc)
             continue
         if not _ps.is_terminal(pos.state):
             result.append((uid, pos))

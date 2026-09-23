@@ -253,3 +253,38 @@ def reset_for_test() -> None:
     with _lock:
         _sites.clear()
         _started_at = time.time()
+
+
+#: Fraction of the daily allowance at which :func:`budget_health` pages —
+#: early enough to act before the refusal, not so early it pages on a busy day.
+BUDGET_ALERT_FRACTION = 0.8
+
+
+def budget_health() -> tuple:
+    """``(ok, detail)`` for the feature-liveness watchdog: is this process's
+    read rate approaching the 50,000/day ceiling?
+
+    Past the ceiling every Firestore-backed path fails together — keystore,
+    kill switch, tunables (2026-09-02).  The census existed and nothing
+    watched it, so an uncached per-tick read reached 102,882/day before
+    anyone read a panel (2026-09-23).  A short uptime is reported as OK and
+    says so: ninety seconds of data extrapolates to a confident daily figure
+    that means nothing.
+    """
+    snap = snapshot()
+    if snap.get("uptime_is_short"):
+        return True, "uptime under 15 min — rate not yet meaningful"
+    per_day = int(snap.get("total_per_day") or 0)
+    ceiling = FREE_TIER_READS_PER_DAY
+    sites = snap.get("sites") or []
+    top = (
+        f"top site {sites[0]['site']} at {sites[0]['per_day']:,}/day"
+        if sites else "no sites recorded"
+    )
+    role = snap.get("process_role")
+    if per_day > BUDGET_ALERT_FRACTION * ceiling:
+        return False, (
+            f"{per_day:,} Firestore reads/day against a {ceiling:,}/day "
+            f"ceiling in the {role} process; {top}"
+        )
+    return True, f"{per_day:,} reads/day of {ceiling:,} ({role}); {top}"
