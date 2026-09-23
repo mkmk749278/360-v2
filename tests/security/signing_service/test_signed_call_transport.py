@@ -47,6 +47,7 @@ class _FakeBinance:
         self.requests: list[dict] = []
         self.status = 200
         self.body: object = {}
+        self.headers: dict = {}
         self._runner: web.AppRunner | None = None
         self.base_url = ""
 
@@ -66,7 +67,7 @@ class _FakeBinance:
                 "signature_valid": hmac.compare_digest(sig, expected),
             }
         )
-        return web.json_response(self.body, status=self.status)
+        return web.json_response(self.body, status=self.status, headers=self.headers)
 
     async def start(self) -> None:
         app = web.Application()
@@ -125,7 +126,7 @@ async def test_verb_maps_to_the_http_method_binance_receives(
 ) -> None:
     """A POST sent as a GET places no order but looks like success."""
     binance.body = {"orderId": 1}
-    status, body = await _call(binance, verb=verb)
+    status, body, _weight = await _call(binance, verb=verb)
 
     assert status == 200
     assert body == {"orderId": 1}
@@ -167,7 +168,7 @@ async def test_non_2xx_is_returned_not_raised(binance) -> None:
     binance.status = 400
     binance.body = {"code": -2019, "msg": "Margin is insufficient."}
 
-    status, body = await _call(binance)
+    status, body, _weight = await _call(binance)
     assert status == 400
     assert body["code"] == -2019
 
@@ -262,3 +263,37 @@ def test_base_url_rejects_unknown_label() -> None:
     """Must raise, never fall through to a default live exchange host."""
     with pytest.raises(ValueError, match="unknown base"):
         handler._base_url("testnet")
+
+
+# ---------------------------------------------------------------------------
+# IP request weight (2026-09-23) — the header rides back to the engine
+# ---------------------------------------------------------------------------
+
+
+async def test_used_weight_header_is_returned_from_the_real_http_call(binance) -> None:
+    """Binance's X-MBX-USED-WEIGHT-1M is the IP-wide trailing-minute weight.
+
+    Driven against a real server so the header is read the way aiohttp
+    actually exposes it — a mocked response would agree with any key name.
+    """
+    binance.headers = {"X-MBX-USED-WEIGHT-1M": "137"}
+    status, body, weight = await _call(binance)
+    assert status == 200
+    assert weight == 137
+
+
+async def test_absent_header_is_none_not_zero(binance) -> None:
+    """'Not reported' must never read as 'no usage'."""
+    status, body, weight = await _call(binance)
+    assert status == 200
+    assert weight is None
+
+
+async def test_header_survives_a_binance_error_response(binance) -> None:
+    """A 429/418 is exactly when the weight matters most."""
+    binance.status = 429
+    binance.body = {"code": -1003, "msg": "Too many requests"}
+    binance.headers = {"X-MBX-USED-WEIGHT-1M": "2400"}
+    status, body, weight = await _call(binance)
+    assert status == 429
+    assert weight == 2400

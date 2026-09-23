@@ -194,6 +194,20 @@ def _firestore_reads(ctx: Ctx) -> Dict[str, Any]:
     return _fsr.snapshot()
 
 
+def _ip_weight(ctx: Ctx) -> Dict[str, Any]:
+    """Binance per-IP request weight: peaks, and which signed calls spend it.
+
+    USDⓈ-M futures allows 2,400 weight/min per IP and this engine has exactly
+    one whitelisted IP. The 2026-09-01 outage was that budget spent on
+    per-user GETs. New orders (``POST /fapi/v1/order``) cost 0 IP weight per
+    Binance's docs; the reconciler's per-user ``positionRisk`` poll does not,
+    so this is the number that grows with live subscribers. Measurement only.
+    """
+    from src import ip_weight_census as _ipw
+
+    return _ipw.snapshot()
+
+
 def _firestore_projection(ctx: Ctx) -> Dict[str, Any]:
     """What today's reads cost at the 1,000-member auto-trade target.
 
@@ -575,6 +589,11 @@ for _e in (
           "Today's measured reads scaled to the auto-trade target, split into "
           "the sites that grow with subscribers and the ones that do not, "
           "against the 50k/day free allowance.", _firestore_projection),
+    Entry("read.ip_weight", "Binance IP request weight", "read",
+          "Per-minute peaks of Binance's X-MBX-USED-WEIGHT-1M against the "
+          "2,400/min futures ban line, split public vs signed, plus signed "
+          "calls per path and distinct users this hour — what one more live "
+          "user costs.", _ip_weight),
     Entry("read.control_generation", "Control invalidation channel", "read",
           "Bumps, polls and failures on the Redis generation that replaced the "
           "5s TTLs — says whether a kill-switch flip converges on the tick or "

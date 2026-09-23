@@ -92,9 +92,12 @@ class SigningClient:
     async def _rpc(self, request: SignRequest) -> SignResponse:
         """One-shot request/response over a fresh Unix-socket connection."""
         async with _SignClientConn(self.socket_path) as conn:
-            return await asyncio.wait_for(
+            response = await asyncio.wait_for(
                 conn.send_and_receive(request), timeout=self.timeout
             )
+        if request.verb != "ping":
+            _record_weight(request, response)
+        return response
 
     async def ping(self) -> SignResponse:
         """Health check.  Doesn't touch KMS / Firestore — useful for
@@ -157,6 +160,27 @@ class SigningClient:
                 params=dict(params or {}),
             )
         )
+
+
+def _record_weight(request: SignRequest, response: SignResponse) -> None:
+    """Hand the IP-weight reading to the census (measurement only).
+
+    Records in whichever process holds this client — the engine, where the
+    reconciler and the order path run and where the diagnostic catalog reads
+    it. Never raises: a census must not be able to fail a signed call.
+    """
+    try:
+        from src import ip_weight_census as _ipw
+
+        _ipw.record_signed(
+            path=request.path,
+            firebase_uid=request.firebase_uid,
+            base=request.base,
+            used_weight_1m=response.used_weight_1m,
+            binance_status=int(response.binance_status or 0),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _new_id() -> str:

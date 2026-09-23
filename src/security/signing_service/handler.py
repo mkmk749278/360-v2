@@ -235,7 +235,7 @@ async def handle_request(
 
     # --- 4. Sign + send Binance request -----------------------------------
     try:
-        binance_status, binance_body = await _signed_call(
+        binance_status, binance_body, used_weight_1m = await _signed_call(
             verb=request.verb,
             api_key=_extract_api_key(blob),
             api_secret=plaintext_secret,
@@ -300,12 +300,14 @@ async def handle_request(
             message=message,
             binance_status=binance_status,
             binance_body=binance_body,
+            used_weight_1m=used_weight_1m,
         )
 
     return SignResponse.ok_reply(
         request.id,
         binance_status=binance_status,
         binance_body=binance_body,
+        used_weight_1m=used_weight_1m,
     )
 
 
@@ -336,11 +338,13 @@ async def _signed_call(
     params: dict,
     recv_window_ms: int,
     session: Optional[aiohttp.ClientSession],
-) -> tuple[int, Any]:
+) -> tuple[int, Any, Optional[int]]:
     """Perform the actual signed HTTP call to Binance.
 
-    Returns ``(status_code, parsed_body)``.  Raises
-    :class:`_BinanceUnreachable` on network errors.
+    Returns ``(status_code, parsed_body, used_weight_1m)``.  The third element
+    is Binance's ``X-MBX-USED-WEIGHT-1M`` response header — the whole IP's
+    trailing-minute request weight — or ``None`` when the response did not
+    carry it.  Raises :class:`_BinanceUnreachable` on network errors.
 
     The plaintext ``api_secret`` is held in this function's local
     scope for the duration of the HMAC compute and dropped on return.
@@ -376,9 +380,31 @@ async def _signed_call(
                 body = await resp.json(content_type=None)
             except (aiohttp.ContentTypeError, ValueError):
                 body = None
-            return resp.status, body
+            return resp.status, body, _used_weight_from(resp)
     except aiohttp.ClientError as exc:
         raise _BinanceUnreachable(f"network error calling {path}: {exc}")
     finally:
         if own_session:
             await session.close()
+
+
+def _used_weight_from(resp: Any) -> Optional[int]:
+    """``X-MBX-USED-WEIGHT-1M`` off a Binance response, or ``None``.
+
+    A response header — never secret material. Defensive about the header
+    mapping's shape so a test double or an unusual response cannot turn a
+    measurement into a failed signed call.
+    """
+    try:
+        headers = getattr(resp, "headers", None)
+        if headers is None:
+            return None
+        raw = headers.get("X-MBX-USED-WEIGHT-1M")
+        if raw is None:
+            raw = headers.get("x-mbx-used-weight-1m")
+        if raw is None:
+            return None
+        value = int(str(raw).strip())
+        return value if value >= 0 else None
+    except Exception:  # noqa: BLE001 — a header must never fail the call
+        return None

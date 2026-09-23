@@ -125,7 +125,7 @@ async def test_happy_path_runs_full_unwrap_and_signed_call() -> None:
     ), patch.object(
         handler, "_signed_call", new_callable=AsyncMock
     ) as mock_signed:
-        mock_signed.return_value = (200, [{"asset": "USDT", "balance": "100"}])
+        mock_signed.return_value = (200, [{"asset": "USDT", "balance": "100"}], None)
         request = protocol.SignRequest(
             id="happy-1",
             verb="binance_signed_get",
@@ -142,6 +142,35 @@ async def test_happy_path_runs_full_unwrap_and_signed_call() -> None:
     assert mock_signed.call_args.kwargs["api_secret"] == plaintext_secret.decode("utf-8")
     # Verify the api_key from the blob was forwarded.
     assert mock_signed.call_args.kwargs["api_key"] == "A" * 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,body", [
+    (200, [{"asset": "USDT"}]),
+    (429, {"code": -1003, "msg": "Too many requests"}),
+])
+async def test_used_weight_is_forwarded_on_success_and_error(status, body) -> None:
+    """The IP-weight header reaches the engine on both reply shapes (2026-09-23).
+
+    The error reply matters most: a 429/418 is the ban arriving, and it is the
+    one moment the census most needs the reading.
+    """
+    plaintext_secret = b"another_real_secret_string_for_weight_test_ABCDEFGHIJKLMNOP"
+    encrypted_raw, dek = _make_real_encrypted_blob(plaintext_secret)
+    blob = _make_blob(api_key_full="B" * 64, encrypted_secret=encrypted_raw,
+                      encrypted_dek=b"opaque")
+    fake_kms = MagicMock()
+    fake_kms.decrypt.return_value = dek
+    kms_client._client = fake_kms
+    with patch.object(firestore_keystore, "get_key_blob", return_value=blob), \
+            patch.object(handler, "_signed_call", new_callable=AsyncMock) as mock_signed:
+        mock_signed.return_value = (status, body, 1777)
+        response = await handler.handle_request(protocol.SignRequest(
+            id="w-1", verb="binance_signed_get", firebase_uid="u",
+            base="futures", path="/fapi/v2/positionRisk",
+        ))
+    assert response.used_weight_1m == 1777
+    assert response.ok is (status == 200)
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +273,7 @@ async def test_binance_non_2xx_returns_typed_http_error_with_body() -> None:
     with patch.object(firestore_keystore, "get_key_blob", return_value=blob), patch.object(
         handler, "_signed_call", new_callable=AsyncMock
     ) as mock_signed:
-        mock_signed.return_value = (401, {"code": -2014, "msg": "Invalid API-key"})
+        mock_signed.return_value = (401, {"code": -2014, "msg": "Invalid API-key"}, None)
         request = protocol.SignRequest(
             id="x",
             verb="binance_signed_get",
@@ -280,7 +309,7 @@ async def test_binance_4xx_with_non_dict_body_falls_back_to_generic_message():
     ), patch.object(
         handler, "_signed_call", new_callable=AsyncMock,
     ) as mock_signed:
-        mock_signed.return_value = (502, "<html>Bad Gateway</html>")
+        mock_signed.return_value = (502, "<html>Bad Gateway</html>", None)
         response = await handler.handle_request(protocol.SignRequest(
             id="x",
             verb="binance_signed_get",
@@ -390,7 +419,7 @@ async def test_response_serialisation_does_not_leak_secret_or_dek() -> None:
     with patch.object(firestore_keystore, "get_key_blob", return_value=blob), patch.object(
         handler, "_signed_call", new_callable=AsyncMock
     ) as mock_signed:
-        mock_signed.return_value = (200, {"ok": True})
+        mock_signed.return_value = (200, {"ok": True}, None)
         request = protocol.SignRequest(
             id="leak-canary",
             verb="binance_signed_get",

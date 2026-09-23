@@ -78,9 +78,17 @@ All of it comes from one whitelisted IP against a 2,400/min budget, the same
 budget the 2026-09-01 orphan sweep exhausted. At ~5–8 weight per live user
 per minute, the ceiling is in the **hundreds** of live users, below the
 1,000-member target. The serial loop stretches the cycle and softens the rate,
-so this needs measuring, not a guess: record `X-MBX-USED-WEIGHT-1M` from
-signed responses. That record-keeping lives in the signing service, which is
-owner-sign-off.
+so this needs measuring, not a guess.
+
+**Instrument shipped (owner-approved the same day):** the signing service now
+returns `X-MBX-USED-WEIGHT-1M` on the wire (`SignResponse.used_weight_1m`,
+`None` = not reported), and `src/ip_weight_census.py` records it with the
+public-REST header. Read `read.ip_weight` on the diag console for per-minute
+peaks (split public/signed), signed calls per path and distinct users this
+hour. Probe `binance_ip_weight` pages past 80% of 2,400 in a recent minute, or
+on a 418/429 within the hour. Measurement only: nothing throttles on it. **To
+answer the ceiling question, read it once live users exist.** With both users
+on paper, today's numbers are almost all scanner traffic.
 
 **What going live needs from the owner** (not code): flip a keyed account to
 `live` in the app's Trade tab and read the armed card there. It shows the
