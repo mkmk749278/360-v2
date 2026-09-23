@@ -4,6 +4,37 @@
 
 ---
 
+## OPEN until verified on the box — the uncached Firestore read in the monitor loop
+
+**Fix in #1042 (owner-approved 2026-09-23); open until the post-deploy census
+says it worked.** Found via the ops guest console [verified]:
+`read.firestore_projection` measured **104,170 reads/day at 1 member**, of which
+`position_state.get_position` was **102,882** — twice the 50,000/day ceiling
+behind the 2 Sep outage.
+
+Cause [verified in code]: `trade_monitor._check_per_user_invalidation` (every
+5s tick, every open signal) → `signal_dispatch.get_fsm_positions_for_signal` →
+one `get_position` **per active uid**. `get_position` serves only a HIT from the
+live-position index; every uid with no live position on the signal (every paper
+user) fell through to a billed read. Its exceptions were swallowed at
+`log.debug`.
+
+What #1042 does: the sweep reads `position_state.index_live_positions_for_signal`
+(the index already holds every live position write-through, so a miss is an
+authoritative "none"), still filtered to active uids and in their order; the
+per-uid read survives only while the index is inactive, and its failures now
+reach `fail_open`. New probe `firestore_read_budget` pages past 80% of 50,000/day.
+
+**To close this entry:** ≥1h after the deploy, `read.firestore_projection` on
+the diag console must show `position_state.get_position` near zero and the
+total well under 50,000/day, and `firestore_read_budget` must read OK. If the
+total is still high, the next site in the census is the lead — do not re-derive
+this one. Open question for the owner either way: GCP → Firestore → Usage says
+whether the excess was being billed or refused.
+
+---
+
+
 ## OPEN, LIVE NOW — the delivered book turned negative on 2026-08-30 and nobody knows why
 
 Present tense because it is still true as this session ends, and it is the
@@ -268,6 +299,40 @@ the tick it came from. Ops had rendered `verdict_max_age_effective_sec` and
 `observed_tick_sec` since its panel shipped and the engine had never sent
 either, so the page carried a paragraph describing a derivation that did not
 exist.
+
+---
+
+## SESSION 153 2026-09-23 — full system, business and app-UX audit (no code changed)
+
+**Audit only; nothing in any repo's runtime changed.** Full write-up is in the
+owner's doc *"Lumin System & Business Audit — Sep 2026"*. Headlines, so the next
+session does not re-derive them:
+
+- **Corrected the same day with live data** (ops guest, `/track-record/trades.csv`):
+  rebased at the dispatch-time price, the book since 9 Sep is **+0.115%/trade net**
+  (n=687, normal 95% range −0.13 to +0.36) after **−0.273%** for 30 Aug–8 Sep
+  (n=90). Recovered, still undecided. `read.path_scorecard`: MVRTP LONG **EARNS**
+  (n=737), MVAVW SHORT **LOSES** (n=65, −0.640%, CI −1.155 to −0.143) and is the
+  engine's only retirement candidate.
+- **No live auto-trading at all** [verified, `read.dispatch_funnel`]: 82 fan-outs
+  in ~50h, 0 placed, all 164 user-skips `mode:paper`.
+- **Live gate silently not enforcing** [verified, liveness run 35822918516]:
+  `entry_quality` is over its blast-radius cap (70/200 rejected, cap 0.35), so
+  `session_quality` suppression is held back and reads as passing.
+- **#1026 has paged every hour since 9 Sep.** Four of five items are chronic
+  (streaks 396–469): `entry_feature_inputs`, `edge_reconciliation`,
+  `tuned_variants`, `ai_governor_blind`. The real, new item sits in the same list.
+- **App, first ten seconds** [verified live, headless Chromium]: 3.1–4.2s to first
+  frame, blank splash; welcome screen ~55% empty; consent checkboxes near-invisible
+  (`welcome_consent_page.dart` overrides the theme border with `cardBorder`);
+  onboarding copy "No runaway losses" contradicts the app's own gap warning. Code:
+  0 haptics, 11 animation widgets, 24 font sizes with 103 below the 11px floor,
+  45 bare spinners, ~10 pages render raw `'$e'` to users, Signals polls prices
+  every 5s even when hidden or backgrounded.
+
+**Open owner questions:** sign-off for the Firestore fix; billed or refused; why
+every user is on paper, and subscriber count and churn; retire MOVER_AVWAP_SCALP; the entry-quality cap; `quality_tier` vs
+`confidence`; legal review of the live USDT rail; approval for the app polish PR.
 
 ---
 

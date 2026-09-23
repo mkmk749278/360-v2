@@ -678,6 +678,31 @@ def index_open_positions_for_symbol(symbol: str) -> Optional[list["Position"]]:
         return out
 
 
+def index_live_positions_for_signal(signal_id: str) -> Optional[dict[str, "Position"]]:
+    """Every LIVE (non-terminal) position on ``signal_id``, keyed by uid, from
+    the live index.  ``None`` when the index is inactive — "cannot answer",
+    never "none live"; the caller falls back to its Firestore path.
+
+    Exists because :func:`get_position` can only serve a HIT from memory: a
+    uid with no live position on the signal falls through to a billed
+    Firestore read.  On a per-tick sweep that miss is the common case (every
+    paper user, every user the signal never placed for), and it measured
+    102,882 reads/day at one member on 2026-09-23 — twice the 50,000/day
+    ceiling behind the 2 Sep outage.  The index holds every live position
+    write-through, so an absent uid here is an authoritative "no live
+    position", which is the only question those sweeps ask.
+    """
+    with _lock:
+        if not _index_active:
+            return None
+        out: dict[str, "Position"] = {}
+        for uid, bucket in _index.items():
+            pos = bucket.get(signal_id)
+            if pos is not None and not is_terminal(pos.state):
+                out[uid] = pos
+        return out
+
+
 def index_open_positions() -> Optional[list["Position"]]:
     """Every OPEN position across all users, from the live index.
 

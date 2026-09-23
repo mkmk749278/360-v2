@@ -3109,6 +3109,19 @@ class CryptoSignalEngine:
             min_streak=2,
         ))
 
+        from src import firestore_reads as _fr
+
+        fl.add_predicate(PredicateProbe(
+            name="firestore_read_budget",
+            # Past 50,000 reads/day every Firestore-backed path fails
+            # together (the 2026-09-02 outage); the census existed and nothing
+            # watched it, so a per-tick read reached 102,882/day unpaged.
+            fn=_fr.budget_health,
+            # 2 audit cycles: a rate averaged over the whole uptime moves
+            # slowly, so a violation is never a one-sample blip.
+            min_streak=2,
+        ))
+
         fl.add_predicate(PredicateProbe(
             name="position_lock_integrity",
             fn=_position_lock_integrity,
