@@ -526,12 +526,14 @@ def _index_put_locked(position: "Position") -> None:
     tracks live positions only)."""
     uid = position.firebase_uid
     sid = position.signal_id
+    _dirty_uids.add(uid)
     if is_terminal(position.state):
         bucket = _index.get(uid)
         if bucket is not None:
             bucket.pop(sid, None)
             if not bucket:
                 _index.pop(uid, None)
+        _closed_ring_push_locked(position)
     else:
         _index.setdefault(uid, {})[sid] = position
 
@@ -543,12 +545,195 @@ def _index_delete_locked(firebase_uid: str, signal_id: str) -> None:
         bucket.pop(signal_id, None)
         if not bucket:
             _index.pop(firebase_uid, None)
+    _dirty_uids.add(firebase_uid)
 
 
 def index_active() -> bool:
     """True if the in-memory live-position index is hydrated and serving."""
     with _lock:
         return _index_active
+
+
+# ---------------------------------------------------------------------------
+# Per-user book, published for the isolated api container (2026-09-23)
+# ---------------------------------------------------------------------------
+#
+# Why this exists.  In isolated mode the api container never initialises this
+# module (see "Process scope" above), so ``GET /api/auto-trade/positions`` hit
+# ``if not _ps._db: return {"positions": []}`` on every request, and the
+# position half of ``/api/auto-trade/signal-outcomes`` was skipped entirely.
+# The Trade tab's "YOUR OPEN POSITIONS" card and every signal card's own
+# outcome chip therefore read empty in production from the day each shipped,
+# while the engine held the answer in memory.  Same seam as the trail
+# governor's ``INDEX COLD``: in-process state read from the other process.
+#
+# The engine now publishes each user's book to Redis (``snapshot_writer``),
+# and the api reads that.  The OPEN half is the live index (zero reads).  The
+# CLOSED half is a bounded ring per user, fed by every terminal write, so it
+# costs nothing going forward; history older than this process is seeded at
+# most once per user, on demand, by one bounded query, and survives engine
+# restarts because the published hash is restored at boot.
+
+#: Closed positions kept per user.  Matches the app's own window.
+CLOSED_RING: int = 25
+
+_closed_recent: dict[str, list["Position"]] = {}   # uid -> newest first
+_closed_seeded: set[str] = set()
+_dirty_uids: set[str] = set()
+
+
+def _closed_ring_push_locked(position: "Position") -> None:
+    """Record a terminal write in the user's ring.  Caller holds :data:`_lock`.
+
+    A copy, because the FSM mutates the object it passed in, and a ring that
+    shares it would describe the position's next write rather than this one.
+    """
+    import dataclasses as _dc
+
+    uid = position.firebase_uid
+    ring = [p for p in _closed_recent.get(uid, []) if p.signal_id != position.signal_id]
+    ring.insert(0, _dc.replace(position))
+    ring.sort(key=_closed_sort_key, reverse=True)
+    _closed_recent[uid] = ring[:CLOSED_RING]
+
+
+def _closed_sort_key(position: "Position") -> float:
+    ts = position.closed_at or position.last_event_at
+    try:
+        return float(ts.timestamp())
+    except Exception:  # noqa: BLE001 — a malformed stamp sorts last, not raises
+        return 0.0
+
+
+#: The fields the api's readers use (``/api/auto-trade/positions`` and
+#: ``/signal-outcomes``).  The book is published into a Redis capped at 128 MB
+#: under ``allkeys-lru``: the full document is ~60 fields, and at 1,000 members
+#: x (open + CLOSED_RING) rows that is tens of MB of cache able to push the
+#: feed keys out.  Everything absent here defaults in ``_from_firestore_dict``.
+BOOK_FIELDS: tuple = (
+    "signal_id", "firebase_uid", "symbol", "side", "state",
+    "entry_price_target", "entry_price_filled", "sl_price", "tp1_price",
+    "total_qty", "filled_qty", "closed_qty", "realized_pnl_total",
+    "pretp_fired", "close_reason", "created_at", "last_event_at", "closed_at",
+)
+
+
+def to_wire(position: "Position", *, fields: Optional[tuple] = None) -> dict:
+    """JSON-safe form of a position: the Firestore dict with ISO datetimes,
+    optionally projected to *fields*."""
+    out = _to_firestore_dict(position)
+    if fields is not None:
+        out = {k: out[k] for k in fields if k in out}
+    for key in ("created_at", "last_event_at", "closed_at", "entry_expires_at"):
+        if key not in out:
+            continue
+        value = out.get(key)
+        out[key] = value.isoformat() if isinstance(value, datetime) else None
+    return out
+
+
+def from_wire(data: dict) -> "Position":
+    """Inverse of :func:`to_wire`."""
+    parsed = dict(data)
+    for key in ("created_at", "last_event_at", "closed_at", "entry_expires_at"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value:
+            try:
+                parsed[key] = datetime.fromisoformat(value)
+            except ValueError:
+                parsed[key] = None
+        elif not isinstance(value, datetime):
+            parsed[key] = None
+    if parsed.get("created_at") is None:
+        parsed.pop("created_at", None)
+    if parsed.get("last_event_at") is None:
+        parsed.pop("last_event_at", None)
+    return _from_firestore_dict(parsed)
+
+
+def take_dirty_uids() -> set[str]:
+    """Users whose book changed since the last call; clears the set."""
+    with _lock:
+        out = set(_dirty_uids)
+        _dirty_uids.clear()
+        return out
+
+
+def mark_all_dirty() -> None:
+    """Every user this process knows about is republished on the next pass."""
+    with _lock:
+        _dirty_uids.update(_index.keys())
+        _dirty_uids.update(_closed_recent.keys())
+
+
+def user_book(firebase_uid: str) -> Optional[dict]:
+    """``{"open": [...], "closed": [...], "closed_seeded": bool}`` or None.
+
+    None while the live index is not serving: an engine that has not
+    hydrated cannot say what is open, and publishing an empty book then would
+    render a cold engine as a flat account.
+    """
+    with _lock:
+        if not _index_active:
+            return None
+        open_rows = [
+            to_wire(p, fields=BOOK_FIELDS)
+            for p in (_index.get(firebase_uid) or {}).values()
+        ]
+        closed_rows = [
+            to_wire(p, fields=BOOK_FIELDS)
+            for p in _closed_recent.get(firebase_uid, [])
+        ]
+        return {
+            "open": open_rows,
+            "closed": closed_rows,
+            "closed_seeded": firebase_uid in _closed_seeded,
+        }
+
+
+def is_closed_seeded(firebase_uid: str) -> bool:
+    with _lock:
+        return firebase_uid in _closed_seeded
+
+
+def seed_closed(firebase_uid: str, positions: list["Position"]) -> None:
+    """Merge a bounded history read into the ring and mark the user seeded.
+
+    Merge, never replace: a terminal write that landed while the query was in
+    flight is newer than anything the query returned.
+    """
+    with _lock:
+        for position in positions:
+            if position.firebase_uid == firebase_uid and is_terminal(position.state):
+                _closed_ring_push_locked(position)
+        _closed_seeded.add(firebase_uid)
+        _dirty_uids.add(firebase_uid)
+
+
+def restore_closed(firebase_uid: str, rows: list, seeded: bool) -> int:
+    """Restore a user's ring from the book the previous process published.
+
+    Returns how many rows were restored.  A malformed row is skipped rather
+    than failing the user, and a user already written to by this process keeps
+    those rows (they are newer).
+    """
+    restored: list[Position] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            restored.append(from_wire(row))
+        except Exception:  # noqa: BLE001
+            log.warning("restore_closed: skipping malformed row uid={}", firebase_uid)
+    with _lock:
+        for position in restored:
+            if is_terminal(position.state):
+                _closed_ring_push_locked(position)
+        if seeded:
+            _closed_seeded.add(firebase_uid)
+        _dirty_uids.add(firebase_uid)
+    return len(restored)
+
 
 
 def enable_position_index() -> None:
@@ -614,6 +799,8 @@ def enable_position_index() -> None:
         _index.clear()
         _index.update(fresh)
         _index_active = True
+        # Every hydrated user is owed a published book.
+        _dirty_uids.update(_index.keys())
     log.info(
         "position index ACTIVE: hydrated {} live positions across {} users",
         hydrated, len(_index),
@@ -655,6 +842,10 @@ def resync_index() -> None:
         log.exception("resync_index: rebuild query failed — keeping current index")
         return
     with _lock:
+        # Both sides: a user who dropped out of the index is owed a book with
+        # nothing open in it, not a stale one.
+        _dirty_uids.update(_index.keys())
+        _dirty_uids.update(fresh.keys())
         _index.clear()
         _index.update(fresh)
 
@@ -1016,6 +1207,9 @@ def reset_for_test() -> None:
         _write_generation = 0
         _index.clear()
         _index_active = False
+        _closed_recent.clear()
+        _closed_seeded.clear()
+        _dirty_uids.clear()
 
 
 # ---------------------------------------------------------------------------

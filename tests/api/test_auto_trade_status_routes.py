@@ -776,17 +776,25 @@ def test_positions_requires_firebase_auth() -> None:
     assert client.get("/api/auto-trade/positions").status_code == 401
 
 
-def test_positions_returns_empty_when_position_state_not_initialised() -> None:
-    """Engine boot without server-side execution stack still answers
-    with an empty list — the Live tab renders "no open positions"
-    which is accurate (engine isn't tracking any)."""
+def test_positions_without_any_position_source_says_unavailable() -> None:
+    """No in-process store and no engine book to read is NOT an empty account.
+
+    This test used to assert ``{"positions": []}`` and call it accurate — and
+    that branch is exactly what the isolated api container took on every
+    request in production, so the Trade tab read "0 open" whatever the user
+    held.  The list is still empty (there is nothing to show), but the
+    envelope now says it proves nothing.
+    """
     from src.execution import position_state
     position_state._db = None
     app = _build_app(identity=_firebase_user(uid="fb-z"))
     client = TestClient(app)
     r = client.get("/api/auto-trade/positions")
     assert r.status_code == 200
-    assert r.json() == {"positions": []}
+    body = r.json()
+    assert body["positions"] == []
+    assert body["positions_state"] == "unavailable"
+    assert body["unmanaged"] == []
 
 
 def test_positions_returns_user_positions_from_firestore(

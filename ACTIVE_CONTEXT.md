@@ -4,6 +4,41 @@
 
 ---
 
+## FIXED 2026-09-23 — the Trade tab's positions were empty in production since they shipped
+
+**What users saw.** "YOUR OPEN POSITIONS" and the per-signal "what happened on
+my account" chips never showed a Lumin position. `/api/auto-trade/positions`
+and the position half of `/api/auto-trade/signal-outcomes` read
+`position_state`, and in isolated mode (production) the api container **never
+initialises it** (`src/api/main.py` has no `init_position_state`, by design —
+see `position_state` "Process scope"). So both took their `_db is None` branch
+on every request: `{"positions": []}` and no position rows [verified from code +
+`read.firestore_reads` reporting `process_role: engine`, i.e. isolated]. The
+endpoint returned before its exchange join, so even `unmanaged` never rendered.
+Issues #988/#990 were "fixed" on top of this in the app, which is why they read
+correct in tests and empty on phones. The test that pinned the branch called
+the empty list *"accurate (engine isn't tracking any)"*.
+
+**Fix (this PR).** The engine publishes each user's book to Redis
+(`snapshot:user_positions`, a hash keyed by uid) from the snapshot writer:
+open rows from the live index (zero reads), closed rows from a 25-row ring per
+user fed by every terminal write (zero reads). Older closed history is seeded
+**once per user, on demand** (≤25 docs, ≤3 seeds per 15s cycle), and survives
+engine restarts because the hash has no TTL and is restored at boot. Liveness
+is a separate `…:meta` key with a 90s TTL, so a cold engine reads
+`positions_state: "unavailable"`, never an empty account; an evicted hash (Redis
+is `allkeys-lru` at 128 MB) reads `unavailable` and is republished from memory
+next pass. Rows are a slim 18-field projection for the same reason. The app
+renders "—" and "can't confirm" on `unavailable`, and keeps its old copy for an
+engine predating the field (`null`).
+
+**Cost.** Redis only on the steady path; Firestore ≤25 reads per user per
+Redis lifetime, once, when that user first opens the Trade tab.
+
+**Watch after deploy:** `snapshot:user_positions:meta` counters (`published`,
+`seeded`, `seed_failed`, `restore_failed`) via the engine's Redis, and the
+Trade tab on a live account with an open position.
+
 ## VERIFIED 2026-09-23 — the uncached Firestore read in the monitor loop (#1042)
 
 **Closed on the box.** `read.firestore_projection` via the ops guest console at

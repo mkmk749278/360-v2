@@ -167,6 +167,20 @@ TTL_POSITION_MARKS = 90
 #: have. Expiring lets the card say "the engine stopped reporting" instead
 #: of drawing a position from ten minutes ago as though it were current.
 TTL_EXCHANGE_POSITIONS = 90
+#: Per-user position book (2026-09-23).  A HASH: field = firebase uid,
+#: value = ``{"open": [...], "closed": [...], "closed_seeded": bool,
+#: "stamped_at": float}``.  Written only for users whose book changed, and
+#: deliberately WITHOUT a TTL: it is also what a restarted engine restores its
+#: closed-position rings from, so history is seeded from Firestore at most
+#: once per user rather than once per deploy.  Liveness is carried by the
+#: META key beside it, which does expire — an absent meta key means "the
+#: engine is not publishing", never "this user has no positions".
+KEY_USER_POSITIONS = "snapshot:user_positions"
+KEY_USER_POSITIONS_META = "snapshot:user_positions:meta"
+TTL_USER_POSITIONS_META = 90
+#: Uids whose closed history the api asked the engine to seed (a SET).  The
+#: engine drains a few per cycle; each costs one bounded Firestore query.
+KEY_CMD_SEED_CLOSED = "snapshot:cmd:seed_closed"
 TTL_ALERTS       = _TTL_FEED
 TTL_CMD          = 60  # command expires if engine is down; client must retry
 
