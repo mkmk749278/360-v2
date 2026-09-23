@@ -90,9 +90,9 @@
         "HOLD"
       ],
       "FUNDING_EXTREME_SIGNAL|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "FUNDING_EXTREME_SIGNAL|min_samples": [
         "HOLD",
@@ -252,7 +252,7 @@
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157,
       "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251
     },
-    "cycle": 2792
+    "cycle": 2834
   },
   "ledger": [
     {
