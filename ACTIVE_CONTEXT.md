@@ -7,7 +7,10 @@
 ## VERIFIED 2026-09-23 — the uncached Firestore read in the monitor loop (#1042)
 
 **Closed on the box.** `read.firestore_projection` via the ops guest console at
-~12:12 UTC, engine uptime 6,503s (1h48m, i.e. the #1042 deploy) [measured]:
+~13:48 UTC, engine uptime 6,503s [measured]. That process booted at ~12:02
+UTC — the redeploy triggered by merging #1043, which carries #1042's code —
+not the 10:24 deploy of #1042 itself; an earlier draft of this entry said
+otherwise.
 
 | | Before (#1042) | After |
 |---|---|---|
@@ -34,6 +37,56 @@ did, or resync one user per tick. A money-path index change is dark-first.
 
 Still open for the owner: GCP → Firestore → Usage says whether the 2 Sep excess
 was billed or refused.
+
+## Live auto-trade, 2026-09-23 — nobody is live, and the path is intact
+
+Owner asked for a deep look at live auto-trading. **No order has been placed
+because no user has chosen live** [measured, `read.dispatch_funnel`, engine up
+1h51m]: 4 fan-outs, each reaching both keyed users, 8 skips, all
+`mode:paper` with `MODE_REASON_OK`. That is a stored user choice, not a store
+that could not be read (#1031 split those apart). Not a fault, and nothing was
+changed.
+
+What was checked, so the next session does not redo it:
+- **Infra** [measured, ops `/system`]: engine, api, signing and redis are up
+  and healthy; all eight liveness links are up; 24 signals today.
+- **Order path since the users went paper** [read]: commits touching
+  `src/execution` / `signal_router` since 3 Sep are the Telegram removal
+  (#1034/#1037), the AI governor (dark, apply OFF) and #1042. The router's
+  fan-out call site still runs after `_write_dispatch_log` and before the
+  signal is registered, with no `return` between them.
+- **App "armed" card** [read]: `/api/auto-trade/runtime-status` surfaces every
+  silent skip gate (tier, pause, block-all prefs) and the readability of the
+  two unreadable-able flags. The stale-close wording (`STALE_EXPIRY`) is live
+  in the app.
+- **Vendor** [read, Binance USDⓈ-M changelog through 2026-09-21]: nothing
+  breaks order placement. `ALGO_UPDATE`'s double `NEW` for trailing stops is a
+  no-op in `position_fsm` (NEW is ignored), and `userTrades` (now 3 months) is
+  not used.
+
+**Refuted before it was written down:** "a 1,000-user fan-out gets the box
+IP-banned". Binance's New Order page states `POST /fapi/v1/order` costs **0**
+IP weight [read, Binance docs]; order limits are per account, so an order burst
+across many users does not draw on the shared per-IP budget. `algoOrder` is
+assumed the same — its page restated the order rule rather than a figure of its
+own [not independently confirmed].
+
+**Finding, inferred, no fix — the real IP-weight cliff is the reconciler.**
+`reconciler.run` walks every user with an open position every 60s. Each pass
+costs one `positionRisk` (IP weight 5 — from memory, not re-read this session), plus an `algoOpenOrders` per symbol.
+All of it comes from one whitelisted IP against a 2,400/min budget, the same
+budget the 2026-09-01 orphan sweep exhausted. At ~5–8 weight per live user
+per minute, the ceiling is in the **hundreds** of live users, below the
+1,000-member target. The serial loop stretches the cycle and softens the rate,
+so this needs measuring, not a guess: record `X-MBX-USED-WEIGHT-1M` from
+signed responses. That record-keeping lives in the signing service, which is
+owner-sign-off.
+
+**What going live needs from the owner** (not code): flip a keyed account to
+`live` in the app's Trade tab and read the armed card there. It shows the
+global flag, tier, pause and preferences with their readability. The first
+live placement after three weeks idle is worth watching in the funnel: `placed`
+should move off 0.
 
 ---
 
