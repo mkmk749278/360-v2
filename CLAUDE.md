@@ -363,6 +363,17 @@ Cloud cost is part of "production-grade." Every change is reviewed for cost the 
 
 - **The census that answers "where did the reads go" must cover every read.** The first cut instrumented **9 of 18** sites and was blind to `position_state` — which holds the two `collection_group` queries that scale with the open book — plus `dispatch_log` and `pretp_dispatcher`, the module whose uncached query wrote this whole section in #609. A census with holes points confidently at whatever it *can* see. `grep -c "_reads.record"` against `grep -c "\.get()\|\.stream()"`, per file, is the check.
 - **This section said the opposite for months.** It read *"the keystore (`firestore_keystore`) and kill-switch reads are already cached (30s / 5s)"*. The keystore had **no cache at all** — the 30s was `signal_dispatch._ACTIVE_UIDS_TTL_S`, a different module — and that sentence is why nobody looked here. **A constant asserting a property it does not have, checkable in one command**, for the eighth time in these two repos, and the first time it was in the Cost Discipline section itself. Any *new* per-loop reader must be cached and invalidation-gated — see `pretp_dispatcher._default_positions_for_symbol` as the reference implementation.
+- **An index that serves only HITS is not a cache for a question whose usual
+  answer is a MISS.** `get_position` answered from the live-position index when
+  the position was there and fell through to a billed Firestore read when it
+  was not — and `get_fsm_positions_for_signal` asked it once per active uid
+  per open signal every 5s tick, where the common answer is "this user has no
+  position" (every paper user). It reached **102,882 reads/day at one member**
+  (2026-09-23, #1042), twice the ceiling, with the index sitting right there
+  holding the complete answer. When a reader asks "which of N have X", ask the
+  index for the set, not each of N for itself; a negative answer from a
+  write-through index is authoritative. The census found it; nothing had
+  watched the census, so `firestore_read_budget` now does.
 - **Auth is not the cost.** Phone Auth / SMS verification is free at tester volume and sits under "Authentication", not "App Engine". If the bill spikes, look at the server-side execution Firestore layer, not auth.
 - **Diagnose on real billing data first** (mirrors Real-Data-First Diagnosis): Billing SKU report + Firestore Usage dashboard *before* theorising about a cause or touching code.
 
