@@ -271,6 +271,38 @@ exist.
 
 ---
 
+## SESSION 153 2026-09-23 — full system, business and app-UX audit (no code changed)
+
+**Audit only; nothing in any repo's runtime changed.** Full write-up is in the
+owner's doc *"Lumin System & Business Audit — Sep 2026"*. Headlines, so the next
+session does not re-derive them:
+
+- **The book's edge is the business risk.** Tape-priced 30d edge was +0.048%/trade
+  net of a 0.07% round trip; recorded post-30-Aug is −0.113%/trade before any drift
+  correction. At 37 trades/day an Auto subscriber's P&L is dominated by the sign of
+  that number, not by the ₹2000 fee (illustrative, $100 notional).
+- **Live gate silently not enforcing** [verified, liveness run 35822918516]:
+  `entry_quality` is over its blast-radius cap (70/200 rejected, cap 0.35), so
+  `session_quality` suppression is held back and reads as passing.
+- **#1026 has paged every hour since 9 Sep.** Four of five items are chronic
+  (streaks 396–469): `entry_feature_inputs`, `edge_reconciliation`,
+  `tuned_variants`, `ai_governor_blind`. The real, new item sits in the same list.
+- **MOVER_AVWAP_SCALP** is negative on every measure (recorded −0.245% n=177,
+  tape −0.467% n=42): the clearest retirement candidate. Owner sign-off.
+- **App, first ten seconds** [verified live, headless Chromium]: 3.1–4.2s to first
+  frame, blank splash; welcome screen ~55% empty; consent checkboxes near-invisible
+  (`welcome_consent_page.dart` overrides the theme border with `cardBorder`);
+  onboarding copy "No runaway losses" contradicts the app's own gap warning. Code:
+  0 haptics, 11 animation widgets, 24 font sizes with 103 below the 11px floor,
+  45 bare spinners, ~10 pages render raw `'$e'` to users, Signals polls prices
+  every 5s even when hidden or backgrounded.
+
+**Open owner questions:** subscriber count and churn; Auto posture while the edge is
+≤ 0; retire MOVER_AVWAP_SCALP; the entry-quality cap; `quality_tier` vs
+`confidence`; legal review of the live USDT rail; approval for the app polish PR.
+
+---
+
 ## SESSION 152 2026-09-21 — the app kept quoting figures about this engine that it could not check
 
 **App-side, plus one engine display endpoint** (`lumin-app` #159, `360-v2`
