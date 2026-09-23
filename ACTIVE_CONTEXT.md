@@ -4,42 +4,91 @@
 
 ---
 
-## OPEN until verified on the box — the uncached Firestore read in the monitor loop
+## VERIFIED 2026-09-23 — the uncached Firestore read in the monitor loop (#1042)
 
-**Fix in #1042 (owner-approved 2026-09-23); open until the post-deploy census
-says it worked.** Found via the ops guest console [verified]:
-`read.firestore_projection` measured **104,170 reads/day at 1 member**, of which
-`position_state.get_position` was **102,882** — twice the 50,000/day ceiling
-behind the 2 Sep outage.
+**Closed on the box.** `read.firestore_projection` via the ops guest console at
+~13:48 UTC, engine uptime 6,503s [measured]. That process booted at ~12:02
+UTC — the redeploy triggered by merging #1043, which carries #1042's code —
+not the 10:24 deploy of #1042 itself; an earlier draft of this entry said
+otherwise.
 
-Cause [verified in code]: `trade_monitor._check_per_user_invalidation` (every
-5s tick, every open signal) → `signal_dispatch.get_fsm_positions_for_signal` →
-one `get_position` **per active uid**. `get_position` serves only a HIT from the
-live-position index; every uid with no live position on the signal (every paper
-user) fell through to a billed read. Its exceptions were swallowed at
-`log.debug`.
+| | Before (#1042) | After |
+|---|---|---|
+| Total reads/day, 1 member | **104,170** | **1,445** |
+| `position_state.get_position` | **102,882** | **106** |
 
-What #1042 does: the sweep reads `position_state.index_live_positions_for_signal`
-(the index already holds every live position write-through, so a miss is an
-authoritative "none"), still filtered to active uids and in their order; the
-per-uid read survives only while the index is inactive, and its failures now
-reach `fail_open`. New probe `firestore_read_budget` pages past 80% of 50,000/day.
+The 50,000/day ceiling is now used at ~3%. `read.fail_open` returned no sites,
+so the index path's new `fail_open` fallback has not fired. The
+`firestore_read_budget` probe keys off the same total, so at 1,445 it reads OK
+by construction [inferred — no catalog entry exposes the liveness table].
 
-**Deployed 2026-09-23 10:24:59 UTC** (`0b5d3ab`, deploy run success). First
-liveness run after it (10:55 UTC) was clean: heartbeat 1s, breaker healthy, 7
-open signals priced, **57 probes / 0 alerting** — 57 is the new
-`firestore_read_budget` registering. That reading is not the verification: the
-restart reset every probe's streak, and the census averages over uptime.
+**Follow-up, a finding only (no fix yet): `position_state.index_resync` is the
+next lead, and the projection understates it.** It is the largest site at
+278/day, and the projection scales it to 278,000/day at 1,000 members on the
+premise of one document per member. The code (`resync_index`) is ONE
+`collection_group` query over every non-terminal position on a ~5-minute timer,
+and it bills `max(docs, 1)`. Today there are zero live positions, so the 278 is
+the floor, not the load. At the target it bills **one read per open position
+per resync**: 1,000 members × N open positions × ~288/day. At N≈3 that is
+~860k/day, over **17x the ceiling**, from a defensive rebuild that exists only to
+bound drift [inferred from code + measured cadence]. Candidate directions for
+owner review: lengthen the timer, gate it on a write generation the way #609
+did, or resync one user per tick. A money-path index change is dark-first.
 
-**To close this entry:** ≥1h after the deploy, `read.firestore_projection` on
-the diag console must show `position_state.get_position` near zero and the
-total well under 50,000/day, and `firestore_read_budget` must read OK. If the
-total is still high, the next site in the census is the lead — do not re-derive
-this one. Open question for the owner either way: GCP → Firestore → Usage says
-whether the excess was being billed or refused.
+Still open for the owner: GCP → Firestore → Usage says whether the 2 Sep excess
+was billed or refused.
+
+## Live auto-trade, 2026-09-23 — nobody is live, and the path is intact
+
+Owner asked for a deep look at live auto-trading. **No order has been placed
+because no user has chosen live** [measured, `read.dispatch_funnel`, engine up
+1h51m]: 4 fan-outs, each reaching both keyed users, 8 skips, all
+`mode:paper` with `MODE_REASON_OK`. That is a stored user choice, not a store
+that could not be read (#1031 split those apart). Not a fault, and nothing was
+changed.
+
+What was checked, so the next session does not redo it:
+- **Infra** [measured, ops `/system`]: engine, api, signing and redis are up
+  and healthy; all eight liveness links are up; 24 signals today.
+- **Order path since the users went paper** [read]: commits touching
+  `src/execution` / `signal_router` since 3 Sep are the Telegram removal
+  (#1034/#1037), the AI governor (dark, apply OFF) and #1042. The router's
+  fan-out call site still runs after `_write_dispatch_log` and before the
+  signal is registered, with no `return` between them.
+- **App "armed" card** [read]: `/api/auto-trade/runtime-status` surfaces every
+  silent skip gate (tier, pause, block-all prefs) and the readability of the
+  two unreadable-able flags. The stale-close wording (`STALE_EXPIRY`) is live
+  in the app.
+- **Vendor** [read, Binance USDⓈ-M changelog through 2026-09-21]: nothing
+  breaks order placement. `ALGO_UPDATE`'s double `NEW` for trailing stops is a
+  no-op in `position_fsm` (NEW is ignored), and `userTrades` (now 3 months) is
+  not used.
+
+**Refuted before it was written down:** "a 1,000-user fan-out gets the box
+IP-banned". Binance's New Order page states `POST /fapi/v1/order` costs **0**
+IP weight [read, Binance docs]; order limits are per account, so an order burst
+across many users does not draw on the shared per-IP budget. `algoOrder` is
+assumed the same — its page restated the order rule rather than a figure of its
+own [not independently confirmed].
+
+**Finding, inferred, no fix — the real IP-weight cliff is the reconciler.**
+`reconciler.run` walks every user with an open position every 60s. Each pass
+costs one `positionRisk` (IP weight 5 — from memory, not re-read this session), plus an `algoOpenOrders` per symbol.
+All of it comes from one whitelisted IP against a 2,400/min budget, the same
+budget the 2026-09-01 orphan sweep exhausted. At ~5–8 weight per live user
+per minute, the ceiling is in the **hundreds** of live users, below the
+1,000-member target. The serial loop stretches the cycle and softens the rate,
+so this needs measuring, not a guess: record `X-MBX-USED-WEIGHT-1M` from
+signed responses. That record-keeping lives in the signing service, which is
+owner-sign-off.
+
+**What going live needs from the owner** (not code): flip a keyed account to
+`live` in the app's Trade tab and read the armed card there. It shows the
+global flag, tier, pause and preferences with their readability. The first
+live placement after three weeks idle is worth watching in the funnel: `placed`
+should move off 0.
 
 ---
-
 
 ## OPEN, LIVE NOW — the delivered book turned negative on 2026-08-30 and nobody knows why
 
