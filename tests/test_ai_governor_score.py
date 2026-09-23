@@ -439,8 +439,10 @@ def test_snapshot_readability_names_the_reason_not_only_the_bool():
     )
     read = built.readability()
     assert read["book_readable"] is False
-    assert read["book_reason"] == snap.WHY_NOT_SUBSCRIBED
-    assert read["flow_reason"] == snap.WHY_NOT_SUBSCRIBED
+    # No source handed in is "not wired", never "not subscribed" (2026-09-23):
+    # the old label told a capacity story about a missing wire.
+    assert read["book_reason"] == snap.WHY_NOT_WIRED
+    assert read["flow_reason"] == snap.WHY_NOT_WIRED
     # The pooled figure stays for continuity rather than being replaced.
     assert built.blind_fraction() == pytest.approx(1.0)
 

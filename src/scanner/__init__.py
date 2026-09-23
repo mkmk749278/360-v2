@@ -4173,16 +4173,8 @@ class Scanner:
         # Effect flag OFF by default: until it is flipped this branch does not
         # run and the bookTicker snapshot below is still what everything sees,
         # while `depth_book` fills and ops renders the disagreement.
-        if _order_book is None and DEPTH_LIVE_FOR_CONSUMERS:
-            try:
-                _order_book = get_depth_store().order_book(symbol)
-            except Exception as exc:  # noqa: BLE001
-                fail_open.record("scanner:depth_book_read", exc)
-                _order_book = None
         if _order_book is None:
-            _book_snapshot = self._order_book_snapshot_cache.get(symbol)
-            if _book_snapshot and time.monotonic() < float(_book_snapshot[1]):
-                _order_book = _book_snapshot[0]
+            _order_book = self.current_order_book(symbol)
             if _order_book is None:
                 dependency_source_state["order_book"] = "unavailable"
             elif isinstance(_order_book, dict) and ((_order_book.get("bids") or []) and (_order_book.get("asks") or [])):
@@ -5343,6 +5335,29 @@ class Scanner:
             self._persist_loss_streaks()
             return streak
         return self._loss_streaks.get(cd_key, 0)
+
+    def current_order_book(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """The book every consumer reads for ``symbol``, or None.
+
+        The one implementation of that choice. The scan path calls it, and so
+        does the AI governor's context snapshot (2026-09-23), which until then
+        had been handed no book at all and recorded every verdict as
+        book-blind. Phase 2c handover rule: prefer the live depth store only
+        while ``DEPTH_LIVE_FOR_CONSUMERS`` is on, else the unexpired
+        bookTicker snapshot. In memory only: no vendor call, no Firestore read.
+        """
+        book: Optional[Dict[str, Any]] = None
+        if DEPTH_LIVE_FOR_CONSUMERS:
+            try:
+                book = get_depth_store().order_book(symbol)
+            except Exception as exc:  # noqa: BLE001
+                fail_open.record("scanner:depth_book_read", exc)
+                book = None
+        if book is None:
+            snap = self._order_book_snapshot_cache.get(symbol)
+            if snap and time.monotonic() < float(snap[1]):
+                book = snap[0]
+        return book
 
     @staticmethod
     def _get_primary_timeframe(chan_name: str, setup_class: str = "") -> str:

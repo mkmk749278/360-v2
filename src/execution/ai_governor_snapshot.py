@@ -53,6 +53,11 @@ WHY_NOT_SUBSCRIBED = "not_subscribed"
 WHY_STALE = "stale"
 WHY_DISABLED = "disabled"
 WHY_ERROR = "error"
+#: No source was handed in at all. Distinct from ``not_subscribed`` (a source
+#: exists and had nothing for this symbol): until 2026-09-23 no caller passed
+#: ``book_getter`` / ``flow_getter``, and every verdict was recorded as
+#: ``not_subscribed`` — a capacity story for what was a missing wire.
+WHY_NOT_WIRED = "not_wired"
 
 
 @dataclass(frozen=True)
@@ -474,9 +479,9 @@ def build_snapshot(
         mae_pct=float(getattr(signal, "max_adverse_excursion_pct", 0.0) or 0.0),
         bars_since_entry=int(bars_since_entry),
         book_imbalance_aligned=_readable_from(book_getter) if book_getter
-        else Readable.unknown(WHY_NOT_SUBSCRIBED),
+        else Readable.unknown(WHY_NOT_WIRED),
         cvd_slope_aligned=_readable_from(flow_getter) if flow_getter
-        else Readable.unknown(WHY_NOT_SUBSCRIBED),
+        else Readable.unknown(WHY_NOT_WIRED),
         price=price,
         macro=dict(macro or {}),
         instrument=dict(instrument or {}),

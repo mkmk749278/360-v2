@@ -1224,6 +1224,8 @@ async def sweep(
     level_getter: Any = None,
     pair_getter: Any = None,
     btc_opposes: Any = None,
+    book_source: Any = None,
+    cvd_source: Any = None,
 ) -> Dict[str, Any]:
     """Advance every armed SIGNAL by at most one bar. Never blocks on the model.
 
@@ -1327,6 +1329,13 @@ async def sweep(
             # the model was missing.
             series=series,
             premise=_premise_for(sig, series),
+            # Order book and CVD, signed toward the trade. `build_snapshot`
+            # has taken these since the lane shipped and no caller passed
+            # them, so all 200 recorded verdicts read book- and flow-blind and
+            # `ai_governor_blind` paged hourly — the `macro` defect above,
+            # left behind on two more parameters (2026-09-23).
+            book_getter=_book_getter_for(sig, book_source),
+            flow_getter=_flow_getter_for(sig, cvd_source),
             now=now,
         )
         snapshot = _snap.with_menu(snapshot, menu)
@@ -2113,6 +2122,44 @@ def _macro_for(
     for key, value in dict(batch_macro or {}).items():
         block.setdefault(key, value)
     return block
+
+
+def _is_long(sig: Any) -> bool:
+    # Same test `ai_governor_snapshot.build_snapshot` applies, so the sign the
+    # model is shown and the side the snapshot records cannot disagree.
+    direction = getattr(sig, "direction", "")
+    return str(getattr(direction, "value", direction) or "").upper().endswith("LONG")
+
+
+def _book_getter_for(sig: Any, book_source: Any) -> Any:
+    """A zero-arg getter for this signal's aligned book imbalance, or None.
+
+    None means *no source was wired* and the snapshot records ``not_wired``.
+    A wired source that has no book for the symbol returns None from the
+    getter, which the snapshot records as ``not_subscribed`` — two different
+    facts with two different fixes. Computed with ``entry_features``' own
+    functions so the governor and the entry lane can never disagree about
+    what "book imbalance, signed toward the trade" means.
+    """
+    if book_source is None:
+        return None
+    from src import entry_features as _ef
+
+    symbol = str(getattr(sig, "symbol", "") or "")
+    is_long = _is_long(sig)
+    return lambda: _ef._align(_ef.book_imbalance(book_source(symbol)), is_long)
+
+
+def _flow_getter_for(sig: Any, cvd_source: Any) -> Any:
+    """A zero-arg getter for this signal's aligned CVD slope, or None. See
+    :func:`_book_getter_for` for why None and a None-returning getter differ."""
+    if cvd_source is None:
+        return None
+    from src import entry_features as _ef
+
+    symbol = str(getattr(sig, "symbol", "") or "")
+    is_long = _is_long(sig)
+    return lambda: _ef._align(_ef.cvd_slope(cvd_source(symbol)), is_long)
 
 
 def _instrument_for(sig: Any, pair_getter: Any) -> Dict[str, Any]:

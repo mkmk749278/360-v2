@@ -38,6 +38,28 @@ did, or resync one user per tick. A money-path index change is dark-first.
 Still open for the owner: GCP → Firestore → Usage says whether the 2 Sep excess
 was billed or refused.
 
+## AI governor was book- and flow-blind by construction (2026-09-23, fixed)
+
+`#1046` (`ai_governor_blind`, "50/50 verdicts had no readable context") was a
+real defect, not a noisy probe. `read.ai_governor` showed **200 of 200** rows
+book-blind and flow-blind, every one labelled `not_subscribed`. Cause
+[verified by grep]: `build_snapshot` takes `book_getter` / `flow_getter`, and
+**no caller in the engine passed them**. That is the `macro` defect fixed
+2026-09-10, left behind on two more parameters.
+
+Fix: `Scanner.current_order_book` is now the one implementation of the book
+choice (the scan path calls it too), `main.py` hands it and a 15m-preferred CVD
+reader to the monitor, and the sweep turns them into signed per-signal getters
+using `entry_features`' own functions. A never-wired source now reads
+`not_wired`, never `not_subscribed`. A derived test fails if the sweep stops
+passing any parameter `build_snapshot` accepts. Measurement lane only (apply
+OFF). In-memory reads, no vendor or Firestore cost.
+
+**Still open, deliberately not fixed:** `sweep(macro=…, macro_moved=…)` is
+never passed by `trade_monitor`, so `macro_moved` is always False and the
+governor's "macro moved" re-review trigger can never fire. Wiring it changes
+how often the model is called, which is spend, so the owner decides.
+
 ## Live auto-trade, 2026-09-23 — nobody is live, and the path is intact
 
 Owner asked for a deep look at live auto-trading. **No order has been placed
