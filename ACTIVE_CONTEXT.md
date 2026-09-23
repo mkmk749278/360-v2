@@ -25,6 +25,12 @@ authoritative "none"), still filtered to active uids and in their order; the
 per-uid read survives only while the index is inactive, and its failures now
 reach `fail_open`. New probe `firestore_read_budget` pages past 80% of 50,000/day.
 
+**Deployed 2026-09-23 10:24:59 UTC** (`0b5d3ab`, deploy run success). First
+liveness run after it (10:55 UTC) was clean: heartbeat 1s, breaker healthy, 7
+open signals priced, **57 probes / 0 alerting** — 57 is the new
+`firestore_read_budget` registering. That reading is not the verification: the
+restart reset every probe's streak, and the census averages over uptime.
+
 **To close this entry:** ≥1h after the deploy, `read.firestore_projection` on
 the diag console must show `position_state.get_position` near zero and the
 total well under 50,000/day, and `firestore_read_budget` must read OK. If the
@@ -302,9 +308,9 @@ exist.
 
 ---
 
-## SESSION 153 2026-09-23 — full system, business and app-UX audit (no code changed)
+## SESSION 153 2026-09-23 — the audit, the Firestore read it found, and the app's first ten seconds
 
-**Audit only; nothing in any repo's runtime changed.** Full write-up is in the
+**Started as an audit; shipped two owner-approved PRs (below).** Full write-up is in the
 owner's doc *"Lumin System & Business Audit — Sep 2026"*. Headlines, so the next
 session does not re-derive them:
 
@@ -330,9 +336,28 @@ session does not re-derive them:
   45 bare spinners, ~10 pages render raw `'$e'` to users, Signals polls prices
   every 5s even when hidden or backgrounded.
 
-**Open owner questions:** sign-off for the Firestore fix; billed or refused; why
-every user is on paper, and subscriber count and churn; retire MOVER_AVWAP_SCALP; the entry-quality cap; `quality_tier` vs
-`confidence`; legal review of the live USDT rail; approval for the app polish PR.
+**Shipped this session (both owner-approved):**
+
+- **`360-v2` #1042** — the Firestore fix above, plus this record. Merged and
+  deployed; verification open at the top of this file.
+- **`lumin-app` #160** — the app pass from the audit, squash-merged as
+  `416bb98`. Branded web splash with a 20s reload offer; a boot guard (a throw
+  before `runApp` now lands on a retryable failure page, not a blank screen);
+  welcome slide 1 shows an EXAMPLE signal card; visible consent checkboxes with
+  a remaining-count hint; "No runaway losses" replaced; haptics (tabs, filters,
+  every switch via `LuminSwitch`, commit/success/failure on both order sheets);
+  a one-time entrance for new signals; shimmer skeletons on eleven pages;
+  seventeen screens that rendered raw exceptions now use plain copy; hidden
+  tabs no longer tick (Signals stopped polling Binance off-screen); 114 font
+  sizes raised to the 11px floor. A local render harness over every tab at
+  three phone sizes found 5 overflows on `main` and 0 after. Five derived
+  guards, each shown failing on the old code.
+
+**Open owner questions:** billed or refused (GCP → Firestore → Usage); why every
+user is on paper, and subscriber count and churn; retire MOVER_AVWAP_SCALP
+SHORT; the entry-quality cap; `quality_tier` vs `confidence`; legal review of
+the live USDT rail; the upsell banner (four tabs, per-tab dismissal — it takes
+over half the Signals viewport at 1.3x text on a small phone).
 
 ---
 
