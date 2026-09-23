@@ -76,7 +76,7 @@ from src.order_manager import OrderManager
 from src.paper_order_manager import PaperOrderManager
 from src.execution.paper_book_registry import PaperBookFanout, PaperBookRegistry
 from src.auto_trade.risk_manager import RiskManager
-from config import PAPER_BOOKS_DIR, PAPER_PER_USER_BOOKS
+from config import GOVERNOR_BOOK_GRACE_SEC, PAPER_BOOKS_DIR, PAPER_PER_USER_BOOKS
 from src.auto_trade.position_reconciler import PositionReconciler
 from src.footprint import get_store as get_footprint_store
 from src.depth_book import get_store as get_depth_store
@@ -516,8 +516,14 @@ class CryptoSignalEngine:
         # Order book and CVD for the governor's context snapshot — the two
         # fields `ai_governor_blind` had been paging about since they were
         # never wired. Same sources, same preference order as the scan path.
+        # The governor is a dark measurement lane, so it may read a top-of-book
+        # quote up to ~60s old (20s TTL + 40s grace) rather than record a
+        # verdict book-blind between the snapshot's expiry and the next scan
+        # cycle's refresh.  The scan path's own read is unchanged.
         self.monitor._book_getter = (
-            lambda symbol: self._scanner.current_order_book(symbol)
+            lambda symbol: self._scanner.current_order_book(
+                symbol, grace_sec=GOVERNOR_BOOK_GRACE_SEC
+            )
         )
         self.monitor._cvd_getter = self._governor_cvd_series
         # Share mutable state with scanner
