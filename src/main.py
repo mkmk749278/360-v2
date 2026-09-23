@@ -513,6 +513,13 @@ class CryptoSignalEngine:
         # quote volume Binance already sends, so the governor can tell a $29M
         # meme up 48% from an $8.4B major. No vendor and no symbol mapping.
         self.monitor._pair_getter = lambda symbol: self.pair_mgr.pairs.get(symbol)
+        # Order book and CVD for the governor's context snapshot — the two
+        # fields `ai_governor_blind` had been paging about since they were
+        # never wired. Same sources, same preference order as the scan path.
+        self.monitor._book_getter = (
+            lambda symbol: self._scanner.current_order_book(symbol)
+        )
+        self.monitor._cvd_getter = self._governor_cvd_series
         # Share mutable state with scanner
         self._scanner.paused_channels = self._paused_channels
         self._scanner.confidence_overrides = self._confidence_overrides
@@ -5253,6 +5260,29 @@ class CryptoSignalEngine:
             min_streak=3,
         ))
         return fl
+
+    def _governor_cvd_series(self, symbol: str):
+        """CVD for ``symbol``: 15m when it has history, else 5m, else None.
+
+        The preference ``entry_features`` applies to the scanner's
+        ``cvd_15m`` / ``cvd`` keys, read from the same order-flow store the
+        scanner fills them from. In memory; no vendor call.
+        """
+        store = self._order_flow_store
+        if store is None:
+            return None
+        try:
+            series = store.get_cvd_15m_history(symbol)
+            if series is not None and len(series) > 0:
+                return series
+            series = store.get_cvd_history(symbol)
+            if series is not None and len(series) > 0:
+                return series
+        except Exception as exc:  # noqa: BLE001
+            from src import fail_open
+
+            fail_open.record("main.governor_cvd_series", exc)
+        return None
 
     def _build_global_market_context(self):
         """Current global (BTC-anchored) MarketContext.  Every input is

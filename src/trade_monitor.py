@@ -294,6 +294,13 @@ class TradeMonitor:
         #: instrument X-ray reports a named unknown rather than an ordinary
         #: instrument.
         self._pair_getter = None
+        #: Returns the order book the scanner's consumers read for a symbol
+        #: (``Scanner.current_order_book``), or None. Set in `main.py`; left
+        #: None, the governor records every verdict as book ``not_wired``.
+        self._book_getter: Optional[Callable[[str], Any]] = None
+        #: Returns the CVD series for a symbol (15m preferred, as
+        #: ``entry_features`` does), or None. Set in `main.py`.
+        self._cvd_getter: Optional[Callable[[str], Any]] = None
         self._get_signals = get_active_signals
         # Monitor start wall-clock (monotonic) — the post-boot grace anchor
         # for the never-WS-stamped staleness case in ``_candle_stale``.
@@ -1270,6 +1277,10 @@ class TradeMonitor:
                 # INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC, so the governor
                 # adds no BTC work at any member count.
                 btc_opposes=self._btc_opposes_direction,
+                # In-memory reads only (the scanner's book cache and the order
+                # flow store): no vendor call and nothing per member.
+                book_source=self._book_getter,
+                cvd_source=self._cvd_getter,
             )
         except Exception as exc:
             from src import fail_open

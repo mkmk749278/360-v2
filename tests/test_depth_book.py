@@ -236,8 +236,31 @@ def test_the_consumer_handover_is_flag_gated_and_defaults_off():
     assert config.DEPTH_STREAM_ENABLED is True      # measurement ON
     assert config.DEPTH_LIVE_FOR_CONSUMERS is False  # effect OFF
 
-    scanner_src = (REPO / "src" / "scanner" / "__init__.py").read_text()
-    assert "if _order_book is None and DEPTH_LIVE_FOR_CONSUMERS:" in scanner_src
+    # Behaviour, not a line of source (2026-09-23): the handover moved into
+    # `Scanner.current_order_book` so the AI governor reads the same book as
+    # the scan path, and the old substring pin would have gone green or red
+    # on the text rather than on whether the gate holds.
+    import time as _time
+
+    from src import scanner as scan_mod
+    from src.scanner import Scanner
+
+    calls = []
+
+    class _Depth:
+        def order_book(self, symbol):
+            calls.append(symbol)
+            return {"bids": [[1, 1]], "asks": [[1, 1]]}
+
+    s = Scanner.__new__(Scanner)
+    s._order_book_snapshot_cache = {"BTCUSDT": ({"bids": [], "asks": []}, _time.monotonic() + 30)}
+    original = scan_mod.get_depth_store
+    scan_mod.get_depth_store = lambda: _Depth()
+    try:
+        s.current_order_book("BTCUSDT")
+        assert calls == [], "the depth store must not be read while the flag is off"
+    finally:
+        scan_mod.get_depth_store = original
 
 
 def test_book_source_is_stamped_so_one_column_is_not_two_measurements():
