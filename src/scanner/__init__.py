@@ -5336,8 +5336,18 @@ class Scanner:
             return streak
         return self._loss_streaks.get(cd_key, 0)
 
-    def current_order_book(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def current_order_book(
+        self, symbol: str, *, grace_sec: float = 0.0
+    ) -> Optional[Dict[str, Any]]:
         """The book every consumer reads for ``symbol``, or None.
+
+        ``grace_sec`` lets a MEASUREMENT consumer accept a bookTicker snapshot
+        that far past its TTL.  The snapshot lives 20s and is refreshed only at
+        the start of a scan cycle once it is 18s old, so any read landing
+        between expiry and the next cycle's refresh sees nothing — measured
+        2026-09-23 on the AI governor as 4 of 12 post-boot verdicts book-blind.
+        The scan path passes nothing and is unchanged: widening what a live
+        gate reads is an owner decision, not a side effect of this parameter.
 
         The one implementation of that choice. The scan path calls it, and so
         does the AI governor's context snapshot (2026-09-23), which until then
@@ -5355,7 +5365,7 @@ class Scanner:
                 book = None
         if book is None:
             snap = self._order_book_snapshot_cache.get(symbol)
-            if snap and time.monotonic() < float(snap[1]):
+            if snap and time.monotonic() < float(snap[1]) + max(0.0, grace_sec):
                 book = snap[0]
         return book
 

@@ -161,6 +161,39 @@ def test_current_order_book_serves_only_an_unexpired_snapshot(monkeypatch):
     assert s.current_order_book("XRPUSDT") is None
 
 
+def test_grace_lets_the_governor_read_a_just_expired_snapshot(monkeypatch):
+    """The snapshot refreshes only at a scan cycle's start, so a read landing
+    between its expiry and the next refresh saw nothing (4 of 12 post-boot
+    verdicts).  The governor's grace covers that gap; beyond it, still None."""
+    from src import scanner as scan_mod
+
+    monkeypatch.setattr(scan_mod, "DEPTH_LIVE_FOR_CONSUMERS", False)
+    s = _scanner_stub()
+    s._order_book_snapshot_cache["ETHUSDT"] = (BOOK, time.monotonic() - 5)
+    s._order_book_snapshot_cache["XRPUSDT"] = (BOOK, time.monotonic() - 100)
+    assert s.current_order_book("ETHUSDT") is None
+    assert s.current_order_book("ETHUSDT", grace_sec=40) is BOOK
+    assert s.current_order_book("XRPUSDT", grace_sec=40) is None
+
+
+def test_the_scan_path_reads_the_book_without_grace():
+    """Widening what a live gate reads is an owner decision.  The scan path's
+    call must never pass ``grace_sec``; only the governor's getter may."""
+    tree = ast.parse((ROOT / "src" / "scanner" / "__init__.py").read_text())
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "current_order_book"
+    ]
+    assert calls, "the scan path no longer calls current_order_book"
+    for call in calls:
+        assert not any(k.arg == "grace_sec" for k in call.keywords)
+
+    main_src = (ROOT / "src" / "main.py").read_text()
+    assert "grace_sec=GOVERNOR_BOOK_GRACE_SEC" in main_src
+
+
 def test_current_order_book_prefers_depth_only_when_handed_over(monkeypatch):
     from src import scanner as scan_mod
 

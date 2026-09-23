@@ -4707,6 +4707,12 @@ AI_GOV_MEASURE_ENABLED: bool = _safe_bool("AI_GOV_MEASURE_ENABLED", "true")
 
 #: Whether a verdict may touch a real order. OFF until owner sign-off.
 AI_GOV_APPLY_ENABLED: bool = _safe_bool("AI_GOV_APPLY_ENABLED", "false")
+# Seconds past the bookTicker snapshot's 20s TTL the governor (a dark
+# measurement lane) will still read it.  The snapshot refreshes only at a scan
+# cycle's start, so without this a read landing between expiry and refresh is
+# recorded book-blind (4 of 12 post-boot verdicts, 2026-09-23).  The scanner's
+# own gates never use it.
+GOVERNOR_BOOK_GRACE_SEC: float = _safe_float("GOVERNOR_BOOK_GRACE_SEC", "40")
 
 #: Which arms may APPLY once the effect flag is on, as a comma set of
 #: tp / sl / panic.
