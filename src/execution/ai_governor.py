@@ -137,6 +137,15 @@ def _now() -> float:
     return time.time()
 
 
+#: When this process started, on the same wall clock as ``issued_at``. The
+#: ledger persists across restarts, so any census over its tail pools rows
+#: written by previous builds with rows written by this one — and a fix
+#: deployed an hour ago is then invisible under the rows it replaced
+#: (2026-09-24: 132/200 book-blind, with only 63 of the 200 written since
+#: the deploy that was meant to cure it).
+_PROCESS_STARTED_AT: float = time.time()
+
+
 # ── Counters ────────────────────────────────────────────────────────────────
 
 _health_lock = threading.RLock()
@@ -2255,6 +2264,22 @@ def blindness(sample: int = 200) -> Dict[str, Any]:
     incident, ``disabled`` is a switch nobody threw, and ``error`` is ours.
     """
     rows = get_ledger().rows()[-int(max(1, sample)):]
+    out = _blindness_of(rows)
+    # Published beside the pooled figure, never in place of it: the pooled one
+    # is what the probe and every existing reader grade on. `since_boot` is the
+    # population this build produced, and it is the only one that can say
+    # whether a context fix just shipped actually took.
+    booted = [
+        r for r in rows
+        if isinstance(r.get("issued_at"), (int, float))
+        and float(r["issued_at"]) >= _PROCESS_STARTED_AT
+    ]
+    out["process_started_at"] = round(_PROCESS_STARTED_AT, 3)
+    out["since_boot"] = _blindness_of(booted)
+    return out
+
+
+def _blindness_of(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not rows:
         # Not a fault, and not zero blindness either: nothing has been asked
         # yet. A caller that renders 0% here would report a healthy lane on an

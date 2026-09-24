@@ -4,6 +4,25 @@
 
 ---
 
+## OPEN 2026-09-24 — is the AI governor still book-blind after #1049? The census could not say
+
+Live read at ~01:10 UTC (engine uptime 6.8h, i.e. after #1049's deploy): `blindness`
+said **132/200 book-blind, 104/200 flow-blind, every reason `not_subscribed`**, and no
+`stale` at all. But the census reads the last 200 **persisted** ledger rows, and only
+**63** verdicts had been issued since boot — so at least 137 of the 200 were written by
+earlier builds, including the pre-#1047 ones where every row was stamped
+`not_subscribed` because no book getter was wired. The pooled figure could not tell
+"fix took" from "fix did not take". Inferred, not measured: 48 of the 63 post-boot
+triggers were `flow_opposed`, which requires a readable flow, so flow at least is
+arriving now.
+
+Shipped: `blindness()` now also publishes `since_boot` (rows with `issued_at` at or after
+this process started) and `process_started_at`, beside the unchanged pooled figure.
+Off the money path; visible in the ops diag console (`read.ai_governor`) the moment it
+deploys. **Next read:** `since_boot.book_reasons`. `not_subscribed` still there means
+movers outside the bookTicker set, which is a stream-budget question for the owner, not
+a wiring fault.
+
 ## FIXED 2026-09-23 — the Trade tab's positions were empty in production since they shipped
 
 **What users saw.** "YOUR OPEN POSITIONS" and the per-signal "what happened on
