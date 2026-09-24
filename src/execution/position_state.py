@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -541,6 +542,8 @@ def _index_put_locked(position: "Position") -> None:
     uid = position.firebase_uid
     sid = position.signal_id
     _dirty_uids.add(uid)
+    if _resync_touched is not None:
+        _resync_touched.add((uid, sid))
     if is_terminal(position.state):
         bucket = _index.get(uid)
         if bucket is not None:
@@ -567,6 +570,8 @@ def _index_delete_locked(firebase_uid: str, signal_id: str) -> None:
         if not bucket:
             _index.pop(firebase_uid, None)
     _dirty_uids.add(firebase_uid)
+    if _resync_touched is not None:
+        _resync_touched.add((firebase_uid, signal_id))
 
 
 def index_active() -> bool:
@@ -836,20 +841,85 @@ def enable_position_index() -> None:
     )
 
 
-def resync_index() -> None:
+#: A full resync is forced at least this often even when the count agrees.
+_INDEX_FULL_RESYNC_SEC: float = 3600.0
+_last_full_resync_monotonic: Optional[float] = None
+#: ``(uid, signal_id)`` written through ``put``/``delete`` while a resync scan
+#: is in flight, or ``None`` when no resync is running.
+_resync_touched: Optional[set] = None
+_resync_stats: dict = {"count_checks": 0, "count_agreed": 0, "full_scans": 0}
+
+
+def resync_stats() -> dict:
+    with _lock:
+        return dict(_resync_stats)
+
+
+_reads.register_gate("position_index_resync", resync_stats)
+
+
+def _count_live_positions(db: Any) -> Optional[int]:
+    """Aggregation count of non-terminal position docs, or ``None``."""
+    try:
+        query = db.collection_group("positions").where(
+            "state", "in", list(_NON_TERMINAL_STATE_VALUES)
+        )
+        result = query.count().get()
+        value = int(result[0][0].value)
+    except Exception as exc:  # noqa: BLE001 — unknown → do the full scan
+        log.warning("resync_index: count failed ({}) — full scan instead", exc)
+        return None
+    _reads.record("position_state.index_resync_count", max(1, -(-value // 1000)))
+    return value
+
+
+def resync_index(*, force: bool = False) -> None:
     """Defensive re-hydration: rebuild the live index from Firestore in case
     a write ever bypassed ``put_position`` / ``delete_position`` (out-of-band
-    tooling, future code path).  ONE collection-group read; safe to call on a
-    low-frequency timer.  No-op while the index is inactive.
+    tooling, future code path).  No-op while the index is inactive.
 
     Mirrors the defensive TTL the #609 generation cache carries — generation
     write-through is the primary mechanism; this bounds drift from anything
     that escapes it.
+
+    Count-gated (2026-09-24).  The full scan bills one read per LIVE position
+    every 5 minutes: ~860k reads a day at 1,000 members holding three each, to
+    re-confirm an index its only writer keeps exact.  An aggregation
+    ``count()`` (one read per 1,000 index entries) is compared with the
+    index's own size, and the full scan runs only when they disagree or the
+    last one is older than ``_INDEX_FULL_RESYNC_SEC``.
+
+    Race-safe (2026-09-24).  The scan runs lock-free in a worker thread while
+    the event loop keeps writing, and the old code then REPLACED the index with
+    the scan's result — so a position opened during the scan vanished from the
+    index for up to one period (invisible to the pre-TP dispatcher, the trail
+    governor and tight invalidation) and one closed during it came back as
+    live.  Every key written during the scan now keeps its live value.
     """
+    global _resync_touched, _last_full_resync_monotonic
+    now = time.monotonic()
     with _lock:
         if not _index_active or _db is None:
             return
         db = _db
+        live_n = sum(
+            1 for bucket in _index.values() for p in bucket.values()
+            if not is_terminal(p.state)
+        )
+        due = (
+            _last_full_resync_monotonic is None
+            or (now - _last_full_resync_monotonic) >= _INDEX_FULL_RESYNC_SEC
+        )
+    if not force and not due:
+        with _lock:
+            _resync_stats["count_checks"] += 1
+        n = _count_live_positions(db)
+        if n is not None and n == live_n:
+            with _lock:
+                _resync_stats["count_agreed"] += 1
+            return
+    with _lock:
+        _resync_touched = set()
     try:
         query = db.collection_group("positions").where(
             "state", "in", list(_NON_TERMINAL_STATE_VALUES)
@@ -869,14 +939,31 @@ def resync_index() -> None:
         _reads.record("position_state.index_resync", max(_docs, 1))
     except Exception:
         log.exception("resync_index: rebuild query failed — keeping current index")
+        with _lock:
+            _resync_touched = None
         return
     with _lock:
+        touched = _resync_touched or set()
+        _resync_touched = None
+        # Writes that landed during the scan are newer than anything it read.
+        for uid, sid in touched:
+            live = (_index.get(uid) or {}).get(sid)
+            if live is not None and not is_terminal(live.state):
+                fresh.setdefault(uid, {})[sid] = live
+            else:
+                bucket = fresh.get(uid)
+                if bucket is not None:
+                    bucket.pop(sid, None)
+                    if not bucket:
+                        fresh.pop(uid, None)
         # Both sides: a user who dropped out of the index is owed a book with
         # nothing open in it, not a stale one.
         _dirty_uids.update(_index.keys())
         _dirty_uids.update(fresh.keys())
         _index.clear()
         _index.update(fresh)
+        _resync_stats["full_scans"] += 1
+        _last_full_resync_monotonic = now
 
 
 def index_open_positions_for_symbol(symbol: str) -> Optional[list["Position"]]:
@@ -1249,6 +1336,7 @@ def list_recent_closed_positions_for_user(
 def reset_for_test() -> None:
     """Test-only: drop the singleton + live index."""
     global _db, _write_generation, _index_active
+    global _resync_touched, _last_full_resync_monotonic
     with _lock:
         _db = None
         _write_generation = 0
@@ -1257,6 +1345,10 @@ def reset_for_test() -> None:
         _closed_recent.clear()
         _closed_seeded.clear()
         _dirty_uids.clear()
+        _resync_touched = None
+        _last_full_resync_monotonic = None
+        for k in _resync_stats:
+            _resync_stats[k] = 0
 
 
 # ---------------------------------------------------------------------------

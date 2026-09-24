@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from src.utils import get_logger
@@ -79,13 +80,36 @@ DOC_KILL_SWITCH = "kill_switch_global"
 DOC_RUNTIME_TUNABLES = "runtime_tunables"
 DOC_ACTIVE_UIDS = "active_uids"
 DOC_DISABLED_UIDS = "disabled_uids"
+#: Any user's encrypted key blob (``users/{uid}/binance_key/current``) was
+#: written or deleted.  Read per signed call by the signing service's blob
+#: cache (:func:`current`), not polled — see ``firestore_keystore``.
+DOC_KEY_BLOBS = "key_blobs"
 
 _ALL_DOCS = (
     DOC_KILL_SWITCH,
     DOC_RUNTIME_TUNABLES,
     DOC_ACTIVE_UIDS,
     DOC_DISABLED_UIDS,
+    DOC_KEY_BLOBS,
 )
+
+#: Documents read ON DEMAND by :func:`current` rather than watched by
+#: :func:`poll`.  A poller sees a flushed Redis as a generation going
+#: backwards, because it read the old value five seconds earlier.  An
+#: on-demand reader holds a cached value for minutes and never sees the
+#: intermediate zero — so a flush followed by the same number of bumps
+#: (0 → N again) would read as "unchanged" and serve a stale cache.  For the
+#: key-blob cache that is a signature under a rotated key, so these documents
+#: start from a millisecond epoch instead of zero: a value from before a flush
+#: cannot recur after it.
+_ON_DEMAND_DOCS = frozenset({DOC_KEY_BLOBS})
+
+
+def _seed_epoch(client: Any, key: str) -> None:
+    """Start an absent on-demand generation at the current epoch-ms (SET NX,
+    so it never overwrites a live counter)."""
+    client.set(key, int(time.time() * 1000), nx=True)
+
 
 _lock = threading.RLock()
 #: doc -> the generation value this process has already acted on.
@@ -159,27 +183,36 @@ def register(doc: str, invalidate: Callable[[], None]) -> None:
         _listeners.setdefault(doc, []).append(invalidate)
 
 
-def bump(doc: str) -> None:
+def bump(doc: str) -> bool:
     """Signal that *doc* has been written.  Called by every writer.
 
     Fails soft and COUNTED.  A dropped bump is not a correctness failure — the
     other container converges on its defensive TTL — but an unbounded number of
     dropped bumps means every reader is running on the slow path, which is
     precisely the state that must not be silent.
+
+    Returns ``False`` only when the increment was attempted and did not land.
+    With no Redis configured it returns ``True``: no reader in any process can
+    be holding a generation-gated cache (:func:`current` answers ``None``), so
+    there is nothing to go stale.
     """
     if doc not in _ALL_DOCS:
         raise ValueError(f"unknown control document: {doc!r}")
     client = _redis()
     if client is None:
-        return
+        return True
     try:
+        if doc in _ON_DEMAND_DOCS:
+            _seed_epoch(client, KEY_PREFIX + doc)
         client.incr(KEY_PREFIX + doc)
         with _lock:
             _stats["bumps"] += 1
+        return True
     except Exception as exc:
         with _lock:
             _stats["bump_failures"] += 1
         log.warning("control_generation: bump({}) failed: {}", doc, exc)
+        return False
 
 
 def poll() -> List[str]:
@@ -242,6 +275,35 @@ def poll() -> List[str]:
             except Exception:
                 log.exception("control_generation: invalidator for {} raised", doc)
     return moved
+
+
+def current(doc: str) -> Optional[int]:
+    """This document's generation right now, or ``None`` if unreadable.
+
+    For a reader with no loop to poll from (the signing service): one Redis
+    ``GET`` per call, local and sub-millisecond.  ``None`` means "cannot tell"
+    and callers must treat it as "do not trust any cache", never as zero.  An
+    absent key IS generation zero (see :func:`poll` for why that matters) —
+    except for an on-demand document, which is first seeded to an epoch (see
+    :func:`_seed_epoch`).
+    """
+    if doc not in _ALL_DOCS:
+        raise ValueError(f"unknown control document: {doc!r}")
+    client = _redis()
+    if client is None:
+        return None
+    key = KEY_PREFIX + doc
+    try:
+        raw = client.get(key)
+        if raw is None and doc in _ON_DEMAND_DOCS:
+            _seed_epoch(client, key)
+            raw = client.get(key)
+        return 0 if raw is None else int(raw)
+    except Exception as exc:
+        with _lock:
+            _stats["poll_failures"] += 1
+        log.debug("control_generation: current({}) failed: {}", doc, exc)
+        return None
 
 
 def stats() -> Dict[str, Any]:

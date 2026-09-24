@@ -238,9 +238,28 @@ async def run() -> None:
             # only stop via process kill.  Production is linux.
             pass
 
+    # Publish this process's Firestore census for the engine's diag console
+    # and read-budget probe (2026-09-24).  Every signed call reads the key
+    # blob here, and until now nothing outside this process could see it.
+    # Redis only; one SET a minute.
+    from src import firestore_reads as _fsr
+
+    async def _publish_census() -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=60.0)
+            except asyncio.TimeoutError:
+                pass
+            await asyncio.to_thread(
+                _fsr.publish, "signing", {"gates": _fsr.local_gates()},
+            )
+
+    census_task = asyncio.create_task(_publish_census(), name="census_publish")
+
     try:
         await stop_event.wait()
     finally:
+        census_task.cancel()
         server.close()
         await server.wait_closed()
         await session.close()

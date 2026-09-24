@@ -659,7 +659,14 @@ class Bootstrap:
                                 _fk_idx.rebuild_active_roster
                             )
                             log.info("active-key roster rebuilt: {} uids", n)
-                        except Exception:
+                        except Exception as exc:
+                            # Raised on purpose when the scan fails (the
+                            # roster is left as it was rather than written
+                            # empty) — counted so a Firestore that keeps
+                            # refusing the scan pages instead of logging.
+                            from src import fail_open as _fo_idx
+
+                            _fo_idx.record("bootstrap.roster_rebuild", exc)
                             log.exception("active-key roster rebuild failed")
                         try:
                             if _ks_idx.is_initialised():

@@ -224,6 +224,7 @@ def put_key_blob(
         }
     )
     _invalidate_has_key(uid)
+    _bump_key_blobs(uid)
     _roster_apply(uid, present=True)
     log.info(
         "Stored encrypted Binance key blob: uid={}, key_id_prefix={}",
@@ -330,6 +331,135 @@ def get_key_blob(uid: str) -> UserKeyBlob:
         connected_at=data["connected_at"],
         last_validated_at=data["last_validated_at"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Ciphertext cache for the signing service (2026-09-24)
+# ---------------------------------------------------------------------------
+#
+# ``get_key_blob`` is one Firestore read per SIGNED CALL, and the signing
+# service makes a signed call for every order, cancel, listenKey keepalive and
+# — the bulk of it — every reconciler ``positionRisk`` / ``algoOpenOrders``
+# poll for a user holding a position, each reconciler cycle.  At the 1,000-member
+# target that is millions of reads a day, all of it in a container whose own
+# census nobody read.  The note above ("caching the blob would hold key
+# material in memory for a TTL to save reads on a path that runs a few times a
+# day") was written about ``has_key``; the premise is false for this path.
+#
+# What is cached is the CIPHERTEXT: the AES-GCM-encrypted secret and the
+# KMS-wrapped DEK, plus the public API key.  Neither half is usable without a
+# KMS Decrypt, which still happens per request, so the plaintext secret keeps
+# its one-request lifetime (B18) — nothing about it changes.
+#
+# Correctness hangs on invalidation, because a stale blob after a key ROTATION
+# would sign with a key Binance has revoked (-2015) and trip the per-user
+# breaker.  So the cache is only trusted against a Redis generation that every
+# key write and delete bumps (``control_generation.DOC_KEY_BLOBS``), read on
+# every call.  When that generation is unreadable, the cache is bypassed
+# entirely and every call reads through — slower, never stale.  The TTL is a
+# floor for a dropped bump, not the mechanism.
+#
+# Why an hour.  Every connected user makes a signed call at least every 30
+# minutes (the listenKey keepalive), and a user holding a position one every
+# reconciler cycle, so the TTL — not the call rate — sets the read rate: at
+# most 24 reads per member per day at 3600s, ~24k/day at the 1,000-member
+# target, against ~48k/day from the keepalive alone uncached.  Longer would be
+# cheaper, and the price is the window a DROPPED bump leaves open: a user who
+# rotates to a key on a different Binance account while the old key is still
+# valid would keep being signed for on the old account for up to one TTL.  A
+# dropped bump is retried, counted and paged (:func:`_bump_key_blobs`), and a
+# key Binance rejects is re-read at once (the signing handler), so the
+# residual is that one narrow case — an hour is the bound chosen for it.
+
+def _blob_ttl_from_env() -> float:
+    """0 disables the cache (every signed call reads through)."""
+    raw = os.environ.get("KEYSTORE_BLOB_CACHE_TTL_SEC", "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else 3600.0
+    except (TypeError, ValueError):
+        return 3600.0
+
+
+_BLOB_CACHE_TTL_S: float = _blob_ttl_from_env()
+#: uid -> (blob, generation it was read under, read_at_monotonic)
+_blob_cache: dict[str, tuple["UserKeyBlob", int, float]] = {}
+_blob_stats: dict[str, int] = {"hits": 0, "misses": 0, "bypassed": 0}
+
+
+def get_key_blob_cached(uid: str) -> UserKeyBlob:
+    """:func:`get_key_blob`, served from the ciphertext cache when provably
+    fresh.  Raises exactly what :func:`get_key_blob` raises."""
+    if _BLOB_CACHE_TTL_S <= 0:
+        return get_key_blob(uid)
+    try:
+        from src import control_generation as _gen
+
+        gen = _gen.current(_gen.DOC_KEY_BLOBS)
+    except Exception:  # noqa: BLE001 — cannot tell → do not trust a cache
+        gen = None
+    if gen is None:
+        with _lock:
+            _blob_stats["bypassed"] += 1
+        return get_key_blob(uid)
+    now = time.monotonic()
+    with _lock:
+        hit = _blob_cache.get(uid)
+        if hit is not None and hit[1] == gen and (now - hit[2]) < _BLOB_CACHE_TTL_S:
+            _blob_stats["hits"] += 1
+            return hit[0]
+        _blob_stats["misses"] += 1
+    blob = get_key_blob(uid)
+    with _lock:
+        _blob_cache[uid] = (blob, gen, now)
+    return blob
+
+
+def invalidate_key_blob(uid: Optional[str] = None) -> None:
+    """Drop one user's cached blob (or all of them)."""
+    with _lock:
+        if uid is None:
+            _blob_cache.clear()
+        else:
+            _blob_cache.pop(uid, None)
+
+
+def blob_cache_stats() -> dict:
+    with _lock:
+        return {**_blob_stats, "entries": len(_blob_cache), "ttl_sec": _BLOB_CACHE_TTL_S}
+
+
+_reads.register_gate("key_blob_cache", blob_cache_stats)
+
+
+def _bump_key_blobs(uid: str) -> None:
+    """Every key write/delete: local drop + cross-process generation bump.
+
+    ``control_generation.bump`` fails soft (a missed kill-switch bump only
+    delays convergence to the TTL floor).  Here a missed bump is a stale
+    signing key for up to an hour, so it is retried and, if it still did not
+    land, recorded through ``fail_open`` — counted and paged, never silent.
+    Never raises: the key write itself has already landed.
+    """
+    invalidate_key_blob(uid)
+    try:
+        from src import control_generation as _gen
+
+        for attempt in range(3):
+            if _gen.bump(_gen.DOC_KEY_BLOBS):
+                return
+            time.sleep(0.2 * (attempt + 1))
+        raise RuntimeError(
+            f"key-blob generation bump failed 3x after a key write uid={uid} — "
+            f"the signing service may sign with the previous key for up to "
+            f"{_BLOB_CACHE_TTL_S:.0f}s"
+        )
+    except Exception as exc:  # noqa: BLE001 — never break a key write
+        try:
+            from src import fail_open as _fo
+
+            _fo.record("keystore.key_blob_bump", exc)
+        except Exception:  # pragma: no cover
+            log.exception("keystore: key-blob generation bump failed")
 
 
 # ---------------------------------------------------------------------------
@@ -452,32 +582,123 @@ def _roster_apply(uid: str, *, present: bool) -> None:
         _write_roster(amended)
 
 
-def rebuild_active_roster() -> int:
-    """Rebuild ``control/active_uids`` from a real scan and persist it.
+#: A full roster scan is forced at least this often even when the cheap count
+#: agrees, so a swap (one key removed and another added between two checks,
+#: both bypassing the writers) cannot hide for longer than this.
+def _full_rebuild_sec_from_env() -> float:
+    raw = os.environ.get("KEYSTORE_ROSTER_FULL_REBUILD_SEC", "").strip()
+    try:
+        return max(60.0, float(raw)) if raw else 21600.0
+    except (TypeError, ValueError):
+        return 21600.0
 
-    Costs one ``collection_group`` scan — the expensive call, now run at boot
-    and on a slow timer instead of once a minute.  Returns the roster size.
+
+_ROSTER_FULL_REBUILD_SEC: float = _full_rebuild_sec_from_env()
+_last_full_rebuild_monotonic: Optional[float] = None
+_rebuild_stats: dict[str, int] = {
+    "count_checks": 0, "count_agreed": 0, "full_scans": 0, "scan_failures": 0,
+}
+
+
+def rebuild_active_roster(*, force: bool = False) -> int:
+    """Re-verify ``control/active_uids`` against the key documents.
+
+    Cheap in the common case (2026-09-24): an aggregation ``count()`` of the
+    key documents — billed one read per 1,000 index entries, not one per
+    document — is compared with the roster's size, and a full scan runs only
+    when they disagree or the last full scan is older than
+    ``_ROSTER_FULL_REBUILD_SEC``.  At the 1,000-member target the full scan was
+    ~1,000 reads every 30 minutes (48k a day) to confirm an index its writers
+    already maintain.
+
+    A FAILED scan never writes (2026-09-24).  ``_scan_active_uids`` used to
+    return ``[]`` on any exception and this persisted it: on a day when reads
+    were refused and writes were not — the 2 Sep outage exactly — every
+    process would then read "nobody is keyed" and fan every signal out to
+    zero users until the next good rebuild.  An unreadable roster is not an
+    empty one.
+
+    Returns the roster size.  Raises when the scan fails, so the caller's loop
+    logs it as the fault it is.
     """
+    global _last_full_rebuild_monotonic
+    now = time.monotonic()
+    due = (
+        _last_full_rebuild_monotonic is None
+        or (now - _last_full_rebuild_monotonic) >= _ROSTER_FULL_REBUILD_SEC
+    )
+    if not force and not due:
+        roster = _read_roster()
+        if roster is not None:
+            with _lock:
+                _rebuild_stats["count_checks"] += 1
+            n = _count_key_docs()
+            if n is not None and n == len(roster):
+                with _lock:
+                    _rebuild_stats["count_agreed"] += 1
+                return len(roster)
     uids = _scan_active_uids()
+    if uids is None:
+        with _lock:
+            _rebuild_stats["scan_failures"] += 1
+        raise RuntimeError(
+            "active-key roster scan failed — roster left as it was"
+        )
     _write_roster(uids)
+    with _lock:
+        _rebuild_stats["full_scans"] += 1
+    _last_full_rebuild_monotonic = now
     return len(uids)
 
 
-def _scan_active_uids() -> list[str]:
+def roster_rebuild_stats() -> dict:
+    with _lock:
+        return dict(_rebuild_stats)
+
+
+_reads.register_gate("active_roster_rebuild", roster_rebuild_stats)
+
+
+def _count_key_docs() -> Optional[int]:
+    """Aggregation count of key documents; ``None`` when it cannot be read.
+
+    Counts every document in the ``binance_key`` collection group, where the
+    scan keeps only ``current`` — so a stray non-``current`` document makes
+    the counts disagree and forces a full scan.  That is the safe direction:
+    it costs reads, it never hides a user.
+    """
+    with _lock:
+        db = _db
+    if db is None:
+        return None
+    try:
+        result = db.collection_group("binance_key").count().get()
+        value = int(result[0][0].value)
+    except Exception as exc:  # noqa: BLE001 — unknown → do the full scan
+        log.warning("keystore: roster count failed ({}) — full scan instead", exc)
+        return None
+    _reads.record("keystore.roster_count", max(1, -(-value // 1000)))
+    return value
+
+
+def _scan_active_uids() -> Optional[list[str]]:
     """The original ``collection_group`` enumeration.
 
     One Firestore read per document RETURNED, which is why this must never sit
     on a loop.  Kept as the roster's source of truth and its fallback.
+
+    ``None`` when the scan failed — never ``[]``, which is a real answer about
+    a project with no connected keys and is persisted as one.
     """
     with _lock:
         if _db is None:
             return []
         db = _db
+    _query_docs = 0
     try:
 
         query = db.collection_group("binance_key")
         uids: list[str] = []
-        _query_docs = 0
         for snap in query.stream():
             _query_docs += 1
             # snap.id is the doc id within binance_key; only
@@ -489,11 +710,14 @@ def _scan_active_uids() -> list[str]:
             if user_ref is None:
                 continue
             uids.append(user_ref.id)
-        _reads.record("keystore.list_active_uids", max(_query_docs, 1))
         return uids
     except Exception as exc:
         log.warning("list_active_uids scan failed: {}", exc)
-        return []
+        return None
+    finally:
+        # Counted whether or not it finished: a scan that raised part-way
+        # still billed every document it had returned.
+        _reads.record("keystore.list_active_uids", max(_query_docs, 1))
 
 
 def list_active_uids() -> list[str]:
@@ -507,6 +731,9 @@ def list_active_uids() -> list[str]:
     signal-dispatch path no-ops cleanly in dev contexts that haven't booted the
     full server-side execution stack.  Callers still cache: this is a Firestore
     read, cheap rather than free, and ``signal_dispatch`` keeps its 30s TTL.
+
+    A failed fallback scan returns ``[]`` to THIS caller (dispatch cannot fan
+    out to users it cannot name) but is never persisted as the roster.
     """
     with _lock:
         if _db is None:
@@ -515,11 +742,14 @@ def list_active_uids() -> list[str]:
     if roster is not None:
         return list(roster)
     uids = _scan_active_uids()
+    if uids is None:
+        return []
     # Self-healing: the first boot after this shipped has no index, so the
     # first caller pays for one scan and every caller after it does not.
-    # Writing an EMPTY roster from a scan that returned nothing is deliberate —
-    # that is a real answer about a project with no connected keys, and the
-    # fallback above is what keeps it distinct from an index nobody wrote.
+    # Writing an EMPTY roster from a scan that SUCCEEDED and returned nothing
+    # is deliberate — that is a real answer about a project with no connected
+    # keys, and the fallback above is what keeps it distinct from an index
+    # nobody wrote.
     _write_roster(uids)
     return uids
 
@@ -535,6 +765,7 @@ def delete_key_blob(uid: str) -> None:
     """
     _invalidate_has_key(uid)
     _doc_ref(uid).delete()
+    _bump_key_blobs(uid)
     # Amend the roster AFTER the delete lands.  A crash between the two leaves
     # a uid on the roster whose blob is gone, which dispatch already handles
     # (the per-user path finds no key and skips); the opposite ordering would
@@ -555,8 +786,14 @@ def update_last_validated(uid: str) -> None:
 
 def reset_for_test() -> None:
     """Test-only: drop the singleton so the next test starts uninitialised."""
-    global _db, _roster_cache
+    global _db, _roster_cache, _last_full_rebuild_monotonic
     with _lock:
         _db = None
         _has_key_cache.clear()
         _roster_cache = None
+        _blob_cache.clear()
+        _last_full_rebuild_monotonic = None
+        for k in _blob_stats:
+            _blob_stats[k] = 0
+        for k in _rebuild_stats:
+            _rebuild_stats[k] = 0

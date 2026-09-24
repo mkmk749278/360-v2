@@ -663,13 +663,14 @@ def test_the_signing_handler_does_not_block_its_loop():
     async handler they serialised every concurrent signed call."""
     path = REPO / "src" / "security" / "signing_service" / "handler.py"
     tree = ast.parse(path.read_text())
-    fn = next(
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.AsyncFunctionDef) and n.name == "handle_request"
-    )
     direct = []
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr in ("get_key_blob", "decrypt"):
-                direct.append(node.func.attr)
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.AsyncFunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in (
+                    "get_key_blob", "get_key_blob_cached", "decrypt",
+                ):
+                    direct.append(f"{fn.name}:{node.func.attr}")
     assert direct == [], f"blocking call on the loop: {direct}"

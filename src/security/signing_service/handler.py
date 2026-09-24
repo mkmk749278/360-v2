@@ -146,6 +146,70 @@ async def handle_request(
             message=str(exc),
         )
 
+    # A cached ciphertext blob is trusted only against the key-blob
+    # generation (see ``firestore_keystore.get_key_blob_cached``).  If a
+    # rotation's bump was lost, the cached key is the revoked one and Binance
+    # says so (-2014/-2015/-1022) — rejected before execution, so a retry is
+    # safe.  Drop the entry and retry ONCE from a fresh read, and only when
+    # the blob on file actually differs; a genuinely bad key is not retried.
+    used: list = []
+    resp = await _sign_and_send(
+        request, session=session, base_url=base_url,
+        blob_getter=firestore_keystore.get_key_blob_cached, used=used,
+    )
+    if used and _is_key_rejection(resp):
+        firestore_keystore.invalidate_key_blob(request.firebase_uid)
+        fresh: list = []
+        try:
+            current = await asyncio.to_thread(
+                firestore_keystore.get_key_blob, request.firebase_uid
+            )
+        except Exception:  # noqa: BLE001 — keep the original rejection
+            return resp
+        if (current.api_key_full, current.encrypted_dek) != (
+            used[0].api_key_full, used[0].encrypted_dek,
+        ):
+            log.warning(
+                "signing handler: key rejected with a cached blob that is no "
+                "longer current — retrying once with the fresh blob uid={}",
+                request.firebase_uid,
+            )
+            resp = await _sign_and_send(
+                request, session=session, base_url=base_url,
+                blob_getter=lambda _uid: current, used=fresh,
+            )
+    return resp
+
+
+#: Binance codes that mean "this key/signature is not accepted" — raised
+#: before the request executes, so retrying with a different key is safe.
+_KEY_REJECTION_CODES = frozenset({-2014, -2015, -1022})
+
+
+def _is_key_rejection(resp: SignResponse) -> bool:
+    if resp.ok or resp.error_code != ERR_BINANCE_HTTP_ERROR:
+        return False
+    body = resp.binance_body
+    if not isinstance(body, dict):
+        return False
+    raw = body.get("code")
+    if raw is None:
+        return False
+    try:
+        return int(raw) in _KEY_REJECTION_CODES
+    except (TypeError, ValueError):
+        return False
+
+
+async def _sign_and_send(
+    request: SignRequest,
+    *,
+    session: Optional[aiohttp.ClientSession],
+    base_url: str,
+    blob_getter: Any,
+    used: list,
+) -> SignResponse:
+    """Blob → KMS unwrap → AES-GCM decrypt → sign → send, for one attempt."""
     # --- 1. Read encrypted blob from Firestore ----------------------------
     try:
         # Off the event loop (2026-09-24): this is a blocking Firestore read,
@@ -153,9 +217,8 @@ async def handle_request(
         # it — at fan-out size, requests queued past the engine's 12s client
         # timeout while this service kept processing them, so an entry could
         # fill after its caller had given up.
-        blob = await asyncio.to_thread(
-            firestore_keystore.get_key_blob, request.firebase_uid
-        )
+        blob = await asyncio.to_thread(blob_getter, request.firebase_uid)
+        used.append(blob)
     except firestore_keystore.KeyBlobNotFoundError:
         return SignResponse.error_reply(
             request.id,
