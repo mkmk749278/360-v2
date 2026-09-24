@@ -4,6 +4,62 @@
 
 ---
 
+## OPEN 2026-09-24 — post-fix audit: two Tier-0 paths are latent in the live order path
+
+Full report with file:line evidence:
+`docs/AUDIT_2026_09_24_POST_FIX_VERIFICATION.md`.
+This session was audit-only and changed no code; each item below is still
+true as it ends.
+
+**Latent now; they fire the day a user goes live:**
+
+1. **An engine close can leave a naked position.**
+   - `close_fsm_positions_for_signal` and `close_single_fsm_position` cancel
+     every stop first, market-close, and mark the doc CLOSED even if the
+     close failed (`signal_dispatch.py:2065-2070`, `:2234`).
+   - The comment says the reconciler catches drift. It cannot:
+     `reconcile_user` reads only non-terminal docs.
+   - The ops naked-position detector reads the signal's SL price, not stop
+     orders.
+   - Result: no stop, no manager, no page. [code]
+2. **An entry timeout can become an unmanaged fill.**
+   - The MARKET entry is placed before the position doc is written.
+   - A 12s signing-client timeout is unhandled.
+   - The signing service blocks its loop on Firestore and KMS for every call.
+   - The fan-out is an unbounded `gather`.
+   - At scale, a fill can arrive with no doc and no stop. [code, inferred]
+3. **The roster rebuild can persist an empty roster.** A failed scan returns
+   `[]`, and the 30-minute rebuild writes it
+   (`firestore_keystore.py:455-463,494-496`). That fans out to zero users
+   during exactly the reads-refused/writes-allowed state of 2 Sep. [code]
+
+**Measured this session:**
+- **MVAVW SHORT is not retired.** Three were delivered after the 23 Sep
+  audit. On book prices, 60d: n=78, −0.468%/trade, symbol-clustered CI
+  [−0.977, +0.005].
+- **Implied entry drift is 25.4 bps.** On the 687-row window, book net was
+  +0.369% against the +0.115% rebased figure recorded 23 Sep.
+- **The public `/api/track-record` publishes book prices** (+0.21%/trade net
+  over 30d).
+- **The live web app still crashes under `en-US@posix`.** It throws
+  `RangeError` before `runApp`, and the splash's Reload link reproduces it.
+- **Flutter's first frame is unchanged** at 3.4–3.8s under baseline
+  conditions.
+- **28 raw `$e` user-facing sites remain in the app.**
+- **The USDT rail is live** ($15/$25, `test_mode:false`), and the Terms still
+  describe Play Billing only.
+- **#1046 is still firing.** `edge_reconciliation` is at +0.64R,
+  `tuned_variants` at 108, and `entry_feature_inputs` is also firing;
+  `ai_governor_blind` cleared.
+
+**Needs the owner:**
+- sign-off to fix items 1 and 2 (FSM and dispatch);
+- whether to retire `MOVER_AVWAP_SCALP:SHORT`;
+- a guest code so the Firestore projection, dispatch funnel and governor
+  latency can be re-read live.
+
+---
+
 ## OPEN 2026-09-24 — a quarter of live scan reads get an invented 0.01% spread (owner decision)
 
 **Measured 02:38 UTC**, ~53 min after the #1051 boot, from `read.loop` →
