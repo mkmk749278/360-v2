@@ -4,24 +4,47 @@
 
 ---
 
-## OPEN 2026-09-24 — is the AI governor still book-blind after #1049? The census could not say
+## OPEN 2026-09-24 — AI governor still book-blind after #1049; the scan's spread gate may be reading an invented 0.01%
 
-Live read at ~01:10 UTC (engine uptime 6.8h, i.e. after #1049's deploy): `blindness`
-said **132/200 book-blind, 104/200 flow-blind, every reason `not_subscribed`**, and no
-`stale` at all. But the census reads the last 200 **persisted** ledger rows, and only
-**63** verdicts had been issued since boot — so at least 137 of the 200 were written by
-earlier builds, including the pre-#1047 ones where every row was stamped
-`not_subscribed` because no book getter was wired. The pooled figure could not tell
-"fix took" from "fix did not take". Inferred, not measured: 48 of the 63 post-boot
-triggers were `flow_opposed`, which requires a readable flow, so flow at least is
-arriving now.
+**Measured after #1050** (`read.ai_governor` → `blindness.since_boot`, 10 verdicts in
+the first ~7 min of a fresh boot):
+- **flow 0/10 blind** (fixed by #1047);
+- **book 7/10 blind**, reason `not_subscribed`;
+- the pooled 200-row tail read 127/200, which is why `since_boot` exists.
 
-Shipped: `blindness()` now also publishes `since_boot` (rows with `issued_at` at or after
-this process started) and `process_started_at`, beside the unchanged pooled figure.
-Off the money path; visible in the ops diag console (`read.ai_governor`) the moment it
-deploys. **Next read:** `since_boot.book_reasons`. `not_subscribed` still there means
-movers outside the bookTicker set, which is a stream-budget question for the owner, not
-a wiring fault.
+**`not_subscribed` does not mean "outside the stream set", and my note an hour earlier
+was wrong to say so.** The bookTicker pre-fetch pulls **every** futures symbol.
+`_readable_from` stamps `not_subscribed` whenever the getter returns None, so an expired
+snapshot and a missing symbol are the same label, and the book side never emits
+`stale`.
+
+**Two findings from the code (read, not yet measured).** The counters shipped beside
+this entry are what will measure them.
+1. **`_get_spread_pct` answers an invented 0.01% on every cache miss**, and the spread
+   cache lives 20s while the pre-fetch runs only at a scan cycle's start, once 18s have
+   passed. Live cycles measured **~5.7s last / 36s worst**. On top of that, the
+   pre-fetch's fresh-entry skip (`src/scanner/__init__.py`, comment *"Skip only if there
+   is already a fresh (non-bookTicker) cache entry"*) hits bookTicker's **own** entries,
+   because it is the only writer of that cache. So a fetch landing at 18–20s rewrites
+   nothing, and both caches then lapse until the next fetch. **In the gap, the live
+   spread gate is handed a tight spread nobody measured, and scan-side book readers get
+   None.**
+2. **The governor's remaining blindness is NOT explained by (1).** Its 40s grace should
+   span a ~40s repopulate period. The cause is open, and the refutation is written down
+   first: if `book_miss_grace` stays near zero while `blindness.since_boot.book_blind`
+   stays high, the miss is inside the governor's getter, not in the cache.
+
+**Shipped, measurement only:** `cycle_health()["book_ticker"]` (in `read.loop`) counts
+- `spread_hit` / `spread_fallback`;
+- `book_hit_scan` / `book_miss_scan` and `book_hit_grace` / `book_miss_grace`;
+- `fetches`, `last_populated` and `last_skipped_fresh`.
+
+All are in-memory ints: no vendor call, no Firestore.
+
+**Owner decision, once the counters have a window:** if `spread_fallback` is a large
+share of spread reads, the spread gate is partly inert. The fixes all change what a
+live gate reads: drop the self-skip, TTL above cycle-start cadence, or refuse rather
+than invent 0.01%. So each ships dark and needs sign-off.
 
 ## FIXED 2026-09-23 — the Trade tab's positions were empty in production since they shipped
 

@@ -271,6 +271,20 @@ _BOOK_TICKER_PREFETCH_TIMEOUT_S: float = 3.0
 # than the standard depth-based entry to encourage fresher polling.
 _BOOK_TICKER_CACHE_TTL: float = 20.0
 
+
+def _new_book_ticker_stats() -> Dict[str, int]:
+    return {
+        "fetches": 0,
+        "last_populated": 0,
+        "last_skipped_fresh": 0,
+        "spread_hit": 0,
+        "spread_fallback": 0,
+        "book_hit_scan": 0,
+        "book_miss_scan": 0,
+        "book_hit_grace": 0,
+        "book_miss_grace": 0,
+    }
+
 # ADX threshold below which SCALP signals are suppressed during RANGING regime
 _RANGING_ADX_SUPPRESS_THRESHOLD: float = 15.0
 
@@ -1496,6 +1510,13 @@ class Scanner:
         # the API call: we only re-fetch when the cache is actually stale, not
         # every 1-second scan cycle.  0.0 = never fetched → fetch immediately.
         self._last_book_ticker_fetch_at: float = 0.0
+        # Measurement only (2026-09-24): how often a reader of those two caches
+        # found nothing. On a miss `_get_spread_pct` answers a fabricated 0.01%
+        # and `current_order_book` answers None, and nothing counted either, so
+        # "the spread gate saw a real spread" was an assumption. Also counts the
+        # pre-fetch's own fresh-entry skip, which suppresses the snapshot write
+        # beside it. Plain ints, bumped in memory: no vendor call, no I/O.
+        self._book_ticker_stats: Dict[str, int] = _new_book_ticker_stats()
 
         # Cooldown tracking: (symbol, channel_name) → monotonic expiry time
         self._cooldown_until: Dict[Tuple[str, str], float] = {}
@@ -3488,6 +3509,14 @@ class Scanner:
                     seconds, SCAN_CYCLE_KILL_SEC,
                 )
 
+    def _book_stats(self) -> Dict[str, int]:
+        """The bookTicker hit/miss counters, created on first use for an
+        instance built without ``__init__`` (the test stubs do this)."""
+        stats = self.__dict__.get("_book_ticker_stats")
+        if stats is None:
+            stats = self.__dict__["_book_ticker_stats"] = _new_book_ticker_stats()
+        return stats
+
     def cycle_health(self) -> Dict[str, Any]:
         """Scan-cycle timing for the ``scan_cycle`` probe and the snapshot.
 
@@ -3515,6 +3544,13 @@ class Scanner:
             # duration — the RATIO between stages is what locates the cost, and
             # the page says so rather than presenting them as a partition.
             "worst_stages": dict(self.worst_cycle_stages),
+            # Hits and misses on the bookTicker caches since boot. `spread_fallback`
+            # is a read that got the invented 0.01%; `book_miss_scan` is a live
+            # scan read that got no book; the `_grace` pair is the AI governor.
+            # Called unbound: `cycle_health` is borrowed by stand-ins that copy
+            # the scanner's readers without its other methods.
+            "book_ticker": dict(Scanner._book_stats(self)),
+            "book_ticker_ttl_sec": _BOOK_TICKER_CACHE_TTL,
             "last_slow_stages": dict(self.last_slow_cycle_stages),
             "last_slow_sec": round(self.last_slow_cycle_sec, 2),
             "last_slow_at": self.last_slow_cycle_at,
@@ -3871,12 +3907,14 @@ class Scanner:
 
             now = time.monotonic()
             populated = 0
+            skipped_fresh = 0
             for symbol, entry in tickers.items():
                 # /depth is now only fetched for spread via bookTicker — accurate
                 # best-bid/ask spread for all channels at zero extra cost.
                 # Skip only if there is already a fresh (non-bookTicker) cache entry.
                 existing = self._order_book_cache.get(symbol)
                 if existing and now < existing[1]:
+                    skipped_fresh += 1
                     continue
                 try:
                     best_bid = float(entry.get("bidPrice", 0))
@@ -3911,6 +3949,10 @@ class Scanner:
                 populated += 1
 
             self._last_book_ticker_fetch_at = now
+            stats = self._book_stats()
+            stats["fetches"] += 1
+            stats["last_populated"] = populated
+            stats["last_skipped_fresh"] = skipped_fresh
             log.debug(
                 "Global bookTicker pre-fetch refreshed {} spread cache entries (market={})",
                 populated, market,
@@ -3932,8 +3974,10 @@ class Scanner:
         now = time.monotonic()
         cached = self._order_book_cache.get(symbol)
         if cached and now < cached[1]:
+            self._book_stats()["spread_hit"] += 1
             return cached[0]
         # bookTicker pre-fetch hasn't populated this symbol yet — return fallback
+        self._book_stats()["spread_fallback"] += 1
         return 0.01
 
     async def _fetch_onchain_data(self, symbol: str) -> Any:
@@ -5367,6 +5411,8 @@ class Scanner:
             snap = self._order_book_snapshot_cache.get(symbol)
             if snap and time.monotonic() < float(snap[1]) + max(0.0, grace_sec):
                 book = snap[0]
+        lane = "grace" if grace_sec > 0 else "scan"
+        self._book_stats()[f"book_{'hit' if book is not None else 'miss'}_{lane}"] += 1
         return book
 
     @staticmethod

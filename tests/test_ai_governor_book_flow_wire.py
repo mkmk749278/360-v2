@@ -237,3 +237,83 @@ def test_cvd_series_prefers_15m_then_5m_then_none():
     assert fn(holder, "X") is None
     holder._order_flow_store = None
     assert fn(holder, "X") is None
+
+
+# --- the bookTicker caches count their misses --------------------------------------
+
+
+def test_book_reads_are_counted_per_lane(monkeypatch):
+    """A miss reads as None to every caller, so without a count "the scan saw a
+    book" was an assumption. The governor's grace reads are kept apart from the
+    live scan's, because only the scan's feed a live gate."""
+    from src import scanner as scan_mod
+
+    monkeypatch.setattr(scan_mod, "DEPTH_LIVE_FOR_CONSUMERS", False)
+    s = _scanner_stub()
+    s._order_book_snapshot_cache["BTCUSDT"] = (BOOK, time.monotonic() + 30)
+    s._order_book_snapshot_cache["ETHUSDT"] = (BOOK, time.monotonic() - 5)
+    s.current_order_book("BTCUSDT")
+    s.current_order_book("ETHUSDT")
+    s.current_order_book("ETHUSDT", grace_sec=40)
+    s.current_order_book("XRPUSDT", grace_sec=40)
+    stats = s._book_stats()
+    assert (stats["book_hit_scan"], stats["book_miss_scan"]) == (1, 1)
+    assert (stats["book_hit_grace"], stats["book_miss_grace"]) == (1, 1)
+
+
+async def test_the_invented_spread_is_counted_apart_from_a_real_one():
+    from src.scanner import Scanner
+
+    s = Scanner.__new__(Scanner)
+    s._order_book_cache = {"BTCUSDT": (0.05, time.monotonic() + 20)}
+    assert await s._get_spread_pct("BTCUSDT") == 0.05
+    assert await s._get_spread_pct("ETHUSDT") == 0.01
+    stats = s._book_stats()
+    assert (stats["spread_hit"], stats["spread_fallback"]) == (1, 1)
+
+
+async def test_the_prefetch_counts_the_entries_its_fresh_skip_left_alone():
+    """The pre-fetch skips a symbol whose spread entry is still fresh, and that
+    skip also suppresses the book-snapshot write beside it. The only writer of
+    that cache is this loop, so the skip hits its own entries — counted, so the
+    rewrite cadence is a measurement rather than a reading of the code."""
+    from src.scanner import Scanner
+
+    class _Client:
+        async def fetch_all_book_tickers(self):
+            row = {"bidPrice": "10", "askPrice": "10.01", "bidQty": "5", "askQty": "4"}
+            return {"BTCUSDT": dict(row), "ETHUSDT": dict(row)}
+
+    s = Scanner.__new__(Scanner)
+    s._order_book_cache = {"BTCUSDT": (0.02, time.monotonic() + 15)}
+    s._order_book_snapshot_cache = {}
+    s._last_book_ticker_fetch_at = 0.0
+    s.futures_client = _Client()
+    await s._fetch_global_book_tickers("futures")
+    stats = s._book_stats()
+    assert stats["fetches"] == 1
+    assert stats["last_populated"] == 1
+    assert stats["last_skipped_fresh"] == 1
+    assert "BTCUSDT" not in s._order_book_snapshot_cache
+
+
+def test_cycle_health_publishes_the_book_counters_from_a_real_scanner():
+    """`read.loop` carries `cycle_health`; a counter that is bumped and never
+    published is the seam this repo keeps paying for."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.scanner import Scanner
+
+    queue = MagicMock()
+    queue.put = AsyncMock(return_value=True)
+    router = MagicMock(active_signals={})
+    s = Scanner(
+        pair_mgr=MagicMock(), data_store=MagicMock(), channels=[],
+        smc_detector=MagicMock(), regime_detector=MagicMock(),
+        predictive=MagicMock(), exchange_mgr=MagicMock(), spot_client=None,
+        telemetry=MagicMock(), signal_queue=queue, router=router,
+    )
+    s.current_order_book("BTCUSDT")
+    health = s.cycle_health()
+    assert health["book_ticker"]["book_miss_scan"] == 1
+    assert health["book_ticker_ttl_sec"] > 0
