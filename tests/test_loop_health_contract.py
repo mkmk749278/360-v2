@@ -88,6 +88,7 @@ def test_loop_health_carries_all_three_producers():
     assert set(block) == {"scan_cycle", "indicator_cache", "snapshot_writer", "strategy_edge"}
     assert block["indicator_cache"]["stale_avoided"] == 1
     assert block["scan_cycle"]["worst_sec"] == 402.5
+    assert block["scan_cycle"]["book_ticker"]["spread_fallback"] == 0
     assert block["snapshot_writer"]["overruns"] == 63
     assert isinstance(block["strategy_edge"], dict)
 
