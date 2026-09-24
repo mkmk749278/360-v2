@@ -137,7 +137,7 @@ top notch"*.
   `/control/routing` could not be loaded. The owner will see it when he opens Control → Routing
   to divert MVAVW SHORT.
 
-**6. Every brief behind an ⓘ. lumin-app #164 MERGED (squash `d506332`); ops #226 OPEN.**
+**6. Every brief behind an ⓘ. lumin-app #164 MERGED (squash `d506332`); ops #226 MERGED (`ba9bbf0`).**
 
 The owner's next two messages: *"Don't keep all that brief there, keep i icon over there …
 keep everything simple, also look at app track record"*, then, after #225 deployed, *"Still
@@ -162,6 +162,49 @@ control panel looks messy only."*
   needs the engine's deps: `numpy`, `aiohttp`, `loguru`. Without them, 67 engine-contract
   tests fail with `ModuleNotFoundError` (identically on `main`), rather than skipping. CI
   never checks the engine out, so it skips them there.
+
+**7. Shorts research. Can a short-only path save red days? No.**
+
+Report: `docs/SHORTS_RESEARCH_2026_09_24.md`. Scripts:
+`scripts/research/shorts_2026_09_24/`, which reproduce every table from
+the public Binance archive.
+
+The owner asked for a separate shorts-only path to save the red days, since
+MVRTP longs carry the edge.
+
+- **Red days are not market-down days** [measured].
+  - The long book's daily correlation is +0.08 with BTC and +0.22 with the
+    alt index.
+  - The three worst alt days were green for the book.
+  - Red days are days when movers stop following through: the previous day's
+    top-20 movers ran −0.22% on red days vs +0.70% on green days.
+- **Our shorts made red days worse.**
+  - The short side lost −66.4% over 60 days, and −65.5% of that landed on red
+    days.
+  - MVAVW SHORT alone cost 33.5% since 14 Aug.
+- **No short mechanism tested has an out-of-sample edge after costs.**
+  - Thirteen mechanisms plus a random baseline, over 12 months, including
+    in-sample/out-of-sample splits.
+  - They cover breakdowns, flushes, failed movers, BTC-led moves, pump fades,
+    trend, regime gates, negative funding and upside traps.
+  - Intraday alt down-moves snap back and up-moves persist, so a short that
+    enters after weakness is buying the snap-back.
+- **The one real bearish signal is priced.** Negative funding predicts a
+  decline, but a short paid roughly as much in carry as it gained.
+- **The long edge is period-dependent.** The MVRTP-long replica on the 78 core
+  symbols was −0.16% from Sep 2025 to Apr 2026 and +0.50% from May to Sep
+  2026.
+- **The 1h simulator failed calibration; the 15m one passed.** 15m results
+  are read for sign only.
+- **Recommendations:**
+  - divert MVAVW SHORT (still the owner's click);
+  - build no new short path;
+  - keep the "failed move up" shorts live and measure them (SR_FLIP,
+    BREAKDOWN_SHORT, FAR, LSR);
+  - look for red days on the long side, in the entry-feature lane.
+- **Not built, and not asked to be.** The untested candidates are
+  minute-scale mechanisms (lead-lag, liquidation cascades). They would need a
+  dark lane on `@forceOrder` / `@aggTrade`.
 
 **Owner decisions carried (not built):**
 
