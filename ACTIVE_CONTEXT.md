@@ -63,12 +63,24 @@ Full suite: `9159 passed`.
 
 **4. Also open:**
 
-- **lumin-app #163** (off money path; merges when green):
+- **lumin-app #163 — MERGED 06:31 UTC** (squash `119f4e0`, off money path).
+  It covers:
   - the `en-US@posix` boot crash;
   - 28 raw `$e` sites plus a derived guard;
   - the signal sheet polling in the background;
   - the onboarding stop-loss copy;
   - every onboarding slide overflowing a small phone (85px at 360×640).
+
+  Verified on the deployed site. With the page's `navigator` reporting
+  `en-US@posix`, it paints in 3.46s. With the same live HTML minus the
+  sanitiser, it throws `RangeError` and never paints.
+
+  **Caveat on the audit's "live crash" finding.** It was reproduced through
+  Playwright's context-locale emulation. That emulation also injects the tag as
+  a script-set `Accept-Language`, and because `@` is not CORS-safelisted it
+  breaks gstatic's module imports. Chromium's own `--lang` normalises the tag
+  to `en-US`. So how many real browsers report a POSIX tag is **unmeasured**.
+  The fix is correct and harmless either way; the user impact is not proven.
 - **lumin-legal #8** (owner sign-off): Terms §4 and Privacy §5 describe the
   web crypto rail (NOWPayments, fixed 30-day period, no auto-renewal). Its
   body flags that Privacy still lists Telegram "signal delivery" after the
