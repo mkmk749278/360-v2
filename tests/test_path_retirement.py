@@ -48,6 +48,25 @@ def test_the_signed_off_retirements_match(monkeypatch):
         "retired:VOLUME_SURGE_BREAKOUT:*"
     assert pr.reason_for("VOLUME_SURGE_BREAKOUT", "SHORT") == \
         "retired:VOLUME_SURGE_BREAKOUT:*"
+    assert pr.reason_for("MOVER_AVWAP_SCALP", "SHORT") == \
+        "retired:MOVER_AVWAP_SCALP:SHORT"
+
+
+def test_mvavw_long_is_untouched():
+    """Owner, 2026-09-24: retire MVAVW *shorts*. The LONG side measured
+    UNDECIDED (+0.026% net, n=60) the same day, so retiring the path would
+    discard a cell with no verdict against it."""
+    assert pr.reason_for("MOVER_AVWAP_SCALP", "LONG") is None
+
+
+def test_the_config_default_and_the_code_default_agree():
+    """`RETIRED_PATHS` (the tunable's registered default) and
+    `DEFAULT_RETIRED` (what `snapshot` calls the default) are two spellings of
+    one decision. If they drift, `is_default` reads False on an untouched
+    engine and the ops panel reports an override nobody made."""
+    from config import RETIRED_PATHS
+
+    assert sorted(pr._parse(RETIRED_PATHS)) == sorted(pr.DEFAULT_RETIRED)
 
 
 def test_the_side_that_earns_money_is_untouched():
@@ -58,7 +77,7 @@ def test_the_side_that_earns_money_is_untouched():
 
 
 def test_no_other_path_is_touched():
-    for s in ("TREND_PULLBACK_EMA", "MOVER_AVWAP_SCALP", "MEAN_REVERT",
+    for s in ("TREND_PULLBACK_EMA", "MEAN_REVERT",
               "LIQUIDITY_SWEEP_REVERSAL", "FAILED_AUCTION_RECLAIM"):
         for side in ("LONG", "SHORT"):
             assert pr.reason_for(s, side) is None, f"{s}:{side}"

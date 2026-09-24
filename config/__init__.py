@@ -1129,7 +1129,8 @@ PATH_RETIREMENT_ENABLED: bool = _safe_bool("PATH_RETIREMENT_ENABLED", "true")
 
 # Comma-separated SETUP:SIDE. Empty retires nothing — a real value, not unset.
 RETIRED_PATHS: str = os.getenv(
-    "RETIRED_PATHS", "MOVER_TREND_PULLBACK:SHORT,VOLUME_SURGE_BREAKOUT:*"
+    "RETIRED_PATHS",
+    "MOVER_TREND_PULLBACK:SHORT,VOLUME_SURGE_BREAKOUT:*,MOVER_AVWAP_SCALP:SHORT",
 ).strip()
 #: Re-seed a promoted mover's candles when its 1m data is older than this many
 #: seconds (2026-07-10).  Promoted movers sit outside the WS kline subscription
