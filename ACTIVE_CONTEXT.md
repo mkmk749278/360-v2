@@ -111,6 +111,32 @@ Live check, 10:31 UTC:
   body flags that Privacy still lists Telegram "signal delivery" after the
   channels were deleted (#1037).
 
+**5. ops #224 (Routing) MERGED 11:00 UTC, deploy green 11:08. ops #225 (Control overhaul) is
+OPEN.**
+
+The owner asked for it: *"everything feels messy and unclear like raw … the ops panel should feel
+top notch"*.
+
+- **Main cause: not design.** Templates used about a dozen classes that `style.css` never defined:
+  - `.panel`, `.tbl`;
+  - `badge-live` / `off` / `err` / `good`;
+  - `btn-primary`, `btn-active`, `.kpi*` and more.
+
+  So Promotions rendered browser-default fieldsets and bare tables. Nothing failed.
+  `tests/test_css_classes.py` now derives the set from the templates.
+- **Engine page:**
+  - the kill switch is its own card at the top;
+  - each other switch is one row with its control, replacing a duplicate tile strip;
+  - colour means one thing everywhere;
+  - tunables get toggles and an unsaved-edit count.
+- **Other pages:** `when` timestamps, styled tables, prose moved into collapsible sections.
+- **Phone:** 0px overflow on every page. The top nav had never wrapped: `flex: 1` sets a 0%
+  basis that beats `width: 100%`.
+- **Presentation only:** no form posts different fields.
+- **Not yet observed live:** the #224 page itself. The guest code expired at ~11:16 UTC, so
+  `/control/routing` could not be loaded. The owner will see it when he opens Control → Routing
+  to divert MVAVW SHORT.
+
 **Owner decisions carried (not built):**
 
 - **KMS Decrypt per signed call** is the next per-member cost at scale. Caching
