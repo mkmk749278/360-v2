@@ -47,6 +47,7 @@ This module is **CRUD only** — the FSM transition logic lives in
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -842,7 +843,20 @@ def enable_position_index() -> None:
 
 
 #: A full resync is forced at least this often even when the count agrees.
-_INDEX_FULL_RESYNC_SEC: float = 3600.0
+#: It exists only to bound a SWAP the count cannot see (one position closed
+#: and another opened out-of-band within one period); every add or remove is
+#: already caught by the count.  Priced at the 1,000-member target (~3,000
+#: live positions): hourly is 24 x 3,000 = 72k reads/day on its own, over the
+#: whole free tier; 6h is ~12k.  Env ``POSITION_INDEX_FULL_RESYNC_SEC``.
+def _full_resync_sec_from_env() -> float:
+    raw = os.environ.get("POSITION_INDEX_FULL_RESYNC_SEC", "").strip()
+    try:
+        return max(300.0, float(raw)) if raw else 21600.0
+    except (TypeError, ValueError):
+        return 21600.0
+
+
+_INDEX_FULL_RESYNC_SEC: float = _full_resync_sec_from_env()
 _last_full_resync_monotonic: Optional[float] = None
 #: ``(uid, signal_id)`` written through ``put``/``delete`` while a resync scan
 #: is in flight, or ``None`` when no resync is running.

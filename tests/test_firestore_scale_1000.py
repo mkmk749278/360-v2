@@ -837,3 +837,15 @@ def test_the_signing_service_publishes_its_gates_not_its_secrets():
         out = json.dumps(fn())
         for forbidden in ("encrypted", "secret", "api_key", "dek"):
             assert forbidden not in out.lower(), (name, forbidden)
+
+
+def test_the_forced_full_resync_is_priced_for_the_target(monkeypatch):
+    """Hourly would be 24 x ~3,000 live positions = 72k reads/day at the
+    1,000-member target — over the whole free tier for a scan that only
+    guards a swap the count cannot see.  Default 6h; floor 5 min."""
+    monkeypatch.delenv("POSITION_INDEX_FULL_RESYNC_SEC", raising=False)
+    assert ps._full_resync_sec_from_env() == 21600.0
+    monkeypatch.setenv("POSITION_INDEX_FULL_RESYNC_SEC", "10")
+    assert ps._full_resync_sec_from_env() == 300.0
+    monkeypatch.setenv("POSITION_INDEX_FULL_RESYNC_SEC", "junk")
+    assert ps._full_resync_sec_from_env() == 21600.0
