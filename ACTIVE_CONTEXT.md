@@ -4,60 +4,95 @@
 
 ---
 
-## OPEN 2026-09-24 — post-fix audit: two Tier-0 paths are latent in the live order path
+## OPEN 2026-09-24 — the audit's fixes: shipped, in review, and waiting on the owner
 
-Full report with file:line evidence:
-`docs/AUDIT_2026_09_24_POST_FIX_VERIFICATION.md`.
-This session was audit-only and changed no code; each item below is still
-true as it ends.
+Report: `docs/AUDIT_2026_09_24_POST_FIX_VERIFICATION.md` (#1053).  Owner reply
+the same morning: retire MVAVW SHORT, fix the stop-loss findings, "fix anything
+if needed", and size Firestore for 1,000 members ("50k is the free tier, not a
+hard stop — maximise the efficiency").
 
-**Latent now; they fire the day a user goes live:**
+**1. MVAVW SHORT is still LIVE, and the fix is one owner click.**
 
-1. **An engine close can leave a naked position.**
-   - `close_fsm_positions_for_signal` and `close_single_fsm_position` cancel
-     every stop first, market-close, and mark the doc CLOSED even if the
-     close failed (`signal_dispatch.py:2065-2070`, `:2234`).
-   - The comment says the reconciler catches drift. It cannot:
-     `reconcile_user` reads only non-terminal docs.
-   - The ops naked-position detector reads the signal's SL price, not stop
-     orders.
-   - Result: no stop, no manager, no page. [code]
-2. **An entry timeout can become an unmanaged fill.**
-   - The MARKET entry is placed before the position doc is written.
-   - A 12s signing-client timeout is unhandled.
-   - The signing service blocks its loop on Firestore and KMS for every call.
-   - The fan-out is an unbounded `gather`.
-   - At scale, a fill can arrive with no doc and no stop. [code, inferred]
-3. **The roster rebuild can persist an empty roster.** A failed scan returns
-   `[]`, and the 30-minute rebuild writes it
-   (`firestore_keystore.py:455-463,494-496`). That fans out to zero users
-   during exactly the reads-refused/writes-allowed state of 2 Sep. [code]
+- #1054 merged and deployed. It adds `MOVER_AVWAP_SCALP:SHORT` to the
+  `RETIRED_PATHS` default.
+- Live `read.path_scorecard` at 06:15 UTC still reads only
+  `MOVER_TREND_PULLBACK:SHORT` + `VOLUME_SURGE_BREAKOUT:*`.
+- A stored value on ops **Control → `retired_paths`** (or in the VPS `.env`)
+  wins over the code default.
+- Add `MOVER_AVWAP_SCALP:SHORT` there. A guest session cannot write it.
 
-**Measured this session:**
-- **MVAVW SHORT is not retired.** Three were delivered after the 23 Sep
-  audit. On book prices, 60d: n=78, −0.468%/trade, symbol-clustered CI
-  [−0.977, +0.005].
-- **Implied entry drift is 25.4 bps.** On the 687-row window, book net was
-  +0.369% against the +0.115% rebased figure recorded 23 Sep.
-- **The public `/api/track-record` publishes book prices** (+0.21%/trade net
-  over 30d).
-- **The live web app still crashes under `en-US@posix`.** It throws
-  `RangeError` before `runApp`, and the splash's Reload link reproduces it.
-- **Flutter's first frame is unchanged** at 3.4–3.8s under baseline
-  conditions.
-- **28 raw `$e` user-facing sites remain in the app.**
-- **The USDT rail is live** ($15/$25, `test_mode:false`), and the Terms still
-  describe Play Billing only.
-- **#1046 is still firing.** `edge_reconciliation` is at +0.64R,
-  `tuned_variants` at 108, and `entry_feature_inputs` is also firing;
-  `ai_governor_blind` cleared.
+**2. #1055 — the stop-loss fixes — MERGED 06:18 UTC (owner sign-off in
+session).**
 
-**Needs the owner:**
-- sign-off to fix items 1 and 2 (FSM and dispatch);
-- whether to retire `MOVER_AVWAP_SCALP:SHORT`;
-- a guest code so the Firestore projection, dispatch funnel and governor
-  latency can be re-read live.
+- **Close ordering.** The close goes first. The stop comes off only once
+  Binance takes the close, or answers −2022. A failed close stays live,
+  protected, and is retried by the reconciler.
+- **Entry path.**
+  - The doc is written before the entry goes out.
+  - An unknown outcome is not treated as a refusal.
+  - The signing service no longer blocks its loop.
+  - The fan-out is bounded at 16.
+- Full suite: `9121 passed, 58 skipped`.
+- **Watching it.** The pre-deploy `read.dispatch_funnel` was all zeros over
+  40 min: no fan-out since boot, and nobody is live. So the deploy check can
+  confirm a clean boot and the new counters, NOT a live placement.
+- **The first real live placement is still unobserved on this code.** When a
+  user goes live, read `closes`, `stop_protection` and the `pending_close`
+  probe.
 
+**3. Firestore at 1,000 members is in review (sign-off: it touches the
+signing service).**
+
+Full suite: `9159 passed`.
+
+- The signing service caches the key **ciphertext only**, trusted against a
+  Redis generation every key write bumps.
+  - KMS Decrypt still runs per call, so B18 is unchanged.
+  - A rejected stale key is re-read once.
+  - The generation is epoch-seeded, so a Redis flush cannot replay it.
+  - A failed bump is retried, then paged.
+- Position-index resync and roster rebuild are gated on an aggregation
+  `count()`.
+- A failed roster scan never writes an empty roster. That was the audit's
+  third latent path: it fans out to zero users on a reads-refused day.
+- A resync no longer drops positions written mid-scan.
+- The signing census is published and summed into the read budget.
+- The signing container gets the in-network `REDIS_URL`. `.env` has
+  localhost, so without it the cache silently never engages.
+- Counters: `read.firestore_reads` → `read_gates`.
+
+**4. Also open:**
+
+- **lumin-app #163** (off money path; merges when green):
+  - the `en-US@posix` boot crash;
+  - 28 raw `$e` sites plus a derived guard;
+  - the signal sheet polling in the background;
+  - the onboarding stop-loss copy;
+  - every onboarding slide overflowing a small phone (85px at 360×640).
+- **lumin-legal #8** (owner sign-off): Terms §4 and Privacy §5 describe the
+  web crypto rail (NOWPayments, fixed 30-day period, no auto-renewal). Its
+  body flags that Privacy still lists Telegram "signal delivery" after the
+  channels were deleted (#1037).
+
+**Owner decisions carried (not built):**
+
+- **KMS Decrypt per signed call** is the next per-member cost at scale. Caching
+  the DEK would breach B18's one-request plaintext lifetime.
+- **Firestore writes** have a 20k/day free allowance, and #1055 makes an order
+  cost two position writes.
+- **Check App Engine → Settings for a daily spending limit.** That is the
+  standing hypothesis for why 2 Sep was *refused* on Blaze.
+
+**Correction to the audit's drift figure (measured, `read.entry_fidelity`
+06:0x UTC):**
+
+| Window | Book avg | Rebased avg | Drift mean | Drift median | Drift positive |
+|---|---|---|---|---|---|
+| Last 500 | +0.378% | **+0.150%** | 23.1 bps | 10.1 bps | 58.2% |
+| All-time (32.3% priced) | +0.366% | +0.124% | 24.4 bps | 10.0 bps | 59.3% |
+
+The audit's "implied 25.4 bps" was an inference; the median is less than half
+the mean, so a few large slips carry it.
 ---
 
 ## OPEN 2026-09-24 — a quarter of live scan reads get an invented 0.01% spread (owner decision)
