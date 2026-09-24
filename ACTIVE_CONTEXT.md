@@ -111,8 +111,8 @@ Live check, 10:31 UTC:
   body flags that Privacy still lists Telegram "signal delivery" after the
   channels were deleted (#1037).
 
-**5. ops #224 (Routing) MERGED 11:00 UTC, deploy green 11:08. ops #225 (Control overhaul) is
-OPEN.**
+**5. ops #224 (Routing) MERGED 11:00 UTC, deploy green 11:08. ops #225 (Control overhaul)
+MERGED.**
 
 The owner asked for it: *"everything feels messy and unclear like raw … the ops panel should feel
 top notch"*.
@@ -136,6 +136,32 @@ top notch"*.
 - **Not yet observed live:** the #224 page itself. The guest code expired at ~11:16 UTC, so
   `/control/routing` could not be loaded. The owner will see it when he opens Control → Routing
   to divert MVAVW SHORT.
+
+**6. Every brief behind an ⓘ. lumin-app #164 MERGED (squash `d506332`); ops #226 OPEN.**
+
+The owner's next two messages: *"Don't keep all that brief there, keep i icon over there …
+keep everything simple, also look at app track record"*, then, after #225 deployed, *"Still
+control panel looks messy only."*
+
+- **ops #226.** Every Control page reads title, state, button.
+  - Each explanation sits behind an ⓘ (`_info.html`, a `<details>`; it docks to the bottom of
+    the screen on a phone). The sentences are moved, not cut.
+  - Faults and must-see warnings stay visible.
+  - Routing drops from ten columns to six, with plain text where every row wore a grey pill.
+    On a phone it goes from 6,063px to 4,627px.
+  - Two layout bugs are fixed: an ⓘ inside a `<p>` breaks out onto its own line, and
+    `.sw-state` was a wrapping flex row.
+  - Guard: `tests/test_control_info_icon.py`, derived from the nav.
+  - Presentation only; no form posts different fields.
+- **lumin-app #164.** The Track record screen and the Pulse "Signal book by day" card lose
+  their assumptions paragraph. An ⓘ opens it in a bottom sheet, with one writer for both:
+  `trackRecordInfo`. *"Past performance does not guarantee future results."* stays in view
+  on purpose. It is a live financial app showing performance figures, so that line should
+  not depend on a tap.
+- **Environment note for the next ops session.** Running the ops suite with `360-v2` beside it
+  needs the engine's deps: `numpy`, `aiohttp`, `loguru`. Without them, 67 engine-contract
+  tests fail with `ModuleNotFoundError` (identically on `main`), rather than skipping. CI
+  never checks the engine out, so it skips them there.
 
 **Owner decisions carried (not built):**
 
