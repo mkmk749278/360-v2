@@ -385,10 +385,19 @@ class Reconciler:
                 fsm_position.state.value,
                 symbol,
             )
+            # PENDING, nothing ever filled, and either the entry's outcome
+            # was never known (``entry_ambiguous``) or it never got an order
+            # id at all — the doc is written BEFORE the entry goes out, so a
+            # process that died in between leaves exactly that.  Neither is a
+            # trade the user closed, and booking one as CLOSED "MANUAL" would
+            # put a fill that never happened in their history.
             never_filled = (
                 fsm_position.state == _position_state.PositionState.PENDING
                 and float(fsm_position.filled_qty or 0.0) <= 0.0
-                and bool(getattr(fsm_position, "entry_ambiguous", False))
+                and (
+                    bool(getattr(fsm_position, "entry_ambiguous", False))
+                    or not int(getattr(fsm_position, "entry_order_id", 0) or 0)
+                )
             )
             fsm_position.state = (
                 _position_state.PositionState.CANCELLED_NO_FILL

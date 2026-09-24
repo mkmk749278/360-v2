@@ -431,6 +431,41 @@ async def test_an_ambiguous_entry_that_never_filled_retires_as_no_fill():
     assert pos.close_reason == "EXPIRED_NO_FILL"
 
 
+@pytest.mark.asyncio
+async def test_a_doc_whose_entry_never_went_out_is_not_booked_as_a_manual_close():
+    """The doc is persisted before the entry is sent.  A process that died in
+    between leaves PENDING, no order id, nothing filled, not ambiguous — and
+    Binance flat.  That is not a trade the user closed."""
+    _f, placer = _stub_placer_factory()
+    pos = _bracketed(
+        state=position_state.PositionState.PENDING, entry_order_id=0,
+        sl_order_id=0, tp1_order_id=0, tp2_order_id=0, tp3_order_id=0,
+        filled_qty=0.0, entry_ambiguous=False,
+    )
+
+    await _reconciler(placer)._diff_and_heal(pos, {"BTCUSDT": 0.0})
+
+    assert pos.state is position_state.PositionState.CANCELLED_NO_FILL
+    assert pos.close_reason == "EXPIRED_NO_FILL"
+
+
+@pytest.mark.asyncio
+async def test_a_placed_entry_whose_fill_we_missed_still_reads_as_closed():
+    """The narrowing must not swallow the ordinary case: an entry that got an
+    order id and is flat now was filled and closed outside the engine."""
+    _f, placer = _stub_placer_factory()
+    pos = _bracketed(
+        state=position_state.PositionState.PENDING, entry_order_id=555,
+        sl_order_id=0, tp1_order_id=0, tp2_order_id=0, tp3_order_id=0,
+        filled_qty=0.0, entry_ambiguous=False,
+    )
+
+    await _reconciler(placer)._diff_and_heal(pos, {"BTCUSDT": 0.0})
+
+    assert pos.state is position_state.PositionState.CLOSED
+    assert pos.close_reason == "MANUAL"
+
+
 # ---------------------------------------------------------------------------
 # 4. Entry: doc first, and an unknown outcome is not a refusal
 # ---------------------------------------------------------------------------
