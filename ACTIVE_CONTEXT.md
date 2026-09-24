@@ -4,22 +4,38 @@
 
 ---
 
-## OPEN 2026-09-24 — the audit's fixes: shipped, in review, and waiting on the owner
+## OPEN 2026-09-24 — the audit's fixes: all merged; MVAVW SHORT waits on one owner click
 
 Report: `docs/AUDIT_2026_09_24_POST_FIX_VERIFICATION.md` (#1053).  Owner reply
 the same morning: retire MVAVW SHORT, fix the stop-loss findings, "fix anything
 if needed", and size Firestore for 1,000 members ("50k is the free tier, not a
 hard stop — maximise the efficiency").
 
-**1. MVAVW SHORT is still LIVE, and the fix is one owner click.**
+**1. MVAVW SHORT is still LIVE, and the fix is one owner click on the new
+screen.**
 
 - #1054 merged and deployed. It adds `MOVER_AVWAP_SCALP:SHORT` to the
   `RETIRED_PATHS` default.
-- Live `read.path_scorecard` at 06:15 UTC still reads only
-  `MOVER_TREND_PULLBACK:SHORT` + `VOLUME_SURGE_BREAKOUT:*`.
-- A stored value on ops **Control → `retired_paths`** (or in the VPS `.env`)
-  wins over the code default.
-- Add `MOVER_AVWAP_SCALP:SHORT` there. A guest session cannot write it.
+- A stored `retired_paths` value wins over the code default. Live
+  `read.path_scorecard` at 10:31 UTC still read only `MOVER_TREND_PULLBACK:SHORT`
+  + `VOLUME_SURGE_BREAKOUT:*`.
+- The owner found no clear screen for it: *"there is no clear diversion
+  screen, Dark to live and live to dark, make it clear and I do it later."* The
+  old Promotions card linked to `/control/tunables`, a POST-only route, so
+  that link 405'd.
+- **ops #224 adds Control → Routing.**
+  - One row per (path, side), with both directions.
+  - The row for MVAVW SHORT reads LIVE · "signed-off default diverts this" ·
+    Divert to dark.
+  - A one-click "Adopt the signed-off default" is included.
+- **The owner said he will do it himself.** Nothing retires it until he
+  clicks.
+- **An engine interaction worth knowing.** A retired row is marked dark with
+  gate `retired:P:S` and then passes `dark_promotion.decide`. A promotion rule
+  with Gate = Any therefore re-promotes it. The routing screen badges that as
+  CONFLICT, and none exists today. An engine-side fix (Any does not match
+  `retired:`) is a proposal, not built: it is a promotion-semantics change and
+  the owner's call.
 
 **2. #1055 — the stop-loss fixes — MERGED 06:18 UTC (owner sign-off in
 session).**
@@ -40,10 +56,19 @@ session).**
   user goes live, read `closes`, `stop_protection` and the `pending_close`
   probe.
 
-**3. Firestore at 1,000 members is in review (sign-off: it touches the
-signing service).**
+**3. Firestore at 1,000 members — #1056 MERGED 06:46 UTC (owner approved).**
 
-Full suite: `9159 passed`.
+Full suite `9160 passed`.
+
+Live check, 10:31 UTC:
+- the engine had run 3.7h since the deploy, with no restart and no fail_open
+  sites;
+- the resync count gate agreed 43 times out of 43 after 1 full scan;
+- the roster count gate agreed 7 times out of 7;
+- the signing census was publishing through Redis, proving the `REDIS_URL`
+  compose fix;
+- the signing blob cache showed 0 calls, because nobody made a signed call
+  since boot. So its hit rate is still unmeasured.
 
 - The signing service caches the key **ciphertext only**, trusted against a
   Redis generation every key write bumps.
@@ -81,10 +106,36 @@ Full suite: `9159 passed`.
   breaks gstatic's module imports. Chromium's own `--lang` normalises the tag
   to `en-US`. So how many real browsers report a POSIX tag is **unmeasured**.
   The fix is correct and harmless either way; the user impact is not proven.
-- **lumin-legal #8** (owner sign-off): Terms §4 and Privacy §5 describe the
+- **lumin-legal #8 — MERGED (owner approved).** Terms §4 and Privacy §5 describe the
   web crypto rail (NOWPayments, fixed 30-day period, no auto-renewal). Its
   body flags that Privacy still lists Telegram "signal delivery" after the
   channels were deleted (#1037).
+
+**5. ops #224 (Routing) MERGED 11:00 UTC, deploy green 11:08. ops #225 (Control overhaul) is
+OPEN.**
+
+The owner asked for it: *"everything feels messy and unclear like raw … the ops panel should feel
+top notch"*.
+
+- **Main cause: not design.** Templates used about a dozen classes that `style.css` never defined:
+  - `.panel`, `.tbl`;
+  - `badge-live` / `off` / `err` / `good`;
+  - `btn-primary`, `btn-active`, `.kpi*` and more.
+
+  So Promotions rendered browser-default fieldsets and bare tables. Nothing failed.
+  `tests/test_css_classes.py` now derives the set from the templates.
+- **Engine page:**
+  - the kill switch is its own card at the top;
+  - each other switch is one row with its control, replacing a duplicate tile strip;
+  - colour means one thing everywhere;
+  - tunables get toggles and an unsaved-edit count.
+- **Other pages:** `when` timestamps, styled tables, prose moved into collapsible sections.
+- **Phone:** 0px overflow on every page. The top nav had never wrapped: `flex: 1` sets a 0%
+  basis that beats `width: 100%`.
+- **Presentation only:** no form posts different fields.
+- **Not yet observed live:** the #224 page itself. The guest code expired at ~11:16 UTC, so
+  `/control/routing` could not be loaded. The owner will see it when he opens Control → Routing
+  to divert MVAVW SHORT.
 
 **Owner decisions carried (not built):**
 
