@@ -178,31 +178,31 @@ class TestVolatilePathLadder:
 
 
 class TestCancelPathLadder:
-    async def test_market_close_failure_falls_back_to_be_sl(self):
+    """2026-09-24: the regime-exit path no longer cancels the stop before its
+    close.  The old ladder (cancel → close fails → lay a BE stop from scratch
+    → retry the close) existed only because the stop had already been
+    cancelled; with the stop left resting, a failed close needs no fallback
+    stop — it needs a retry, which the reconciler owns."""
+
+    async def test_market_close_failure_keeps_the_stop_and_marks_close_pending(self):
         pos = _position()
+        sl_before = pos.sl_order_id
         placer = _placer(place_market_close=AsyncMock(side_effect=_FAIL))
         await _fsm()._pretp_cancel_path(pos, placer)
-        placer.place_stop_loss.assert_awaited_once()
-        assert pos.sl_be_order_id == 4001
+        placer.cancel_algo_order.assert_not_called()
+        placer.place_stop_loss.assert_not_called()
+        assert pos.sl_order_id == sl_before
+        assert pos.pending_close_reason == "REGIME_EXIT"
+        assert not position_state.is_terminal(pos.state)
 
-    async def test_close_and_be_sl_failure_retries_the_close(self):
-        """Final rung retries the market close — a transient first
-        failure no longer strands the residual."""
+    async def test_the_bracket_comes_off_only_after_the_close_is_taken(self):
         pos = _position()
-        placer = _placer(
-            place_market_close=AsyncMock(
-                side_effect=[
-                    _FAIL,
-                    order_placer.OrderPlacementResult(
-                        order_id=9001, client_order_id="lumin_s_close",
-                        status="FILLED", avg_price=29100.0, binance_body={},
-                    ),
-                ]
-            ),
-            place_stop_loss=AsyncMock(side_effect=_FAIL),
-        )
+        placer = _placer()
         await _fsm()._pretp_cancel_path(pos, placer)
-        assert placer.place_market_close.await_count == 2
+        names = [c[0] for c in placer.mock_calls
+                 if c[0] in ("place_market_close", "cancel_algo_order")]
+        assert names and names[0] == "place_market_close", names
+        assert pos.sl_order_id == 0
 
 
 class TestSpawnHelpers:

@@ -268,6 +268,10 @@ def _apply_cancel_fullgrab(grab_fraction: float, regime_label: Optional[str]) ->
 # load while keeping the operator-visible behaviour predictable.
 _ACTIVE_UIDS_TTL_S = 30.0
 
+#: Users whose order path may be in flight at once during one fan-out.  See
+#: the comment at the gather in :func:`dispatch_signal_to_active_users`.
+_FANOUT_CONCURRENCY: int = max(1, int(os.getenv("DISPATCH_FANOUT_CONCURRENCY", "16")))
+
 
 @dataclass
 class _CachedUids:
@@ -1551,8 +1555,22 @@ async def dispatch_signal_to_active_users(
                 _consec_insufficient_margin.pop(uid, None)
             return False
 
+    # Bounded (2026-09-24).  The fan-out was one unbounded gather: every
+    # user's ~5 signed calls hit the signing service at once, where they
+    # queue — and the engine's client gives up after 12s while the service
+    # keeps working through the queue, so an entry could fill after its caller
+    # had recorded a failure.  Harmless at two users, a stream of unmanaged
+    # fills at hundreds.  A paper user takes its slot for microseconds (the
+    # mode gate skips before any signed call), so the bound only paces real
+    # order paths.
+    _fanout_sem = asyncio.Semaphore(_FANOUT_CONCURRENCY)
+
+    async def _bounded(uid: str) -> bool:
+        async with _fanout_sem:
+            return await _one_user(uid)
+
     results = await asyncio.gather(
-        *(_one_user(uid) for uid in uids),
+        *(_bounded(uid) for uid in uids),
         return_exceptions=False,
     )
     placed = sum(1 for r in results if r)
@@ -1860,6 +1878,200 @@ async def dispatch_manual_trade(
     }
 
 
+# ---------------------------------------------------------------------------
+# Closing a live position without ever uncovering it (2026-09-24)
+# ---------------------------------------------------------------------------
+#
+# Every engine-initiated close used to run: cancel the whole bracket (the stop
+# included) → MARKET close → mark the doc CLOSED "regardless of whether the
+# MARKET order succeeded", on the stated belief that "an engine restart /
+# reconciler will catch any remaining Binance state drift".  It could not:
+# ``Reconciler.reconcile_user`` walks NON-terminal positions only, so a doc
+# marked CLOSED is never looked at again.  A close that failed (a signing
+# timeout, -1003, a network blip) therefore left a real position open on
+# Binance with NO stop and nothing that would ever look at it — the
+# naked-position invariant broken by the path meant to exit risk.
+#
+# The order is inverted, and it is safe to invert: the close is reduceOnly and
+# the stop is closePosition, so neither can over-reduce or flip the position
+# if both fire in the same instant (the only argument the old ordering had).
+#
+#   1. MARKET close (reduceOnly).
+#   2. Only once Binance took it — or said -2022, already flat — sweep the
+#      bracket and mark the doc CLOSED.
+#   3. Otherwise leave the bracket resting, stamp ``pending_close_reason`` and
+#      keep the doc LIVE.  The reconciler retries the close every cycle.
+
+CLOSE_CLOSED = "closed"
+CLOSE_ALREADY_FLAT = "already_flat"
+CLOSE_FAILED = "failed"
+
+#: Outcomes since boot, for the liveness probe and the ops X-ray.  ``failed``
+#: is the one that matters: each is a position the engine wanted out of that
+#: is still open (protected) and owed a retry.
+_CLOSE_COUNTS: Dict[str, int] = {
+    CLOSE_CLOSED: 0, CLOSE_ALREADY_FLAT: 0, CLOSE_FAILED: 0,
+}
+
+
+def close_counts() -> Dict[str, int]:
+    """Snapshot of :data:`_CLOSE_COUNTS`."""
+    return dict(_CLOSE_COUNTS)
+
+
+def _reject_code(exc: Exception) -> Optional[int]:
+    sig_resp = getattr(exc, "signing_response", None)
+    body = getattr(sig_resp, "binance_body", None) if sig_resp is not None else None
+    if isinstance(body, dict):
+        try:
+            return int(body.get("code", 0)) or None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+async def close_position_keeping_stop(
+    pos: Any,
+    placer: Any,
+    *,
+    reason: str,
+    site: str,
+) -> str:
+    """Close one live position; the stop comes off only once it is flat.
+
+    Returns :data:`CLOSE_CLOSED`, :data:`CLOSE_ALREADY_FLAT` or
+    :data:`CLOSE_FAILED`.  Never raises.  On a failure the position stays
+    non-terminal with its bracket intact and ``pending_close_reason`` set —
+    the reconciler's :meth:`~src.execution.reconciler.Reconciler.reconcile_user`
+    retries through this same function.
+    """
+    from datetime import datetime, timezone
+
+    from src.execution import order_placer as _op
+    from src.execution import position_fsm as _fsm
+    from src.execution import position_state as _ps
+
+    remaining = pos.total_qty - pos.closed_qty
+    if remaining <= 0:
+        remaining = pos.total_qty
+
+    outcome = CLOSE_FAILED
+    try:
+        await placer.place_market_close(
+            signal_id=pos.signal_id,
+            symbol=pos.symbol,
+            direction=pos.side,
+            quantity=remaining,
+        )
+        outcome = CLOSE_CLOSED
+    except _op.OrderRejectedByBinance as exc:
+        code = _reject_code(exc)
+        if code == -2022:
+            # ReduceOnly rejected: Binance has nothing to reduce — a native SL
+            # or TP beat us here.  Flat is the state we wanted.
+            outcome = CLOSE_ALREADY_FLAT
+        else:
+            log.error(
+                "{}: MARKET close rejected uid={} signal_id={} symbol={} "
+                "reason={} code={} exc={} — stop left resting, close pending",
+                site, pos.firebase_uid, pos.signal_id, pos.symbol, reason,
+                code, exc,
+            )
+    except Exception as exc:  # noqa: BLE001 — unreachable/timeout: outcome unknown
+        log.error(
+            "{}: MARKET close FAILED uid={} signal_id={} symbol={} reason={} "
+            "exc={!r} — stop left resting, close pending",
+            site, pos.firebase_uid, pos.signal_id, pos.symbol, reason, exc,
+        )
+
+    now = datetime.now(timezone.utc)
+    _CLOSE_COUNTS[outcome] = _CLOSE_COUNTS.get(outcome, 0) + 1
+    if outcome == CLOSE_FAILED:
+        # First failure wins the timestamp: the probe measures how long a
+        # position has been owed a close, not how recently we retried.
+        if not getattr(pos, "pending_close_reason", ""):
+            pos.pending_close_at = now
+        pos.pending_close_reason = str(reason or "close")[:20]
+        try:
+            _ps.put_position(pos)
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "{}: put_position failed recording a pending close uid={} "
+                "signal_id={} exc={}",
+                site, pos.firebase_uid, pos.signal_id, exc,
+            )
+        return outcome
+
+    # Flat (or closing at market): everything still resting is an orphan now.
+    try:
+        await _fsm.cancel_protective_orders(pos, placer, site=site)
+    except Exception as exc:  # noqa: BLE001 — orphans are swept by the reconciler
+        log.warning(
+            "{}: bracket sweep raised uid={} signal_id={} exc={}",
+            site, pos.firebase_uid, pos.signal_id, exc,
+        )
+    pos.state = _ps.PositionState.CLOSED
+    pos.close_reason = str(
+        getattr(pos, "pending_close_reason", "") or reason or "close"
+    )[:20]
+    pos.closed_at = now
+    pos.last_event_at = now
+    pos.pending_close_reason = ""
+    pos.pending_close_at = None
+    try:
+        _ps.put_position(pos)
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            "{}: put_position failed uid={} signal_id={} exc={}",
+            site, pos.firebase_uid, pos.signal_id, exc,
+        )
+    return outcome
+
+
+def pending_close_health(
+    positions: Optional[List[Any]] = None,
+    *,
+    now: Optional[float] = None,
+    max_age_sec: float = 300.0,
+) -> Tuple[bool, str]:
+    """Feature-liveness predicate: a live position the engine could not close.
+
+    Every such position is protected (its stop was never cancelled), so this
+    is not an emergency — it is a trade the engine wanted out of and is still
+    in.  It pages once one has been owed a close for ``max_age_sec``, because
+    at that point the reconciler's retries are not landing and a person has to
+    look at why.
+    """
+    from src.execution import position_state as _ps
+
+    if positions is None:
+        positions = _ps.index_live_positions()
+        if positions is None:
+            return True, "position index inactive — nothing to judge"
+    t = time.time() if now is None else now
+    owed = []
+    for p in positions:
+        reason = getattr(p, "pending_close_reason", "")
+        if not reason or _ps.is_terminal(p.state):
+            continue
+        at = getattr(p, "pending_close_at", None)
+        age = (t - at.timestamp()) if at is not None else 0.0
+        owed.append((age, p))
+    stale = [(a, p) for a, p in owed if a >= max_age_sec]
+    counts = close_counts()
+    if stale:
+        a, p = max(stale, key=lambda x: x[0])
+        return False, (
+            f"{len(stale)} position(s) the engine could not close for "
+            f"{max_age_sec:.0f}s+ (oldest {p.symbol} uid={p.firebase_uid} "
+            f"reason={p.pending_close_reason} for {a:.0f}s); stops are still "
+            f"resting. Close outcomes since boot: {counts}"
+        )
+    return True, (
+        f"{len(owed)} close(s) pending retry; outcomes since boot: {counts}"
+    )
+
+
 async def close_fsm_positions_for_signal(
     signal_id: str,
     *,
@@ -1887,24 +2099,24 @@ async def close_fsm_positions_for_signal(
     "Close position" button reaches (2026-09-01, owner: *"user can close that
     trade from our app too without visiting binance"*), and it is a parameter
     rather than a second function on purpose — everything below it is the
-    hardened close: cancel the bracket first so a resting stop cannot fire
-    against our own market order, tolerate -2022 because Binance may have
-    flattened us a millisecond earlier, mark terminal so the monitor stops
-    re-attempting.  A second implementation would be a second thing to keep
+    hardened close (:func:`close_position_keeping_stop`): market close first,
+    tolerate -2022 because Binance may have flattened us a millisecond
+    earlier, sweep the bracket only once flat, and on a failure keep the stop
+    resting and the doc live so the reconciler retries.  A second
+    implementation would be a second thing to keep
     correct, and this repo has paid for that in every measurement lane that
     grew its own resolver.  Note the scope: it closes the user's POSITION and
     leaves the signal in the engine's book, which is the honest split — one
     subscriber exiting early is not the setup being invalidated for everyone.
 
-    Returns the count of users whose positions were actually closed
-    (i.e. the MARKET close order was accepted OR the position was
-    already terminal/not found).
+    Returns the count of users whose positions were actually closed (the
+    MARKET close was accepted, or Binance said the position was already
+    flat).  A close Binance did not take is NOT counted — its position is
+    still open, still protected, and pending a reconciler retry.
 
     Fail-soft: per-user errors are logged but never propagate — a
     failure for one user must not prevent the close for others.
     """
-    from datetime import datetime, timezone
-
     from src.execution import order_placer as _op
     from src.execution import position_state as _ps
 
@@ -1988,102 +2200,20 @@ async def close_fsm_positions_for_signal(
             continue
 
         placer = _op.OrderPlacer(uid)
-
-        # Cancel all open bracket orders — tolerant of -2011/-20121 (already
-        # gone, filled, or expired).  Cancel first so the MARKET close
-        # below doesn't fight with a pending SL/TP that might otherwise
-        # also close the position and over-reduce.
-        # SL and TP orders are algo orders (placed via /fapi/v1/algoOrder);
-        # cancel via cancel_algo_order, not cancel_order.
-        for attr in _PROTECTIVE_ORDER_ATTRS:
-            order_id = int(getattr(pos, attr, 0) or 0)
-            if not order_id:
-                continue
-            try:
-                await placer.cancel_algo_order(symbol=pos.symbol, algo_id=order_id)
-            except _op.OrderPlacementError as exc:
-                log.warning(
-                    "close_fsm: cancel_algo_order failed uid={} signal_id={} "
-                    "algo_id={} exc={}",
-                    uid, signal_id, order_id, exc,
-                )
-
-        # Place REDUCE_ONLY MARKET to close the remaining position.
-        # ``reduceOnly=true`` is a safety net: if Binance already closed
-        # the position (e.g. native SL fired milliseconds before we got
-        # here), this will fail with -2022 "ReduceOnly Order is rejected"
-        # which we absorb below rather than crashing.
-        # Defensively: if closed_qty somehow exceeds total_qty (shouldn't
-        # happen but Firestore partial writes are possible), fall back to
-        # total_qty so we don't send a zero-qty order.
-        remaining = pos.total_qty - pos.closed_qty
-        if remaining <= 0:
-            remaining = pos.total_qty
-
-        market_close_ok = False
-        try:
-            await placer.place_market_close(
-                signal_id=signal_id,
-                symbol=pos.symbol,
-                direction=pos.side,
-                quantity=remaining,
-            )
-            market_close_ok = True
-        except _op.OrderRejectedByBinance as exc:
-            sig_resp = getattr(exc, "signing_response", None)
-            b_code = None
-            if sig_resp is not None:
-                body = getattr(sig_resp, "binance_body", None)
-                if isinstance(body, dict):
-                    try:
-                        b_code = int(body.get("code", 0))
-                    except (TypeError, ValueError):
-                        pass
-            if b_code == -2022:
-                # -2022: ReduceOnly rejected — position already flat on
-                # Binance's side (native SL/TP beat us here).  That's
-                # fine — we still want to mark the Firestore doc closed.
-                log.info(
-                    "close_fsm: -2022 ReduceOnly rejected — position "
-                    "already flat on Binance uid={} signal_id={}",
-                    uid, signal_id,
-                )
-                market_close_ok = True  # treat as success
-            else:
-                log.error(
-                    "close_fsm: MARKET close rejected uid={} signal_id={} "
-                    "symbol={} reason={} code={} exc={}",
-                    uid, signal_id, pos.symbol, reason, b_code, exc,
-                )
-        except _op.OrderPlacementError as exc:
-            log.error(
-                "close_fsm: MARKET close FAILED uid={} signal_id={} "
-                "symbol={} reason={} exc={}",
-                uid, signal_id, pos.symbol, reason, exc,
-            )
-
-        # Mark the Firestore position terminal regardless of whether
-        # the MARKET order succeeded — an engine restart / reconciler
-        # will catch any remaining Binance state drift.  Without this
-        # mark the TradeMonitor would re-attempt close on every tick.
-        now = datetime.now(timezone.utc)
-        pos.state = _ps.PositionState.CLOSED
-        pos.close_reason = reason[:20]  # short label fits in the doc
-        pos.closed_at = now
-        pos.last_event_at = now
-        try:
-            _ps.put_position(pos)
-        except Exception as exc:
-            log.error(
-                "close_fsm: put_position failed uid={} signal_id={} exc={}",
-                uid, signal_id, exc,
-            )
-
+        outcome = await close_position_keeping_stop(
+            pos, placer, reason=reason, site="close_fsm",
+        )
+        if outcome == CLOSE_FAILED:
+            # The stop is still resting and the doc is still live, so the
+            # reconciler retries the close; nothing more to do here.  Not
+            # counted: the caller's "closed" must mean Binance took it — the
+            # app's Close button renders exactly this count to the user.
+            continue
         closed += 1
         log.info(
             "close_fsm: closed uid={} signal_id={} symbol={} reason={} "
-            "market_close_ok={}",
-            uid, signal_id, pos.symbol, reason, market_close_ok,
+            "outcome={}",
+            uid, signal_id, pos.symbol, reason, outcome,
         )
 
     return closed
@@ -2143,14 +2273,16 @@ async def close_single_fsm_position(
     direction: str,
     reason: str,
 ) -> bool:
-    """Cancel native bracket orders + place a MARKET close for a single user.
+    """MARKET-close one user's position, then sweep its bracket once flat.
+
+    Same close as :func:`close_fsm_positions_for_signal` — see
+    :func:`close_position_keeping_stop` for why the stop now comes off last.
 
     Returns ``True`` when the close was successfully attempted, ``False`` when
     the position was not found, already terminal, or position_state is not
     initialised.  Fail-soft: Binance / Firestore errors are logged but not
     re-raised — the reconciler is the safety net.
     """
-    from datetime import datetime, timezone
 
     from src.execution import order_placer as _op
     from src.execution import position_state as _ps
@@ -2173,80 +2305,12 @@ async def close_single_fsm_position(
         return False
 
     placer = _op.OrderPlacer(uid)
-
-    for attr in _PROTECTIVE_ORDER_ATTRS:
-        order_id = int(getattr(pos, attr, 0) or 0)
-        if not order_id:
-            continue
-        try:
-            await placer.cancel_algo_order(symbol=pos.symbol, algo_id=order_id)
-        except _op.OrderPlacementError as exc:
-            log.warning(
-                "close_single_fsm: cancel_algo_order failed uid={} signal_id={} "
-                "attr={} algo_id={} exc={}",
-                uid, signal_id, attr, order_id, exc,
-            )
-
-    remaining = pos.total_qty - pos.closed_qty
-    if remaining <= 0:
-        remaining = pos.total_qty
-
-    market_close_ok = False
-    try:
-        await placer.place_market_close(
-            signal_id=signal_id,
-            symbol=pos.symbol,
-            direction=pos.side,
-            quantity=remaining,
-        )
-        market_close_ok = True
-    except _op.OrderRejectedByBinance as exc:
-        sig_resp = getattr(exc, "signing_response", None)
-        b_code = None
-        if sig_resp is not None:
-            body = getattr(sig_resp, "binance_body", None)
-            if isinstance(body, dict):
-                try:
-                    b_code = int(body.get("code", 0))
-                except (TypeError, ValueError):
-                    pass
-        if b_code == -2022:
-            log.info(
-                "close_single_fsm: -2022 ReduceOnly rejected — already flat "
-                "uid={} signal_id={}",
-                uid, signal_id,
-            )
-            market_close_ok = True
-        else:
-            log.error(
-                "close_single_fsm: MARKET close rejected uid={} signal_id={} "
-                "reason={} code={} exc={}",
-                uid, signal_id, reason, b_code, exc,
-            )
-    except _op.OrderPlacementError as exc:
-        log.error(
-            "close_single_fsm: MARKET close FAILED uid={} signal_id={} "
-            "reason={} exc={}",
-            uid, signal_id, reason, exc,
-        )
-
-    now = datetime.now(timezone.utc)
-    pos.state = _ps.PositionState.CLOSED
-    pos.close_reason = reason[:20]
-    pos.closed_at = now
-    pos.last_event_at = now
-    try:
-        _ps.put_position(pos)
-    except Exception as exc:
-        log.error(
-            "close_single_fsm: put_position failed uid={} signal_id={} exc={}",
-            uid, signal_id, exc,
-        )
-
+    outcome = await close_position_keeping_stop(
+        pos, placer, reason=reason, site="close_single_fsm",
+    )
     log.info(
-        "close_single_fsm: closed uid={} signal_id={} symbol={} reason={} "
-        "market_close_ok={}",
-        uid, signal_id, pos.symbol, reason, market_close_ok,
+        "close_single_fsm: uid={} signal_id={} symbol={} reason={} outcome={}",
+        uid, signal_id, pos.symbol, reason, outcome,
     )
     return True
 

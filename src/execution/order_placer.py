@@ -32,6 +32,7 @@ between "intent" (place a SL at X) and "wire" (Binance HTTP body).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -194,6 +195,26 @@ class OrderPlacer:
         self.firebase_uid = firebase_uid
         self._client = client or signing_client.SigningClient()
 
+    async def _signed(self, call: Any, **kwargs: Any) -> Any:
+        """Make one signing-service call; a transport failure becomes typed.
+
+        ``SigningClient`` raises ``asyncio.TimeoutError`` / ``OSError`` rather
+        than returning a response when the socket is slow or gone, and neither
+        is an :class:`OrderPlacementError` — so every caller's
+        ``except OrderPlacementError`` let it straight through.  The SL retry
+        loop in ``place_signal`` is the one that mattered: a timed-out stop
+        escaped the loop, skipped the force-close, and left a filled entry
+        with no stop (2026-09-24 audit).  Mapped to
+        :class:`OrderPlacementUnreachable`, which every caller already treats
+        as "transient, outcome unknown".
+        """
+        try:
+            return await call(**kwargs)
+        except (asyncio.TimeoutError, OSError) as exc:
+            raise OrderPlacementUnreachable(
+                f"signing service transport failed: {type(exc).__name__}: {exc}"
+            ) from exc
+
     async def ensure_cross_margin(self, *, symbol: str) -> bool:
         """Force the symbol onto CROSSED margin before the entry order.
 
@@ -218,7 +239,8 @@ class OrderPlacer:
         """
         params = {"symbol": symbol, "marginType": "CROSSED"}
         try:
-            resp = await self._client.binance_signed_post(
+            resp = await self._signed(
+                self._client.binance_signed_post,
                 firebase_uid=self.firebase_uid,
                 base=_FUTURES_BASE,
                 path=_FUTURES_MARGIN_TYPE_PATH,
@@ -726,7 +748,8 @@ class OrderPlacer:
         was already filled or cancelled — caller doesn't care which).
         """
         params = {"symbol": symbol, "orderId": order_id}
-        resp = await self._client.binance_signed_delete(
+        resp = await self._signed(
+            self._client.binance_signed_delete,
             firebase_uid=self.firebase_uid,
             base=_FUTURES_BASE,
             path=_FUTURES_ORDER_PATH,
@@ -766,7 +789,8 @@ class OrderPlacer:
         the desired end-state (order gone) is already true.
         """
         params = {"symbol": symbol, "algoId": algo_id}
-        resp = await self._client.binance_signed_delete(
+        resp = await self._signed(
+            self._client.binance_signed_delete,
             firebase_uid=self.firebase_uid,
             base=_FUTURES_BASE,
             path=_FUTURES_ALGO_ORDER_PATH,
@@ -795,7 +819,8 @@ class OrderPlacer:
         signal_id: str,
     ) -> OrderPlacementResult:
         """Shared POST + error-mapping helper for MARKET/LIMIT order verbs."""
-        resp = await self._client.binance_signed_post(
+        resp = await self._signed(
+            self._client.binance_signed_post,
             firebase_uid=self.firebase_uid,
             base=_FUTURES_BASE,
             path=_FUTURES_ORDER_PATH,
@@ -824,7 +849,8 @@ class OrderPlacer:
         Returns ``OrderPlacementResult`` with ``order_id = algoId`` from the
         response, so callers can store and later pass to ``cancel_algo_order``.
         """
-        resp = await self._client.binance_signed_post(
+        resp = await self._signed(
+            self._client.binance_signed_post,
             firebase_uid=self.firebase_uid,
             base=_FUTURES_BASE,
             path=_FUTURES_ALGO_ORDER_PATH,
@@ -863,6 +889,43 @@ def _price_str(price: float) -> str:
     """Same convention as :func:`_qty_str`, separate function for
     readability at call sites."""
     return f"{price:.8f}".rstrip("0").rstrip(".")
+
+
+#: Binance codes that mean "we do not know whether it executed" even though
+#: they arrive as an error body (Binance's own wording: "execution status
+#: unknown").  An order rejected with one of these may be live.
+_EXECUTION_STATUS_UNKNOWN_CODES: frozenset = frozenset({-1000, -1006, -1007})
+
+
+def definitely_not_placed(exc: BaseException) -> bool:
+    """True only when ``exc`` proves the order never reached Binance's book.
+
+    Used where a wrong "no" is dangerous: an entry believed refused that in
+    fact filled is a position with no doc and no stop.  So the default is
+    False — a timeout, a cancelled task, a 5xx, an execution-status-unknown
+    code, or a signing-service error raised after the request left all count
+    as "may have been placed".  The only proofs are a 4xx Binance rejection
+    with a definite code, and a key that could not be read or decrypted (the
+    request was never signed, so it never left).
+    """
+    resp = getattr(exc, "signing_response", None)
+    if isinstance(exc, OrderRejectedByBinance):
+        status = int(getattr(resp, "binance_status", 0) or 0)
+        body = getattr(resp, "binance_body", None)
+        code = None
+        raw_code = body.get("code") if isinstance(body, dict) else None
+        if raw_code is not None:
+            try:
+                code = int(raw_code)
+            except (TypeError, ValueError):
+                code = None
+        return 400 <= status < 500 and code not in _EXECUTION_STATUS_UNKNOWN_CODES
+    if isinstance(exc, OrderPlacementKeyError):
+        return getattr(resp, "error_code", None) in (
+            sig_protocol.ERR_KEY_BLOB_NOT_FOUND,
+            sig_protocol.ERR_CRYPTO_DECRYPT_FAILED,
+        )
+    return False
 
 
 def _raise_for_signing_error(

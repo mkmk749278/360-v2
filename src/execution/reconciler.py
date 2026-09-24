@@ -131,6 +131,17 @@ _ORPHAN_SWEEP_MAX_ITEMS = 12
 _ORDER_HEAL_MIN_QUIET_S = 180.0
 
 
+def _is_quiet(fsm_position: Any) -> bool:
+    """No FSM activity on this position within ``_ORDER_HEAL_MIN_QUIET_S``."""
+    last_event = getattr(fsm_position, "last_event_at", None)
+    if last_event is None:
+        return True
+    if last_event.tzinfo is None:
+        last_event = last_event.replace(tzinfo=timezone.utc)
+    quiet_s = (datetime.now(timezone.utc) - last_event).total_seconds()
+    return quiet_s >= _ORDER_HEAL_MIN_QUIET_S
+
+
 class Reconciler:
     """Per-engine reconciler.  Holds a list of (firebase_uid,
     signing_client) pairs for the active users and runs the diff
@@ -198,6 +209,12 @@ class Reconciler:
         self._orphan_pending: Dict[str, List[tuple]] = {}
         # Counted, because a sweep that silently finds nothing and a sweep
         # that never ran read identically from outside.
+        #: Stop-less live positions found and what was done (2026-09-24).
+        self.protection_counts: Dict[str, int] = {
+            "stopless_reprotected": 0,
+            "stopless_unrecorded_orders": 0,
+            "missed_fill_healed": 0,
+        }
         self.orphan_counts: Dict[str, int] = {
             "history_reads": 0,
             "suspects_found": 0,
@@ -287,16 +304,40 @@ class Reconciler:
                 # it resting.  (Never falls through to _diff_and_heal.)
                 await self._reconcile_pending_entry(fsm_position, actual_amt)
                 continue
+            if (
+                fsm_position.state == _position_state.PositionState.PENDING
+                and not _is_quiet(fsm_position)
+            ):
+                # The doc is written BEFORE the entry goes out (2026-09-24),
+                # so a young PENDING row may be a placement still talking to
+                # Binance: flat because the entry has not filled yet, and
+                # stop-less because place_signal has not laid it yet.  Healing
+                # either would race the placement it is meant to back up.
+                continue
             if abs(actual_amt) < 1e-9:
                 # Flat on Binance → manual/external close.  Heal FSM state.
                 await self._diff_and_heal(fsm_position, binance_positions)
             else:
+                # A close the engine asked for and Binance did not take.  The
+                # stop is still resting (close_position_keeping_stop never
+                # cancels it first), so retrying is safe and is the whole
+                # reason the doc was left live.
+                if getattr(fsm_position, "pending_close_reason", ""):
+                    await self._retry_pending_close(fsm_position)
+                    if _position_state.is_terminal(fsm_position.state):
+                        continue
                 # Still open on Binance → check the stale-position ceiling.
                 # This is the last-resort backstop behind the JTOUSDT
                 # 2026-06-01 incident (uncovered position rode 5h09m).
                 await self._maybe_force_close_stale(fsm_position)
                 if _position_state.is_terminal(fsm_position.state):
                     continue  # stale close just went terminal
+                if fsm_position.state == _position_state.PositionState.PENDING:
+                    # Quiet (checked above), non-flat, still PENDING: the
+                    # entry filled and its fill event never reached the FSM —
+                    # dropped because it outran the doc, or an entry whose
+                    # outcome place_signal could not learn.
+                    self._heal_missed_entry_fill(fsm_position, actual_amt)
                 # Order-side diff: detect externally-cancelled SL/TP
                 # algo orders and heal (audit F4).
                 if symbol not in algo_open_cache:
@@ -305,9 +346,14 @@ class Reconciler:
                     )
                 open_ids = algo_open_cache[symbol]
                 if open_ids is not None:
-                    await self._heal_external_order_cancels(
+                    reprotected = await self._heal_external_order_cancels(
                         fsm_position, open_ids
                     )
+                    # One re-protect attempt per position per cycle: if the
+                    # heal above already tried (and paged on failure), a
+                    # second attempt here would only page twice.
+                    if not reprotected:
+                        await self._ensure_protected(fsm_position, open_ids)
 
     async def _diff_and_heal(
         self,
@@ -339,10 +385,27 @@ class Reconciler:
                 fsm_position.state.value,
                 symbol,
             )
-            fsm_position.state = _position_state.PositionState.CLOSED
+            never_filled = (
+                fsm_position.state == _position_state.PositionState.PENDING
+                and float(fsm_position.filled_qty or 0.0) <= 0.0
+                and bool(getattr(fsm_position, "entry_ambiguous", False))
+            )
+            fsm_position.state = (
+                _position_state.PositionState.CANCELLED_NO_FILL
+                if never_filled
+                else _position_state.PositionState.CLOSED
+            )
             fsm_position.closed_at = datetime.now(timezone.utc)
             if not fsm_position.close_reason:
-                fsm_position.close_reason = "MANUAL"
+                # A pending engine close that Binance flattened in the
+                # meantime keeps the engine's reason, not "MANUAL".
+                fsm_position.close_reason = (
+                    "EXPIRED_NO_FILL" if never_filled
+                    else (getattr(fsm_position, "pending_close_reason", "")
+                          or "MANUAL")
+                )
+            fsm_position.pending_close_reason = ""
+            fsm_position.pending_close_at = None
             # Retire the bracket before persisting, so the document we write
             # does not claim orders that no longer exist.  Binance being flat
             # says nothing about the conditional orders still parked on the
@@ -497,47 +560,120 @@ class Reconciler:
             age_sec,
             self._max_position_age_sec,
         )
-        remaining = fsm_position.total_qty - fsm_position.closed_qty
-        if remaining <= 0:
-            remaining = fsm_position.total_qty
+        # Same close every engine exit uses: market first, the bracket comes
+        # off only once flat, and a close Binance refuses leaves the stop
+        # resting with the doc live (``pending_close_reason``) for the next
+        # cycle.  This path used to cancel the bracket first and return on a
+        # failed close — a naked position for at least one cycle, and for as
+        # long as the close kept failing.
+        from src.execution import pretp_dispatcher as _pd
+        from src.execution import signal_dispatch as _sd
+
+        outcome = await _sd.close_position_keeping_stop(
+            fsm_position,
+            self._order_placer_factory(fsm_position.firebase_uid),
+            reason=fsm_position.close_reason or "STALE_EXPIRY",
+            site="reconciler:stale_close",
+        )
+        if outcome != _sd.CLOSE_FAILED:
+            _pd.spawn_untrack(fsm_position.symbol)
+
+    async def _retry_pending_close(
+        self, fsm_position: _position_state.Position
+    ) -> None:
+        """Retry a close Binance did not take.  Never raises."""
+        from src.execution import pretp_dispatcher as _pd
+        from src.execution import signal_dispatch as _sd
+
+        log.warning(
+            "reconciler: retrying pending close uid={} signal_id={} symbol={} "
+            "reason={}",
+            fsm_position.firebase_uid, fsm_position.signal_id,
+            fsm_position.symbol, fsm_position.pending_close_reason,
+        )
         try:
-            placer = self._order_placer_factory(fsm_position.firebase_uid)
-            # Cancel the bracket BEFORE the market close, exactly as
-            # ``close_fsm_positions_for_signal`` does: a resting SL that fires
-            # in the same instant as our close would over-reduce, and a TP left
-            # parked outlives the position (owner screenshot 2026-09-01 —
-            # Positions 0, Conditional orders 24).  This path is the single
-            # largest producer of those orphans: it fired on 39 of 140 matched
-            # positions in the 24 Aug – 1 Sep window and cancelled nothing.
-            from src.execution import position_fsm as _fsm
-            await _fsm.cancel_protective_orders(
-                fsm_position, placer, site="reconciler:stale_close",
+            outcome = await _sd.close_position_keeping_stop(
+                fsm_position,
+                self._order_placer_factory(fsm_position.firebase_uid),
+                reason=fsm_position.pending_close_reason,
+                site="reconciler:pending_close",
             )
-            await placer.place_market_close(
-                signal_id=fsm_position.signal_id,
-                symbol=fsm_position.symbol,
-                direction=fsm_position.side,
-                quantity=remaining,
-            )
-        except Exception as exc:
+        except Exception:  # noqa: BLE001 — the helper never raises; belt only
+            log.exception("reconciler: pending-close retry raised")
+            return
+        if outcome != _sd.CLOSE_FAILED:
+            _pd.spawn_untrack(fsm_position.symbol)
+
+    def _heal_missed_entry_fill(
+        self, fsm_position: _position_state.Position, actual_amt: float,
+    ) -> None:
+        """PENDING in the FSM, a position on Binance: advance to OPEN.
+
+        Binance's size is the fact; the entry price stays the signal's target
+        when no fill was ever recorded, the same fallback the LIMIT-entry heal
+        uses.  Protection is checked right after by :meth:`_ensure_protected`.
+        """
+        log.warning(
+            "reconciler: PENDING position is live on Binance (fill event never "
+            "reached the FSM) uid={} signal_id={} amt={} ambiguous_entry={} — "
+            "advancing to OPEN",
+            fsm_position.firebase_uid, fsm_position.signal_id, actual_amt,
+            bool(getattr(fsm_position, "entry_ambiguous", False)),
+        )
+        fsm_position.filled_qty = abs(actual_amt)
+        if fsm_position.entry_price_filled <= 0:
+            fsm_position.entry_price_filled = fsm_position.entry_price_target
+        fsm_position.state = _position_state.PositionState.OPEN
+        _position_state.put_position(fsm_position)
+        self.protection_counts["missed_fill_healed"] += 1
+
+    async def _ensure_protected(
+        self,
+        fsm_position: _position_state.Position,
+        open_algo_ids: Set[int],
+    ) -> None:
+        """A live, engine-managed position with no stop recorded at all.
+
+        :meth:`_heal_external_order_cancels` re-protects only when a RECORDED
+        stop disappears, so a position that never had one — its SL failed and
+        so did the force-close, or an entry that filled after place_signal
+        gave up on it — was never re-protected by anything.
+
+        It places one only when Binance confirms nothing we do not know about
+        is resting on the symbol: an unrecorded ``closePosition`` stop would
+        make a second one fail (-4130) and page a naked position that is not
+        naked.  In that case it counts and logs rather than guessing.
+        """
+        if _position_state.is_terminal(fsm_position.state):
+            return
+        if getattr(fsm_position, "protection_mode", "managed") == "user_owned":
+            return
+        if not _is_quiet(fsm_position):
+            return
+        protection_fields = (
+            "trail_order_id", "trail_stop_order_id", "sl_be_order_id",
+            "sl_order_id",
+        )
+        if any(int(getattr(fsm_position, f, 0) or 0) for f in protection_fields):
+            return
+        recorded = {
+            int(getattr(fsm_position, f, 0) or 0)
+            for f in _position_state.PROTECTIVE_ORDER_ATTRS
+        }
+        unknown = set(open_algo_ids) - recorded
+        if unknown:
+            self.protection_counts["stopless_unrecorded_orders"] += 1
             log.error(
-                "reconciler: stale force-close FAILED uid={} signal_id={} "
-                "symbol={} exc={} — will retry next cycle",
-                fsm_position.firebase_uid,
+                "reconciler: live position has no RECORDED stop but {} "
+                "unrecorded algo order(s) rest on {} uid={} signal_id={} — not "
+                "placing a second stop blind",
+                len(unknown), fsm_position.symbol, fsm_position.firebase_uid,
                 fsm_position.signal_id,
-                fsm_position.symbol,
-                exc,
             )
             return
-        # Close succeeded → mark terminal so we don't re-close next cycle.
-        fsm_position.state = _position_state.PositionState.CLOSED
-        fsm_position.closed_at = datetime.now(timezone.utc)
-        if not fsm_position.close_reason:
-            fsm_position.close_reason = "STALE_EXPIRY"
-        fsm_position.last_event_at = datetime.now(timezone.utc)
+        self.protection_counts["stopless_reprotected"] += 1
+        await self._replace_lost_stop(fsm_position)
         _position_state.put_position(fsm_position)
-        from src.execution import pretp_dispatcher as _pd
-        _pd.spawn_untrack(fsm_position.symbol)
 
     async def _sweep_orphan_backlog(self, firebase_uid: str) -> None:
         """Cancel protective orders left resting by a position that closed
@@ -749,7 +885,7 @@ class Reconciler:
         self,
         fsm_position: _position_state.Position,
         open_algo_ids: Set[int],
-    ) -> None:
+    ) -> bool:
         """Clear FSM order ids whose algo orders are no longer open on
         Binance, and re-protect if the position lost its stop.
 
@@ -762,6 +898,9 @@ class Reconciler:
         Freshness guard: positions with FSM activity in the last
         ``_ORDER_HEAL_MIN_QUIET_S`` are skipped so we never race an
         in-flight cancel→replace transition.
+
+        Returns True when it attempted a re-protect, so the caller does not
+        try (and page) a second time in the same cycle.
         """
         last_event = getattr(fsm_position, "last_event_at", None)
         if last_event is not None:
@@ -771,7 +910,7 @@ class Reconciler:
                 datetime.now(timezone.utc) - last_event
             ).total_seconds()
             if quiet_s < _ORDER_HEAL_MIN_QUIET_S:
-                return
+                return False
 
         # ``trail_stop_order_id`` is the TRAIL GOVERNOR's stop (#908) and is a
         # different field from ``trail_order_id``, which is the older native
@@ -808,14 +947,16 @@ class Reconciler:
                 if field in protection_fields:
                     lost_protection = True
         if not changed:
-            return
+            return False
 
         still_protected = any(
             int(getattr(fsm_position, f, 0) or 0) for f in protection_fields
         )
-        if lost_protection and not still_protected:
+        attempted = lost_protection and not still_protected
+        if attempted:
             await self._replace_lost_stop(fsm_position)
         _position_state.put_position(fsm_position)
+        return attempted
 
     async def _replace_lost_stop(
         self, fsm_position: _position_state.Position

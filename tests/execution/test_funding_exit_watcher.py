@@ -337,7 +337,12 @@ class TestCloseForFunding:
         )
         return placer
 
-    async def test_cancels_orders_and_places_market_close(self):
+    async def test_places_market_close_and_leaves_the_bracket_resting(self):
+        """2026-09-24: the bracket is no longer cancelled before the close.
+
+        It used to be, and a failed close left the position with no stop until
+        the next poll.  The close fill's terminal sweep in the FSM retires the
+        bracket once the position is actually flat."""
         from src.execution.position_state import Position, PositionState
 
         pos = MagicMock(spec=Position)
@@ -356,12 +361,7 @@ class TestCloseForFunding:
         placer = self._make_placer()
         await _close_for_funding("uid1", pos, placer)
 
-        assert placer.cancel_algo_order.await_count == 3
-        cancelled_ids = {
-            call.kwargs["algo_id"]
-            for call in placer.cancel_algo_order.await_args_list
-        }
-        assert cancelled_ids == {1001, 2001, 3001}
+        placer.cancel_algo_order.assert_not_called()
 
         placer.place_funding_market_close.assert_awaited_once_with(
             signal_id="sig1",
