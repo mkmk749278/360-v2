@@ -348,7 +348,16 @@ class TestPretpCancelPath:
         assert p.tp2_order_id == 0
 
     @pytest.mark.asyncio
-    async def test_cancel_path_fallback_to_be_sl_on_close_failure(self):
+    async def test_cancel_path_keeps_the_stop_and_marks_the_close_pending_on_failure(self):
+        """A failed regime-exit close leaves the ORIGINAL stop resting.
+
+        The old ladder cancelled the bracket first and then tried to
+        re-place a break-even stop if the close failed — a window in which
+        the residual had no stop at all, and a second failure left it naked.
+        The close now goes first, so on failure nothing was cancelled: the
+        stop the position was opened with is still on the exchange, and the
+        position is marked for the reconciler to retry the close.
+        """
         placer = _make_placer()
         placer.place_market_close = AsyncMock(
             side_effect=order_placer.OrderRejectedByBinance("close fail")
@@ -356,12 +365,19 @@ class TestPretpCancelPath:
         factory = lambda uid: placer  # noqa: E731
         fsm = position_fsm.PositionFSM("uid", order_placer_factory=factory)
         pos = _position(regime="QUIET", regime_15m="")
+        original_sl = pos.sl_order_id
+        assert original_sl, "fixture must carry a resting stop"
         captured = []
         with patch.object(position_state, "get_position", return_value=pos), \
              patch.object(position_state, "put_position", side_effect=captured.append):
             await fsm.handle_event(_otu(coid=position_state.coid_pretp("s")))
-        # Fallback BE-SL placed when market close fails
-        placer.place_stop_loss.assert_awaited_once()
+        placer.place_market_close.assert_awaited_once()
+        placer.cancel_algo_order.assert_not_called()
+        placer.place_stop_loss.assert_not_called()
+        p = captured[-1]
+        assert p.sl_order_id == original_sl
+        assert p.pending_close_reason == "REGIME_EXIT"
+        assert not position_state.is_terminal(p.state)
 
 
 # ---------------------------------------------------------------------------

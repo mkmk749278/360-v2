@@ -39,6 +39,7 @@ called at signing-service boot.  The :func:`run` entry point in
 
 from __future__ import annotations
 
+import asyncio
 import time
 import urllib.parse
 from typing import Any, Optional
@@ -147,7 +148,14 @@ async def handle_request(
 
     # --- 1. Read encrypted blob from Firestore ----------------------------
     try:
-        blob = firestore_keystore.get_key_blob(request.firebase_uid)
+        # Off the event loop (2026-09-24): this is a blocking Firestore read,
+        # and on the loop it serialised EVERY concurrent signed call behind
+        # it — at fan-out size, requests queued past the engine's 12s client
+        # timeout while this service kept processing them, so an entry could
+        # fill after its caller had given up.
+        blob = await asyncio.to_thread(
+            firestore_keystore.get_key_blob, request.firebase_uid
+        )
     except firestore_keystore.KeyBlobNotFoundError:
         return SignResponse.error_reply(
             request.id,
@@ -165,7 +173,9 @@ async def handle_request(
     # --- 2. Unwrap DEK via KMS --------------------------------------------
     try:
         kms = kms_client.get_client()
-        plaintext_dek = kms.decrypt(blob.encrypted_dek)
+        # Blocking gRPC call; same reason as the blob read above.  The
+        # plaintext DEK still lives only in this coroutine's frame.
+        plaintext_dek = await asyncio.to_thread(kms.decrypt, blob.encrypted_dek)
     except kms_client.KmsNotInitialisedError:
         log.error("signing handler: KMS client not initialised")
         return SignResponse.error_reply(

@@ -2197,11 +2197,11 @@ class TradeMonitor:
             from src.execution import signal_dispatch as _sd
             user_positions = _sd.get_fsm_positions_for_signal(sig.signal_id)
         except Exception as exc:
-            log.debug(
-                "_check_per_user_invalidation: get_fsm_positions_for_signal "
-                "failed signal_id={} exc={}",
-                sig.signal_id, exc,
-            )
+            # Fail-open (nothing to invalidate this tick), but counted: this
+            # is where a quota refusal on the roster read surfaced, and at
+            # debug level it surfaced nowhere (2026-09-24 audit).
+            from src import fail_open
+            fail_open.record("trade_monitor.per_user_invalidation", exc)
             return
 
         for uid, pos in user_positions:

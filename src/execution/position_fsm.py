@@ -477,6 +477,28 @@ class PositionFSM:
             _pd.spawn_track(position.symbol)
             if was_pending_entry:
                 await self.place_protection_on_limit_fill(position)
+            elif (
+                getattr(position, "entry_ambiguous", False)
+                and not _has_stop(position)
+            ):
+                # place_signal could not learn this entry's outcome and gave
+                # up on it, so nobody is laying its stop.  The fill proves it
+                # is live: protect it now, anchored at the real fill.
+                log.error(
+                    "position_fsm: entry whose outcome was unknown has FILLED "
+                    "uid={} signal_id={} symbol={} — laying protection now",
+                    self.firebase_uid, position.signal_id, position.symbol,
+                )
+                if position.entry_price_filled > 0 and position.sl_price > 0:
+                    position.sl_price = reanchor_sl(
+                        entry_price=position.entry_price_target,
+                        sl_price=position.sl_price,
+                        fill_price=position.entry_price_filled,
+                        direction=position.side,
+                        firebase_uid=self.firebase_uid,
+                        signal_id=position.signal_id,
+                    )
+                await self.place_protection_on_limit_fill(position)
 
     async def place_protection_on_limit_fill(
         self,
@@ -967,46 +989,30 @@ class PositionFSM:
     ) -> None:
         """RANGING/QUIET/counter-trend exit path: bank pre-TP gain, exit residual.
 
-        Cancels all remaining SL + TP orders and places a MARKET close for the
-        residual position.  The market-close fill arrives as a ``close`` phase
-        ORDER_TRADE_UPDATE event which ``_apply_close_fill`` handles → CLOSED.
+        Places a MARKET close for the residual, and only once Binance takes it
+        retires the remaining SL + TP orders.  The market-close fill arrives
+        as a ``close`` phase ORDER_TRADE_UPDATE event which
+        ``_apply_close_fill`` handles → CLOSED.
 
-        If the market close fails, attempts to place a BE-SL at entry as a
-        fallback stop so the residual is never left completely unprotected.
+        If the market close fails, the stop is still resting (it was never
+        cancelled) and the position is stamped ``pending_close_reason`` so the
+        reconciler retries the close.
         """
-        # Cancel all remaining orders.
-        for _oid in (
-            position.sl_order_id,
-            position.tp1_order_id,
-            position.tp2_order_id,
-            position.tp3_order_id,
-        ):
-            if _oid:
-                try:
-                    await placer.cancel_algo_order(
-                        symbol=position.symbol, algo_id=_oid
-                    )
-                except _order_placer.OrderPlacementError as exc:
-                    log.warning(
-                        "_pretp_cancel_path: order cancel failed uid={} "
-                        "signal_id={} algo_id={} exc={}",
-                        self.firebase_uid, position.signal_id, _oid, exc,
-                    )
-        position.sl_order_id = 0
-        position.tp1_order_id = 0
-        position.tp2_order_id = 0
-        position.tp3_order_id = 0
-        # Position stays PRE_TP_FIRED until the close fill arrives.
-        position.state = _position_state.PositionState.PRE_TP_FIRED
         remaining_qty = max(0.0, position.total_qty - position.closed_qty)
         if remaining_qty <= 0:
-            # Nothing left — mark closed directly.
+            # Nothing left — the bracket protects nothing; retire it and close.
+            await self._cancel_regime_exit_bracket(position, placer)
             position.state = _position_state.PositionState.CLOSED
             position.closed_at = datetime.now(timezone.utc)
             if not position.close_reason:
                 position.close_reason = "REGIME_EXIT"
             self._untrack_symbol(position.symbol)
             return
+        # Close FIRST (2026-09-24).  This path used to cancel the SL and TPs,
+        # then send the close, and on a failed close try to lay a BE stop from
+        # scratch — a window with no stop at all, and none for good if that
+        # placement failed too.  The close is reduceOnly and the stop
+        # closePosition, so they cannot over-reduce if both fire.
         try:
             await placer.place_market_close(
                 signal_id=position.signal_id,
@@ -1014,22 +1020,49 @@ class PositionFSM:
                 direction=position.side,
                 quantity=remaining_qty,
             )
-            log.info(
-                "_pretp_cancel_path: market close placed uid={} signal_id={} "
-                "remaining_qty={:.8f} regime={} regime_15m={}",
-                self.firebase_uid, position.signal_id, remaining_qty,
-                position.entry_regime, position.entry_regime_15m,
-            )
-        except _order_placer.OrderPlacementError as exc:
+        except Exception as exc:  # noqa: BLE001 — any failure: keep the stop
             log.error(
-                "_pretp_cancel_path: market close failed — engaging fallback "
-                "ladder uid={} signal_id={} exc={}",
+                "_pretp_cancel_path: market close failed — stop left resting, "
+                "close pending for the reconciler uid={} signal_id={} exc={!r}",
                 self.firebase_uid, position.signal_id, exc,
             )
-            # Fallback ladder: BE-SL → force-close retry → page.
-            await self._protect_residual_final(
-                position, placer, site="_pretp_cancel_path"
-            )
+            if not position.pending_close_reason:
+                position.pending_close_at = datetime.now(timezone.utc)
+            position.pending_close_reason = "REGIME_EXIT"
+            return
+        log.info(
+            "_pretp_cancel_path: market close placed uid={} signal_id={} "
+            "remaining_qty={:.8f} regime={} regime_15m={}",
+            self.firebase_uid, position.signal_id, remaining_qty,
+            position.entry_regime, position.entry_regime_15m,
+        )
+        # The close was taken: the bracket is now an orphan.  (The close
+        # fill's terminal sweep would retire it too; doing it here means the
+        # position never carries a stop against nothing while that event is
+        # in flight.)  Position stays PRE_TP_FIRED until the close fill lands.
+        await self._cancel_regime_exit_bracket(position, placer)
+        position.state = _position_state.PositionState.PRE_TP_FIRED
+
+    async def _cancel_regime_exit_bracket(
+        self,
+        position: _position_state.Position,
+        placer: _order_placer.OrderPlacer,
+    ) -> None:
+        for attr in ("sl_order_id", "tp1_order_id", "tp2_order_id", "tp3_order_id"):
+            _oid = int(getattr(position, attr, 0) or 0)
+            if not _oid:
+                continue
+            try:
+                await placer.cancel_algo_order(symbol=position.symbol, algo_id=_oid)
+                setattr(position, attr, 0)
+            except _order_placer.OrderPlacementError as exc:
+                # Kept, not zeroed: the id is the only record the order may
+                # still rest, and the reconciler reads the same fields.
+                log.warning(
+                    "_pretp_cancel_path: order cancel failed uid={} "
+                    "signal_id={} algo_id={} exc={}",
+                    self.firebase_uid, position.signal_id, _oid, exc,
+                )
 
     def _apply_close_fill(
         self,
@@ -1314,6 +1347,50 @@ class PositionFSM:
 # ---------------------------------------------------------------------------
 
 
+#: Fields naming a resting STOP (not a take-profit) on a live position.
+_STOP_ORDER_ATTRS: tuple = (
+    "sl_order_id", "sl_be_order_id", "trail_order_id", "trail_stop_order_id",
+)
+
+
+def _has_stop(position: "_position_state.Position") -> bool:
+    return any(int(getattr(position, a, 0) or 0) for a in _STOP_ORDER_ATTRS)
+
+
+def reanchor_sl(
+    *,
+    entry_price: float,
+    sl_price: float,
+    fill_price: float,
+    direction: str,
+    firebase_uid: str = "",
+    signal_id: str = "",
+) -> float:
+    """The signal's SL, moved to keep its distance when the fill crossed it.
+
+    A MARKET fill can land beyond the signal's own stop (price ran between
+    generation and dispatch), and a stop placed there triggers immediately
+    (-2021).  Preserve the signed distance from the signal's entry, anchored at
+    the fill.  Unchanged when the fill did not cross.
+    """
+    crossed = (
+        (direction == "LONG" and fill_price > 0 and fill_price < sl_price)
+        or (direction == "SHORT" and fill_price > 0 and fill_price > sl_price)
+    )
+    if not crossed:
+        return sl_price
+    frac = (sl_price - entry_price) / entry_price if entry_price > 0 else (
+        -0.008 if direction == "LONG" else 0.008
+    )
+    new_sl = fill_price * (1.0 + frac)
+    log.warning(
+        "place_signal: fill {} crossed signal SL {} — re-anchoring SL "
+        "to fill uid={} signal_id={} new_sl={:.6g}",
+        fill_price, sl_price, firebase_uid, signal_id, new_sl,
+    )
+    return new_sl
+
+
 async def place_signal(
     firebase_uid: str,
     *,
@@ -1484,13 +1561,100 @@ async def place_signal(
         )
         return position
 
-    # Step 1: entry — the only must-succeed step.
-    entry_result = await placer.place_market_entry(
-        signal_id=signal_id,
-        symbol=symbol,
-        direction=direction,
-        quantity=total_qty,
+    # Step 0b: persist BEFORE the entry goes out (2026-09-24).
+    #
+    # The doc used to be written only after the entry REST call returned.  Two
+    # things could then produce a real position on Binance with no doc at all,
+    # and a fill for an unknown position is logged and dropped by the FSM —
+    # nothing ever lays its stop, and the reconciler walks docs, not Binance:
+    #   * the user-data-stream fill can outrun the REST response, so the FSM
+    #     looked for the doc before it existed;
+    #   * the signing call can time out after Binance has already accepted the
+    #     order — the outcome is unknown, and the old code simply gave up.
+    # Writing first means every fill finds a doc.  An entry Binance refused is
+    # then retired as CANCELLED_NO_FILL; an entry whose outcome is unknown is
+    # left PENDING with ``entry_ambiguous`` so whoever sees it fill — the fill
+    # handler, or the reconciler as backstop — lays the stop.
+    from . import pretp_controller as _pretp
+
+    # Clamp pretp_fraction to B17 [0.30, 1.0] floor/ceiling.
+    # 0.0 (or negative) passes through unchanged — PR-F allowlist uses 0
+    # to suppress pre-TP entirely; clamping 0→0.30 would defeat that.
+    pretp_fraction_clamped = (
+        0.0 if pretp_fraction <= 0 else max(0.30, min(1.0, pretp_fraction))
     )
+    position = _position_state.Position(
+        signal_id=signal_id,
+        firebase_uid=firebase_uid,
+        symbol=symbol,
+        side=direction,
+        state=_position_state.PositionState.PENDING,
+        entry_price_target=entry_price,
+        entry_price_filled=0.0,
+        sl_price=sl_price,
+        tp1_price=tp1_price,
+        tp2_price=tp2_price,
+        tp3_price=tp3_price,
+        total_qty=total_qty,
+        tp1_qty=tp1_qty,
+        tp2_qty=tp2_qty,
+        tp3_qty=tp3_qty,
+        entry_order_id=0,
+        pretp_threshold_price=_pretp.compute_pretp_threshold_price(
+            entry_price=entry_price,
+            direction=direction,
+            threshold_pct=pretp_threshold_pct,
+        ),
+        pretp_fraction=pretp_fraction_clamped,
+        invalidation_mode=invalidation_mode,
+        entry_regime=entry_regime,
+        entry_regime_15m=entry_regime_15m,
+        atr_percentile_at_entry=atr_percentile_at_entry,
+        atr_value_at_entry=atr_value_at_entry,
+        protection_mode=protection_mode,
+        exit_mechanism=exit_mechanism,
+    )
+    _position_state.put_position(position)
+
+    # Step 1: entry — the only must-succeed step.
+    try:
+        entry_result = await placer.place_market_entry(
+            signal_id=signal_id,
+            symbol=symbol,
+            direction=direction,
+            quantity=total_qty,
+        )
+    except BaseException as exc:
+        now = datetime.now(timezone.utc)
+        if _order_placer.definitely_not_placed(exc):
+            # Binance refused it (or the key could not be read, so it was
+            # never sent): nothing is on the book.
+            position.state = _position_state.PositionState.CANCELLED_NO_FILL
+            position.close_reason = "ENTRY_REJECTED"
+            position.closed_at = now
+        else:
+            # Outcome UNKNOWN — a timeout, an unreachable signing service, a
+            # cancelled task, a 5xx or Binance's own "execution status
+            # unknown".  Keep the doc live and say so: the fill handler lays
+            # protection if it fills, the reconciler retires it once Binance
+            # stays flat.
+            position.entry_ambiguous = True
+            log.error(
+                "place_signal: entry outcome UNKNOWN uid={} signal_id={} "
+                "symbol={} exc={!r} — doc kept PENDING+entry_ambiguous so a "
+                "late fill is protected",
+                firebase_uid, signal_id, symbol, exc,
+            )
+        position.last_event_at = now
+        try:
+            _position_state.put_position(position)
+        except Exception as put_exc:  # noqa: BLE001 — never mask the entry error
+            log.error(
+                "place_signal: could not record the entry outcome uid={} "
+                "signal_id={} exc={}",
+                firebase_uid, signal_id, put_exc,
+            )
+        raise
 
     # Step 1b: Re-anchor SL to actual MARKET fill price.
     #
@@ -1512,38 +1676,15 @@ async def place_signal(
     fill_price: float = (
         entry_result.avg_price if entry_result.avg_price > 0 else entry_price
     )
-    _fill_crossed_sl = (
-        (direction == "LONG" and fill_price > 0 and fill_price < sl_price)
-        or (direction == "SHORT" and fill_price > 0 and fill_price > sl_price)
+    sl_price = reanchor_sl(
+        entry_price=entry_price, sl_price=sl_price, fill_price=fill_price,
+        direction=direction, firebase_uid=firebase_uid, signal_id=signal_id,
     )
-    if _fill_crossed_sl:
-        _orig_sl = sl_price
-        # Preserve the signed SL-distance fraction relative to signal entry.
-        # For LONG: sl < entry → fraction is negative (e.g. -0.008)
-        # For SHORT: sl > entry → fraction is positive (e.g. +0.008)
-        _sl_frac = (sl_price - entry_price) / entry_price if entry_price > 0 else (
-            -0.008 if direction == "LONG" else 0.008
-        )
-        sl_price = fill_price * (1.0 + _sl_frac)
-        log.warning(
-            "place_signal: fill {} crossed signal SL {} — re-anchoring SL "
-            "to fill uid={} signal_id={} new_sl={:.6g}",
-            fill_price, _orig_sl, firebase_uid, signal_id, sl_price,
-        )
 
-    # Step 2: persist immediately with entry_order_id captured so the
-    # FSM can handle the entry-fill event even if subsequent SL/TP
-    # placements crash this coroutine.
-    # Local import to avoid circular dep (pretp_controller imports
-    # this module via the FSM tests).
-    from . import pretp_controller as _pretp
-
-    # Clamp pretp_fraction to B17 [0.30, 1.0] floor/ceiling.
-    # 0.0 (or negative) passes through unchanged — PR-F allowlist uses 0
-    # to suppress pre-TP entirely; clamping 0→0.30 would defeat that.
-    pretp_fraction_clamped = (
-        0.0 if pretp_fraction <= 0 else max(0.30, min(1.0, pretp_fraction))
-    )
+    # Step 2: record what the entry returned, on the SAME object.  The fill
+    # event may already have advanced it (state OPEN, filled qty) while the
+    # REST call was in flight; constructing a fresh Position here would write
+    # that back to PENDING.
     # Use fill_price (not signal entry_price) as the pre-TP anchor so the
     # LIMIT order rests at the correct threshold distance from where we
     # actually entered — not from the signal's stale target.
@@ -1552,33 +1693,9 @@ async def place_signal(
         direction=direction,
         threshold_pct=pretp_threshold_pct,
     )
-    position = _position_state.Position(
-        signal_id=signal_id,
-        firebase_uid=firebase_uid,
-        symbol=symbol,
-        side=direction,
-        state=_position_state.PositionState.PENDING,
-        entry_price_target=entry_price,
-        entry_price_filled=0.0,
-        sl_price=sl_price,
-        tp1_price=tp1_price,
-        tp2_price=tp2_price,
-        tp3_price=tp3_price,
-        total_qty=total_qty,
-        tp1_qty=tp1_qty,
-        tp2_qty=tp2_qty,
-        tp3_qty=tp3_qty,
-        entry_order_id=entry_result.order_id,
-        pretp_threshold_price=pretp_threshold_price,
-        pretp_fraction=pretp_fraction_clamped,
-        invalidation_mode=invalidation_mode,
-        entry_regime=entry_regime,
-        entry_regime_15m=entry_regime_15m,
-        atr_percentile_at_entry=atr_percentile_at_entry,
-        atr_value_at_entry=atr_value_at_entry,
-        protection_mode=protection_mode,
-        exit_mechanism=exit_mechanism,
-    )
+    position.entry_order_id = entry_result.order_id
+    position.sl_price = sl_price
+    position.pretp_threshold_price = pretp_threshold_price
     _position_state.put_position(position)
 
     # Steps 3-5: SL + 3x TP.  SL is NO LONGER best-effort.

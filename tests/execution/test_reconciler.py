@@ -423,9 +423,13 @@ async def test_stale_close_failure_leaves_position_open_for_retry() -> None:
     ):
         await r.reconcile_user("fb-x")
     placer.place_market_close.assert_awaited_once()
-    # Close failed → NOT marked terminal, NOT persisted.
+    # Close failed → NOT marked terminal.  Persisted since 2026-09-24, but
+    # only to record the close as pending: the doc stays live (so the next
+    # cycle retries) and its stop was never cancelled.
     assert stale.state == position_state.PositionState.OPEN
-    assert len(persisted) == 0
+    assert all(not position_state.is_terminal(p.state) for p in persisted)
+    assert stale.pending_close_reason == "STALE_EXPIRY"
+    assert stale.sl_order_id == _make_position(symbol="BTCUSDT").sl_order_id
 
 
 # ---------------------------------------------------------------------------

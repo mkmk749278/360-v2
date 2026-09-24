@@ -498,6 +498,16 @@ def _asyncio_tasks(ctx: Ctx) -> Dict[str, Any]:
     return {"count": len(rows), "tasks": sorted(rows, key=lambda r: r["name"])}
 
 
+def _reconciler_protection_counts() -> Dict[str, Any]:
+    """The reconciler's stop-less-position counters, or a named absence."""
+    from src.execution import reconciler as _rec
+
+    inst = _rec.get_instance()
+    if inst is None:
+        return {"reported": False, "why": "no reconciler in this process"}
+    return {"reported": True, **dict(getattr(inst, "protection_counts", {}))}
+
+
 def _dispatch_funnel(ctx: Ctx) -> Dict[str, Any]:
     """Where every delivered signal went, per user, since boot.
 
@@ -554,6 +564,12 @@ def _dispatch_funnel(ctx: Ctx) -> Dict[str, Any]:
             "skip_reasons": _split(live, "skip:"),
             "reject_classes": _split(live, "rejected:"),
         },
+        # Engine-initiated closes since boot (2026-09-24).  ``failed`` is a
+        # position the engine wanted out of that is still open, with its
+        # stop still resting, owed a reconciler retry — see the
+        # ``pending_close`` liveness probe for the ones that stay owed.
+        "closes": _live.close_counts(),
+        "stop_protection": _reconciler_protection_counts(),
         "paper": {
             "fanouts": float(paper.get("fanouts_total", 0.0)),
             "fanouts_with_users": float(

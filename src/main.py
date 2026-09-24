@@ -1152,10 +1152,11 @@ class CryptoSignalEngine:
         beside it is the other thing, is owner-gated, and closes everyone.
 
         Reuses ``close_fsm_positions_for_signal`` scoped to one uid rather
-        than growing a second close path: cancel the bracket first so a
-        resting stop cannot fire against our own market order, tolerate -2022
-        (Binance may have flattened us a millisecond earlier), mark terminal
-        so the monitor stops re-attempting.  Every one of those was paid for.
+        than growing a second close path: market close first, tolerate -2022
+        (Binance may have flattened us a millisecond earlier), take the
+        bracket off only once flat, and on a refused close leave the stop
+        resting and the position live for the reconciler to retry — so the
+        "rejected … its stop is still in place" copy below is now true.
 
         Returns the shape the app's Recent Activity card already renders:
         ``outcome`` ∈ {"closed", "rejected"} plus reject fields.  A business
@@ -5210,6 +5211,18 @@ class CryptoSignalEngine:
                 _auto_dispatch_state
             ),
             min_streak=3,
+        ))
+
+        # A position the engine decided to close and Binance would not
+        # (2026-09-24).  Its stop is still resting — the close no longer
+        # removes it first — so this is not a naked position, it is a trade
+        # the engine wants out of and is still in.  It pages once one has
+        # been owed a close for five minutes: past that, the reconciler's
+        # retries are not landing and a person has to look at why.
+        fl.add_predicate(PredicateProbe(
+            name="pending_close",
+            fn=_sd_liveness.pending_close_health,
+            min_streak=1,
         ))
 
         # Paper fan-out (2026-08-31, owner: "live and paper trading not

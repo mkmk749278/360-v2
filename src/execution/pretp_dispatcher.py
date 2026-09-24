@@ -426,9 +426,13 @@ async def maybe_fire_be_shift(
     except _order_placer.OrderPlacementError as exc:
         log.error(
             "be_shift: BE-SL placement FAILED uid={} signal_id={} exc={} — "
-            "position has no stop; FSM reconciler will detect and force-close",
+            "position has no stop; retried next tick, and the reconciler "
+            "re-places a stop once the position is quiet",
             position.firebase_uid, position.signal_id, exc,
         )
         # Do NOT set be_shift_fired — let next tick retry the placement.
         # The original SL was already canceled; if the retry also fails the
-        # reconciler will catch the naked position and close it.
+        # reconciler's ``_ensure_protected`` re-places a stop at the recorded
+        # level once the position has been quiet for _ORDER_HEAL_MIN_QUIET_S
+        # (it re-protects; it does not close).  Place-then-cancel, as the
+        # trail governor does, would remove even that window — not done here.

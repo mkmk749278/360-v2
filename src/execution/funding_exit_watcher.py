@@ -189,11 +189,12 @@ class FundingExitWatcher:
 
 
 async def _close_for_funding(uid: str, pos: "object", placer: "object") -> bool:
-    """Cancel bracket orders then market-close for funding exit.
+    """Market-close for funding exit; the bracket stays until the close fills.
 
-    Mirrors the pattern in ``signal_dispatch.close_fsm_positions_for_signal``:
-    cancel first (to avoid fighting an active SL/TP), then place MARKET close.
-    Uses ``place_funding_market_close`` so the FSM records close_reason=FUNDING_EXIT.
+    Same ordering as ``signal_dispatch.close_position_keeping_stop``: the stop
+    is never removed before the position is flat.  Uses
+    ``place_funding_market_close`` so the FSM records close_reason=FUNDING_EXIT
+    and its terminal sweep cancels the orphaned bracket.
 
     Returns True when the close order was successfully placed (or there
     was nothing left to close) — the watcher uses this to suppress
@@ -206,25 +207,12 @@ async def _close_for_funding(uid: str, pos: "object", placer: "object") -> bool:
     assert isinstance(placer, _op.OrderPlacer)
     assert isinstance(pos, _ps.Position)
 
-    # Cancel active bracket orders (SL, optional tightened SL-BE, TP1/2/3).
-    # Tolerant of -2011/-20121 (already gone / filled / expired).
-    for order_id in (
-        pos.sl_order_id,
-        pos.sl_be_order_id,
-        pos.tp1_order_id,
-        pos.tp2_order_id,
-        pos.tp3_order_id,
-    ):
-        if not order_id:
-            continue
-        try:
-            await placer.cancel_algo_order(symbol=pos.symbol, algo_id=order_id)
-        except _op.OrderPlacementError as exc:
-            log.warning(
-                "funding_exit_watcher: cancel_algo_order failed uid={} "
-                "signal_id={} algo_id={} exc={}",
-                uid, pos.signal_id, order_id, exc,
-            )
+    # The bracket is NOT cancelled first (2026-09-24).  It used to be, and a
+    # failed close then left the position open with no stop until the next
+    # poll — and for as long as the close kept failing.  The close is
+    # reduceOnly and the stop closePosition, so neither can over-reduce if
+    # both fire together; and when the close fills, the FSM's terminal sweep
+    # (``position_fsm.cancel_protective_orders``) retires the whole bracket.
 
     # Place REDUCE_ONLY MARKET close for remaining quantity.  A zero
     # residual means the position is already fully closed and only the

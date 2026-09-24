@@ -253,6 +253,20 @@ class Position:
     #: governor acts once per bar; this is what makes it idempotent across
     #: sweeps and is the clock a staleness probe reads (#835).
     trail_last_bar_ms: float = 0.0
+    # ---- Close that did not land (2026-09-24) ----------------------------
+    #: Set when the engine decided to close this position and Binance did not
+    #: take the market close.  The position stays NON-terminal with its stop
+    #: still resting, so the reconciler — which only walks live positions —
+    #: retries the close every cycle.  Until then a close failure cancelled the
+    #: stop first and marked the doc CLOSED anyway, leaving a position open on
+    #: Binance with no stop and nothing left that would ever look at it.
+    pending_close_reason: str = ""
+    pending_close_at: Optional[datetime] = None
+    #: The entry order's outcome is unknown: the signing call timed out or was
+    #: unreachable, so it may still have filled.  The doc is written BEFORE the
+    #: entry goes out, so a late fill always finds it; this flag tells the fill
+    #: handler (and the reconciler) that nobody is laying the stop for it.
+    entry_ambiguous: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -625,13 +639,21 @@ BOOK_FIELDS: tuple = (
 )
 
 
+#: Datetime fields a wire dict carries as ISO strings.  One list for both
+#: directions, so a field added to one cannot be forgotten by the other.
+_WIRE_DATETIME_FIELDS: tuple = (
+    "created_at", "last_event_at", "closed_at", "entry_expires_at",
+    "pending_close_at",
+)
+
+
 def to_wire(position: "Position", *, fields: Optional[tuple] = None) -> dict:
     """JSON-safe form of a position: the Firestore dict with ISO datetimes,
     optionally projected to *fields*."""
     out = _to_firestore_dict(position)
     if fields is not None:
         out = {k: out[k] for k in fields if k in out}
-    for key in ("created_at", "last_event_at", "closed_at", "entry_expires_at"):
+    for key in _WIRE_DATETIME_FIELDS:
         if key not in out:
             continue
         value = out.get(key)
@@ -642,7 +664,7 @@ def to_wire(position: "Position", *, fields: Optional[tuple] = None) -> dict:
 def from_wire(data: dict) -> "Position":
     """Inverse of :func:`to_wire`."""
     parsed = dict(data)
-    for key in ("created_at", "last_event_at", "closed_at", "entry_expires_at"):
+    for key in _WIRE_DATETIME_FIELDS:
         value = parsed.get(key)
         if isinstance(value, str) and value:
             try:
@@ -920,6 +942,24 @@ def index_open_positions() -> Optional[list["Position"]]:
             for bucket in _index.values()
             for pos in bucket.values()
             if pos.state == PositionState.OPEN
+        ]
+
+
+def index_live_positions() -> Optional[list["Position"]]:
+    """Every LIVE (non-terminal) position across all users, from the index.
+
+    Unlike :func:`index_open_positions` this includes PENDING, PRE_TP_FIRED,
+    TP1_HIT and the rest — a close can be owed on any of them.  ``None`` when
+    the index is inactive: "cannot answer", never "none live".
+    """
+    with _lock:
+        if not _index_active:
+            return None
+        return [
+            pos
+            for bucket in _index.values()
+            for pos in bucket.values()
+            if not is_terminal(pos.state)
         ]
 
 
@@ -1280,6 +1320,9 @@ def _to_firestore_dict(position: Position) -> dict:
         "trail_stop_price": position.trail_stop_price,
         "trail_stop_seq": position.trail_stop_seq,
         "trail_last_bar_ms": position.trail_last_bar_ms,
+        "pending_close_reason": position.pending_close_reason,
+        "pending_close_at": position.pending_close_at,
+        "entry_ambiguous": position.entry_ambiguous,
     }
 
 
@@ -1350,4 +1393,9 @@ def _from_firestore_dict(data: dict) -> Position:
         trail_stop_price=float(data.get("trail_stop_price", 0.0)),
         trail_stop_seq=int(data.get("trail_stop_seq", 0)),
         trail_last_bar_ms=float(data.get("trail_last_bar_ms", 0.0)),
+        # Written before 2026-09-24 → no close pending, entry unambiguous: the
+        # old code path either placed the stop itself or recorded why not.
+        pending_close_reason=str(data.get("pending_close_reason", "") or ""),
+        pending_close_at=data.get("pending_close_at"),
+        entry_ambiguous=bool(data.get("entry_ambiguous", False)),
     )
