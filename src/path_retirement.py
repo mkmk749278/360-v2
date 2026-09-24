@@ -30,6 +30,15 @@ dump, straight into the squeeze.
 absence of symbol concentration is what makes it worth acting on rather than
 watching.
 
+**`MOVER_AVWAP_SCALP` SHORT** (owner, 2026-09-24) — retired on the Session
+153 audit's evidence: n=65, −0.640% net/trade rebased on the tape,
+symbol-clustered 95% CI [−1.155, −0.143]. Re-read the day it was retired on
+book prices (`read.path_scorecard`, 30d): n=67 over 45 symbols, −0.488% net,
+25% win, CI [−1.049, +0.019] — the upper bound had just crossed zero on three
+TP1 winners in one afternoon, and book prices overstate by the measured
+entry drift (~0.23%/trade), so the tape-priced interval stays below zero.
+The LONG side is untouched: n=60, +0.026% net, UNDECIDED.
+
 Why divert rather than delete
 -----------------------------
 
@@ -69,6 +78,7 @@ ANY_SIDE = "*"
 DEFAULT_RETIRED: Tuple[Tuple[str, str], ...] = (
     ("MOVER_TREND_PULLBACK", "SHORT"),
     ("VOLUME_SURGE_BREAKOUT", ANY_SIDE),
+    ("MOVER_AVWAP_SCALP", "SHORT"),
 )
 
 #: Master switch. Default **ON**, unlike most money-path flags in this repo,

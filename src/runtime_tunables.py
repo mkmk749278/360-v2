@@ -1434,7 +1434,9 @@ def _build_registry() -> Dict[str, Tunable]:
                 "the book whose interval excludes zero, and not explained by "
                 "market direction, since every other path's shorts made "
                 "+0.739% in the same window); and VOLUME_SURGE_BREAKOUT "
-                "(0 wins in 11 across 11 distinct symbols, p=0.0096)."
+                "(0 wins in 11 across 11 distinct symbols, p=0.0096). "
+                "MOVER_AVWAP_SCALP SHORT added 2026-09-24 by the owner "
+                "(tape-priced -0.640%/trade, CI [-1.155,-0.143], n=65)."
             ),
             type="str",
             default=RETIRED_PATHS,
