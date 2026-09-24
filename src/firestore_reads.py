@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 _lock = threading.Lock()
 _sites: Dict[str, Dict[str, Any]] = {}
@@ -153,7 +153,14 @@ def project(members: int = TARGET_MEMBERS, current_members: int = 1) -> Dict[str
     census would have said so until the subscribers arrived.  A cost model
     that only describes today cannot stop the bill it is there to stop.
     """
-    snap = snapshot()
+    return project_snapshot(snapshot(), members, current_members)
+
+
+def project_snapshot(
+    snap: Dict[str, Any], members: int = TARGET_MEMBERS, current_members: int = 1,
+) -> Dict[str, Any]:
+    """:func:`project` over any snapshot — this process's or a published
+    peer's (the signing service's key-blob reads scale with members too)."""
     members = max(int(members), 1)
     current = max(int(current_members), 1)
     factor = members / current
@@ -212,6 +219,7 @@ _PER_MEMBER_SITES = frozenset({
     "keystore.list_active_uids",
     "keystore.has_key",
     "keystore.get_key_blob",
+    "position_state.index_resync_count",
     "kill_switch.user_disabled",
     "kill_switch.self_reenable",
     "kill_switch.disabled_rebuild",
@@ -243,6 +251,7 @@ def _scales_with_members(site: str) -> bool:
         "kill_switch.disabled_mirror",
         "runtime_tunables.doc",
         "keystore.roster_doc",
+        "keystore.roster_count",
     )
     return site not in known_flat
 
@@ -274,7 +283,10 @@ def budget_health() -> tuple:
     snap = snapshot()
     if snap.get("uptime_is_short"):
         return True, "uptime under 15 min — rate not yet meaningful"
-    per_day = int(snap.get("total_per_day") or 0)
+    # The allowance is per PROJECT: add every process that publishes its
+    # census (the signing service reads on every signed call).
+    total = project_total_per_day()
+    per_day = int(total["total_per_day"])
     ceiling = FREE_TIER_READS_PER_DAY
     sites = snap.get("sites") or []
     top = (
@@ -282,9 +294,145 @@ def budget_health() -> tuple:
         if sites else "no sites recorded"
     )
     role = snap.get("process_role")
+    procs = ", ".join(f"{r} {n:,}" for r, n in sorted(total["by_process"].items()))
+    if not total["peers_readable"]:
+        procs += " (other processes unreadable)"
     if per_day > BUDGET_ALERT_FRACTION * ceiling:
         return False, (
             f"{per_day:,} Firestore reads/day against a {ceiling:,}/day "
-            f"ceiling in the {role} process; {top}"
+            f"ceiling across [{procs}]; {top} in the {role} process"
         )
-    return True, f"{per_day:,} reads/day of {ceiling:,} ({role}); {top}"
+    return True, f"{per_day:,} reads/day of {ceiling:,} [{procs}]; {top} ({role})"
+
+
+# ---------------------------------------------------------------------------
+# Other processes' censuses (2026-09-24)
+# ---------------------------------------------------------------------------
+#
+# Every counter above lives in ONE process's memory, and the diag console runs
+# in the engine.  The signing service reads Firestore on every signed call —
+# the one site that grows with live members fastest — and its census was
+# never read by anything, so ``read.firestore_projection`` and the
+# ``firestore_read_budget`` probe described the engine and called it the
+# project.  Firestore's allowance is per PROJECT, not per process.
+#
+# A process with no diag surface of its own publishes its snapshot to Redis on
+# a slow timer; the engine reads every published one back.  Redis only — no
+# Firestore, no vendor.
+
+PEER_KEY_PREFIX = "census:firestore:"
+PEER_TTL_SEC = 300
+
+
+def publish(role: str, extra: Optional[Dict[str, Any]] = None) -> bool:
+    """Write this process's snapshot to Redis under ``role``.  Never raises."""
+    try:
+        import json
+
+        from src import control_generation as _gen
+
+        client = _gen._redis()
+        if client is None:
+            return False
+        payload = {**snapshot(), "process_role": role, "published_at": time.time()}
+        if extra:
+            payload.update(extra)
+        client.set(PEER_KEY_PREFIX + role, json.dumps(payload), ex=PEER_TTL_SEC)
+        return True
+    except Exception:  # pragma: no cover - a census must never break its host
+        return False
+
+
+def peers() -> Dict[str, Any]:
+    """Every other process's published snapshot, by role.  ``{}`` when none
+    or when Redis is unreachable — which the caller must not read as "no
+    reads elsewhere": ``peers_readable`` says which."""
+    try:
+        import json
+
+        from src import control_generation as _gen
+
+        client = _gen._redis()
+        if client is None:
+            return {"_readable": False}
+        out: Dict[str, Any] = {"_readable": True}
+        for key in client.scan_iter(match=PEER_KEY_PREFIX + "*", count=50):
+            raw = client.get(key)
+            if not raw:
+                continue
+            role = str(key)[len(PEER_KEY_PREFIX):]
+            try:
+                out[role] = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+        return out
+    except Exception:
+        return {"_readable": False}
+
+
+def project_total_per_day() -> Dict[str, Any]:
+    """This process plus every published peer, per day — the project's rate."""
+    own = snapshot()
+    got = peers()
+    readable = bool(got.pop("_readable", False))
+    by_role = {own["process_role"]: int(own.get("total_per_day") or 0)}
+    for role, snap in got.items():
+        if isinstance(snap, dict) and role not in by_role:
+            by_role[role] = int(snap.get("total_per_day") or 0)
+    return {
+        "total_per_day": sum(by_role.values()),
+        "by_process": by_role,
+        "peers_readable": readable,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Read gates (2026-09-24)
+# ---------------------------------------------------------------------------
+#
+# Each cache or count-gate that stands in front of a scaling read registers a
+# stats function here at import, and ``read_gates`` assembles them — local
+# gates from this process, peer gates from each process's published census
+# (``publish(role, {"gates": {...}})``).  The diag entry calls only this, so
+# it never has to import a money-path module to show a counter.
+
+_gate_providers: Dict[str, Callable[[], Dict[str, Any]]] = {}
+
+
+def register_gate(name: str, fn: Callable[[], Dict[str, Any]]) -> None:
+    """Register a gate's stats function under *name* (idempotent)."""
+    with _lock:
+        _gate_providers[name] = fn
+
+
+def local_gates() -> Dict[str, Any]:
+    """Every gate registered in THIS process, by name."""
+    with _lock:
+        providers = dict(_gate_providers)
+    local: Dict[str, Any] = {}
+    for name, fn in sorted(providers.items()):
+        try:
+            local[name] = fn()
+        except Exception as exc:  # a stats call must never break the page
+            local[name] = {"error": f"{type(exc).__name__}: {exc}"}
+    return local
+
+
+def read_gates() -> Dict[str, Any]:
+    """``{"local": {gate: stats}, "peers": {role: {gates, published_at}}}``.
+
+    A peer that has not published reads as absent, never as zeroes: a
+    missing census is "we cannot see that process", not "it read nothing".
+    """
+    local = local_gates()
+    got = peers()
+    readable = bool(got.pop("_readable", False))
+    peer_gates: Dict[str, Any] = {}
+    for role, snap in got.items():
+        if isinstance(snap, dict) and snap.get("gates") is not None:
+            peer_gates[role] = {
+                "gates": snap.get("gates"),
+                "published_at": snap.get("published_at"),
+            }
+    return {"local": local, "peers": peer_gates, "peers_readable": readable}
+

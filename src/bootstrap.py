@@ -610,10 +610,15 @@ class Bootstrap:
 
                 # Defensive periodic resync of the in-memory position
                 # index — bounds staleness from any write that ever
-                # bypasses put_position / delete_position.  ONE collection-
-                # group read per interval (negligible), off the event loop
-                # so a slow Firestore round-trip can't stall the engine.
+                # bypasses put_position / delete_position.  Off the event
+                # loop so a slow Firestore round-trip can't stall the engine.
                 # No-op while the index is inactive.
+                #
+                # Not "one read per interval": a collection-group query bills
+                # one read per document RETURNED, so the old full scan here
+                # cost every live position every 5 minutes (~864k/day at the
+                # 1,000-member target).  It is count-gated now — see
+                # ``position_state.resync_index`` (2026-09-24).
                 if POSITION_INDEX_RESYNC_SEC > 0:
                     from src.execution import position_state as _ps_idx
 
@@ -622,7 +627,10 @@ class Bootstrap:
                             await asyncio.sleep(POSITION_INDEX_RESYNC_SEC)
                             try:
                                 await asyncio.to_thread(_ps_idx.resync_index)
-                            except Exception:
+                            except Exception as exc:
+                                from src import fail_open as _fo_rs
+
+                                _fo_rs.record("bootstrap.position_index_resync", exc)
                                 log.exception(
                                     "position_index_resync: rebuild failed"
                                 )
@@ -659,7 +667,14 @@ class Bootstrap:
                                 _fk_idx.rebuild_active_roster
                             )
                             log.info("active-key roster rebuilt: {} uids", n)
-                        except Exception:
+                        except Exception as exc:
+                            # Raised on purpose when the scan fails (the
+                            # roster is left as it was rather than written
+                            # empty) — counted so a Firestore that keeps
+                            # refusing the scan pages instead of logging.
+                            from src import fail_open as _fo_idx
+
+                            _fo_idx.record("bootstrap.roster_rebuild", exc)
                             log.exception("active-key roster rebuild failed")
                         try:
                             if _ks_idx.is_initialised():

@@ -242,6 +242,14 @@ services:
       # Override the default path so the socket lands on the
       # shared volume rather than the container's own /var/run/.
       - SIGNING_SERVICE_SOCKET_PATH=/app/sock/signing.sock
+      # The key-blob cache is trusted only against a Redis generation
+      # (control_generation.DOC_KEY_BLOBS), and the Firestore census is
+      # published through Redis.  .env's REDIS_URL is localhost, which in
+      # this container is not Redis — so without this line the cache would
+      # bypass itself on every call (never stale, never saving a read) and
+      # the census would never leave the process.  No depends_on: Redis being
+      # down must not stop signing; the cache then reads through.
+      - REDIS_URL=redis://redis:6379/0
     command: python -m src.security.signing_service
     # Override the Dockerfile's engine healthcheck (which checks for the
     # scanner heartbeat file and src.main process — neither exist here).

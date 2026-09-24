@@ -191,7 +191,14 @@ def _firestore_reads(ctx: Ctx) -> Dict[str, Any]:
     """
     from src import firestore_reads as _fsr
 
-    return _fsr.snapshot()
+    out = dict(_fsr.snapshot())
+    out["project"] = _fsr.project_total_per_day()
+    # The read gates added for the 1,000-member target (2026-09-24), each
+    # with its own counters so "it is saving reads" is a reading, not a
+    # claim.  Assembled by the census module from what each gate registered,
+    # so this entry names no money-path module.
+    out["read_gates"] = _fsr.read_gates()
+    return out
 
 
 def _ip_weight(ctx: Ctx) -> Dict[str, Any]:
@@ -235,7 +242,24 @@ def _firestore_projection(ctx: Ctx) -> Dict[str, Any]:
         current = int(ctx.args.get("current_members") or 1)
     except (TypeError, ValueError):
         current = 1
-    return _fsr.project(members=members, current_members=current)
+    out = _fsr.project(members=members, current_members=current)
+    # Other processes that publish their census (the signing service), each
+    # projected by the same rule; ``peers_readable`` False means Redis could
+    # not be asked — not that nothing else reads.
+    peers = _fsr.peers()
+    readable = bool(peers.pop("_readable", False))
+    own_role = out.get("process_role")
+    out["other_processes"] = {
+        role: _fsr.project_snapshot(snap, members, current)
+        for role, snap in peers.items()
+        if isinstance(snap, dict) and role != own_role
+    }
+    out["peers_readable"] = readable
+    out["project_projected_per_day"] = out["projected_per_day"] + sum(
+        int(v.get("projected_per_day") or 0)
+        for v in out["other_processes"].values()
+    )
+    return out
 
 
 def _control_generation(ctx: Ctx) -> Dict[str, Any]:
