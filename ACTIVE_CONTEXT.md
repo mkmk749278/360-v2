@@ -4,47 +4,45 @@
 
 ---
 
-## OPEN 2026-09-24 — AI governor still book-blind after #1049; the scan's spread gate may be reading an invented 0.01%
+## OPEN 2026-09-24 — a quarter of live scan reads get an invented 0.01% spread (owner decision)
 
-**Measured after #1050** (`read.ai_governor` → `blindness.since_boot`, 10 verdicts in
-the first ~7 min of a fresh boot):
-- **flow 0/10 blind** (fixed by #1047);
-- **book 7/10 blind**, reason `not_subscribed`;
-- the pooled 200-row tail read 127/200, which is why `since_boot` exists.
+**Measured 02:38 UTC**, ~53 min after the #1051 boot, from `read.loop` →
+`scan_cycle.book_ticker` (per-boot counters):
 
-**`not_subscribed` does not mean "outside the stream set", and my note an hour earlier
-was wrong to say so.** The bookTicker pre-fetch pulls **every** futures symbol.
-`_readable_from` stamps `not_subscribed` whenever the getter returns None, so an expired
-snapshot and a missing symbol are the same label, and the book side never emits
-`stale`.
+| Read | Hit | Miss | Miss share |
+|---|---|---|---|
+| Scan spread (`_get_spread_pct`) | 21,961 | **7,416 → invented 0.01%** | **25.2%** |
+| Scan book (`current_order_book`, no grace) | 22,095 | 7,282 → None | 24.8% |
+| Governor book (40s grace) | 1,665 | 15 | 0.9% |
 
-**Two findings from the code (read, not yet measured).** The counters shipped beside
-this entry are what will measure them.
-1. **`_get_spread_pct` answers an invented 0.01% on every cache miss**, and the spread
-   cache lives 20s while the pre-fetch runs only at a scan cycle's start, once 18s have
-   passed. Live cycles measured **~5.7s last / 36s worst**. On top of that, the
-   pre-fetch's fresh-entry skip (`src/scanner/__init__.py`, comment *"Skip only if there
-   is already a fresh (non-bookTicker) cache entry"*) hits bookTicker's **own** entries,
-   because it is the only writer of that cache. So a fetch landing at 18–20s rewrites
-   nothing, and both caches then lapse until the next fetch. **In the gap, the live
-   spread gate is handed a tight spread nobody measured, and scan-side book readers get
-   None.**
-2. **The governor's remaining blindness is NOT explained by (1).** Its 40s grace should
-   span a ~40s repopulate period. The cause is open, and the refutation is written down
-   first: if `book_miss_grace` stays near zero while `blindness.since_boot.book_blind`
-   stays high, the miss is inside the governor's getter, not in the cache.
+`fetches` 132, `last_populated` 776, **`last_skipped_fresh` 0**.
 
-**Shipped, measurement only:** `cycle_health()["book_ticker"]` (in `read.loop`) counts
-- `spread_hit` / `spread_fallback`;
-- `book_hit_scan` / `book_miss_scan` and `book_hit_grace` / `book_miss_grace`;
-- `fetches`, `last_populated` and `last_skipped_fresh`.
+**Cause (measured, not inferred):**
+- The pre-fetch runs only at a scan cycle's start, once 18s have passed since the last one.
+- With ~10s cycles (last 10.8s, worst 66s) that lands roughly 20–28s apart, and entries live 20s.
+- So about a quarter of reads fall in the lapse between expiry and the next fetch.
+- **Not the self-skip**: I named it an hour ago as the cause, and it measures 0 skipped on the last fetch. It is real but does not bite at this cadence.
 
-All are in-memory ints: no vendor call, no Firestore.
+**Consequence:** on ~25% of scans the live spread gate evaluates a spread nobody
+measured, and scan-side book consumers see no book. How many signals that admitted
+is **not measured**. That needs the gate's threshold hits split by hit/fallback,
+which nothing records yet.
 
-**Owner decision, once the counters have a window:** if `spread_fallback` is a large
-share of spread reads, the spread gate is partly inert. The fixes all change what a
-live gate reads: drop the self-skip, TTL above cycle-start cadence, or refuse rather
-than invent 0.01%. So each ships dark and needs sign-off.
+**Fix options, each changing what a live gate reads (owner sign-off, dark-first):**
+1. TTL comfortably above the fetch spacing (e.g. 45s).
+2. Fetch every cycle once older than ~8s. One weight-bounded all-symbols call per cycle; count it against `read.ip_weight` before choosing.
+3. Refuse rather than invent: treat a miss as unknown in the spread gate.
+
+(3) is the only one that removes the fabricated value rather than making it rarer. (1)
+or (2) keeps spreads real on the reads that currently miss. They combine.
+
+**Governor (dark lane) — probably a boot transient, not a cache fault.** Since boot:
+6 of 15 verdicts book-blind against 15 misses in 1,680 grace reads. The two agree only
+if the misses fell on verdict snapshots, most likely the first sweeps after restart:
+restored arms trigger before the scanner's first bookTicker fetch. The earlier 7/10
+was also read in a boot's first minutes.
+**Refutation condition:** `since_boot.book_blind` should stay at ~6 while `rows` grows.
+If it keeps climbing, the transient reading is wrong. Flow: 0/15 blind (#1047 held).
 
 ## FIXED 2026-09-23 — the Trade tab's positions were empty in production since they shipped
 
