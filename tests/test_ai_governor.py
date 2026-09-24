@@ -280,3 +280,47 @@ def test_premise_broken_is_a_closed_vocabulary():
         result=_result({}), batch=_batch(), now=1000.0,
     )
     assert out[0][0].premise_broken == ("macro_regime_flip",)
+
+
+# ── Blindness is published per build, beside the pooled figure ─────────────
+
+def test_blindness_splits_rows_this_process_wrote_from_the_persisted_tail(monkeypatch):
+    """The ledger survives restarts, so a census over its tail pools the rows a
+    previous build wrote with this one's. On 2026-09-24 that read 132/200
+    book-blind with only 63 rows written since the fix deployed — the census
+    could not say whether the fix had taken. `since_boot` can, and the pooled
+    figure stays beside it unchanged."""
+    monkeypatch.setattr(gov, "_PROCESS_STARTED_AT", 1_000.0)
+    led = ai_governor_ledger.get_ledger()
+    # A previous build: blind on the book.
+    for i in range(3):
+        led.add({"signal_id": f"old{i}", "issued_at": 900.0 + i,
+                 "unknown_frac": 0.5, "book_readable": False,
+                 "book_reason": "not_subscribed", "flow_readable": True})
+    # No issued_at at all is not "since boot": a missing stamp is not a pass.
+    led.add({"signal_id": "nostamp", "unknown_frac": 0.5,
+             "book_readable": False, "book_reason": "not_subscribed",
+             "flow_readable": True})
+    # This build: the book reads.
+    for i in range(2):
+        led.add({"signal_id": f"new{i}", "issued_at": 1_000.0 + i,
+                 "unknown_frac": 0.0, "book_readable": True,
+                 "flow_readable": True})
+
+    out = gov.blindness()
+    assert out["rows"] == 6
+    assert out["book_blind"] == 4
+    assert out["process_started_at"] == 1_000.0
+    assert out["since_boot"]["rows"] == 2
+    assert out["since_boot"]["book_blind"] == 0
+    assert out["since_boot"]["book_reasons"] == {}
+
+
+def test_blindness_since_boot_with_nothing_asked_yet_is_unmeasured_not_zero(monkeypatch):
+    monkeypatch.setattr(gov, "_PROCESS_STARTED_AT", 1_000.0)
+    ai_governor_ledger.get_ledger().add(
+        {"signal_id": "old", "issued_at": 10.0, "unknown_frac": 1.0,
+         "book_readable": False, "book_reason": "stale", "flow_readable": False})
+    out = gov.blindness()
+    assert out["since_boot"] == {"rows": 0, "measured": False}
+    assert out["book_blind"] == 1

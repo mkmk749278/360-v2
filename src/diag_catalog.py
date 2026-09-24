@@ -603,7 +603,9 @@ for _e in (
           "and whether the panic arm's position ceiling is set — it refuses "
           "while that is zero. Carries `blindness` — how much context the recent "
           "verdicts actually had, book and flow counted apart because their "
-          "fixes differ. Deliberately does NOT carry the scorecard: that parses "
+          "fixes differ, with `since_boot` beside the pooled tail so a fix "
+          "that just deployed is not hidden under the rows it replaced. "
+          "Deliberately does NOT carry the scorecard: that parses "
           "the closed-signal record off disk and belongs in its own entry, so "
           "the arms and bounds stay readable when the record is large or slow.",
           _ai_governor),
