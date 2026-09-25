@@ -520,6 +520,7 @@ Telegram are both acceptable paging paths.
 | Mover retention — keep a promoted pair while it is still producing (HOLD/RELEASE/EXTEND/WARMUP) | `src/mover_retention.py` |
 | Path retirement — remove a `(setup, side)` from the live feed by **diverting** it, never deleting | `src/path_retirement.py` |
 | Dark → live promotion, under owner-set per-path conditions | `src/dark_promotion.py` |
+| **Unlock-short dark lane** — insider cliff unlocks shorted T−14 → T+2, measured forward on public data (never reaches a user or an order) | `src/unlock_shorts.py`, `src/unlock_calendar.py` |
 | **Diagnostic catalog** — named engine reads + reversible actions, driven from ops. Never a shell | `src/diag_catalog.py` |
 | **Cross-process invalidation** for the control documents — the Redis generation that replaced the 5s TTLs | `src/control_generation.py` |
 | **Safety-switch bridge** — the engine end of the kill switch, so the stop is throwable when the api container is blind | `src/execution/safety_switch_bridge.py` |

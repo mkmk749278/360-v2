@@ -21,6 +21,7 @@ from src.binance_weights import (
     CARRIED,
     FIXED,
     VERIFIED,
+    VERIFIED_MARKERS,
     known_paths,
     weight_for,
 )
@@ -167,7 +168,7 @@ class TestTheTableItself:
     def test_every_entry_states_where_its_number_came_from(self):
         """An unlabelled constant reads exactly like a verified one."""
         for path, w in FIXED.items():
-            assert w.source in (VERIFIED, CARRIED), f"{path} has no provenance"
+            assert w.source in (*VERIFIED_MARKERS, CARRIED), f"{path} has no provenance"
 
     def test_carried_entries_are_visible_as_unconfirmed(self):
         """Not a failure — a standing note that these are the first things to

@@ -1649,6 +1649,18 @@ STRUCTURAL_SNAP_APPLY_PATHS: str = os.getenv("STRUCTURAL_SNAP_APPLY_PATHS", "")
 # produces an empty panel and a decision that keeps being deferred.
 STRUCTURAL_VETO_MEASURE: bool = _safe_bool("STRUCTURAL_VETO_MEASURE", "true")
 
+# ---------------------------------------------------------------------------
+# Unlock-short dark lane (src/unlock_shorts.py, 2026-09-25)
+# ---------------------------------------------------------------------------
+# Measurement only: it reads public market data and the DefiLlama unlock
+# calendar, and writes one ledger ops renders. It has no effect flag because it
+# has no effect — nothing in it can reach a subscriber or an order. ON by
+# default per the dark-flag rule ("if it cannot reach a subscriber or the money
+# path, turn it on when you ship it") and at the owner's instruction (2026-09-25:
+# "build shorts system, make it live in ops, not for users"). Runtime switch:
+# ops Control → Tunables → Measurement → unlock_short_lane_enabled.
+UNLOCK_SHORT_LANE_ENABLED: bool = _safe_bool("UNLOCK_SHORT_LANE_ENABLED", "true")
+
 # ENFORCE defaults OFF and is gated per setup class, the same shape as the
 # snap: one flip must not move nineteen paths on evidence from the one that is
 # 59% of the book. An empty allow-list means enforcing nowhere, which is what

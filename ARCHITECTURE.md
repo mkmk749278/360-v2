@@ -824,8 +824,8 @@ has to be applied by hand in all three places.
 | Business rules | 18 | `OWNER_BRIEF.md` Part IV (B5 retired) |
 | Engine Python modules | 251 | `src/**/*.py` |
 | Env-overridable settings | **615** | `config/__init__.py` — distinct env keys across `_safe_*` (436) and `os.getenv` (179), per B8 |
-| `*_ENABLED` feature flags | 81 | `config/__init__.py` — the §10 command counts declared `_safe_bool` flags; 103 `*_ENABLED` names exist in total, the rest being derived or aliased |
-| Feature-liveness probes | **52** | `main._build_feature_liveness` — 9 `RateProbe` + 43 `PredicateProbe` |
+| `*_ENABLED` feature flags | 82 | `config/__init__.py` — the §10 command counts declared `_safe_bool` flags; 103 `*_ENABLED` names exist in total, the rest being derived or aliased |
+| Feature-liveness probes | **60** | `main._build_feature_liveness` — 10 `RateProbe` + 50 `PredicateProbe` (re-derived 2026-09-25; the list had drifted to 52 while the code held 59) |
 
 ### Flags whose default surprises people
 
@@ -851,27 +851,29 @@ what the name suggests, or where the default *is* the doctrine:
 | `INDICATOR_CACHE_CONTENT_KEY` | **true** | Kill switch for the content-addressed indicator cache key. Off = the old bar-COUNT key, which stops changing at the 1,000-bar bucket cap and serves frozen indicators forever |
 | `SCAN_CYCLE_WARN_SEC` / `SCAN_CYCLE_KILL_SEC` | 60 / 120 | Not thresholds ops invented — `healthcheck.py` owns the kill number and every surface grades against these |
 
-### The 52 liveness probes
+### The 60 liveness probes
 
 A feature whose output can silently flat-line without paging is unfinished — this is the
 list that enforces it (`RateProbe` = throughput, `PredicateProbe` = health assertion):
 
 ```
-aggtrade_feed · atr_trail_live_arms · auto_dispatch · btc_reference
+aggtrade_feed · ai_governor_blind · ai_governor_live_arms · ai_governor_verdicts
+atr_trail_live_arms · auto_dispatch · binance_ip_weight · btc_reference
 candle_coverage · candle_series_integrity · close_accounting · cohort_edge_gate
 context_emission_policy · dark_atr_trail_arms · dark_promotion_rules
 dark_resolution · dark_sar_arms · depth_feed · edge_reconciliation
 emission_controller · emission_controller_routability · entry_feature_inputs
-entry_quality_effective · footprint_bars · gate_override_shadow · geometry_ab
-indicator_cache_key · market_context · mean_revert_emission · mean_revert_path
-mover_admission_metadata · mover_retention · position_lock_integrity
+entry_quality_effective · firestore_read_budget · footprint_bars
+gate_override_shadow · geometry_ab · indicator_cache_key · market_context
+mean_revert_emission · mean_revert_path · mover_admission_metadata
+mover_retention · paper_dispatch · pending_close · position_lock_integrity
 prescoring_audit · price_action_lane · promoted_pair_integrity
-range_fade_emission · range_fade_path · sar_alignment_crosscheck
-sar_exit_shadow · sar_hold_arm · sar_ledger_candles · sar_live_arms
-sar_refresh_budget · sar_resolution_progress · scan_cycle · setup_tf_resolver
-shadow_units · snapshot_writer · stale_tf_scoring · staleness_v2_shadow
-strategy_edge · structural_snap · structural_veto_lane · suppression_audit
-tuned_variants
+range_fade_emission · range_fade_path · sar_alignment_crosscheck · sar_exit_shadow
+sar_hold_arm · sar_ledger_candles · sar_live_arms · sar_refresh_budget
+sar_resolution_progress · scan_cycle · setup_tf_resolver · shadow_units
+snapshot_writer · stale_tf_scoring · staleness_v2_shadow · strategy_edge
+structural_snap · structural_veto_lane · suppression_audit · tuned_variants
+unlock_shorts
 ```
 
 Never signal "idle" or "disabled" by raising inside a `PredicateProbe` — that converts to
@@ -894,6 +896,7 @@ The measurement plane's substrate. Ops mounts `data/` **read-only** at `/engine-
 | `dispatch_log.json` | `signal_router.py` · `main.py` | monitor-logs surfaces |
 | `geometry_ab_candidates.json` | `geometry_ab.py` | via edge matrix |
 | `cohort_edge_store.json` | `stat_filter.py` | cohort gate |
+| `unlock_shorts_v1.json` | `unlock_shorts.py` (own task, 5-min cycle; calendar via `python -m src.unlock_calendar`) | `/signals/unlock-shorts` |
 | `level_book.json` · `alerts.json` · `pnl_history.json` · `confidence_log.json` | their own modules | engine-internal |
 
 ---

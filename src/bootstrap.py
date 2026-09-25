@@ -332,6 +332,10 @@ class Bootstrap:
                 engine._strategy_edge_flush_loop(), name="strategy_edge_flush"
             ),
             asyncio.create_task(engine._invalidation_audit_loop()),
+            # Unlock-short dark lane: public data in, one ledger out; nothing
+            # here reaches a subscriber or an order. Own task so its daily
+            # calendar read never delays the maintenance loop's lanes.
+            asyncio.create_task(engine._unlock_shorts_loop(), name="unlock_shorts"),
             asyncio.create_task(engine._macro_watchdog.start()),
             asyncio.create_task(engine._liquidation_flush_loop()),
             asyncio.create_task(engine._daily_performance_report_loop()),

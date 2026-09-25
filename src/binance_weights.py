@@ -47,6 +47,10 @@ from typing import Callable, Dict, Optional, Union
 
 #: Read from Binance's endpoint documentation on this date.
 VERIFIED = "verified:2026-08-05"
+#: Read from Binance's endpoint documentation on 2026-09-25 (unlock-short lane).
+VERIFIED_2026_09_25 = "verified:2026-09-25"
+#: Every marker that means "read from the vendor's own page on a stated date".
+VERIFIED_MARKERS = (VERIFIED, VERIFIED_2026_09_25)
 #: Pre-existing value preserved from the call site it was moved out of. NOT
 #: independently confirmed — re-check this first if the limiter drifts.
 CARRIED = "carried"
@@ -93,6 +97,15 @@ FIXED: Dict[str, Weight] = {
     # No symbol param = whole board.
     "/fapi/v1/ticker/24hr": Weight(40, CARRIED, "no symbol param = all symbols"),
     "/api/v3/ticker/24hr": Weight(40, CARRIED, "no symbol param = all symbols"),
+    # --- unlock-short lane (src/unlock_shorts.py) ----------------------------
+    # Binance documents NO request weight here: "share 500/5min/IP rate limit
+    # with GET /fapi/v1/fundingInfo" — a separate limit. Declared 1 so the
+    # shared limiter still counts it (over-declaring is harmless; the lane also
+    # caps its own funding calls far under 500/5min).
+    "/fapi/v1/fundingRate": Weight(
+        1, VERIFIED_2026_09_25,
+        "separate 500/5min/IP limit shared with fundingInfo; declared 1 conservatively",
+    ),
 }
 
 #: Single-symbol variants of endpoints whose all-symbol form is far heavier.

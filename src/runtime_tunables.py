@@ -172,6 +172,7 @@ def _build_registry() -> Dict[str, Tunable]:
         DISPATCH_COOLDOWN_SEC,
         GEOMETRY_AB_ENABLED,
         SAR_EXIT_SHADOW_ENABLED,
+        UNLOCK_SHORT_LANE_ENABLED,
         STALE_TF_REFUSE_ENABLED,
         TRACK_RECORD_PUBLIC_ENABLED,
         SIGNALS_PAYWALL_START,
@@ -1551,6 +1552,24 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=GEOMETRY_AB_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="unlock_short_lane_enabled",
+            label="Unlock-short dark lane",
+            description=(
+                "Measure the unlock short forward: read DefiLlama's vesting "
+                "calendar daily, stamp every insider cliff unlock >= 0.5% of "
+                "max supply at T-14 on real Binance prices (both squeeze "
+                "filters stamped, never applied), walk it hourly and close it "
+                "at T+2 with no-stop / 20% / 40% / BTC- and alt-hedged results. "
+                "Observe-only and public data only: nothing here reaches a "
+                "subscriber, the signal queue or an order. Off stops stamping; "
+                "an entry that comes due while off is recorded MISSED, never "
+                "backfilled."
+            ),
+            type="bool",
+            default=UNLOCK_SHORT_LANE_ENABLED,
             category="Measurement",
         ),
         Tunable(
