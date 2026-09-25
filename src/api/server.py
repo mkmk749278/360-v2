@@ -127,6 +127,7 @@ from .schemas import (
     SignalExpirySetRequest,
     SignalExpiryState,
     SignalsResponse,
+    LockedSignal,
     TelegramOtpIssueRequest,
     TelegramOtpIssueResponse,
     SymbolManagementUpdate,
@@ -1761,10 +1762,24 @@ def build_app(
 
         items = await _fetch(want, limit)
         locked_open = 0
+        locked_items: List[LockedSignal] = []
         if not access.allowed:
             # Defence in depth: the "closed" filter already excludes them.
             items = [it for it in items if not _signal_access.item_is_open(it)]
-            locked_open = len(await _fetch("open", 500))
+            open_items = await _fetch("open", 500)
+            locked_open = len(open_items)
+            # Masked cards: only fields that carry no trade (LockedSignal).
+            locked_items = [
+                LockedSignal(
+                    signal_id=it.signal_id,
+                    symbol=it.symbol,
+                    agent_name=it.agent_name,
+                    quality_tier=it.quality_tier,
+                    confidence=it.confidence,
+                    minutes_ago=it.minutes_ago,
+                )
+                for it in open_items
+            ]
         # private: the body now depends on who is asking, so no shared cache
         # (CDN / proxy) may hand one caller's live feed to another.
         response.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
@@ -1773,6 +1788,7 @@ def build_app(
             total=len(items),
             live_locked=not access.allowed,
             locked_open_count=locked_open,
+            locked_items=locked_items,
             live_access=access.to_dict(),
         )
 

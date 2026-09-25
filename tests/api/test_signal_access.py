@@ -343,3 +343,29 @@ def test_push_keeps_its_levels_while_the_paywall_is_off(monkeypatch) -> None:
     pn.push_signal_published(_Sig())
     title, body, data = sent[0]
     assert "LONG" in title and "64000" in body and data["direction"] == "LONG"
+
+
+# ---------------------------------------------------------------------------
+# Masked live cards (owner, 2026-09-25: "show all live signals but mask them")
+# ---------------------------------------------------------------------------
+
+
+def test_guest_gets_masked_live_cards_with_nothing_tradeable(app_client) -> None:
+    client, _ = app_client
+    body = _get(client, "/api/signals?status=all", "anon").json()
+    assert [c["signal_id"] for c in body["locked_items"]] == ["sig-001"]
+    card = body["locked_items"][0]
+    assert card["symbol"] == "ETHUSDT"
+    # The mask is enforced by the SHAPE: nothing tradeable is on the wire.
+    assert set(card) == {
+        "signal_id", "symbol", "agent_name", "quality_tier", "confidence", "minutes_ago",
+    }
+    raw = str(body["locked_items"])
+    for leak in ("2329", "2310", "2351", "LONG", "SHORT"):
+        assert leak not in raw
+
+
+def test_a_caller_with_live_access_gets_no_masked_cards(app_client) -> None:
+    client, _ = app_client
+    body = _get(client, "/api/signals?status=all", "phone").json()
+    assert body["locked_items"] == []

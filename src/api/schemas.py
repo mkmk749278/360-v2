@@ -220,6 +220,26 @@ class SignalDetail(BaseModel):
     )
 
 
+class LockedSignal(BaseModel):
+    """A live signal as a caller WITHOUT live access sees it (owner, 2026-09-25:
+    *"show all live signals too but mask them … click here to see signal"*).
+
+    Deliberately a separate, narrow model rather than a ``SignalDetail`` with
+    fields blanked: nothing tradeable exists on it to leak. No direction, no
+    entry / stop / targets, no live price or PnL — a masked card blurred on the
+    client would still carry the levels in the JSON, and the API is readable by
+    anyone holding a guest token. Symbol, the analyst that fired it, its
+    confidence tier and how long ago are the tease; the levels are the product.
+    """
+
+    signal_id: str
+    symbol: str
+    agent_name: str
+    quality_tier: str
+    confidence: float
+    minutes_ago: int
+
+
 class SignalsResponse(BaseModel):
     items: List[SignalDetail]
     total: int
@@ -230,6 +250,9 @@ class SignalsResponse(BaseModel):
     #: How many active signals the caller is not being shown (same
     #: ``setup_class`` filter). 0 when nothing is locked.
     locked_open_count: int = 0
+    #: The live signals being withheld, masked (see :class:`LockedSignal`),
+    #: newest first, same ``setup_class`` filter. Empty when nothing is locked.
+    locked_items: List[LockedSignal] = Field(default_factory=list)
     #: ``signal_access.LiveAccess.to_dict()`` — allowed / reason / until /
     #: paywall_start. None from an engine predating the paywall.
     live_access: Optional[Dict[str, Any]] = None
