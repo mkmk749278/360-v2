@@ -1,48 +1,57 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 1320,
-    "wins": 437,
-    "losses": 527,
-    "neutral": 356,
-    "win_rate_pct": 33.1,
-    "avg_pnl_pct": 0.2991
+    "n": 1356,
+    "wins": 453,
+    "losses": 539,
+    "neutral": 364,
+    "win_rate_pct": 33.4,
+    "avg_pnl_pct": 0.3125
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 279,
+    "n": 283,
     "wins": 66,
-    "losses": 93,
-    "neutral": 120,
-    "win_rate_pct": 23.7,
-    "avg_pnl_pct": 0.2576
+    "losses": 96,
+    "neutral": 121,
+    "win_rate_pct": 23.3,
+    "avg_pnl_pct": 0.2303
   },
   {
     "setup": "SR_FLIP_RETEST",
-    "n": 199,
+    "n": 200,
     "wins": 54,
-    "losses": 73,
+    "losses": 74,
     "neutral": 72,
-    "win_rate_pct": 27.1,
-    "avg_pnl_pct": 0.0586
+    "win_rate_pct": 27.0,
+    "avg_pnl_pct": 0.049
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 189,
-    "wins": 51,
-    "losses": 86,
-    "neutral": 52,
-    "win_rate_pct": 27.0,
-    "avg_pnl_pct": 0.1157
+    "n": 197,
+    "wins": 52,
+    "losses": 91,
+    "neutral": 54,
+    "win_rate_pct": 26.4,
+    "avg_pnl_pct": 0.0866
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 182,
-    "wins": 46,
-    "losses": 85,
-    "neutral": 51,
-    "win_rate_pct": 25.3,
-    "avg_pnl_pct": -0.1668
+    "n": 188,
+    "wins": 47,
+    "losses": 89,
+    "neutral": 52,
+    "win_rate_pct": 25.0,
+    "avg_pnl_pct": -0.1917
+  },
+  {
+    "setup": "LIQUIDITY_SWEEP_REVERSAL",
+    "n": 123,
+    "wins": 25,
+    "losses": 58,
+    "neutral": 40,
+    "win_rate_pct": 20.3,
+    "avg_pnl_pct": -0.1538
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
@@ -54,22 +63,13 @@
     "avg_pnl_pct": 0.084
   },
   {
-    "setup": "LIQUIDITY_SWEEP_REVERSAL",
-    "n": 115,
-    "wins": 25,
-    "losses": 53,
-    "neutral": 37,
-    "win_rate_pct": 21.7,
-    "avg_pnl_pct": -0.0919
-  },
-  {
     "setup": "BREAKDOWN_SHORT",
-    "n": 50,
+    "n": 51,
     "wins": 14,
     "losses": 22,
-    "neutral": 14,
-    "win_rate_pct": 28.0,
-    "avg_pnl_pct": 0.7708
+    "neutral": 15,
+    "win_rate_pct": 27.5,
+    "avg_pnl_pct": 0.7557
   },
   {
     "setup": "VOLUME_SURGE_BREAKOUT",
@@ -109,12 +109,12 @@
   },
   {
     "setup": "MA_CROSS_TREND_SHIFT",
-    "n": 4,
-    "wins": 1,
+    "n": 5,
+    "wins": 2,
     "losses": 3,
     "neutral": 0,
-    "win_rate_pct": 25.0,
-    "avg_pnl_pct": 0.3584
+    "win_rate_pct": 40.0,
+    "avg_pnl_pct": 1.0048
   },
   {
     "setup": "WHALE_MOMENTUM",
