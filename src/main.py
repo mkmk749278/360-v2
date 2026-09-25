@@ -1926,6 +1926,39 @@ class CryptoSignalEngine:
             except Exception as exc:
                 fail_open.record("main.strategy_edge_flush", exc)
 
+    async def _unlock_shorts_loop(self) -> None:
+        """Unlock-short dark lane (``src/unlock_shorts.py``) — its own task.
+
+        Not inside the 5-min maintenance loop, although it runs on the same
+        cadence: once a day the lane reads the unlock calendar through a child
+        process that can take tens of seconds, and the other lanes' resolves
+        must not wait on it (nor it on them).
+
+        The first cycle waits a minute so Binance's symbol metadata is loaded —
+        admission is fail-closed and an empty cache would refuse every unlock.
+        The ledger is flushed every cycle whether or not the lane is on, so a
+        switched-off lane renders OFF in ops rather than STALE.
+        """
+        from src import unlock_shorts as _uls
+
+        await asyncio.sleep(60)
+        while True:
+            try:
+                if _uls.enabled():
+                    counts = await _uls.step()
+                    moved = {k: v for k, v in counts.items() if v and k != "budget_exhausted"}
+                    if moved:
+                        log.info("Unlock-short lane: {}", moved)
+                _uls.get_ledger().flush(force=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — the lane must not take the task down
+                from src import fail_open as _fo
+
+                _fo.record("main.unlock_shorts_loop", exc)
+                log.warning("Unlock-short lane cycle failed (fail-open): {}", exc)
+            await asyncio.sleep(300)
+
     async def _invalidation_audit_loop(self) -> None:
         """Periodically classify pending invalidation kills as PROTECTIVE /
         PREMATURE / NEUTRAL based on post-kill price action.
@@ -3146,6 +3179,19 @@ class CryptoSignalEngine:
             # throttled a signed call within the hour.
             fn=_ipw.budget_health,
             min_streak=1,
+        ))
+
+        from src import unlock_shorts as _uls
+
+        fl.add_predicate(PredicateProbe(
+            name="unlock_shorts",
+            # The unlock-short dark lane. Keyed on the rows owed a verdict (an
+            # open row that stopped advancing) and on the calendar, the one
+            # input no other probe watches — a calendar that stops arriving
+            # empties the lane silently, which reads exactly like "no unlocks".
+            # Off is healthy: it is a decision, not a fault.
+            fn=_uls.health,
+            min_streak=2,
         ))
 
         fl.add_predicate(PredicateProbe(

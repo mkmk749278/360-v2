@@ -490,6 +490,29 @@ def _ai_governor_paired(ctx: Ctx) -> Dict[str, Any]:
     return _cf.build_diag()
 
 
+def _unlock_shorts(ctx: Ctx) -> Dict[str, Any]:
+    """The unlock-short dark lane from the process that runs it.
+
+    Statuses, the calendar's own freshness and last error, per-boot counters
+    (vendor calls, deferrals, refusals by name) and the rows still owed a
+    verdict. The ops page reads the ledger FILE; this reads the live object,
+    so a disagreement between them says the flush stopped.
+    """
+    from src import unlock_shorts
+
+    ledger = unlock_shorts.get_ledger()
+    out = unlock_shorts.summary(ledger)
+    out["health"] = list(unlock_shorts.health(ledger=ledger))
+    keep = ("row_id", "status", "entry_due_ts", "exit_due_ts", "fraction",
+            "selected", "bars_behind", "stalled", "last_miss_reason")
+    owed = unlock_shorts.S_OPEN, unlock_shorts.S_SCHEDULED
+    out["owed"] = [
+        {k: r.get(k) for k in keep}
+        for r in sorted(ledger.by_status(*owed), key=lambda r: float(r.get("entry_due_ts") or 0))[:40]
+    ]
+    return out
+
+
 def _fail_open(ctx: Ctx) -> Dict[str, Any]:
     """Every fail-open exception site and its count — the silent-failure ledger."""
     from src import fail_open
@@ -691,6 +714,12 @@ for _e in (
     Entry("read.loop", "Loop + host counters", "read",
           "Scan cycle, snapshot writer, edge store and CPU-against-quota in one "
           "read.", _loop_snapshot),
+    Entry("read.unlock_shorts", "Unlock-short dark lane", "read",
+          "The unlock short measured forward: statuses, calendar freshness and "
+          "its last error, vendor calls and deferrals this boot, and every row "
+          "still owed a verdict. Read `health` first. Measurement only — "
+          "nothing in the lane reaches a subscriber or an order.",
+          _unlock_shorts),
     Entry("read.fail_open", "Fail-open sites", "read",
           "Every swallowed exception site and its count.", _fail_open),
     Entry("read.tasks", "Asyncio task census", "read",
@@ -726,7 +755,7 @@ def _flush_ledgers(ctx: Ctx) -> Dict[str, Any]:
     modules = (
         "sar_live_shadow", "dark_emission", "entry_features",
         "structural_snap", "structural_veto", "atr_trail_live",
-        "price_action_lane",
+        "price_action_lane", "unlock_shorts",
     )
     for name in modules:
         try:

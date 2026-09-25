@@ -243,6 +243,61 @@ class BinanceClient:
             weight=weight_for(path, limit=limit),
         )
 
+    async def fetch_klines_since(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        limit: int = 99,
+    ) -> Optional[List[List[Any]]]:
+        """Klines opening at or after ``start_ms`` — a window located by TIME.
+
+        ``fetch_klines`` returns "the newest N bars", which is right for a seed
+        and wrong for a walk: a consumer resuming from the bar it last consumed
+        must ask for the bars *after that bar*, or a gap in its own schedule
+        silently becomes a gap in its measurement. ``limit`` defaults to 99 so
+        a routine call stays in the weight-1 tier.
+        """
+        path = "/fapi/v1/klines" if self.market == "futures" else "/api/v3/klines"
+        return await self._get(
+            path,
+            params={"symbol": symbol, "interval": interval,
+                    "startTime": int(start_ms), "limit": int(limit)},
+            weight=weight_for(path, limit=limit),
+        )
+
+    async def fetch_funding_history(
+        self,
+        symbol: str,
+        start_ms: int,
+        limit: int = 100,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Settled funding rates at or after ``start_ms`` (futures only).
+
+        Binance limits this endpoint separately — 500 requests per 5 minutes
+        per IP, shared with ``/fapi/v1/fundingInfo`` — rather than by request
+        weight; see ``binance_weights`` for why it is still declared.
+        """
+        if self.market != "futures":
+            return None
+        path = "/fapi/v1/fundingRate"
+        return await self._get(
+            path,
+            params={"symbol": symbol, "startTime": int(start_ms), "limit": int(limit)},
+            weight=weight_for(path),
+        )
+
+    async def fetch_all_tickers_24h(self) -> Optional[List[Dict[str, Any]]]:
+        """24h statistics for **every** symbol in one request (weight 40).
+
+        The expensive form, and deliberately so: one call prices the whole
+        board, which is what a caller needs when it must value a basket. Never
+        call it per symbol — ``fetch_ticker_24h`` is the weight-1 form for that.
+        """
+        path = "/fapi/v1/ticker/24hr" if self.market == "futures" else "/api/v3/ticker/24hr"
+        data = await self._get(path, weight=weight_for(path))
+        return data if isinstance(data, list) else None
+
     async def fetch_all_book_tickers(self) -> Optional[Dict[str, Dict[str, str]]]:
         """Fetch best bid/ask prices for **all** symbols in a single request.
 
