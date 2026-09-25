@@ -36,6 +36,8 @@ deployed engine). Open risk the owner accepted: charging for signal
 *information* is closer to paid tips than the automation-only framing —
 Play financial-features declaration to be kept current.
 
+---
+
 ## OPEN 2026-09-24 — the audit's fixes: all merged; MVAVW SHORT waits on one owner click
 
 Report: `docs/AUDIT_2026_09_24_POST_FIX_VERIFICATION.md` (#1053).  Owner reply
