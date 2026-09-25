@@ -43,6 +43,9 @@ _EXCHANGE_REFRESH_S = 45
 _SEED_CLOSED_PER_CYCLE = 3
 _ACTIVITY_INTERVAL_S = 30
 _AGENTS_INTERVAL_S   = 60
+#: Per-pair chart context: levels refresh on a much slower TTL than this, so
+#: once a minute is already more often than the answer changes.
+_PAIR_CONTEXT_INTERVAL_S = 60
 
 #: A cycle slower than this has started eating its own margin. The feed-critical
 #: keys carry ``TTL_SIGNALS`` = 60s against a 15s interval — **four** cycles of
@@ -130,6 +133,7 @@ class SnapshotWriter:
         self._redis  = redis_client
         self._last_activity: float = 0.0
         self._last_agents: float   = 0.0
+        self._last_pair_context: float = 0.0
         # Writer health, read by the `snapshot_writer` liveness probe. These are
         # in-memory counters: no network, no cost, and they are the LEADING
         # indicator. The lagging one is the keys vanishing, and by then the app
@@ -316,6 +320,10 @@ class SnapshotWriter:
             with self._timing("agents"):
                 await self._write_agents()
             self._last_agents = now
+        if now - self._last_pair_context >= _PAIR_CONTEXT_INTERVAL_S:
+            with self._timing("pair_context"):
+                await self._write_pair_context()
+            self._last_pair_context = now
         # Check for a pending mode-change command from the API container.
         await self._apply_pending_mode_cmd()
         # Check for a pending full-signal-reset command from the API container.
@@ -438,6 +446,25 @@ class SnapshotWriter:
     def _build_data_intake(self) -> dict:
         from src.data_intake import build_data_intake
         return build_data_intake(self._engine)
+
+    async def _write_pair_context(self) -> None:
+        """Publish each scanned pair's levels / volume profile / 4h structure.
+
+        The stores live on the engine's scanner; the app's chart screen is
+        served by the API container, which cannot see them in isolated mode.
+        One key for the whole universe (~80 pairs, a few KB each) rather than
+        one per pair, so the API reads it with one GET.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(self._executor, self._build_pair_context)
+            await self._set(_store.KEY_PAIR_CONTEXT, data, _store.TTL_PAIR_CONTEXT)
+        except Exception:
+            log.exception("snapshot_writer: failed to write pair_context")
+
+    def _build_pair_context(self) -> dict:
+        from src.pair_context import build_snapshot
+        return build_snapshot(self._engine)
 
     async def _write_router_delivery(self) -> None:
         """Publish the router's drop census — the last hop before a subscriber.

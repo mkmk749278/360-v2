@@ -54,6 +54,7 @@ KEY_DATA_INTAKE    = "snapshot:data_intake"    # data-intake X-ray         — w
 KEY_ROUTER_DELIVERY = "snapshot:router_delivery"  # router drop census     — written every ~15 s
 KEY_TRAIL_GOVERNOR = "snapshot:trail_governor"  # live trail-governor X-ray — written every ~15 s
 KEY_DARK_PROMOTION = "snapshot:dark_promotion"  # promotion decide-counters — written every ~15 s
+KEY_PAIR_CONTEXT   = "snapshot:pair_context"    # per-pair levels/VP/structure — written every ~60 s
 #: {symbol: mark_price} for every symbol the engine is currently marking,
 #: plus ``__stamped_at__``.  The api container has no mark-price feed of
 #: its own (and no signing socket), so without this a per-user position
@@ -157,6 +158,9 @@ TTL_DATA_INTAKE  = _TTL_FEED
 TTL_ROUTER_DELIVERY = _TTL_FEED
 TTL_TRAIL_GOVERNOR  = _TTL_FEED
 TTL_DARK_PROMOTION  = _TTL_FEED
+#: Written every ~60s, so it outlives a couple of missed cycles; past this the
+#: key is gone and the app says "not reported" rather than showing old levels.
+TTL_PAIR_CONTEXT    = 300
 #: Deliberately SHORTER than _TTL_FEED.  A stale feed renders a stale
 #: list, which is merely old; a stale mark renders a WRONG unrealized
 #: PnL on a live position, which reads as fact.  Expiring lets the app

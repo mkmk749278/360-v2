@@ -223,6 +223,10 @@ def reduce_records(records: Any) -> List[Dict[str, Any]]:
             "pnl_pct": rec.get("pnl_pct"),
             "closed_at": closed,
             "closed_at_ts": closed.timestamp() if closed else None,
+            # When the trade went out — the chart marks a past signal where
+            # it OPENED. Dispatch time first (what users received), else the
+            # engine's creation stamp; None when neither was recorded.
+            "opened_at_ts": _f(rec.get("dispatch_timestamp")) or _f(rec.get("create_timestamp")),
         })
     out.sort(key=lambda r: r.get("closed_at_ts") or 0.0, reverse=True)
     return out
