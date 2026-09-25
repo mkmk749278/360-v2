@@ -4,6 +4,38 @@
 
 ---
 
+## OPEN 2026-09-25 — guest access + paid live signals: 4 PRs, rollout needs the owner
+
+Owner, from a marketing session: ad visitors bounced off the phone-number
+screen ("they want my personal data"). Direction: *"guest login without asking
+anything … just one welcome screen … no more scary warnings"*, then *"hide
+active signals only show closed signals … account and new plan … first 3 days
+free"*. AskUserQuestion: Signals plan ₹499/mo; existing users 3 days from
+launch then lock; teaser push; 3 days start automatically.
+
+**This reverses B1 for ACTIVE signals** (OWNER_BRIEF B1/B16 updated in #1063).
+
+| PR | What | State |
+|---|---|---|
+| 360-v2 #1063 | guest identity (anonymous Firebase, no user row), `signal_access` paywall, `signals` tier, teaser push | open, owner sign-off |
+| lumin-app #165 | one welcome screen, guest mode, live-signals strip, Signals plan UI | open; merging deploys the PWA in ~2 min |
+| lumin-legal #9 | Terms §4 + Privacy §2.0 | open, owner sign-off |
+| Meta-ads #4 | "Live signals 3 din FREE" on ad + landing | open |
+
+**Rollout order, and none of it is done yet:**
+1. Merge + deploy #1063 (paywall stays OFF: `signals_paywall_start` empty).
+2. Firebase Console → Authentication → **Anonymous: enable**. Until then the
+   app falls back to phone sign-in (safe, just no guests).
+3. Merge lumin-app #165.
+4. Create Play product `lumin_signals_monthly` (₹499), merge lumin-legal #9,
+   THEN set `signals_paywall_start` in ops. Existing users' 3 days count from
+   that date.
+
+Not verified: the anonymous sign-in round trip end to end (needs step 2 and a
+deployed engine). Open risk the owner accepted: charging for signal
+*information* is closer to paid tips than the automation-only framing —
+Play financial-features declaration to be kept current.
+
 ## OPEN 2026-09-24 — the audit's fixes: all merged; MVAVW SHORT waits on one owner click
 
 Report: `docs/AUDIT_2026_09_24_POST_FIX_VERIFICATION.md` (#1053).  Owner reply
