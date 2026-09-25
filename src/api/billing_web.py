@@ -78,7 +78,7 @@ _GRANT_STATUSES = frozenset({"finished", "confirmed"})
 
 #: Tiers this rail can sell.  ``free`` is not purchasable; owner/paid are not
 #: web SKUs.  Kept in lock-step with ``config.WEB_BILLING_TIER_USD``.
-_SELLABLE_TIERS = frozenset({"assist", "auto"})
+_SELLABLE_TIERS = frozenset({"signals", "assist", "auto"})
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@ async def _create_invoice_http(payload: dict) -> dict:
 
 
 class WebCheckoutRequest(BaseModel):
-    tier: str = Field(..., description="assist | auto — the tier to purchase")
+    tier: str = Field(..., description="signals | assist | auto — the tier to purchase")
 
 
 class WebCheckoutResponse(BaseModel):

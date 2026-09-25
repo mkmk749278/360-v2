@@ -14,18 +14,21 @@ from src.api import auth
 
 
 def test_tier_rank_hierarchy():
+    # 2026-09-25: the Signals plan (live signals only) sits below Assist.
     assert auth.tier_rank("free") == 0
-    assert auth.tier_rank("assist") == 1
-    assert auth.tier_rank("auto") == 2
-    assert auth.tier_rank("paid") == 2          # legacy == full automation
-    assert auth.tier_rank("all-access") >= 2
-    assert auth.tier_rank("owner") >= 2
+    assert auth.tier_rank("signals") == 1
+    assert auth.tier_rank("assist") == 2
+    assert auth.tier_rank("auto") == 3
+    assert auth.tier_rank("paid") == 3          # legacy == full automation
+    assert auth.tier_rank("all-access") >= 3
+    assert auth.tier_rank("owner") >= 3
     assert auth.tier_rank(None) == 0
     assert auth.tier_rank("nonsense") == 0
 
 
 def test_can_assist_and_can_auto():
     assert not auth.can_assist("free")
+    assert not auth.can_assist("signals")       # live signals only, no trading
     assert auth.can_assist("assist")
     assert auth.can_assist("auto")
     assert not auth.can_auto("free")

@@ -564,7 +564,7 @@ class TestPerUserAutoModeAndPositions:
         app = build_app(engine, jwt_secret=_TEST_SECRET, allow_static=False)
         client = self._client_for(app, fresh_uid)
         body = client.get("/api/positions").json()
-        assert body == {"items": [], "total": 0}, (
+        assert body == {"items": [], "total": 0, "locked_open_count": 0}, (
             "fresh user must see no open positions — the engine has "
             "OP-OPEN-1 active but its dispatch is pre-window"
         )

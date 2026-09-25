@@ -56,12 +56,14 @@ from pydantic import BaseModel
 from src.utils import get_logger
 
 from . import firebase_auth
+from . import signal_access as _signal_access
 from .rate_limit import install_rate_limiting
 from .auth import (
     ASSIST_TIER,
     AUTO_TIER,
     OWNER_TIER,
     PAID_TIER,
+    FREE_TIER,
     AuthError,
     TokenClaims,
     decode_token,
@@ -277,6 +279,59 @@ def _firebase_enabled() -> bool:
     return os.environ.get("FIREBASE_AUTH_ENABLED", "false").lower() == "true"
 
 
+def _guest_access_enabled() -> bool:
+    """True unless ``GUEST_ACCESS_ENABLED=false``.
+
+    Owner, 2026-09-25: people arriving from an ad must reach the app without
+    being asked for anything, and a phone-number screen as the first thing
+    they see read as "they want my personal data". The app therefore signs a
+    new visitor in with Firebase **anonymous** auth, and this switch decides
+    whether the engine honours those tokens. Read per request, like
+    :func:`_firebase_enabled`, so flipping it in ``.env`` takes effect without
+    a restart. Turning it off locks nobody out of their account, only out of
+    the guest preview: a guest then lands on phone sign-in again.
+    """
+    return os.environ.get("GUEST_ACCESS_ENABLED", "true").lower() != "false"
+
+
+def _is_anonymous(claims: Dict[str, Any]) -> bool:
+    """A Firebase ID token minted by ``signInAnonymously``.
+
+    Keyed on the provider Firebase stamps into the token, never on the
+    absence of ``phone_number``: a phone user whose claim is missing for some
+    other reason must not be downgraded to a guest silently.
+    """
+    fb = claims.get("firebase")
+    return isinstance(fb, dict) and fb.get("sign_in_provider") == "anonymous"
+
+
+def _guest_claims(claims: Dict[str, Any]) -> Optional[TokenClaims]:
+    """Map a verified anonymous Firebase token to a guest identity, or None.
+
+    A guest is the engine's existing anonymous-device shape: ``sub`` does not
+    start with ``user-``, so :func:`_resolve_user_id` refuses every per-user
+    endpoint ("sign in with phone first") and nothing per-user is created —
+    no ``UserStore`` row and no Firestore document, so guest traffic from an
+    ad cannot grow any per-member cost. It carries no ``firebase_uid``, so
+    the Binance-connect, billing and account routes, which key on it, refuse
+    a guest too. Tier is ``free``, and a guest never sees an active signal
+    (see ``signal_access``).
+    """
+    if not _guest_access_enabled() or not _is_anonymous(claims):
+        return None
+    uid = str(claims.get("uid") or claims.get("user_id") or "")
+    if not uid:
+        return None
+
+    def _ts(key: str) -> datetime:
+        try:
+            return datetime.fromtimestamp(int(claims.get(key) or 0), tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            return datetime.fromtimestamp(0, tz=timezone.utc)
+
+    return TokenClaims(sub=f"guest-{uid}", tier=FREE_TIER, iat=_ts("iat"), exp=_ts("exp"))
+
+
 # ---------------------------------------------------------------------------
 # Auth dependency
 # ---------------------------------------------------------------------------
@@ -360,6 +415,15 @@ def _make_auth_dep(
                             ),
                         )
                     return
+                # Guest (anonymous Firebase sign-in): read access only.
+                # Every tier-gated endpoint (owner writes) refuses it.
+                if _guest_claims(claims) is not None:
+                    if required_tier is not None:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="guest: sign in with phone to use this",
+                        )
+                    return
                 # Firebase token verified but missing uid/phone — fall
                 # through to HS256 path rather than 401 immediately.
                 # An ID token without a phone_number claim shouldn't
@@ -437,6 +501,9 @@ def _make_user_claims_dep(
                 phone = str(claims.get("phone_number") or "")
                 if uid and phone:
                     return await user_store.aget_or_create_by_firebase_uid(uid, phone)
+                guest = _guest_claims(claims)
+                if guest is not None:
+                    return guest
         # 3. HS256 JWT — legacy path.
         try:
             return decode_token(presented, secret=jwt_secret)
@@ -1481,6 +1548,7 @@ def build_app(
                 user.onboarded_at.isoformat() if user.onboarded_at else None
             ),
             needs_onboarding=user.needs_onboarding,
+            live_access=_signal_access.live_access(user).to_dict(),
         )
 
     @app.get(
@@ -1673,18 +1741,40 @@ def build_app(
             None,
             description="Filter to one evaluator's signals (e.g. SR_FLIP_RETEST)",
         ),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> SignalsResponse:
-        items = _snapshot_cache.filter_signals(
-            status=status, limit=limit, setup_class=setup_class,
-        )
-        if items is None:
-            # Cache cold (first 5 s after startup) or stale (engine stopped
-            # publishing) — rebuild from whatever real source this process has.
-            items = await _cold_signals(
-                status=status, limit=limit, setup_class=setup_class,
+        # Live-signal paywall (owner, 2026-09-25): a caller without live
+        # access gets CLOSED signals only, whatever it asked for, plus the
+        # count of what it is not being shown.
+        access = _signal_access.live_access(identity)
+        want = status if access.allowed else "closed"
+
+        async def _fetch(which: str, n: int) -> List[SignalDetail]:
+            got = _snapshot_cache.filter_signals(
+                status=which, limit=n, setup_class=setup_class,
             )
-        response.headers["Cache-Control"] = "public, max-age=10, stale-while-revalidate=30"
-        return SignalsResponse(items=items, total=len(items))
+            if got is None:
+                # Cache cold (first 5 s after startup) or stale (engine stopped
+                # publishing) — rebuild from whatever real source this process has.
+                got = await _cold_signals(status=which, limit=n, setup_class=setup_class)
+            return list(got)
+
+        items = await _fetch(want, limit)
+        locked_open = 0
+        if not access.allowed:
+            # Defence in depth: the "closed" filter already excludes them.
+            items = [it for it in items if not _signal_access.item_is_open(it)]
+            locked_open = len(await _fetch("open", 500))
+        # private: the body now depends on who is asking, so no shared cache
+        # (CDN / proxy) may hand one caller's live feed to another.
+        response.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
+        return SignalsResponse(
+            items=items,
+            total=len(items),
+            live_locked=not access.allowed,
+            locked_open_count=locked_open,
+            live_access=access.to_dict(),
+        )
 
     @app.get(
         "/api/signals/{signal_id}",
@@ -1692,7 +1782,10 @@ def build_app(
         tags=["signals"],
         dependencies=[Depends(auth)],
     )
-    async def signal_detail(signal_id: str) -> SignalDetail:
+    async def signal_detail(
+        signal_id: str,
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> SignalDetail:
         # Serve from the 5s background cache when warm (avoids building
         # 1000+ Pydantic models synchronously on every request).  The
         # cache cap is 500; fall back to a live 1000-item build for very
@@ -1706,6 +1799,17 @@ def build_app(
         )
         for it in pool:
             if it.signal_id == signal_id:
+                if (
+                    _signal_access.item_is_open(it)
+                    and not _signal_access.live_access(identity).allowed
+                ):
+                    # A push or a shared link can name a live signal; the
+                    # paywall holds here too. 403 with a stable code the app
+                    # keys its unlock sheet on.
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="live_signal_locked",
+                    )
                 return it
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1775,6 +1879,11 @@ def build_app(
         # Per-user paper visibility (PR #503, 2026-05-26) — open
         # positions filtered by the caller's subscription windows in
         # paper mode. Anonymous tokens fall through to engine-wide.
+        # A guest is not a device-token caller from before signup: it must
+        # not fall through to the engine-wide book below, which is a list of
+        # live entries.
+        if _signal_access.is_guest(identity):
+            return PositionsResponse(items=[], total=0)
         try:
             user_id = _resolve_user_id(identity)
         except HTTPException:
@@ -1790,6 +1899,9 @@ def build_app(
         except Exception:
             log.exception("/api/positions failed — returning empty list")
             items = []
+        if not _signal_access.live_access(identity).allowed:
+            # Every open position here mirrors a live signal's entry.
+            return PositionsResponse(items=[], total=0, locked_open_count=len(items))
         return PositionsResponse(items=items, total=len(items))
 
     # ---- Internal diag: position-state X-ray for the ops dashboard ----
@@ -2172,6 +2284,7 @@ def build_app(
             None,
             description="Filter to one evaluator's lifecycle events",
         ),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> ActivityResponse:
         try:
             cached = _snapshot_cache.filter_activity(limit=limit, setup_class=setup_class)
@@ -2182,7 +2295,11 @@ def build_app(
         except Exception:
             log.exception("/api/activity failed — returning empty list")
             items = []
-        response.headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=60"
+        if not _signal_access.live_access(identity).allowed:
+            # An OPEN / PRE_TP event of a still-active signal carries its
+            # live entry — withheld from a caller without live access.
+            items = [e for e in items if not getattr(e, "signal_open", False)]
+        response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=60"
         return ActivityResponse(items=items, total=len(items))
 
     # ---- Auto-mode ----

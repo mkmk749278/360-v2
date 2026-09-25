@@ -122,6 +122,15 @@ def register(
                 detail="only paper mode supported in v1 — live trade records ship in a follow-up",
             )
 
+        # An open paper trade carries a live signal's entry, so a caller
+        # without live access (guest, or free days used up with no plan)
+        # gets closed trades only. See ``signal_access``.
+        if include_open and _per_user_enabled:
+            from . import signal_access as _signal_access
+
+            if not _signal_access.live_access(identity).allowed:
+                include_open = False
+
         # Per-user books ON: the caller reads their OWN trades DB directly —
         # no shared ledger, no subscription-window filter (the per-user book
         # is the isolation boundary).

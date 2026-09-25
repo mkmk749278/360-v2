@@ -4256,11 +4256,23 @@ GOOGLE_PLAY_AUTO_PRODUCT_IDS: frozenset[str] = frozenset(
     if p.strip()
 )
 
+#: Product IDs for the Signals plan (owner, 2026-09-25): ₹499/mo, unlocks the
+#: LIVE signal feed and nothing else. Below Assist in the hierarchy
+#: ``free < signals < assist < auto``, so Assist and Auto include it. The
+#: Play Console product must exist before ``signals_paywall_start`` is set,
+#: or a locked user is shown a plan they cannot buy.
+GOOGLE_PLAY_SIGNALS_PRODUCT_IDS: frozenset[str] = frozenset(
+    p.strip()
+    for p in os.getenv("GOOGLE_PLAY_SIGNALS_PRODUCT_IDS", "lumin_signals_monthly").split(",")
+    if p.strip()
+)
+
 #: product_id → tier map consumed by the billing verifier.  Built from the
-#: two sets above so the verifier has a single source of truth.
+#: sets above so the verifier has a single source of truth.
 GOOGLE_PLAY_PRODUCT_TIERS: dict[str, str] = {
     **{pid: "auto" for pid in GOOGLE_PLAY_AUTO_PRODUCT_IDS},
     **{pid: "assist" for pid in GOOGLE_PLAY_ASSIST_PRODUCT_IDS},
+    **{pid: "signals" for pid in GOOGLE_PLAY_SIGNALS_PRODUCT_IDS},
 }
 
 #: Expected OIDC audience on Google Pub/Sub **push** requests carrying RTDN
@@ -4332,7 +4344,7 @@ REFERRAL_COMMISSION_MAX_PERIODS: int = _safe_int("REFERRAL_COMMISSION_MAX_PERIOD
 #: from the actual USD amount the webhook confirms.
 _REFERRAL_PRICES_RAW = os.getenv(
     "REFERRAL_COMMISSION_PRICES",
-    "lumin_assist_monthly:1000,lumin_auto_monthly:2000",
+    "lumin_signals_monthly:499,lumin_assist_monthly:1000,lumin_auto_monthly:2000",
 )
 
 
@@ -4481,6 +4493,8 @@ NOWPAYMENTS_API_BASE: str = os.getenv(
 #: Web/crypto pricing — independent of the Play ₹ prices (design decision
 #: 2026-07-20).  Priced in USD; NOWPayments converts to the payer's chosen
 #: crypto.  Monthly.
+#: ~₹499 at ~₹84/USD. The web rail prices in USD (NOWPayments), Play in ₹.
+WEB_BILLING_SIGNALS_USD: float = _safe_float("WEB_BILLING_SIGNALS_USD", "6")
 WEB_BILLING_ASSIST_USD: float = _safe_float("WEB_BILLING_ASSIST_USD", "15")
 WEB_BILLING_AUTO_USD: float = _safe_float("WEB_BILLING_AUTO_USD", "25")
 WEB_BILLING_PERIOD_DAYS: int = _safe_int("WEB_BILLING_PERIOD_DAYS", "30")
@@ -4489,6 +4503,7 @@ WEB_BILLING_PERIOD_DAYS: int = _safe_int("WEB_BILLING_PERIOD_DAYS", "30")
 #: The client names a *tier*; the engine sets the money — a tampered client
 #: can never assert its own price (design §7).
 WEB_BILLING_TIER_USD: dict[str, float] = {
+    "signals": WEB_BILLING_SIGNALS_USD,
     "assist": WEB_BILLING_ASSIST_USD,
     "auto": WEB_BILLING_AUTO_USD,
 }
@@ -4671,6 +4686,29 @@ FCM_TOPIC_PROXY_MAX_PER_MIN: int = _safe_int("FCM_TOPIC_PROXY_MAX_PER_MIN", "12"
 # release, which is a different guarantee from dark-first and a weaker one; it
 # is named here so nobody later reads it as the latter.
 TRACK_RECORD_PUBLIC_ENABLED: bool = _safe_bool("TRACK_RECORD_PUBLIC_ENABLED", "true")
+
+# ---------------------------------------------------------------------------
+# Live-signal paywall (owner, 2026-09-25) — src/api/signal_access.py
+# ---------------------------------------------------------------------------
+# Owner reversal of B1: CLOSED signals stay free and visible to everyone
+# (including guests); ACTIVE signals need an account AND the Signals plan
+# (or Assist/Auto). Every account gets SIGNALS_FREE_ACCESS_DAYS of live
+# access from sign-up; accounts that existed before the paywall start get the
+# same days from the start date.
+#
+# One knob, one meaning: SIGNALS_PAYWALL_START is an ISO date/time (UTC).
+# Empty = paywall OFF (today's behaviour for phone users). A future date
+# schedules it. It is a runtime tunable too (ops → Control), so the owner can
+# set or clear it without a deploy. Guests never see live signals regardless
+# (that is the guest mode's own rule, not the paywall's).
+#
+# Default EMPTY on purpose: the Play product lumin_signals_monthly must exist
+# in Play Console before this is set, or locked users meet a plan they cannot
+# buy.
+SIGNALS_PAYWALL_START: str = os.getenv("SIGNALS_PAYWALL_START", "")
+
+#: Free live-signal access every account gets (owner: 3 days).
+SIGNALS_FREE_ACCESS_DAYS: int = _safe_int("SIGNALS_FREE_ACCESS_DAYS", "3")
 
 #: Default window the app asks for, and the hard ceiling on what it may ask.
 #: The ceiling is a *render* bound on the caller's behalf: the series is one

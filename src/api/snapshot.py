@@ -1111,6 +1111,7 @@ def build_activity(
     router = getattr(engine, "router", None)
     active = list(router.active_signals.values()) if router is not None else []
 
+    active_ids = {getattr(s, "signal_id", None) for s in active} - {None}
     pool = active + history
     if setup_class:
         target = setup_class.strip().upper()
@@ -1138,6 +1139,7 @@ def build_activity(
                 else str(direction or "LONG")
             ).upper()
             agent = _agent_name_for(getattr(sig, "setup_class", "") or "")
+            still_open = getattr(sig, "signal_id", None) in active_ids
             events.append(
                 ActivityEvent(
                     kind="OPEN",
@@ -1145,6 +1147,7 @@ def build_activity(
                     subtitle=f"entry {getattr(sig, 'entry', 0.0):.4f} — {agent}",
                     timestamp=ts,
                     minutes_ago=_minutes_since(ts),
+                    signal_open=still_open,
                 )
             )
 
@@ -1158,6 +1161,7 @@ def build_activity(
                         subtitle=f"+{getattr(sig, 'pre_tp_pct', 0.0):.2f}% — SL → breakeven",
                         timestamp=pre_ts,
                         minutes_ago=_minutes_since(pre_ts),
+                        signal_open=still_open,
                     )
                 )
 
