@@ -1670,6 +1670,96 @@ def build_app(
         response.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=10"
         return build_pairs(engine)
 
+    @app.get(
+        "/api/pairs/{symbol}/context",
+        tags=["pulse"],
+        dependencies=[Depends(auth)],
+    )
+    async def pair_context(
+        symbol: str,
+        response: Response,
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> Dict[str, Any]:
+        """What the engine reads on one pair, for the app's chart screen.
+
+        Levels, the week's volume profile and the 4h structure leg for pairs
+        the scanner tracks, plus Lumin's own closed signals on the pair over
+        30 days (wins AND losses, the same record as the track record).
+
+        Three states, never two: ``covered`` (the engine holds a read),
+        ``not_tracked`` (a pair the scanner does not scan — the app says so
+        instead of the engine fetching it) and ``not_reported`` (no published
+        block at all: an engine predating this, or the key expired). The
+        long/short checklist is part of the live-signal plan; a caller without
+        live access gets ``checklist_locked`` and the levels, which are free.
+        """
+        from src import pair_context as _pc
+        from src import track_record as _tr
+
+        sym = symbol.upper().strip()
+        if not sym.isalnum() or len(sym) > 30:
+            raise HTTPException(status_code=400, detail="bad_symbol")
+
+        published = getattr(engine, "published_pair_context", None)
+        snap = published() if callable(published) else None
+        if snap is None and not callable(published):
+            # Single-process: the scanner is in this process.
+            try:
+                snap = _pc.build_snapshot(engine)
+            except Exception:
+                snap = None
+
+        ctx = None
+        state = "not_reported"
+        generated_at = None
+        if isinstance(snap, dict):
+            generated_at = snap.get("generated_at")
+            ctx = (snap.get("pairs") or {}).get(sym)
+            state = "covered" if ctx else "not_tracked"
+
+        access = _signal_access.live_access(identity)
+        out: Dict[str, Any] = {
+            "symbol": sym,
+            "state": state,
+            "generated_at": generated_at,
+            "context": ctx,
+            "checklist": None,
+            "checklist_locked": False,
+        }
+        if ctx:
+            if access.allowed:
+                out["checklist"] = _pc.checklist(ctx)
+            else:
+                out["checklist_locked"] = True
+
+        # Lumin's closed signals on this pair, 30 days — never the live ones
+        # (those follow the paywall on /api/signals).
+        rows, err = _tr.load_rows()
+        cutoff = time.time() - 30 * 86400
+        past = []
+        for r in rows:
+            if r.get("symbol") != sym:
+                continue
+            ts = r.get("closed_at_ts")
+            if ts is None or ts < cutoff:
+                continue
+            past.append({
+                "signal_id": r.get("signal_id"),
+                "direction": r.get("direction"),
+                "entry": r.get("entry"),
+                "outcome": r.get("outcome"),
+                "pnl_pct": r.get("pnl_pct"),
+                "opened_at_ts": r.get("opened_at_ts"),
+                "closed_at_ts": ts,
+            })
+            if len(past) >= 30:
+                break
+        out["past_signals"] = past
+        out["past_signals_unavailable"] = err or ""
+        # Per-caller body (the checklist follows access): never a shared cache.
+        response.headers["Cache-Control"] = "private, max-age=30"
+        return out
+
     # ---- Signals ----
 
     async def _cold_signals(
