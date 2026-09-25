@@ -38,6 +38,73 @@ Play financial-features declaration to be kept current.
 
 ---
 
+## OPEN 2026-09-25 — shorts from market structure: one edge survives (unlock shorts), nothing built
+
+Report: `docs/SHORTS_MARKET_RESEARCH_2026_09_25.md`. Scripts:
+`scripts/research/shorts_market_2026_09_25/`. Uses only public Binance archive
+data and DefiLlama's unlock schedule, per the owner: *"don't only depend on our
+data and paths … purely research on the crypto market."*
+
+Ten hypotheses were pre-registered (commit `cd92f95`) before any data was read.
+
+**Survives: the insider cliff unlock short.**
+- The trade: insider cliff unlocks ≥0.5% of max supply, short from T−14d to
+  T+2d.
+- n=319 over 56 tokens.
+- Net per trade: **+5.66%** raw and **+3.83%** BTC-hedged, both halves positive.
+- The unlock-specific excess over the same tokens on quiet dates is +2.85pp,
+  interval [−1.0, +6.1]. That is the right sign, but not proven.
+- Stops kill the naive version: the median trade first goes 10.6% against.
+- Exploratory filters, declared before running (commit `f9cf494`): skip
+  already-crowded shorts (funding ≤ −0.03%) and names up >20% in 14d. With
+  those, a 20% stop survives at +3.2%, and the alt-basket-hedged result is
+  **+3.7% [+1.4, +5.9]**.
+- **Not validated. It needs a dark forward lane before anyone trades it.**
+
+**Refuted, with one of my own errors caught on the way.**
+- The liquidation-cascade short (H10) first passed at +0.16% over 26k trades.
+  The archive's 5m OI stamps lead the price by five minutes (measured,
+  `oi_stamp_check.py`), so the rule was reading the future.
+- Timed honestly, the hour after a burst is flat (−0.01% gross). An
+  ordinary −2% drop bounces (−0.16% gross for the short).
+- **Any OI research on `data.binance.vision` metrics must re-time the stamps
+  +5m.** `load.metrics` does this now.
+
+**Failed after costs:**
+- new-listing decay once hedged or stopped;
+- trapped-long breakdowns;
+- perp-led rallies (they continue);
+- premium fades;
+- funding-settlement dips (price rises into high funding);
+- retail-crowding contrarian;
+- weekly loser momentum;
+- US-open time of day.
+
+**Owner decisions (nothing built):**
+1. Whether to build an **unlock-short dark lane**, dark-first:
+   - one DefiLlama request a day;
+   - stamp at T−14 with the two filters, and walk to T+2 with a 20% stop;
+   - about one candidate a day, so 2–3 months gives 60–80 forward rows.
+   - It is a new evaluator path, so owner sign-off applies.
+2. The unlock calendar should be confirmed against a second source (Tokenomist,
+   paid API) before it goes live.
+
+**Live-book facts read the same session (ops guest, ~04:30 UTC):**
+- **MVAVW SHORT is diverted.** The path scorecard lists it under "Already
+  diverted".
+- **LSR SHORT now grades LOSES on the engine scorecard.** Over 30d it ran
+  −0.43% (n=41, 22 symbols), interval [−0.92, −0.00]. It is a retirement
+  candidate.
+- **Routing alone will not stop LSR SHORT.**
+  - 19 of those 41 were delivered through the LSR promotion rule (gate
+    `execution:overextended`, direction Any).
+  - Retirement leaves already-dark rows alone (`src/scanner/__init__.py:6858`),
+    so the rule would keep promoting them.
+  - Setting that rule's direction to LONG is the second half of the fix.
+  - The owner's call.
+
+---
+
 ## OPEN 2026-09-24 — the audit's fixes: all merged; MVAVW SHORT waits on one owner click
 
 Report: `docs/AUDIT_2026_09_24_POST_FIX_VERIFICATION.md` (#1053).  Owner reply
