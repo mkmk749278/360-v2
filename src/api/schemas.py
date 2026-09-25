@@ -223,6 +223,16 @@ class SignalDetail(BaseModel):
 class SignalsResponse(BaseModel):
     items: List[SignalDetail]
     total: int
+    #: True when the caller may not see ACTIVE signals (guest, or the live
+    #: paywall's free days are used up with no plan). ``items`` then holds
+    #: closed signals only, whatever ``status`` asked for.
+    live_locked: bool = False
+    #: How many active signals the caller is not being shown (same
+    #: ``setup_class`` filter). 0 when nothing is locked.
+    locked_open_count: int = 0
+    #: ``signal_access.LiveAccess.to_dict()`` — allowed / reason / until /
+    #: paywall_start. None from an engine predating the paywall.
+    live_access: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +290,9 @@ class PositionDetail(BaseModel):
 class PositionsResponse(BaseModel):
     items: List[PositionDetail]
     total: int
+    #: Open positions withheld because they would show a live signal's entry
+    #: to a caller without live access (see ``signal_access``).
+    locked_open_count: int = 0
 
 
 class PositionDiagDetail(BaseModel):
@@ -355,6 +368,9 @@ class ActivityEvent(BaseModel):
     subtitle: str
     timestamp: datetime
     minutes_ago: int
+    #: True on an OPEN / PRE_TP event whose signal is still active. Those
+    #: carry the live entry, so a caller without live access never gets them.
+    signal_open: bool = False
 
 
 class ActivityResponse(BaseModel):
@@ -1574,6 +1590,9 @@ class ProfileResponse(BaseModel):
     terms_accepted_at: Optional[str] = None
     onboarded_at: Optional[str] = None
     needs_onboarding: bool
+    #: Live-signal access (``signal_access.LiveAccess.to_dict()``), so the
+    #: app can render "3 days free — N left" or the upgrade prompt.
+    live_access: Optional[Dict[str, Any]] = None
 
 
 class ProfileUpdate(BaseModel):

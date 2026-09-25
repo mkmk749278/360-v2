@@ -59,6 +59,10 @@ FREE_TIER = "free"
 # (it historically unlocked everything); all-access/owner sit above auto.
 ASSIST_TIER = "assist"
 AUTO_TIER = "auto"
+# SIGNALS_TIER ("signals", ₹499/mo, owner 2026-09-25) — unlocks the LIVE
+# signal feed only (closed signals are free).  Sits below Assist, so every
+# automation tier includes it: free < signals < assist < auto.
+SIGNALS_TIER = "signals"
 # OWNER_TIER gates write endpoints (settings PUT, auto-mode POST).  Anon /
 # all-access / paid / free clients can READ everything but only owner-tier
 # JWTs (or the static admin token bypass) can mutate engine state.  Added
@@ -71,11 +75,12 @@ OWNER_TIER = "owner"
 # money-path gate (only ``auto`` runs hands-off) and the app feature gates.
 _TIER_RANK = {
     FREE_TIER: 0,
-    ASSIST_TIER: 1,
-    AUTO_TIER: 2,
-    PAID_TIER: 2,          # legacy single paid tier == full automation
-    ALL_ACCESS_TIER: 3,    # testing-phase god mode
-    OWNER_TIER: 3,
+    SIGNALS_TIER: 1,
+    ASSIST_TIER: 2,
+    AUTO_TIER: 3,
+    PAID_TIER: 3,          # legacy single paid tier == full automation
+    ALL_ACCESS_TIER: 4,    # testing-phase god mode
+    OWNER_TIER: 4,
 }
 
 
@@ -87,6 +92,11 @@ def tier_rank(tier: Optional[str]) -> int:
 def can_assist(tier: Optional[str]) -> bool:
     """True when the tier may place one-tap (assisted) live trades."""
     return tier_rank(tier) >= _TIER_RANK[ASSIST_TIER]
+
+
+def can_see_live_signals_by_tier(tier: Optional[str]) -> bool:
+    """True when the tier itself includes the live signal feed (signals+)."""
+    return tier_rank(tier) >= _TIER_RANK[SIGNALS_TIER]
 
 
 def can_auto(tier: Optional[str]) -> bool:
@@ -103,7 +113,7 @@ def effective_tier(
     """Effective subscription tier after the read-time expiry downgrade.
 
     Pure function over a user row's ``tier`` + ``paid_until``: normalises
-    the tier string and downgrades any assist-or-higher tier to ``free``
+    the tier string and downgrades any paid tier (signals or higher) to ``free``
     when its paid window has lapsed (defence-in-depth alongside RTDN
     expiry events — the DB row may lag the store's reality).
 
@@ -115,7 +125,7 @@ def effective_tier(
     """
     t = (tier or "free").lower()
     if (
-        can_assist(t)
+        can_see_live_signals_by_tier(t)
         and paid_until is not None
         and paid_until <= (now or datetime.now(timezone.utc))
     ):

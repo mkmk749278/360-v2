@@ -174,6 +174,7 @@ def _build_registry() -> Dict[str, Tunable]:
         SAR_EXIT_SHADOW_ENABLED,
         STALE_TF_REFUSE_ENABLED,
         TRACK_RECORD_PUBLIC_ENABLED,
+        SIGNALS_PAYWALL_START,
         TUNED_VARIANTS_ENABLED,
         LOSS_STREAK_CAP_HOURS,
         LOSS_STREAK_ESCALATION_ENABLED,
@@ -1661,6 +1662,24 @@ def _build_registry() -> Dict[str, Tunable]:
             type="bool",
             default=TRACK_RECORD_PUBLIC_ENABLED,
             category="Measurement",
+        ),
+        Tunable(
+            key="signals_paywall_start",
+            label="Live-signal paywall start (UTC)",
+            description=(
+                "ISO date or date-time, e.g. 2026-10-01 or 2026-10-01T06:00. "
+                "EMPTY = paywall OFF. From this moment ACTIVE signals need an "
+                "account plus the Signals plan (or Assist/Auto); closed signals "
+                "stay free. Every account keeps live access for "
+                "SIGNALS_FREE_ACCESS_DAYS after sign-up, and accounts created "
+                "before this date get those days counted from it. Set it only "
+                "after the Play product lumin_signals_monthly is live. An "
+                "unparseable value is treated as OFF and reported as "
+                "'misconfigured' on /api/profile, never as a lock."
+            ),
+            type="str",
+            default=SIGNALS_PAYWALL_START,
+            category="Billing",
         ),
     ]
 

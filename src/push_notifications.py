@@ -170,25 +170,38 @@ def push_signal_published(signal: Any) -> None:
     if not FCM_PUSH_SIGNALS_ENABLED:
         return
     direction = getattr(signal.direction, "value", str(signal.direction))
-    title = f"New Signal: {direction} {signal.symbol}"
-    body = (
-        f"Entry {signal.entry:g} · SL {signal.stop_loss:g} · TP1 {signal.tp1:g}"
-        f" · Confidence {signal.confidence:.0f}"
-    )
-    _dispatch(
-        FCM_SIGNALS_TOPIC,
-        title,
-        body,
-        {
-            "kind": "signal",
-            "signal_id": getattr(signal, "signal_id", "") or "",
-            "symbol": signal.symbol,
-            "direction": direction,
-            "route": "signals",
-            "collapse_tag": f"signal:{getattr(signal, 'signal_id', signal.symbol)}",
-        },
-        _CHANNEL_SIGNALS,
-    )
+    # Live-signal paywall (owner, 2026-09-25). A topic push reaches every
+    # subscribed device, paid or not, and a topic cannot be scoped per user.
+    # So once the paywall is on, the push itself is the teaser for EVERYONE:
+    # symbol only — no direction, no levels, not even in the data payload —
+    # and the app opens the signal behind the paywall. Direction is withheld
+    # too because for a scalp "BTCUSDT LONG, now" is most of the call.
+    try:
+        from src.api.signal_access import paywall_active
+
+        teaser = paywall_active()
+    except Exception as exc:  # noqa: BLE001 — never lose the push over this
+        log.warning("push_signal_published: paywall check failed, sending teaser: {}", exc)
+        teaser = True
+    data = {
+        "kind": "signal",
+        "signal_id": getattr(signal, "signal_id", "") or "",
+        "symbol": signal.symbol,
+        "route": "signals",
+        "collapse_tag": f"signal:{getattr(signal, 'signal_id', signal.symbol)}",
+    }
+    if teaser:
+        title = f"New signal: {signal.symbol}"
+        body = "Tap to see entry, stop-loss and target in Lumin."
+        data["teaser"] = "1"
+    else:
+        title = f"New Signal: {direction} {signal.symbol}"
+        body = (
+            f"Entry {signal.entry:g} · SL {signal.stop_loss:g} · TP1 {signal.tp1:g}"
+            f" · Confidence {signal.confidence:.0f}"
+        )
+        data["direction"] = direction
+    _dispatch(FCM_SIGNALS_TOPIC, title, body, data, _CHANNEL_SIGNALS)
 
 
 def push_signal_outcome(signal: Any, outcome_label: Optional[str] = None) -> None:

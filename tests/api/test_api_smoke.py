@@ -601,7 +601,7 @@ def test_positions_returns_empty_on_router_attribute_error(
     monkeypatch.setattr(_server_mod, "build_positions", _broken)
     r = client.get("/api/positions")
     assert r.status_code == 200
-    assert r.json() == {"items": [], "total": 0}
+    assert r.json() == {"items": [], "total": 0, "locked_open_count": 0}
 
 
 # ---------------------------------------------------------------------------
