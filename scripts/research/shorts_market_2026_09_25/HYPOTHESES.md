@@ -19,7 +19,12 @@ not used and nothing is compared against them.
 
 **Split:**
 - in-sample (IS): 2025-09-08 → 2026-04-30;
-- out-of-sample (OOS): 2026-05-01 → 2026-09-23.
+- out-of-sample (OOS): 2026-05-01 → 2026-08-31.
+
+  **Amended before any test ran:** the OOS end was 2026-09-23. The public
+  archive publishes funding only in monthly files, and September 2026 is not
+  yet out; the live API answers 451 here. Every window therefore ends at
+  2026-08-31, so that no trade is booked without its carry.
 
 **Pass bar:**
 - a hypothesis passes only if its net mean is **negative for the short
@@ -158,3 +163,25 @@ losing as holders capitulate and supply keeps unlocking.
 - **Test B (exhaustion):** the same, long.
 - Reported as a **map of what happens after a cascade**, so we know whether
   shorts must avoid chasing one.
+
+## Exploratory, declared after H1's primary result and before running (2026-09-25)
+
+H1 passed its pre-registered bar. Two findings made it unusable as a signal:
+- its excess over the control is not significant;
+- any hard stop removes it, because the median trade first moves 10.6%
+  against the short.
+
+The rules below come from market structure, not from looking at which H1 rows
+lost. **They are exploratory:** four more cells, read with that count in mind,
+and never quoted as validated.
+
+- **E1 — crowding filter.** Skip the entry if the last settled funding at
+  entry ≤ −0.03%. A short that is already crowded pays carry and is squeeze
+  fuel.
+- **E2 — no squeeze in progress.** Skip the entry if the token's 14d return
+  into entry is > +20%.
+- **E3 — E1 and E2 together.**
+- **E4 — alt-basket hedge.** Hedge with an equal-weight basket of liquid alts
+  instead of BTC, which isolates the token from the alt market.
+
+Each is reported unstopped, and with 20% and 40% hard stops.
