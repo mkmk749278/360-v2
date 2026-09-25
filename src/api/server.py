@@ -1745,8 +1745,12 @@ def build_app(
         identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> SignalsResponse:
         # Live-signal paywall (owner, 2026-09-25): a caller without live
-        # access gets CLOSED signals only, whatever it asked for, plus the
-        # count of what it is not being shown.
+        # access gets CLOSED signals only, plus the count of what it is not
+        # being shown. A request for OPEN signals therefore answers with no
+        # items — never with closed ones in their place: the app reads every
+        # row of an `open` answer as live, so substituting closed signals put
+        # LONG/SHORT badges and a finished trade's levels on the Charts tab as
+        # if they were running (found 2026-09-25, the same day).
         access = _signal_access.live_access(identity)
         want = status if access.allowed else "closed"
 
@@ -1760,7 +1764,7 @@ def build_app(
                 got = await _cold_signals(status=which, limit=n, setup_class=setup_class)
             return list(got)
 
-        items = await _fetch(want, limit)
+        items = [] if (not access.allowed and status == "open") else await _fetch(want, limit)
         locked_open = 0
         locked_items: List[LockedSignal] = []
         if not access.allowed:

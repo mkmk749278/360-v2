@@ -216,10 +216,16 @@ def test_guest_reads_closed_signals_only_and_is_told_how_many_are_locked(app_cli
     assert "private" in r.headers["cache-control"]
 
 
-def test_guest_asking_for_open_gets_nothing_open(app_client) -> None:
+def test_guest_asking_for_open_gets_no_items_at_all(app_client) -> None:
+    """Not closed signals in their place: the app reads every row of an
+    `open` answer as live (Charts-tab badges, the chart's Levels overlay)."""
     client, _ = app_client
     body = _get(client, "/api/signals?status=open", "anon").json()
-    assert all(not it["is_open"] for it in body["items"])
+    assert body["items"] == []
+    assert body["total"] == 0
+    assert body["live_locked"] is True
+    assert body["locked_open_count"] == 1
+    assert [it["signal_id"] for it in body["locked_items"]] == ["sig-001"]
 
 
 def test_guest_cannot_open_a_live_signal_by_id_but_can_open_a_closed_one(app_client) -> None:
