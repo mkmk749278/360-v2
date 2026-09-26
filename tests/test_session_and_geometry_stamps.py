@@ -37,7 +37,12 @@ What is pinned here is the **separation**, not a verdict:
 """
 from __future__ import annotations
 
+import ast
 import datetime as dt
+import json
+from pathlib import Path
+
+import pytest
 
 from config import MOVER_TP_MIN_STACK_SEP_PCT
 from src import entry_features as ef
@@ -48,6 +53,7 @@ from src.performance_tracker import (
     SignalRecord,
     entry_sl_distance_pct,
     shipped_sl_distance_pct,
+    shipped_tp1_distance_pct,
 )
 from src.runtime_truth_report import build_geometry_override
 from src.smc import Direction
@@ -345,6 +351,102 @@ class TestShippedStopDistance:
             signal_id="x", channel="c", symbol="s", direction="LONG",
             entry=1.0, hit_tp=0, hit_sl=False, pnl_pct=0.0, confidence=70.0,
         ).shipped_sl_distance_pct == 0.0
+
+
+class TestShippedTp1Distance:
+    """The target the trade closed against — the field every entry/exit study
+    had to approximate, because the record kept the stop and never the TP1
+    (docs/LONGS_RESEARCH_2026_09_26.md §11.3)."""
+
+    def test_long_distance_is_read_off_the_signal(self):
+        sig = _signal()  # entry 100, tp1 104.13
+        assert shipped_tp1_distance_pct(sig) == pytest.approx(4.13)
+
+    def test_short_distance_is_positive_too(self):
+        sig = Signal(
+            channel="360_SCALP", symbol="BTWUSDT", direction=Direction.SHORT,
+            entry=100.0, stop_loss=103.0, tp1=96.0, tp2=94.0,
+        )
+        assert shipped_tp1_distance_pct(sig) == pytest.approx(4.0)
+
+    def test_a_missing_target_is_unknown_not_zero_distance_guessed(self):
+        sig = _signal()
+        sig.tp1 = 0.0
+        assert shipped_tp1_distance_pct(sig) == 0.0
+        sig = _signal()
+        sig.entry = 0.0
+        assert shipped_tp1_distance_pct(sig) == 0.0
+
+    def test_the_record_carries_it(self, tmp_path):
+        """Driven through the real tracker and the real helper."""
+        tracker = PerformanceTracker(storage_path=str(tmp_path / "perf.json"))
+        sig = _signal()
+        tracker.record_outcome(
+            signal_id="sig-1", channel="360_SCALP", symbol="BTWUSDT",
+            direction="LONG", entry=100.0, hit_tp=1, hit_sl=False,
+            pnl_pct=4.13, outcome_label="TP1_HIT",
+            shipped_sl_distance_pct=shipped_sl_distance_pct(sig),
+            shipped_tp1_distance_pct=shipped_tp1_distance_pct(sig),
+        )
+        rec = tracker._records[-1]
+        assert rec.shipped_tp1_distance_pct == pytest.approx(4.13)
+        assert rec.shipped_sl_distance_pct == 3.09
+
+    def test_the_field_survives_the_round_trip_to_disk(self, tmp_path):
+        """A field one writer sets and the serializer drops is invisible at
+        both ends (#842) — follow it to disk and back."""
+        path = tmp_path / "perf.json"
+        tracker = PerformanceTracker(storage_path=str(path))
+        tracker.record_outcome(
+            signal_id="sig-1", channel="360_SCALP", symbol="BTWUSDT",
+            direction="LONG", entry=100.0, hit_tp=1, hit_sl=False,
+            pnl_pct=4.13, outcome_label="TP1_HIT",
+            shipped_tp1_distance_pct=4.13,
+        )
+        on_disk = json.loads(path.read_text())
+        assert on_disk[-1]["shipped_tp1_distance_pct"] == pytest.approx(4.13)
+        reloaded = PerformanceTracker(storage_path=str(path))
+        assert reloaded._records[-1].shipped_tp1_distance_pct == pytest.approx(4.13)
+
+    def test_a_row_written_before_the_field_loads_as_unknown(self, tmp_path):
+        path = tmp_path / "perf.json"
+        tracker = PerformanceTracker(storage_path=str(path))
+        tracker.record_outcome(
+            signal_id="old", channel="360_SCALP", symbol="BTWUSDT",
+            direction="LONG", entry=100.0, hit_tp=0, hit_sl=True,
+            pnl_pct=-3.0, outcome_label="SL_HIT",
+        )
+        rows = json.loads(path.read_text())
+        for row in rows:
+            row.pop("shipped_tp1_distance_pct", None)
+        path.write_text(json.dumps(rows))
+        reloaded = PerformanceTracker(storage_path=str(path))
+        assert reloaded._records[-1].shipped_tp1_distance_pct == 0.0
+
+    def test_the_field_name_is_a_cross_repo_contract(self):
+        from dataclasses import fields
+
+        assert "shipped_tp1_distance_pct" in {f.name for f in fields(SignalRecord)}
+
+    @pytest.mark.parametrize("module", ["src/trade_monitor.py", "src/main.py"])
+    def test_both_terminal_writers_stamp_it(self, module):
+        """Two writers of the closed record; a field carried by one and not the
+        other reads as missing data on half the rows, not as a missing writer.
+        Qualified on the receiver: ``_circuit_breaker.record_outcome`` shares
+        the method name."""
+        tree = ast.parse(Path(module).read_text())
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", None) == "record_outcome"
+            and getattr(getattr(node.func, "value", None), "attr", None)
+            == "_performance_tracker"
+        ]
+        assert calls, f"{module} no longer writes the closed-signal record"
+        for call in calls:
+            assert "shipped_tp1_distance_pct" in {kw.arg for kw in call.keywords}, (
+                f"{module} writes the closed record without shipped_tp1_distance_pct"
+            )
 
 
 class TestGeometryOverrideSection:
