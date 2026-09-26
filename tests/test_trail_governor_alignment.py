@@ -432,47 +432,61 @@ def test_reconciler_watches_the_governor_stop():
 # --------------------------------------------------------------------------- #
 
 
-def test_sl_hit_skips_a_governed_position():
-    """GUARD (fails pre-fix).
+@pytest.mark.parametrize(
+    "reason,governing,expect_closed",
+    [
+        ("sl_hit", True, False),     # the governor owns the exit — never market-close
+        ("sl_hit", False, True),     # pre-handover the evaluator's SL IS this stop
+        ("invalidated", True, True),  # the engine leaving the trade closes everyone
+        ("expired", True, True),
+        ("cancelled", True, True),
+    ],
+)
+async def test_sl_hit_skips_a_governed_position_and_nothing_else(
+    reason: str, governing: bool, expect_closed: bool,
+):
+    """GUARD, driven through the real close path.
 
     At handover the governor CANCELS the evaluator's stop on the exchange.
     TradeMonitor kept evaluating the signal against that same level and closed
     everyone on a hit, so the governed position exited on a rule the mechanism
-    had removed — and exited worse, at market.  PROMUSDT 2026-08-11: signal
+    had removed — and exited worse, at market. PROMUSDT 2026-08-11: signal
     SL_HIT at -3.00% designed, position market-closed 12s later at **-4.89%**.
 
-    Asserted on the source of the guard rather than by driving Firestore,
-    because the surrounding function needs a live position store; the behaviour
-    itself is covered by the pair of predicate tests below.
+    The narrowness IS the argument: ``invalidated`` / ``expired`` /
+    ``cancelled`` are the engine deciding to be out of the trade entirely, and
+    B12's lockstep guarantee depends on those still closing everyone.
+
+    This replaced two tests that could not fail (2026-09-26 audit): one read
+    the function's SOURCE for the text ``reason == "sl_hit"`` (satisfied by a
+    guard that no longer skips), the other re-implemented the predicate in the
+    test body and asserted on its own copy. This one calls
+    ``close_fsm_positions_for_signal`` and counts market closes.
     """
-    src = inspect.getsource(sd.close_fsm_positions_for_signal)
-    assert 'reason == "sl_hit"' in src
-    assert "trail_governing" in src
+    from unittest.mock import patch
 
+    pos = _pos(trail_governing=governing, sl_order_id=1001, tp1_order_id=2001)
+    closes: list = []
 
-@pytest.mark.parametrize(
-    "reason,governing,expect_skip",
-    [
-        ("sl_hit", True, True),
-        ("sl_hit", False, False),
-        ("invalidated", True, False),
-        ("expired", True, False),
-        ("cancelled", True, False),
-    ],
-)
-def test_only_sl_hit_is_exempt_and_only_once_governing(
-    reason: str, governing: bool, expect_skip: bool
-):
-    """The narrowness IS the argument.
+    async def _market_close(self_ignored, **kwargs):
+        closes.append(kwargs)
+        return op.OrderPlacementResult(
+            order_id=9999, client_order_id="lumin_SIG1_close",
+            status="FILLED", avg_price=100.0, binance_body={},
+        )
 
-    ``invalidated`` / ``expired`` / ``cancelled`` are the engine deciding to be
-    out of the trade entirely rather than a level being touched — B12's
-    lockstep guarantee and the hold-time bound both depend on those still
-    closing everyone, governed or not.  Pre-handover the evaluator's SL is
-    genuinely live and genuinely this position's stop.
-    """
-    pos = _pos(trail_governing=governing)
-    skipped = reason == "sl_hit" and bool(
-        getattr(pos, "trail_governing", False)
-    )
-    assert skipped is expect_skip
+    async def _cancel(self_ignored, *, symbol, algo_id):
+        return None
+
+    with patch.object(ps, "is_initialised", return_value=True), \
+            patch.object(sd, "_active_uids", return_value=["UID1"]), \
+            patch.object(ps, "get_position", return_value=pos), \
+            patch.object(ps, "put_position"), \
+            patch.object(op.OrderPlacer, "cancel_algo_order", _cancel), \
+            patch.object(op.OrderPlacer, "place_market_close", _market_close):
+        closed = await sd.close_fsm_positions_for_signal(
+            "SIG1", symbol="BTCUSDT", direction="LONG", reason=reason,
+        )
+
+    assert (len(closes) == 1) is expect_closed, (reason, governing, closes)
+    assert closed == (1 if expect_closed else 0)
