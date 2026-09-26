@@ -16,6 +16,7 @@ what most of this file pins.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -229,7 +230,14 @@ def test_the_interval_is_stable_across_PROCESSES():
         proc = subprocess.run(
             [sys.executable, "-c", prog],
             capture_output=True, text=True, timeout=120,
-            env={"PYTHONHASHSEED": seed, "PATH": "/usr/bin:/bin"},
+            # A stripped env on purpose (the hash seed is the variable under
+            # test) — but carry the suite's log sinks, or the child imports
+            # src.logger with no LOG_DIR and writes into the checkout's logs/.
+            env={
+                "PYTHONHASHSEED": seed,
+                "PATH": "/usr/bin:/bin",
+                **{k: os.environ[k] for k in ("LOG_DIR", "WS_TRACE_LOG_PATH") if k in os.environ},
+            },
         )
         assert proc.returncode == 0, proc.stderr
         runs.append(proc.stdout.strip())
