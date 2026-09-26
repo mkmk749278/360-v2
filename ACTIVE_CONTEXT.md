@@ -28,8 +28,26 @@ Binance 1m archive klines for every long closed in the last 62 days.
   worth ≤0.03%/trade, and every interval spans zero.
   - 78% of stopped MVRTP longs trade back to entry within 24h, and a wider
     stop still does not pay.
-- **Entry drift is the lever** [recorded, not re-measured]. It runs
-  ~0.23%/trade, about two-thirds of the long book's edge.
+- **Entry, measured on the engine's own record (§11, ops guest session).**
+  - Sample: 708 longs since 5 Sep with a fill stamp. The book reads +0.45%
+    and the user's fill gets +0.24% [+0.01, +0.47]. For MVRTP longs:
+    +0.49% → +0.26%.
+  - The cause is a stale signal price: 56% of MVRTP longs are created 5–15
+    minutes after the 15m bar they are priced from.
+  - **Ops' rebased column overstates the cost.** It parks break-even at the
+    signal price, while a live user's break-even parks at their fill
+    (`pretp_dispatcher.entry_price_filled`). So high-drift trades read
+    −0.29% rebased but −0.05% at the fill.
+- **Order placement recovers little (§11.3).** Tested on the 1m tape over the
+  last 271 MVRTP longs:
+  - The `FSM_LIMIT_ENTRY` zone-edge design: +0.01. 75% of signals are already
+    inside the zone, so it fills at market.
+  - A drift ≥0.5% skip gate: +0.02. Do not build it.
+  - A 60-minute limit at the signal price: +0.06 to +0.13 per signal,
+    unproven.
+- **MVRTP LONG edge on real fills is on core pairs.** Core pairs make +0.40%
+  (407 trades); promoted movers make −0.06% (177). This is a candidate, not a
+  result.
 - **Red days are long days.** Over 30d the longs account for −99.5% of the
   −105.5% red-day loss. The worst days are MVRTP stop clusters.
 - **No live long path has a CI below zero.** SR_FLIP LONG and LSR LONG last
@@ -38,8 +56,13 @@ Binance 1m archive klines for every long closed in the last 62 days.
   [−1.08, −0.10]. FAR SHORT went 0 for 7.
 
 **Recommendations (none built):**
-1. Research drift by path and side, and how the order is placed (limit vs
-   market; adverse selection is the trap). This needs dispatch timestamps.
+1. Entry:
+   - no drift gate;
+   - do not expect `FSM_LIMIT_ENTRY` to improve price;
+   - shadow a 60-minute limit at the signal price before any FSM change
+     (owner sign-off);
+   - persist TP1 on the closed-signal record.
+   Also read MVRTP LONG core vs mover at 60 days.
 2. Leave MVRTP exits alone.
 3. Retire LSR SHORT and set the LSR promotion rule's direction to LONG. These
    are the owner's clicks, carried from 25 Sep.

@@ -9,10 +9,25 @@ wrong."* The long-side companion to `SHORTS_RESEARCH_2026_09_24.md`.
 - **The long side carries the book, and one path carries the long side.**
   `MOVER_TREND_PULLBACK` (MVRTP) is 74% of long trades and more than all of
   their profit. The other thirteen long paths together are flat.
-- **About two-thirds of the long edge is lost at entry, before any exit rule
-  acts.** Longs read +0.35%/trade on book prices over 30 days. The recorded
-  entry drift is ~0.23–0.25%/trade, so on the tape the long book is roughly
-  +0.10–0.12%.
+- **About half of the published long edge never reaches a user's fill**
+  (§11, measured on the engine's own record). On the 708 longs since 5 Sep
+  that carry a fill stamp:
+  - the book reads **+0.45%/trade**;
+  - priced from the price the user actually got, it is **+0.24%**
+    [+0.01, +0.47].
+
+  The drift comes from a **stale signal price**: 56% of MVRTP longs are
+  created 5–15 minutes after the 15m bar they are priced from.
+- **Changing the order type recovers little of it (§11.3).** On the latest
+  271 MVRTP longs, on the 1m tape:
+  - the existing `FSM_LIMIT_ENTRY` design (limit at the zone edge) changes
+    nothing, because 75% of signals are already inside the zone at dispatch;
+  - skipping high-drift signals changes nothing;
+  - a resting limit at the signal price for 60 minutes is +0.06% to +0.13%
+    per signal. That is not proven, and about 0.03 of it is the maker fee.
+- **MVRTP longs on promoted movers earn about nothing at the fill (§11.2).**
+  Core pairs make +0.40%/trade (407 trades); promoted movers −0.06%
+  (177 trades). This is a candidate, not a result.
 - **The exits are not the problem.** Three changes were tested on Binance's
   1m tape: no break-even move, a wider stop, and a TP1 runner. Each is worth
   ≤0.03%/trade on the book, and every interval spans zero. Do not change MVRTP's
@@ -42,13 +57,14 @@ re-measured here) or **[inferred]**.
 
 - `net_pct` is the engine's own `pnl_pct − 0.07%` round trip. These are
   **book prices** (the stamped entry), not the tape.
-- **Entry drift is not re-measured here.** The public record carries no
-  dispatch time, so drift uses the recorded figures:
+- **§2–§8 use the public record, which carries no dispatch time.** Drift
+  there uses the recorded figures:
   - 0.226% mean over 605 rows to 6 Sep (`src/entry_fidelity.py` docstring);
   - 0.254% over 687 rows, 9–23 Sep (`AUDIT_2026_09_24` #12).
+
   Where a column says "≈ on the tape", it subtracts 0.23% and is
-  **[inferred]**. The drift was measured on the whole book, which is
-  ~75% long and ~62% MVRTP; its split by path and side is unmeasured.
+  **[inferred]**. **§11 replaces that inference with a measurement** from the
+  engine's own record, read through an ops guest session the owner granted.
 - **Confidence intervals are 95% symbol-clustered bootstraps.** One symbol's
   repeated entries into one move are not independent evidence.
 - **PnL % leads** (fixed-notional sizing, see ops `CLAUDE.md`).
@@ -348,19 +364,23 @@ entered.
 
 ## 9. What to do, ranked by expected effect on subscriber PnL
 
-1. **Research entry drift by path and side, before any exit or path change.**
-   - It is ~0.23%/trade. That is seven to eight times any exit lever
-     measured here, and about two-thirds of the long book's edge.
-   - The obvious gate (refuse drifted signals) was measured and withdrawn
-     on 7 Sep. It drops rows carrying −91.4% of book PnL but +20% of real
-     PnL.
-   - The unmeasured question is **how** the order is placed. A resting
-     limit at the stamped entry, instead of market, sounds free. It is
-     adversely selected: it fills the trades that come back and misses the
-     ones that run, and §4.2 says the ones that run are the whole edge.
-   - It needs dispatch timestamps: the engine's closed-signal record plus
-     `read.entry_fidelity`, replayed on the 1m tape.
-   - Research only; nothing on the money path.
+1. **Entry: done in §11, and the answer is smaller than §9 first expected.**
+   - The book-to-fill gap is real: MVRTP longs +0.49% → +0.26% at the fill.
+   - Order placement recovers a fraction of it, unproven.
+   - What to do:
+     - **Do not build a drift gate.** Skipping signals with ≥0.5% drift
+       moves users' results by +0.01% to +0.02% (§11.3). That agrees with
+       the 7 Sep withdrawal.
+     - **Do not arm `FSM_LIMIT_ENTRY` expecting it to recover drift.** It
+       fills at market on 75% of MVRTP longs (§11.3). Its own purpose (one
+       truth per signal) is unaffected.
+     - **Shadow a resting limit at the signal price, 60-minute TTL**, before
+       anyone considers it. It is an FSM entry-shape change, so owner
+       sign-off applies. On 271 signals it is +0.06% to +0.13% per signal
+       with an interval spanning zero.
+     - **Persist TP1 on the closed-signal record** (one measurement field).
+       Only the last 500 signals carry it today, so every entry or exit study
+       older than about 12 days has to approximate it.
 2. **Leave MVRTP's exits alone** (§5). No break-even, stop-width or runner
    change clears 0.03%/trade. This saves a money-path change the
    78%-came-back statistic would otherwise have argued for.
@@ -375,18 +395,186 @@ entered.
    They go through the entry-feature lane (`src/entry_features.py`). The
    stamps are measurement: ON and dark. Any gate built on them is a separate,
    owner-signed change. **Not built in this PR.**
-5. **Retire no long path today.** No live long path has a CI below zero.
+5. **Measure MVRTP LONG on core pairs vs promoted movers (§11.2).** Every row
+   is already stamped with `pair_admission`, so this is a read, not a build.
+   At the fill:
+   - core pairs: **+0.40%** (407 trades);
+   - movers: **−0.06%** (177 trades).
+
+   On book prices over the whole record:
+   - core: +0.50% [+0.21, +0.78] (775);
+   - top-24h movers: +0.18% [−0.27, +0.63] (176);
+   - ignition movers: +0.27% [−0.17, +0.71] (161).
+
+   "MVRTP long on core pairs only" would be a money-path change. Read it
+   again at 60 days first.
+6. **Retire no long path today.** No live long path has a CI below zero.
    Watch MOVER_AVWAP_SCALP LONG (≈ −0.26% on the tape) and
    TREND_PULLBACK_EMA LONG (10.5% win), and re-read them at 60 rows each.
-6. **Track MVRTP LONG's rolling 30-day mean on the tape as the business KPI.**
+7. **Track MVRTP LONG's rolling 30-day mean at the user's fill as the business KPI**
+   (ops' rebased column, with the §11.1 caveat about break-even exits).
    The long edge was negative in July and on most of the past year's replica
    (§4.1). If it rolls over, the book has nothing behind it. That is the case
    for keeping the non-MVRTP paths measured rather than cutting them to zero.
 
 ## 10. What this report cannot answer
 
-- **Drift by path or side.** The public record has no dispatch time.
-- **Exact per-trade stop and TP1 levels.** §5 uses the book's medians, and
-  says so.
+- **Exact TP1 levels older than the last 500 signals.** §5 uses the book's
+  medians, and says so; §11.3 is limited to 14–25 Sep for this reason.
 - **Whether the "previous trade" of §7 had closed before the next entry.**
 - **Anything about the dark feed.** This report is the delivered book only.
+
+---
+
+## 11. Entry study, on the engine's own record (added 2026-09-26)
+
+**Data:** the owner granted an ops read-only guest session, which exposes two
+of the engine's own files:
+
+| File | What it adds | Rows |
+|---|---|---|
+| `signal_performance.json` | Every closed signal, with dispatch time, the first price the monitor observed after dispatch, MFE/MAE and both stop distances. The fill stamp exists from 5 Sep. | 2,658 closed; **936 with a fill stamp** (5–26 Sep) |
+| `signal_history.json` | The **last 500 signals only**, with the exact TP1, entry zone and validity window | 14–26 Sep |
+
+**Three prices of one trade:**
+
+- **recorded** — `pnl_pct` from the stamped entry. Every page publishes this.
+- **rebased** — the same exit priced from the observed fill. This is ops'
+  rebased book.
+- **BE@fill** — rebased, except that a break-even exit scratches at the fill.
+  - A live user's break-even stop parks at *their* fill:
+    `pretp_dispatcher` uses `entry_price_filled`.
+  - The book parks it at the stamped entry.
+  - So ops' rebased figure books every drifted scratch as a loss of the
+    whole drift, which a user never takes.
+
+**11.1 How much of the published edge reaches a fill [measured].**
+
+5–26 Sep; net of the 0.07% round trip; 95% CI on BE@fill.
+
+| Population | n | Drift mean / median | Recorded | Rebased | BE@fill | CI |
+|---|---|---|---|---|---|---|
+| All LONG | 708 | +0.26% / +0.08% | +0.45% | +0.19% | **+0.24%** | [+0.01, +0.47] |
+| All SHORT | 228 | +0.15% / +0.11% | −0.32% | −0.48% | **−0.44%** | [−0.69, −0.20] |
+| MVRTP LONG | 584 | +0.28% / +0.06% | +0.49% | +0.21% | **+0.26%** | [−0.00, +0.53] |
+| QCB LONG | 48 | +0.12% | +0.17% | +0.05% | +0.07% | [−0.46, +0.60] |
+| MVAVW LONG | 41 | +0.23% | +0.20% | −0.03% | −0.00% | [−0.62, +0.64] |
+| FAR LONG | 16 | +0.09% | +0.72% | +0.63% | +0.65% | [−0.21, +1.54] |
+| MVAVW SHORT (now diverted) | 57 | +0.22% | −0.77% | −0.99% | −0.92% | [−1.49, −0.32] |
+| LSR SHORT | 33 | +0.16% | −0.52% | −0.69% | **−0.64%** | [−1.26, −0.13] |
+| QCB SHORT | 76 | +0.12% | −0.21% | −0.33% | −0.30% | [−0.64, −0.01] |
+
+- **About half of MVRTP LONG's published edge never reaches a user**
+  (+0.49% → +0.26%).
+- **§3's "≈ tape" column subtracted 0.23% everywhere.** Measured drift is
+  0.28% on MVRTP longs and 0.09–0.23% on the smaller long paths. So the
+  inference was about right for MVRTP and too pessimistic for the small
+  paths.
+- **The shorts' drift is smaller, but they start below zero.** LSR SHORT's
+  interval is below zero on real fills too.
+
+**11.2 Where the drift comes from, and what it does and does not predict [measured].**
+
+*Stale signal price.*
+
+- MVRTP triggers on 15m bars, and its entry is the close of the trigger
+  bar.
+- **56% of MVRTP longs (328 of 584) are created 5–15 minutes after that bar
+  closed.** Their drift averages +0.39% (median +0.21%), against +0.15%
+  (median 0.00%) for signals created within 5 minutes.
+- The published entry is therefore up to one bar old when the order goes
+  out.
+- **Why a 15m setup fires mid-bar is not established here** [inferred]: a
+  later gate passing, cooldowns expiring, or a pair entering the scan set.
+  The engine can answer it from its own gate stamps.
+- **At the fill the late signals are not clearly worse:** BE@fill +0.18%
+  (late) vs +0.36% (prompt), with overlapping intervals.
+
+*Drift at fill: rebased overstates what it costs.*
+
+| MVRTP LONG | n | Recorded | Rebased | BE@fill |
+|---|---|---|---|---|
+| drift < 0.5% | 415 | +0.30% | +0.41% | **+0.39%** [+0.08, +0.68] |
+| drift ≥ 0.5% | 169 | +0.94% | −0.29% | **−0.05%** [−0.60, +0.52] |
+
+- **The book calls the high-drift trades its best, at +0.94%.** At the fill
+  they are flat.
+- **Most of the rebased −0.29% is the break-even anchor, not the market.**
+  Parked at the fill, the scratches cost nothing beyond the fee.
+- **Both halves of September agree:**
+  - high drift: +0.02% and −0.12%;
+  - low drift: +0.38% and +0.39%.
+
+*Pair admission (MVRTP LONG):*
+
+| Admission | n (fill-stamped) | BE@fill | CI | n (whole record) | Recorded, whole record | CI |
+|---|---|---|---|---|---|---|
+| CORE | 407 | **+0.40%** | [+0.02, +0.71] | 775 | +0.50% | [+0.21, +0.78] |
+| MOVER_IGNITION | 106 | +0.03% | [−0.45, +0.50] | 161 | +0.27% | [−0.17, +0.71] |
+| MOVER_TOP24H | 71 | −0.20% | [−0.95, +0.58] | 176 | +0.18% | [−0.27, +0.63] |
+
+- **On real fills, MVRTP's long edge is on core pairs.** The promoted movers
+  are about flat.
+- The intervals overlap, and it is one path over three weeks, so this is a
+  candidate for measurement, not a filter.
+
+**11.3 How the order is placed, priced on the 1m tape [measured].**
+
+*Method.*
+
+- The latest 444 signals with exact levels and 1m coverage, 14–25 Sep. 56 of
+  the 500 lacked levels or coverage.
+- Every method is walked by **one** simulator, so their differences are the
+  order placement and nothing else:
+  - the shipped stop and the signal's TP1 as absolute prices;
+  - break-even per `be_policy`, measured from and parked at the fill;
+  - a bar touching both levels books the stop.
+- **Calibration:** replaying the market fill with the book's semantics
+  reproduces the recorded outcome on 84% of signals at the configured
+  break-even cap (0.5 × TP1). It reproduces 88% at 0.6, because the 1m high
+  overshoots the mark price the engine watches. Both are reported.
+- **Fees:** 0.07% on a market fill, 0.04% on a resting limit fill (the
+  maker entry).
+
+*MVRTP LONG, 271 signals.* Δ = difference per signal against a market entry,
+at break-even cap 0.6 and at 0.5.
+
+| Entry method | Filled | Per signal (0.6) | Δ (0.6) | 95% CI (0.6) | Δ (0.5) |
+|---|---|---|---|---|---|
+| Market at dispatch (today) | 100% | +0.20% | — | — | — |
+| `FSM_LIMIT_ENTRY` design: limit at zone edge, validity TTL | 93% | +0.21% | **+0.01** | [−0.09, +0.11] | −0.02 |
+| Limit at the signal price, 15 min | 83% | +0.26% | +0.06 | [−0.11, +0.23] | 0.00 |
+| **Limit at the signal price, 60 min** | 91% | +0.33% | **+0.13** | [−0.03, +0.26] | +0.06 |
+| Skip when drift ≥ 0.5% | 73% | +0.22% | +0.02 | [−0.21, +0.27] | +0.01 |
+| Market if drift < 0.5%, else limit at the signal price for 15 min | 89% | +0.27% | +0.07 | [−0.08, +0.22] | 0.00 |
+
+- **The existing design does nothing for MVRTP longs.** Its buy limit sits at
+  the zone's top edge, and **75% of MVRTP longs are already inside the zone at
+  dispatch**, so the limit is marketable and fills at market. It was designed
+  so that the book and auto-trade agree (one truth per signal), and it still
+  does that. It was never a price-improvement mechanism, and this shows it
+  cannot become one as built.
+- **A 60-minute limit at the signal price is the only method positive under
+  both calibrations,** at +0.06 to +0.13 per signal.
+  - About 0.03 of that is the maker fee.
+  - It misses 6% of signals where TP1 printed before the fill (17 of 271),
+    which is the adverse selection §4.2 warned about. It is smaller than
+    feared because most drift comes back.
+  - Not proven on 271 signals.
+- **On all 444 signals the 60-minute limit is +0.09 to +0.11** (CI [+0.01,
+  +0.22] at cap 0.6).
+- **Shorts gain most** (+0.18 to +0.19, CI [+0.03, +0.37]) and stay negative
+  (−0.43% → −0.24%). A better entry does not rescue a losing short.
+- **Skipping high-drift signals is worth about zero to users.** This
+  supports the 7 Sep decision not to gate. The high-drift rows are flat at
+  the fill, not negative, so removing them removes nothing.
+
+**What §11 changes in this report.**
+
+- §9's first recommendation is rewritten.
+- The short answer's entry bullet is rewritten.
+- Everything else stands. The exit tests of §5 were run on the book's entry,
+  so they measure the exit rules, not the fill.
+
+Scripts: `fetch_ops.sh` (needs a guest code), `entry_drift.py` (§11.1–11.2),
+`entry_limits.py` (§11.3; `CAPF=0.5` for the second calibration).
