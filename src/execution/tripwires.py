@@ -201,6 +201,29 @@ def assert_symbol_allowed(
         )
 
 
+#: ``fail_open`` site for a wired preference store whose read raised.
+USER_PREF_UNREADABLE_SITE = "tripwires.user_symbol_preference"
+
+
+def _user_pref_fail_closed() -> bool:
+    """Read at call time, like the allowlist, so a flip needs no restart."""
+    raw = os.environ.get("TRIPWIRE_USER_PREF_FAIL_CLOSED", "false")
+    return raw.strip().lower() in ("true", "1", "yes")
+
+
+def _user_pref_unreadable(symbol: str, firebase_uid: str, exc: BaseException) -> None:
+    """Count an unreadable preference; refuse only when the switch is on."""
+    from src import fail_open as _fail_open
+
+    _fail_open.record(USER_PREF_UNREADABLE_SITE, exc)
+    if _user_pref_fail_closed():
+        raise SymbolNotInUserPreference(
+            f"symbol preference for user {firebase_uid!r} could not be read "
+            f"({type(exc).__name__}) — refusing {symbol!r} "
+            f"(TRIPWIRE_USER_PREF_FAIL_CLOSED)"
+        )
+
+
 def assert_symbol_in_user_preference(
     symbol: str,
     firebase_uid: str,
@@ -219,6 +242,19 @@ def assert_symbol_in_user_preference(
     (test harnesses, engine boot order), default to allowing through.
     The engine-wide ``assert_symbol_allowed`` is still the hard
     security floor — this gate only narrows.
+
+    **A store that is wired and FAILS is a different state from one that
+    is not wired** (2026-09-26 test-suite audit).  A SQLite read that raises
+    (``database is locked`` under WAL contention is the ordinary case) means
+    we could not ask whether this user narrowed their symbols — and a user
+    who limited auto-trade to BTC would get an order on anything else.  That
+    used to be a bare ``return`` with no counter, so it was invisible.  Now
+    every such read failure is counted through ``fail_open.record`` (paged by
+    the feature-liveness watchdog), and ``TRIPWIRE_USER_PREF_FAIL_CLOSED``
+    turns it into a refusal.  The switch ships OFF: refusing on a transient
+    lock refuses the order for EVERY user whose read failed, preference or
+    not, which is a money-path behaviour change and needs owner sign-off on
+    the measured failure rate first.
     """
     try:
         from src.api import user_overrides as _uo
@@ -235,14 +271,16 @@ def assert_symbol_in_user_preference(
 
     try:
         user = user_store.get_by_firebase_uid(firebase_uid)
-    except Exception:
+    except Exception as exc:
+        _user_pref_unreadable(symbol, firebase_uid, exc)
         return
     if user is None or user.user_id is None:
         return
 
     try:
         overrides = store.get_auto_trade(user.user_id)
-    except Exception:
+    except Exception as exc:
+        _user_pref_unreadable(symbol, firebase_uid, exc)
         return
 
     pref = overrides.get("symbol_preference")
@@ -251,12 +289,23 @@ def assert_symbol_in_user_preference(
     if pref is None:
         return
     if not isinstance(pref, list):
-        return  # defensive — corrupted row, fall through
+        # Corrupted row: a preference EXISTS and cannot be read.
+        _user_pref_unreadable(
+            symbol, firebase_uid,
+            TypeError(f"symbol_preference is {type(pref).__name__}, not list"),
+        )
+        return
     if symbol.upper() not in {s.upper() for s in pref}:
         raise SymbolNotInUserPreference(
             f"symbol {symbol!r} is not in user {firebase_uid!r}'s "
             f"symbol preference (pref size: {len(pref)})"
         )
+
+
+def _record_display_pref_failure(exc: BaseException) -> None:
+    from src import fail_open as _fail_open
+
+    _fail_open.record(USER_PREF_UNREADABLE_SITE + ".display", exc)
 
 
 def effective_allowed_symbols_for_user(
@@ -301,14 +350,19 @@ def effective_allowed_symbols_for_user(
 
     try:
         user = user_store.get_by_firebase_uid(firebase_uid)
-    except Exception:
+    except Exception as exc:
+        # Display only, so no refusal here — but a read that raised is not
+        # "no preference", and it is counted rather than silently shown as
+        # the full engine list.
+        _record_display_pref_failure(exc)
         return sorted(engine_allowlist)
     if user is None or user.user_id is None:
         return sorted(engine_allowlist)
 
     try:
         overrides = store.get_auto_trade(user.user_id)
-    except Exception:
+    except Exception as exc:
+        _record_display_pref_failure(exc)
         return sorted(engine_allowlist)
 
     pref = overrides.get("symbol_preference")
