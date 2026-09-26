@@ -31,6 +31,18 @@ from . import snapshot_store as _store
 
 log = get_logger("api.snapshot_writer")
 
+
+def _boot_auto_mode() -> Any:
+    """The mode this engine boots into — ``AUTO_EXECUTION_MODE``, read in THIS
+    process, which is the engine container. The api container has its own env,
+    so reading it there would describe a boot that never happens."""
+    try:
+        from config import AUTO_EXECUTION_MODE
+
+        return str(AUTO_EXECUTION_MODE)
+    except Exception:
+        return None
+
 _CYCLE_INTERVAL_S   = 15   # ≈ one scan cycle
 # Republish the exchange-position key at least this often even when nothing
 # changed, so it stays inside its 90s TTL. Comfortably under that bound: an
@@ -862,6 +874,10 @@ class SnapshotWriter:
 
         return {
             "current_auto_mode": getattr(engine, "_current_auto_mode", "off"),
+            # A runtime mode change does not survive a restart: the engine
+            # boots into AUTO_EXECUTION_MODE on every deploy. Published so the
+            # control plane can say so beside a mode that differs from it.
+            "boot_auto_mode": _boot_auto_mode(),
             "regime_btcusdt": regime,
             "uptime_seconds": uptime_seconds,
             "scanning_pairs_count": scanning_pairs,
@@ -903,7 +919,15 @@ class SnapshotWriter:
     # ------------------------------------------------------------------
 
     async def _apply_pending_mode_cmd(self) -> None:
-        """Pick up a pending mode-change queued by the API container."""
+        """Pick up a pending mode-change queued by the API container.
+
+        The engine's answer is published (``KEY_CMD_SET_MODE_RESULT``) and, on
+        a change, the engine state is republished at once. Both halves exist
+        because the API returns "queued" before this runs: without the result
+        a refusal (open positions, no exchange keys) was visible only in this
+        container's log, and without the republish the API kept reporting the
+        old mode for up to a full cycle after the engine had changed.
+        """
         if not self._redis.available:
             return
         try:
@@ -915,12 +939,46 @@ class SnapshotWriter:
             await self._redis.client.delete(_store.KEY_CMD_SET_MODE)
             if new_mode not in {"off", "paper", "live"}:
                 log.warning("snapshot_writer: ignoring invalid mode command: {!r}", new_mode)
+                await self._publish_mode_result(
+                    new_mode, "invalid", f"invalid mode {new_mode!r} — ignored"
+                )
                 return
-            log.info("snapshot_writer: applying mode command from API: {!r}", new_mode)
-            ok, msg = self._engine.set_auto_execution_mode(new_mode)
-            log.info("snapshot_writer: mode command result: {}", msg)
+            before = getattr(self._engine, "_current_auto_mode", None)
+            if new_mode == before:
+                # A repeat or an undo that raced the apply. Not a refusal:
+                # the engine is already where the operator asked it to be.
+                outcome, msg = "no_op", f"already in {new_mode.upper()} mode — nothing to do"
+            else:
+                log.info("snapshot_writer: applying mode command from API: {!r}", new_mode)
+                try:
+                    ok, msg = self._engine.set_auto_execution_mode(new_mode)
+                    outcome = "applied" if ok else "refused"
+                except Exception as exc:
+                    outcome, msg = "error", f"{type(exc).__name__}: {exc}"
+                    log.exception("snapshot_writer: mode command raised")
+            log.info("snapshot_writer: mode command {} — {}", outcome, msg)
+            await self._publish_mode_result(new_mode, outcome, msg)
+            if outcome == "applied":
+                await self._write_engine_state()
         except Exception:
             log.exception("snapshot_writer: failed to apply mode command")
+
+    async def _publish_mode_result(self, requested: str, outcome: str, message: str) -> None:
+        """Best-effort: a failure here must never block the mode change itself."""
+        try:
+            await self._set(
+                _store.KEY_CMD_SET_MODE_RESULT,
+                {
+                    "requested": requested,
+                    "outcome": outcome,
+                    "message": message,
+                    "mode": getattr(self._engine, "_current_auto_mode", None),
+                    "at": datetime.now(timezone.utc).isoformat(),
+                },
+                _store.TTL_CMD_RESULT,
+            )
+        except Exception:
+            log.exception("snapshot_writer: failed to publish mode command result")
 
     # ------------------------------------------------------------------
     # Diagnostic-catalog channel
