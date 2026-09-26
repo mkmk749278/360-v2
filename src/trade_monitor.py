@@ -74,7 +74,11 @@ from src.indicators import atr as _compute_atr
 from src.indicators import ema as _compute_ema
 from src.indicators import momentum as _compute_momentum
 from src.performance_metrics import calculate_trade_pnl_pct, classify_trade_outcome
-from src.performance_tracker import entry_sl_distance_pct, shipped_sl_distance_pct
+from src.performance_tracker import (
+    entry_sl_distance_pct,
+    shipped_sl_distance_pct,
+    shipped_tp1_distance_pct,
+)
 from src.push_notifications import push_signal_outcome
 from src.smc import Direction
 from src.stat_filter import CohortEdgeStore, SignalOutcome
@@ -558,6 +562,10 @@ class TradeMonitor:
                 # 46 MVRTP signals in the 2026-08-04 dispatch log, and every R
                 # on every ops surface divides by the line above (2026-08-04).
                 shipped_sl_distance_pct=shipped_sl_distance_pct(sig),
+                # ...and the target it closed against, which the record never
+                # kept: every entry/exit study had to approximate it
+                # (docs/LONGS_RESEARCH_2026_09_26.md §11.3, 2026-09-26).
+                shipped_tp1_distance_pct=shipped_tp1_distance_pct(sig),
                 signal_quality_pnl_pct=signal_quality_pnl,
                 signal_quality_hit_tp=signal_quality_hit_tp,
                 # Stamped where it becomes true: the regime at entry is knowable
