@@ -4,7 +4,7 @@
 
 ---
 
-## OPEN 2026-09-26 — test-suite audit across all five repos: 5 PRs, 3 owner calls
+## OPEN 2026-09-26 — test-suite audit across all five repos: 5 PRs, 2 owner calls
 
 Owner asked for a QA audit of every repo's tests, then "fix everything". Five
 PRs, one per repo, branch `claude/test-suite-audit-improve-xdc87y`:
@@ -20,15 +20,20 @@ PRs, one per repo, branch `claude/test-suite-audit-improve-xdc87y`:
 **Owner calls, none of them made by this session:**
 1. `TRIPWIRE_USER_PREF_FAIL_CLOSED` — refuse an order when a user's symbol
    preference cannot be read (today: allowed, now counted in `fail_open`).
-2. **`GH_PAT` in 360ce-ops Actions secrets.** The new `contracts` workflow
-   clones the engine and fails, naming the remedy, if the secret is absent.
-   Until it is there, the cross-repo contract tests still never run in CI.
-3. `manual_take` treats an unparseable `ts` as fresh and fires the take —
+2. `manual_take` treats an unparseable `ts` as fresh and fires the take —
    recorded, not changed (money path).
+
+**The cross-repo contracts now run in CI** — ops #229's `engine contracts`
+job cloned engine main and ran 15 files: **399 passed, 0 skipped**. This entry
+first listed `GH_PAT` as a missing owner action; the secret was already there
+(this file records it being added for ops #204, further down). Grep the
+context before asking the owner for something.
 
 **Measured, not estimated:** engine 9,321 passed / 56 skipped / 1 xfailed
 (5m08s, no coverage), random seeds 1–3 clean after two order-dependence fixes;
-ops 2,020 passed / 110 skipped CI-style and 2,130 / 0 skipped with the engine;
+ops 2,020 passed / 110 skipped CI-style and 2,130 / 0 skipped with the engine
+(ops `lint + tests` then ran **2m01s** on its first hermetic CI run, against
+6m52s–10m15s measured 2026-09-03 — one run, re-derive before trusting it);
 app 876 passed (Flutter 3.47.5, now pinned in both app workflows and ops mobile).
 
 **Not done:** 257 broad `except` blocks in `src/` without `fail_open.record`;
