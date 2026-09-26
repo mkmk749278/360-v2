@@ -263,9 +263,16 @@ def decode_token(token: str, *, secret: str) -> TokenClaims:
         raise AuthError("invalid token: not three parts")
     header_b64, payload_b64, sig_b64 = parts
 
+    # A JWT is base64url throughout, so a non-ASCII character means it cannot
+    # be valid. Refuse it as an AuthError (401): ``.encode("ascii")`` and a
+    # ``str`` compare_digest both RAISED on one, which was an unhandled 500 on
+    # every authenticated route (2026-09-26 audit).
+    if not token.isascii():
+        raise AuthError("invalid token: non-ASCII characters")
+
     # Constant-time signature check
     expected = _sign(f"{header_b64}.{payload_b64}".encode("ascii"), secret)
-    if not hmac.compare_digest(expected, sig_b64):
+    if not hmac.compare_digest(expected.encode("ascii"), sig_b64.encode("ascii")):
         raise AuthError("invalid token: signature mismatch")
 
     try:

@@ -186,7 +186,12 @@ class NowPaymentsIpnVerifier:
             self._secret, _sorted_json_bytes(payload), hashlib.sha512
         ).hexdigest()
         cleaned = presented_signature.strip().lower()
-        if not hmac.compare_digest(expected, cleaned):
+        # Compare BYTES: compare_digest raises TypeError on a str holding a
+        # non-ASCII character, which turned a forged header into a 500 instead
+        # of a 401. A non-ASCII signature can never match a hex digest.
+        if not hmac.compare_digest(
+            expected.encode("ascii"), cleaned.encode("utf-8", "surrogatepass"),
+        ):
             log.warning("NOWPayments IPN HMAC mismatch")
             return VerificationResult(ok=False, detail="signature mismatch")
         return VerificationResult(ok=True)

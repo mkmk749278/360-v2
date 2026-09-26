@@ -252,6 +252,31 @@ def test_webhook_401_on_bad_signature(enable_crypto):
     assert _post_ipn(client, body, sig="deadbeef").status_code == 401
 
 
+@pytest.mark.parametrize("sig", ["déadbeef", "１２３", "\u00e9" * 128])
+def test_verifier_refuses_a_non_ascii_signature_instead_of_raising(sig):
+    """Regression (2026-09-26 audit): ``hmac.compare_digest`` raises
+    ``TypeError`` for a ``str`` holding a non-ASCII character, so a forged
+    header turned a 401 into an unhandled 500. Refused, never granted."""
+    v = billing_web.NowPaymentsIpnVerifier(IPN_SECRET)
+    raw = json.dumps({"a": 1}).encode()
+    result = v.verify(raw, sig)
+    assert result.ok is False
+    assert result.detail == "signature mismatch"
+
+
+def test_webhook_401_on_non_ascii_signature_header(enable_crypto):
+    store = FakeUserStore()
+    client = TestClient(_build_app(user_store=store), raise_server_exceptions=False)
+    body = {"payment_status": "finished", "payment_id": "p1",
+            "order_id": billing_web.encode_order_id(1, "auto"), "price_amount": 25.0}
+    raw = json.dumps(body).encode()
+    # Starlette decodes header bytes as latin-1, so this arrives as "déadbeef".
+    headers = {billing_web.NOWPAYMENTS_SIG_HEADER: "déadbeef".encode("latin-1")}
+    resp = client.post("/api/billing/web/crypto/webhook", content=raw, headers=headers)
+    assert resp.status_code == 401
+    assert store.set_tier_calls == []
+
+
 def test_webhook_non_grant_status_grants_nothing(enable_crypto):
     store = FakeUserStore()
     client = TestClient(_build_app(user_store=store))
