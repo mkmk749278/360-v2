@@ -526,7 +526,10 @@ class RedisEngineFacade:
         }))
 
     def set_auto_execution_mode(self, new_mode: str):
-        """Queue a mode-change command to Redis.
+        """Queue a mode-change command to Redis — the legacy sync path.
+
+        The HTTP routes use :meth:`aset_auto_execution_mode`, which awaits the
+        write and reads the queue; this one fires the write and forgets it.
 
         The ``SnapshotWriter`` running in the engine container picks it up on
         the next ``_apply_pending_mode_cmd`` check (≤ ``_CYCLE_INTERVAL_S`` s).
@@ -558,6 +561,96 @@ class RedisEngineFacade:
             f"{current.upper()} → {new_mode.upper()} "
             f"(takes effect on next engine scan cycle)"
         )
+
+    async def _fresh_state(self) -> dict:
+        """The engine state as Redis holds it NOW, not as of the last 10s
+        refresh — the writer republishes it the moment a mode change applies,
+        so this is current to within milliseconds of the engine."""
+        state = _store.decode(await self._redis.client.get(_store.KEY_ENGINE_STATE))
+        return state if isinstance(state, dict) else self._state
+
+    async def aset_auto_execution_mode(self, new_mode: str) -> tuple:
+        """Queue a mode change, awaited, and answer against what is QUEUED.
+
+        Returns ``(ok, message, http_status)``. Replaces the sync path for the
+        HTTP routes, which had two defects:
+
+        * the Redis write was fire-and-forget, so a lost command was a log
+          line in this container while the caller was told "queued";
+        * "already in X" was judged against a state up to ~40s old and blind
+          to the queue. Switching LIVE → PAPER and back to LIVE inside that
+          window answered "already in LIVE — nothing to do" and left PAPER
+          queued: the undo was swallowed and the engine changed anyway.
+
+        Now the queue is read first. An undo overwrites the pending command
+        rather than deleting it, because the engine may already have consumed
+        it: re-sending the current mode is a no-op if it has not, and a revert
+        if it has — either way the engine ends where the operator last asked.
+        """
+        new_mode = (new_mode or "").strip().lower()
+        if new_mode not in {"off", "paper", "live"}:
+            return False, f"invalid mode {new_mode!r} — must be off / paper / live", 409
+        if not self._redis.available:
+            return False, (
+                "Redis unavailable — the mode change was NOT queued; the engine "
+                "cannot receive it"
+            ), 503
+        try:
+            pending_raw = await self._redis.client.get(_store.KEY_CMD_SET_MODE)
+            state = await self._fresh_state()
+        except Exception as exc:
+            return False, (
+                f"could not read the engine's mode ({type(exc).__name__}) — nothing queued"
+            ), 503
+        pending = (pending_raw or "").strip().lower() or None
+        current = str(state.get("current_auto_mode", "off"))
+        if pending == new_mode:
+            return False, (
+                f"a change to {new_mode.upper()} is already queued — the engine "
+                f"applies it on its next cycle"
+            ), 409
+        if pending is None and new_mode == current:
+            return False, f"already in {new_mode.upper()} mode — nothing to do", 409
+        try:
+            await self._redis.client.set(_store.KEY_CMD_SET_MODE, new_mode, ex=_store.TTL_CMD)
+        except Exception as exc:
+            return False, (
+                f"Redis write failed ({type(exc).__name__}) — the mode change was NOT queued"
+            ), 503
+        if pending is not None:
+            return True, (
+                f"queued {new_mode.upper()}, replacing the pending change to "
+                f"{pending.upper()} (engine reports {current.upper()})"
+            ), 200
+        return True, (
+            f"auto-execution mode change queued: {current.upper()} → "
+            f"{new_mode.upper()} (takes effect on next engine scan cycle)"
+        ), 200
+
+    async def mode_command_status(self) -> dict:
+        """What the mode queue holds, for the owner's control plane.
+
+        ``mode_queue`` is ``queued`` when this was read, ``unreadable`` when it
+        was not. Unreadable is kept apart from "nothing pending": a page that
+        cannot see the queue must not say the queue is empty.
+        """
+        if not self._redis.available:
+            return {"mode_queue": "unreadable", "detail": "Redis unavailable"}
+        try:
+            pending_raw = await self._redis.client.get(_store.KEY_CMD_SET_MODE)
+            result = _store.decode(
+                await self._redis.client.get(_store.KEY_CMD_SET_MODE_RESULT)
+            )
+            state = await self._fresh_state()
+        except Exception as exc:
+            return {"mode_queue": "unreadable", "detail": type(exc).__name__}
+        return {
+            "mode_queue": "queued",
+            "mode": state.get("current_auto_mode"),
+            "boot_mode": state.get("boot_auto_mode"),
+            "pending_mode": (pending_raw or "").strip().lower() or None,
+            "last_mode_command": result if isinstance(result, dict) else None,
+        }
 
     @property
     def auto_execution_mode(self) -> str:

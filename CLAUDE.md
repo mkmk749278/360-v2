@@ -2674,3 +2674,21 @@ python -m src.main
   again on `copy`; this is the third hat, at the delimiter instead of the name.
   **The test that asserts the counter is what catches it** — reading the line
   tells you nothing, because both keys look equally reasonable.
+
+
+- **A queued control is a request, and its answer must be published where the
+  request was made.** In isolated mode `POST /api/auto-mode` wrote a Redis
+  command and returned success; the engine applied it at the end of its next
+  writer cycle, or refused it (open positions, no exchange keys), and that
+  answer went only to the engine log. Ops therefore printed "Auto-mode set to
+  PAPER" beside a toggle that never moved (owner, 2026-09-26: *"not showing
+  correctly"*). The same stale read made an undo unsafe: "already in LIVE"
+  was judged against a state up to ~40s old and blind to the queue, so
+  LIVE → PAPER → LIVE answered "nothing to do" to the undo and let PAPER
+  apply. The facade now awaits its write, answers against the queue, and
+  overwrites a pending command rather than 409ing an undo. The writer
+  publishes `KEY_CMD_SET_MODE_RESULT` and republishes state the moment a change
+  applies. `GET /api/auto-mode/command` makes all of it readable to the owner.
+  **Ask of every command channel: where does the "no" go, and who reads it?**
+  `_apply_pending_reset_cmd` and the SAR-clear command have the same shape and
+  have not been audited.

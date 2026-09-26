@@ -605,6 +605,35 @@ class AutoModeChangeResponse(BaseModel):
     success: bool
     message: str
     mode: Literal["off", "paper", "live"]
+    queued: Optional[bool] = Field(
+        None,
+        description="True when the change was QUEUED for the engine container "
+        "(isolated mode) rather than applied — success then means 'accepted', "
+        "and GET /api/auto-mode/command says what the engine did with it.",
+    )
+
+
+class AutoModeCommandStatus(BaseModel):
+    """The engine-wide mode as the control plane needs to see it.
+
+    ``mode_queue`` says how to read the rest: ``direct`` (single-process — a
+    change applies inside the POST, nothing is ever pending), ``queued``
+    (isolated — pending and last result were read), ``unreadable`` (isolated,
+    and the queue could not be read; that is not "nothing pending").
+    """
+
+    mode_queue: Literal["direct", "queued", "unreadable"]
+    mode: Optional[str] = None
+    boot_mode: Optional[str] = Field(
+        None, description="AUTO_EXECUTION_MODE — what a restart returns the engine to"
+    )
+    pending_mode: Optional[str] = None
+    last_mode_command: Optional[Dict[str, Any]] = Field(
+        None,
+        description="The engine's answer to the last queued command: requested, "
+        "outcome (applied/refused/no_op/invalid/error), message, mode, at",
+    )
+    detail: Optional[str] = None
 
 
 class AutoModeResumeMineResponse(BaseModel):

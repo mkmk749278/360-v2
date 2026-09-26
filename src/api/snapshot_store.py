@@ -71,6 +71,11 @@ KEY_POSITION_MARKS = "snapshot:position_marks"  # {symbol: price}  — written e
 #: "this user has nothing" indistinguishable per user.
 KEY_EXCHANGE_POSITIONS = "snapshot:exchange_positions"  # {uid: {symbol: row}}
 KEY_CMD_SET_MODE   = "snapshot:cmd:set_mode"   # str "off|paper|live"     — consumed once
+#: The engine's answer to the last mode command: applied, refused (open
+#: positions, no exchange keys), no-op or error. Before it existed that answer
+#: lived only in the engine log, so ops printed "set to PAPER" over a change
+#: the engine had refused, and the toggle simply never moved.
+KEY_CMD_SET_MODE_RESULT = "snapshot:cmd:set_mode_result"
 KEY_CMD_RESET_SIGNALS = "snapshot:cmd:reset_signals"  # set to "1" by API; consumed once by engine
 TTL_CMD_RESET = 120  # 2-min TTL — engine consumes before this; if engine is down, client must retry
 # Owner-initiated purge of the SAR exit shadow ledger.  Same fire-and-forget
@@ -187,6 +192,7 @@ TTL_USER_POSITIONS_META = 90
 KEY_CMD_SEED_CLOSED = "snapshot:cmd:seed_closed"
 TTL_ALERTS       = _TTL_FEED
 TTL_CMD          = 60  # command expires if engine is down; client must retry
+TTL_CMD_RESULT   = 3600  # long enough to read after the fact, short enough not to linger
 
 
 def encode(data: Any) -> str:

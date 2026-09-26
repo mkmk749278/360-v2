@@ -89,6 +89,7 @@ from .schemas import (
     AlertsResponse,
     AutoModeChangeRequest,
     AutoModeChangeResponse,
+    AutoModeCommandStatus,
     AutoModeResumeMineResponse,
     AutoModeStatus,
     AutoTradeGlobalSetRequest,
@@ -2414,6 +2415,22 @@ def build_app(
 
     # ---- Auto-mode ----
 
+    async def _set_engine_mode(mode: str) -> tuple:
+        """One writer for an engine-wide mode change: ``(ok, msg, http, queued)``.
+
+        In isolated mode the facade queues the change and answers against the
+        queue (see ``RedisEngineFacade.aset_auto_execution_mode``); a direct
+        engine applies it here and now. Looked up on the TYPE so a MagicMock
+        engine in a test is not mistaken for one with an async setter.
+        """
+        aset = getattr(type(engine), "aset_auto_execution_mode", None)
+        if aset is not None and asyncio.iscoroutinefunction(aset):
+            ok, msg, code = await engine.aset_auto_execution_mode(mode)
+            return ok, msg, code, True
+        ok, msg = engine.set_auto_execution_mode(mode)
+        return ok, msg, (200 if ok else status.HTTP_409_CONFLICT), False
+
+
     @app.get(
         "/api/auto-mode",
         response_model=AutoModeStatus,
@@ -2647,16 +2664,39 @@ def build_app(
         dependencies=[Depends(owner_required)],
     )
     async def auto_mode_set(req: AutoModeChangeRequest) -> AutoModeChangeResponse:
-        ok, msg = engine.set_auto_execution_mode(req.mode)
+        ok, msg, code, queued = await _set_engine_mode(req.mode)
         if not ok:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=msg,
-            )
+            raise HTTPException(status_code=code, detail=msg)
         return AutoModeChangeResponse(
             success=True,
             message=msg,
             mode=req.mode,
+            queued=queued,
+        )
+
+    @app.get(
+        "/api/auto-mode/command",
+        response_model=AutoModeCommandStatus,
+        tags=["auto-mode"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def auto_mode_command() -> AutoModeCommandStatus:
+        """Current, pending and last-answered mode — owner only.
+
+        Kept off ``GET /api/auto-mode`` deliberately: that one is the Lumin
+        app's Trade-tab header, and the queue is the control plane's concern.
+        """
+        status_fn = getattr(type(engine), "mode_command_status", None)
+        if status_fn is not None and asyncio.iscoroutinefunction(status_fn):
+            return AutoModeCommandStatus(**(await engine.mode_command_status()))
+        try:
+            from config import AUTO_EXECUTION_MODE as _boot_mode
+        except Exception:
+            _boot_mode = None
+        return AutoModeCommandStatus(
+            mode_queue="direct",
+            mode=getattr(engine, "_current_auto_mode", None),
+            boot_mode=_boot_mode,
         )
 
     # ---- Per-user auto-pause resume (2026-05-24) ----
@@ -3379,12 +3419,9 @@ def build_app(
         # ``user_settings`` and take effect on the next sizing / risk check.
         mode = partial.pop("mode", None)
         if mode is not None:
-            ok, msg = engine.set_auto_execution_mode(mode)
+            ok, msg, code, _queued = await _set_engine_mode(mode)
             if not ok:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=msg,
-                )
+                raise HTTPException(status_code=code, detail=msg)
         if partial:
             _user_settings.update_auto_trade(partial)
         return _build_auto_trade_view()
