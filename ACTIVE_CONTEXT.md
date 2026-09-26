@@ -4,17 +4,17 @@
 
 ---
 
-## OPEN 2026-09-26 — test-suite audit: 3 of 5 PRs merged; engine #1071 + legal #10 open, 2 owner calls
+## OPEN 2026-09-26 — test-suite audit: all 5 PRs merged; 2 owner calls remain
 
 Owner asked for a QA audit of every repo's tests, then "fix everything". Five
 PRs, one per repo, branch `claude/test-suite-audit-improve-xdc87y`:
 
 | PR | Real defects fixed (each has a regression test that fails on the old code) | Merge |
 |---|---|---|
-| 360-v2 #1071 | non-ASCII `Bearer` / IPN / callback signature → 500 (now 401); unreadable symbol preference allowed the order **silently** (now counted; fail-closed switch `TRIPWIRE_USER_PREF_FAIL_CLOSED` ships **OFF**) | **owner sign-off** (tripwires.py) |
+| 360-v2 #1071 **merged 17:00 (owner: "merge after green"), deployed 17:01** | non-ASCII `Bearer` / IPN / callback signature → 500 (now 401); unreadable symbol preference allowed the order **silently** (now counted; fail-closed switch `TRIPWIRE_USER_PREF_FAIL_CLOSED` ships **OFF**) | merged |
 | 360ce-ops #229 **merged 13:15, deployed** | agent paged **RECOVERY for a still-naked position** after one `positions_diag` timeout; login/TOTP 500 on non-ASCII; `/static*`/`/api/v1*` prefix exemptions; diag run + exit-backtest start unaudited; **the suite made 1,638 real requests per run, 1,108 to the production engine** | merged |
 | lumin-app #171 **merged 15:16, main build green** | LIVE switch showed the tap, not the engine (a failed turn-OFF read OFF over a live book); Binance connect page read "not connected" in every debug build (inherited lookup in initState, swallowed by `catch (_)`) | merged |
-| lumin-legal #10 | CI check on the published docs (paths the app/Play link, Last updated) | normal review |
+| lumin-legal #10 **merged 16:52** | CI check on the published docs (paths the app/Play link, Last updated) | merged; /privacy /terms /risk /delete-account all 200 after the Pages redeploy |
 | Meta-ads #7 | CI check for the checklist's mechanical rules (ASCI ≥5s, timings in step, banned claims) | merged 15:10 |
 
 **Owner calls, none of them made by this session:**
@@ -23,6 +23,19 @@ PRs, one per repo, branch `claude/test-suite-audit-improve-xdc87y`:
 2. `manual_take` treats an unparseable `ts` as fresh and fires the take —
    recorded, not changed (money path).
 
+**After the deploys — what was and was not looked at.** Engine deploy run 910
+succeeded (17:00:23 → 17:01:27) and `/api/health` answered `ok: true,
+engine_connected: true` afterwards. That is **not** evidence the new build is
+the one serving: `uptime_seconds` read 6125.9068 on two calls 15s apart, so the
+health payload is a snapshot, not a live clock. A non-ASCII `Bearer` returned
+401 in production, but production may reject that token in Firebase
+verification before `decode_token` is reached, so that is not a check of the
+fix either. The money path (placements, dispatch funnel, breaker) needs the
+owner-tier ops pages and was **not** looked at from this session — the only
+money-path code change is a counter behind a flag that ships OFF, but "we could
+not look" is the honest state. ops #229's deploy (run 234) and lumin-app #171's
+main build (run 405) both succeeded.
+
 **The cross-repo contracts now run in CI** — ops #229's `engine contracts`
 job cloned engine main and ran 15 files: **399 passed, 0 skipped**. This entry
 first listed `GH_PAT` as a missing owner action; the secret was already there
@@ -30,7 +43,9 @@ first listed `GH_PAT` as a missing owner action; the secret was already there
 context before asking the owner for something.
 
 **Measured, not estimated:** engine 9,321 passed / 56 skipped / 1 xfailed
-(5m08s, no coverage), random seeds 1–3 clean after two order-dependence fixes;
+(5m08s, no coverage) — 9,343 after merging main back in, and CI on #1071's
+first head read 9,325 in 7m03s with coverage (81%, unchanged) — random seeds
+1–3 clean after two order-dependence fixes;
 ops 2,020 passed / 110 skipped CI-style and 2,130 / 0 skipped with the engine
 (ops `lint + tests` then ran **2m01s** on its first hermetic CI run, against
 6m52s–10m15s measured 2026-09-03 — one run, re-derive before trusting it);
