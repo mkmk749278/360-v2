@@ -380,7 +380,8 @@ entered.
        with an interval spanning zero.
      - **Persist TP1 on the closed-signal record** (one measurement field).
        Only the last 500 signals carry it today, so every entry or exit study
-       older than about 12 days has to approximate it.
+       older than about 12 days has to approximate it. **Built, same PR:**
+       `shipped_tp1_distance_pct`.
 2. **Leave MVRTP's exits alone** (§5). No break-even, stop-width or runner
    change clears 0.03%/trade. This saves a money-path change the
    78%-came-back statistic would otherwise have argued for.
@@ -397,6 +398,8 @@ entered.
    owner-signed change. **Not built in this PR.**
 5. **Measure MVRTP LONG on core pairs vs promoted movers (§11.2).** Every row
    is already stamped with `pair_admission`, so this is a read, not a build.
+   **Built on ops:** `/track-record` has a pair-admission filter and a split
+   inside the entry-fidelity panel.
    At the fill:
    - core pairs: **+0.40%** (407 trades);
    - movers: **−0.06%** (177 trades).
@@ -411,8 +414,10 @@ entered.
 6. **Retire no long path today.** No live long path has a CI below zero.
    Watch MOVER_AVWAP_SCALP LONG (≈ −0.26% on the tape) and
    TREND_PULLBACK_EMA LONG (10.5% win), and re-read them at 60 rows each.
-7. **Track MVRTP LONG's rolling 30-day mean at the user's fill as the business KPI**
-   (ops' rebased column, with the §11.1 caveat about break-even exits).
+7. **Track MVRTP LONG's rolling 30-day mean at the user's fill as the business KPI.**
+   **Built:** engine `entry_fidelity.rebased_be_at_fill_pct`, and on ops
+   `/track-record` a third row, "rebased, break-even at the fill", beside the
+   rebased one. Neither is called the real result.
    The long edge was negative in July and on most of the past year's replica
    (§4.1). If it rolls over, the book has nothing behind it. That is the case
    for keeping the non-MVRTP paths measured rather than cutting them to zero.
