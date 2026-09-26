@@ -38,11 +38,45 @@ Play financial-features declaration to be kept current.
 
 ---
 
-## OPEN 2026-09-25 — unlock-short dark lane BUILT (engine + ops), shipping in paired PRs
+## OPEN 2026-09-25 — unlock-short dark lane: both halves MERGED, ops page live 2026-09-26
 
 Owner: *"build shorts system … make it live in ops, not for users — that's the
 dark means."* It implements the one mechanism that survived the market-structure
 research (entry below).
+
+**State, 2026-09-26 (owner asked again: *"can we proceed to implement to see in
+ops as live not for users"*).**
+- Engine #1065 merged and deployed 2026-09-25 08:57 UTC. The lane has run since
+  then with **no ops surface for ~17h**.
+- Ops #227 (`/signals/unlock-shorts`, nav: Signals → Unlock shorts) merged
+  2026-09-26 01:45 UTC. It was the missing half; nothing new had to be built.
+- Checked before merge: page tests 23 passed. The local-only contract
+  (`scripts/gen_ops_unlock_shorts_fixture.py` vs the committed ops fixture) is
+  identical on every key and value, on engine `main` @ 24bcbaa. CI never runs
+  that contract.
+- "Not for users" was checked on the imports. `unlock_shorts` / `unlock_calendar`
+  import only `fail_open`, `ledger_schema`, `runtime_tunables`, `config`,
+  symbol admission and the public `BinanceClient`. There is no queue, router,
+  dispatch, push or signed endpoint.
+- **Live page read 2026-09-26 01:56 UTC** (owner guest code, after the deploy):
+  - State `LIVE`, file 22s old.
+  - Calendar `OK`, read 16h58m earlier: 76 qualifying unlocks, 370 tokens,
+    14 with no Binance perp.
+  - Ledger: 62 rows. 44 SCHEDULED, 1 OPEN, 17 LATE (all `lane_start`), 0 closed.
+  - The first entry is MOVEUSDT, stamped 2026-09-26 00:00 UTC. Its unlock is
+    2026-10-09, 1.15% of max supply. The `running` filter rejects it; the
+    lane walks it anyway.
+  - Next entries: CARV 09-27, then BB and PUMP 09-29.
+- **First verdict: 2026-10-12 00:00 UTC** (MOVEUSDT's T+2 close).
+- **Definition note, not a defect.** "Insider" is DefiLlama category
+  `insiders`/`privateSale` OR a recipient matching
+  `team|investor|…|strategic|…|core`. So STRK's "Foundation Treasury /
+  Donations / Grants" and SEI's "Strategic Allocation" count as insider.
+  - The research backtest (`scripts/research/…/events.py:20`) used the
+    identical rule, so the forward lane measures the same quantity as the
+    +5.66%.
+  - Tightening the rule is a research question. It would also break
+    comparability with the backtest, so do not change it mid-window.
 
 **What runs.**
 - `src/unlock_shorts.py` runs as its own task, `_unlock_shorts_loop`, on a
