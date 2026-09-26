@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff pytest-cov
+          pip install ruff pytest-cov pytest-timeout
 
       # Blocking gate: src/ + config/ are ruff-clean as of this PR, so lint
       # failures now fail CI. Keep new code clean to keep this green.
@@ -42,9 +42,17 @@ jobs:
       # Coverage is measured and REPORTED, not gated (2026-07-17): the
       # per-module table in the job summary makes untested modules visible
       # at review time without turning a coverage dip into a red build.
+      #
+      # 2026-09-26 test-suite audit:
+      # * no ``-x`` — stopping at the first failure hid every other one, so a
+      #   red run said "one thing broke" when it could have said "these five";
+      # * ``test_deployment.py`` is no longer ignored — it passes, and nothing
+      #   recorded why it had been excluded;
+      # * ``--timeout`` turns a hung async test into a NAMED failure instead of
+      #   a silent 20-minute job cancellation.
       - name: Tests (pytest)
         run: >
-          python -m pytest tests/ -x --ignore=tests/test_deployment.py -q
+          python -m pytest tests/ -q --timeout=300
           --cov=src --cov=config --cov-report=term
 
       - name: Coverage summary
