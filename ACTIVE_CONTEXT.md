@@ -4,7 +4,41 @@
 
 ---
 
-## OPEN 2026-09-25 — guest access + paid live signals: 4 PRs, rollout needs the owner
+## OPEN 2026-09-26 — test-suite audit across all five repos: 5 PRs, 3 owner calls
+
+Owner asked for a QA audit of every repo's tests, then "fix everything". Five
+PRs, one per repo, branch `claude/test-suite-audit-improve-xdc87y`:
+
+| PR | Real defects fixed (each has a regression test that fails on the old code) | Merge |
+|---|---|---|
+| 360-v2 #1071 | non-ASCII `Bearer` / IPN / callback signature → 500 (now 401); unreadable symbol preference allowed the order **silently** (now counted; fail-closed switch `TRIPWIRE_USER_PREF_FAIL_CLOSED` ships **OFF**) | **owner sign-off** (tripwires.py) |
+| 360ce-ops #229 | agent paged **RECOVERY for a still-naked position** after one `positions_diag` timeout; login/TOTP 500 on non-ASCII; `/static*`/`/api/v1*` prefix exemptions; diag run + exit-backtest start unaudited; **the suite made 1,638 real requests per run, 1,108 to the production engine** | normal review |
+| lumin-app #171 | LIVE switch showed the tap, not the engine (a failed turn-OFF read OFF over a live book); Binance connect page read "not connected" in every debug build (inherited lookup in initState, swallowed by `catch (_)`) | normal review; merge deploys the PWA |
+| lumin-legal #10 | CI check on the published docs (paths the app/Play link, Last updated) | normal review |
+| Meta-ads #7 | CI check for the checklist's mechanical rules (ASCI ≥5s, timings in step, banned claims) | normal review |
+
+**Owner calls, none of them made by this session:**
+1. `TRIPWIRE_USER_PREF_FAIL_CLOSED` — refuse an order when a user's symbol
+   preference cannot be read (today: allowed, now counted in `fail_open`).
+2. **`GH_PAT` in 360ce-ops Actions secrets.** The new `contracts` workflow
+   clones the engine and fails, naming the remedy, if the secret is absent.
+   Until it is there, the cross-repo contract tests still never run in CI.
+3. `manual_take` treats an unparseable `ts` as fresh and fires the take —
+   recorded, not changed (money path).
+
+**Measured, not estimated:** engine 9,321 passed / 56 skipped / 1 xfailed
+(5m08s, no coverage), random seeds 1–3 clean after two order-dependence fixes;
+ops 2,020 passed / 110 skipped CI-style and 2,130 / 0 skipped with the engine;
+app 876 passed (Flutter 3.47.5, now pinned in both app workflows and ops mobile).
+
+**Not done:** 257 broad `except` blocks in `src/` without `fail_open.record`;
+24 `importlib.reload` calls in 8 engine test files (same class-identity hazard
+that bit `test_regime_context`; passed under three seeds); signals-page paywall
+has component tests only (engine enforces).
+
+---
+
+## OPEN 2026-09-25 — guest access + paid live signals: 4 PRs merged, console steps unverified
 
 Owner, from a marketing session: ad visitors bounced off the phone-number
 screen ("they want my personal data"). Direction: *"guest login without asking
@@ -17,12 +51,16 @@ launch then lock; teaser push; 3 days start automatically.
 
 | PR | What | State |
 |---|---|---|
-| 360-v2 #1063 | guest identity (anonymous Firebase, no user row), `signal_access` paywall, `signals` tier, teaser push | open, owner sign-off |
-| lumin-app #165 | one welcome screen, guest mode, live-signals strip, Signals plan UI | open; merging deploys the PWA in ~2 min |
-| lumin-legal #9 | Terms §4 + Privacy §2.0 | open, owner sign-off |
-| Meta-ads #4 | "Live signals 3 din FREE" on ad + landing | open |
+| 360-v2 #1063 | guest identity (anonymous Firebase, no user row), `signal_access` paywall, `signals` tier, teaser push | **merged 2026-09-25 06:46 UTC** |
+| lumin-app #165 | one welcome screen, guest mode, live-signals strip, Signals plan UI | **merged 2026-09-25 06:49 UTC** |
+| lumin-legal #9 | Terms §4 + Privacy §2.0 | **merged 2026-09-25 06:49 UTC** |
+| Meta-ads #4 | "Live signals 3 din FREE" on ad + landing | **merged 2026-09-25 06:40 UTC** |
 
-**Rollout order, and none of it is done yet:**
+*(Table corrected 2026-09-26 from the GitHub API — it read "open" for all four
+a day after they merged. Steps 2 and 4 below are console / Play Console actions
+no session can see; whether they are done is unverified, not "not done".)*
+
+**Rollout order:**
 1. Merge + deploy #1063 (paywall stays OFF: `signals_paywall_start` empty).
 2. Firebase Console → Authentication → **Anonymous: enable**. Until then the
    app falls back to phone sign-in (safe, just no guests).
