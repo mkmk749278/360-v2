@@ -4,6 +4,54 @@
 
 ---
 
+## OPEN 2026-09-26 — longs research: exits are fine, entry drift is the lever, nothing built
+
+Report: `docs/LONGS_RESEARCH_2026_09_26.md`. Scripts:
+`scripts/research/longs_2026_09_26/`. Owner: *"special investigation of
+longs, like we did for shorts … what to improve, what we are doing wrong"*.
+
+**Data.** 2,622 delivered closed signals from the public
+`/api/track-record/signals`, one call per UTC day (25 Jun → 26 Sep), plus
+Binance 1m archive klines for every long closed in the last 62 days.
+
+**Findings [measured unless marked]:**
+- **Longs vs shorts.** Over 30d, longs run +0.352%/trade [+0.13, +0.58] and
+  shorts −0.234% [−0.46, −0.03]. Both sides win 35% over 93d; payoff is the
+  whole difference.
+- **MVRTP is the long product.** It makes +424.7% of the long side's +420.9%.
+  The other 13 long paths together: n=448, −0.01%/trade.
+- **MVRTP's edge is fat-tailed and period-dependent.**
+  - Its best 50 of 1,253 trades sum to more than its total.
+  - By month: July −0.17%, August +0.47%, September +0.40%.
+- **Exits are not the lever.** Tested on the 1m tape from each trade's actual
+  exit: no BE move, stop 1–3pt wider, and a 50% runner after TP1. Each is
+  worth ≤0.03%/trade, and every interval spans zero.
+  - 78% of stopped MVRTP longs trade back to entry within 24h, and a wider
+    stop still does not pay.
+- **Entry drift is the lever** [recorded, not re-measured]. It runs
+  ~0.23%/trade, about two-thirds of the long book's edge.
+- **Red days are long days.** Over 30d the longs account for −99.5% of the
+  −105.5% red-day loss. The worst days are MVRTP stop clusters.
+- **No live long path has a CI below zero.** SR_FLIP LONG and LSR LONG last
+  delivered on 29–30 June.
+- **Shorts.** LSR SHORT went 0 for 9 over the last 7 days; its 30d is −0.56%
+  [−1.08, −0.10]. FAR SHORT went 0 for 7.
+
+**Recommendations (none built):**
+1. Research drift by path and side, and how the order is placed (limit vs
+   market; adverse selection is the trap). This needs dispatch timestamps.
+2. Leave MVRTP exits alone.
+3. Retire LSR SHORT and set the LSR promotion rule's direction to LONG. These
+   are the owner's clicks, carried from 25 Sep.
+4. Stamp three dark entry features on MVRTP LONG:
+   - the signal's index on its symbol within 24h;
+   - the previous outcome on that symbol;
+   - the lagged count of MVRTP enqueues.
+5. Retire no long path.
+6. Track MVRTP LONG's rolling 30d on the tape as the KPI.
+
+---
+
 ## OPEN 2026-09-25 — guest access + paid live signals: 4 PRs, rollout needs the owner
 
 Owner, from a marketing session: ad visitors bounced off the phone-number
