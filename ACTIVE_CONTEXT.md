@@ -55,7 +55,18 @@ Binance 1m archive klines for every long closed in the last 62 days.
 - **Shorts.** LSR SHORT went 0 for 9 over the last 7 days; its 30d is −0.56%
   [−1.08, −0.10]. FAR SHORT went 0 for 7.
 
-**Recommendations (none built):**
+**Built 2026-09-26 on the owner's "proceed" (measurement only):**
+- 360-v2 #1070: `SignalRecord.shipped_tp1_distance_pct`, stamped by both
+  terminal writers, and `entry_fidelity.rebased_be_at_fill_pct`, published
+  beside rebased and never instead of it.
+- ops #228: `/track-record` gains a third fidelity row "rebased, break-even at
+  the fill", a pair-admission filter plus a by-admission split in the panel,
+  and CSV columns for both new fields.
+- The TP1 stamp reads 0.0 on every row until #1070 deploys; there is no
+  backfill. Rerun `scripts/research/longs_2026_09_26/entry_limits.py`
+  against a fresh window once about 2 weeks of stamped rows exist.
+
+**Recommendations:**
 1. Entry:
    - no drift gate;
    - do not expect `FSM_LIMIT_ENTRY` to improve price;
