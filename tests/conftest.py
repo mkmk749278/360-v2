@@ -15,6 +15,7 @@ fixture by re-enabling.
 from __future__ import annotations
 
 import os
+import tempfile as _tempfile
 
 # Disable dispatch cooldown for the test suite — set BEFORE any test
 # imports ``src.scanner`` so the module-level ``DISPATCH_COOLDOWN_SEC``
@@ -22,7 +23,17 @@ import os
 # manage their own state via the in-memory dict directly.
 os.environ.setdefault("DISPATCH_COOLDOWN_SEC", "0")
 
-import pytest
+# Runtime log sinks OUT of the working tree. ``src/logger.py`` reads LOG_DIR and
+# WS_TRACE_LOG_PATH at import and defaults both into ``logs/`` beside the repo,
+# so every local run left engine_*.log / engine_errors.log / ws_trace.log there
+# (2026-09-26 audit) — gitignored, but runtime state written by the suite into
+# the checkout is the `.tmp` / restart-guard defect again. Set before any
+# ``src`` import; tests that care about these paths still set their own.
+_TEST_LOG_DIR = _tempfile.mkdtemp(prefix="engine-test-logs-")
+os.environ.setdefault("LOG_DIR", _TEST_LOG_DIR)
+os.environ.setdefault("WS_TRACE_LOG_PATH", os.path.join(_TEST_LOG_DIR, "ws_trace.log"))
+
+import pytest  # noqa: E402 - the env above must be set before anything imports src
 
 
 @pytest.fixture(autouse=True)
@@ -212,6 +223,42 @@ def numpy_seeded_store():
         return store
 
     return _make
+
+
+def _reset_process_singletons() -> None:
+    from src.api import auto_trade_status_routes as _atsr
+    from src.api.snapshot_cache import snapshot_cache as _snapshot_cache
+    from src.execution import kill_switch as _kill_switch
+    from src.execution import tripwires as _tripwires
+    from src.security import firestore_keystore as _keystore
+
+    _kill_switch.reset_for_test()
+    _keystore.reset_for_test()
+    _tripwires.reset_singletons_for_test()
+    _atsr._runtime_cache.clear()
+    _snapshot_cache.reset_for_test()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_singletons():
+    """Reset the money-path and API singletons around EVERY test.
+
+    Each of these had a ``reset_for_test`` and was reset only by the test
+    files that remembered to — so a test that set ``firestore_keystore._db``
+    (or warmed the 10s runtime-status cache, or the snapshot cache) handed
+    that state to whichever test ran next. In file order the next test was
+    a sibling that expected it; in a shuffled run (2026-09-26 audit, seeds
+    777 and 12345) the "safe defaults when nothing is initialised" test read
+    ``binance_key_connected: True`` and two smoke tests read another test's
+    signals. A test that pins "unknown is not a value" must not pass only
+    because of what ran before it.
+
+    Reset on the way IN as well as out: a module that sets state at import
+    time, or a test that crashed mid-teardown, must not leak either.
+    """
+    _reset_process_singletons()
+    yield
+    _reset_process_singletons()
 
 
 @pytest.fixture(autouse=True)

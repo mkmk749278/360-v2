@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 
@@ -317,21 +319,32 @@ class TestBBWidthVolatileThresholdRecalibration:
     def test_env_override_lowers_threshold_when_requested(self, monkeypatch):
         """B8 — operator may tighten back to 6.0 via BB_WIDTH_VOLATILE_PCT."""
         monkeypatch.setenv("BB_WIDTH_VOLATILE_PCT", "6.0")
-        # Reload the module so the env var is consumed by the constant.
-        import importlib
-        import src.regime as regime_mod
-        importlib.reload(regime_mod)
-        try:
-            assert regime_mod._BB_WIDTH_VOLATILE_PCT == pytest.approx(6.0)
-            result = regime_mod.MarketRegimeDetector._decide(
-                adx=20.0, ema_slope=0.0, bb_width_pct=6.5,
-                timeframe="5m", ema9_slope_pct=None,
-            )
-            assert result == regime_mod.MarketRegime.VOLATILE
-        finally:
-            # Restore default for other tests.
-            monkeypatch.delenv("BB_WIDTH_VOLATILE_PCT", raising=False)
-            importlib.reload(regime_mod)
+        # Execute the module source into a PRIVATE module object so the env
+        # var is consumed by the constant at import time — without touching
+        # ``sys.modules``. ``importlib.reload(src.regime)`` did the same job
+        # and replaced every class in the shared module, so any test that
+        # had imported ``RegimeContext`` before the reload then failed
+        # ``isinstance`` against the object a detector built after it
+        # (surfaced by a random-order run, 2026-09-26).
+        import importlib.util
+        import src.regime as shared
+
+        spec = importlib.util.spec_from_file_location("_regime_env_probe", shared.__file__)
+        regime_mod = importlib.util.module_from_spec(spec)
+        # @dataclass resolves annotations through sys.modules[cls.__module__];
+        # register under the private name only, and let monkeypatch drop it.
+        monkeypatch.setitem(sys.modules, spec.name, regime_mod)
+        spec.loader.exec_module(regime_mod)
+
+        assert regime_mod._BB_WIDTH_VOLATILE_PCT == pytest.approx(6.0)
+        result = regime_mod.MarketRegimeDetector._decide(
+            adx=20.0, ema_slope=0.0, bb_width_pct=6.5,
+            timeframe="5m", ema9_slope_pct=None,
+        )
+        assert result == regime_mod.MarketRegime.VOLATILE
+        # Control: the shared module kept its default and its identity.
+        assert shared._BB_WIDTH_VOLATILE_PCT == pytest.approx(8.0)
+        assert shared.RegimeContext is RegimeContext
 
 
 class TestTrendShortCircuitsVolatile:

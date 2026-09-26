@@ -140,16 +140,20 @@ class TestEvaluatorPropagation:
     def test_long_preserves_shared_smc_data_divergence_keys(self):
         """Evaluator must not mutate global smc_data divergence keys for LONG."""
         sig, smc = self._run_long()
-        if sig is None:
-            pytest.skip("Signal did not fire — cannot test propagation")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire — cannot test propagation"
+        )
         assert "cvd_divergence" not in smc
         assert "cvd_divergence_strength" not in smc
 
     def test_long_sets_analyst_reason_with_label_and_strength(self):
         """Signal analyst_reason includes local divergence label and strength."""
         sig, _ = self._run_long()
-        if sig is None:
-            pytest.skip("Signal did not fire — cannot test propagation")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire — cannot test propagation"
+        )
         assert sig.analyst_reason is not None
         assert "Hidden BULLISH CVD divergence" in sig.analyst_reason
         strength = _extract_strength(sig.analyst_reason)
@@ -164,8 +168,10 @@ class TestEvaluatorPropagation:
         """A larger price drop produces a higher divergence strength."""
         # Close = 100; dip to ~97 → ~3% drop → strength ≈ 1.0
         sig_big, _ = self._run_long(close=100.0)
-        if sig_big is None:
-            pytest.skip("Big-dip signal did not fire — cannot test magnitude")
+        assert sig_big is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Big-dip signal did not fire — cannot test magnitude"
+        )
         assert sig_big.analyst_reason is not None
         # Smaller dip: build a candle set with only a 1.5% dip
         channel = ScalpChannel()
@@ -191,8 +197,10 @@ class TestEvaluatorPropagation:
             volume_24h_usd=50_000_000,
             regime="TRENDING_UP",
         )
-        if sig_s is None:
-            pytest.skip("Small-dip signal did not fire — skipping magnitude comparison")
+        assert sig_s is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Small-dip signal did not fire — skipping magnitude comparison"
+        )
         assert sig_s.analyst_reason is not None
         big_strength = _extract_strength(sig_big.analyst_reason)
         small_strength = _extract_strength(sig_s.analyst_reason)

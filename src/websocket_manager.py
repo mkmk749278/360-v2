@@ -98,6 +98,19 @@ ws_trace = get_ws_trace_logger()
 MessageHandler = Callable[[dict], Coroutine[Any, Any, None]]
 
 
+def _reconnect_delay(attempts: int, uniform=random.uniform) -> float:
+    """Exponential backoff with ±25% jitter, floored at 0.5s.
+
+    Jitter prevents thundering-herd reconnects when several connections drop
+    at once. A function of its own (2026-09-26 audit) because its only test
+    re-implemented this formula in the test body and asserted properties of
+    the copy — it could not fail whatever the loop did.
+    """
+    delay = min(WS_RECONNECT_BASE_DELAY * (2 ** attempts), WS_RECONNECT_MAX_DELAY)
+    jitter = delay * uniform(-0.25, 0.25)
+    return max(0.5, delay + jitter)
+
+
 @dataclass
 class WSConnection:
     """Tracks one WebSocket connection and its streams."""
@@ -690,14 +703,7 @@ class WebSocketManager:
                                 f"total drops: {self._total_drops}). Reconnecting…"
                             )
                         )
-                delay = min(
-                    WS_RECONNECT_BASE_DELAY * (2 ** conn.reconnect_attempts),
-                    WS_RECONNECT_MAX_DELAY,
-                )
-                # Add ±25% jitter to prevent thundering-herd reconnects when
-                # multiple connections drop simultaneously.
-                jitter = delay * random.uniform(-0.25, 0.25)
-                actual_delay = max(0.5, delay + jitter)
+                actual_delay = _reconnect_delay(conn.reconnect_attempts)
                 conn.reconnect_attempts += 1
                 log.info(
                     "Reconnecting in {:.1f}s (attempt {}) …",

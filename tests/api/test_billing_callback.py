@@ -92,3 +92,14 @@ def test_signature_header_constant_exposed() -> None:
 
 
 pytest.importorskip("fastapi")  # smoke tests for the endpoint live in test_api_smoke
+
+
+def test_non_ascii_signature_is_a_mismatch_not_a_crash() -> None:
+    """Regression (2026-09-26 audit): ``hmac.compare_digest`` raises
+    ``TypeError`` on a non-ASCII ``str``, so a forged header crashed the
+    webhook instead of being refused."""
+    v = BillingWebhookVerifier(secret=SECRET)
+    body = b'{"phone":"+1","tier":"paid","paid_until_iso":null}'
+    result = v.verify(body, "déadbeef")
+    assert result.ok is False
+    assert result.detail == "signature mismatch"

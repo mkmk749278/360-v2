@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 
 from src.cluster_suppression import ClusterSuppressor
 
@@ -90,25 +89,40 @@ def test_undirected_burst_blocks_any_direction():
 # ---------------------------------------------------------------------------
 
 
+class _Clock:
+    """Controlled monotonic time — the window is tested without sleeping."""
+
+    def __init__(self) -> None:
+        self.t = 1_000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
 def test_expired_signals_are_pruned():
-    s = ClusterSuppressor(window_seconds=0.05, max_signals=2)
+    clock = _Clock()
+    s = ClusterSuppressor(window_seconds=60.0, max_signals=2, clock=clock)
     symbols = [f"SYM{i}USDT" for i in range(5)]
     for sym in symbols:
         s.record_signal(sym, "LONG")
-    # Wait for window to expire
-    time.sleep(0.1)
-    # After pruning, window is empty → should allow
+    # Inside the window the burst still blocks — the control for the
+    # assertion below, which would otherwise pass on a gate that never blocks.
+    clock.t += 59.0
+    assert s.check_cluster_gate("NEWUSDT", "LONG")[0] is False
+    # Past the window it has aged out.
+    clock.t += 2.0
     allowed, _ = s.check_cluster_gate("NEWUSDT", "LONG")
     assert allowed is True
 
 
 def test_mixed_old_and_new_signals():
     """Old signals should not count against the current window."""
-    s = ClusterSuppressor(window_seconds=0.1, max_signals=2)
+    clock = _Clock()
+    s = ClusterSuppressor(window_seconds=60.0, max_signals=2, clock=clock)
     # Record old signals
     for i in range(5):
         s.record_signal(f"OLD{i}USDT", "LONG")
-    time.sleep(0.15)
+    clock.t += 61.0
     # Record fresh signals within limit
     s.record_signal("NEW1USDT", "LONG")
     allowed, _ = s.check_cluster_gate("NEW2USDT", "LONG")

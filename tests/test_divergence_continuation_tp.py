@@ -225,8 +225,10 @@ class TestDivergenceContinuationTPLongSwingBased:
         close = 100.0
         candles = _make_candles_long(close=close)
         sig, _ = _run_long(close=close, candles=candles)
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         highs_5m = [float(h) for h in candles["5m"]["high"]]
         sl_dist = abs(sig.entry - sig.stop_loss)
         struct = max(highs_5m[-10:])
@@ -256,8 +258,10 @@ class TestDivergenceContinuationTPLongSwingBased:
         close = 100.0
         candles = _make_candles_long(close=close)
         sig, _ = _run_long(close=close, candles=candles)
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         highs_5m = [float(h) for h in candles["5m"]["high"]]
         swing_high = max(highs_5m[-20:])
         sl_dist = abs(sig.entry - sig.stop_loss)
@@ -276,16 +280,20 @@ class TestDivergenceContinuationTPLongSwingBased:
 
     def test_all_tps_above_entry(self):
         sig, _ = _run_long()
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         assert sig.tp1 > sig.entry, f"tp1 ({sig.tp1}) must be above entry ({sig.entry})"
         assert sig.tp2 > sig.entry, f"tp2 ({sig.tp2}) must be above entry ({sig.entry})"
         assert sig.tp3 > sig.entry, f"tp3 ({sig.tp3}) must be above entry ({sig.entry})"
 
     def test_sl_below_entry(self):
         sig, _ = _run_long()
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         assert sig.stop_loss < sig.entry, (
             f"stop_loss ({sig.stop_loss}) must be below entry ({sig.entry}) for LONG"
         )
@@ -311,8 +319,10 @@ class TestDivergenceContinuationTPShortSwingBased:
         close = 100.0
         candles = _make_candles_short(close=close)
         sig, _ = _run_short(close=close, candles=candles)
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         lows_5m = [float(l) for l in candles["5m"]["low"]]
         sl_dist = abs(sig.entry - sig.stop_loss)
         struct = min(lows_5m[-10:])
@@ -334,8 +344,10 @@ class TestDivergenceContinuationTPShortSwingBased:
         close = 100.0
         candles = _make_candles_short(close=close)
         sig, _ = _run_short(close=close, candles=candles)
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         lows_5m = [float(l) for l in candles["5m"]["low"]]
         sl_dist = abs(sig.entry - sig.stop_loss)
         swing_low = min(lows_5m[-20:])
@@ -350,16 +362,20 @@ class TestDivergenceContinuationTPShortSwingBased:
 
     def test_all_tps_below_entry(self):
         sig, _ = _run_short()
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         assert sig.tp1 < sig.entry, f"tp1 ({sig.tp1}) must be below entry ({sig.entry})"
         assert sig.tp2 < sig.entry, f"tp2 ({sig.tp2}) must be below entry ({sig.entry})"
         assert sig.tp3 < sig.entry, f"tp3 ({sig.tp3}) must be below entry ({sig.entry})"
 
     def test_sl_above_entry(self):
         sig, _ = _run_short()
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         assert sig.stop_loss > sig.entry, (
             f"stop_loss ({sig.stop_loss}) must be above entry ({sig.entry}) for SHORT"
         )
@@ -405,8 +421,10 @@ class TestDivergenceContinuationAuditFixes:
         `max(0.8% × close, 1×ATR)` keeps sl_dist ≥ 0.8%.
         """
         sig, _ = _run_long()
-        if sig is None:
-            pytest.skip("Signal did not fire")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire"
+        )
         sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
         assert sl_dist_pct >= 0.79, (
             f"DIV_CONT SL distance {sl_dist_pct:.3f}% is too tight — "
@@ -443,9 +461,10 @@ class TestDivergenceContinuationTPFallback:
             }
         }
         sig, _ = _run_long(close=close, candles=candles)
-        if sig is None:
-            # May not fire if price vs EMA checks fail with these unusual candles
-            pytest.skip("Signal did not fire with all-below-close highs")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            "Signal did not fire with all-below-close highs"
+        )
         # tp1 must be above entry (fallback was applied)
         assert sig.tp1 > sig.entry, (
             f"tp1 fallback must be above entry; got tp1={sig.tp1}, entry={sig.entry}"
@@ -478,8 +497,10 @@ class TestDivergenceContinuationTPFallback:
             }
         }
         sig, _ = _run_short(close=close, candles=candles)
-        if sig is None:
-            pytest.skip("Signal did not fire with all-above-close lows")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Signal did not fire with all-above-close lows"
+        )
         assert sig.tp1 < sig.entry, (
             f"tp1 fallback must be below entry; got tp1={sig.tp1}, entry={sig.entry}"
         )

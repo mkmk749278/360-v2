@@ -642,7 +642,7 @@ This rule exists because six PRs were spent on WS instrumentation before a 5-min
 
 ```bash
 # Tests
-python -m pytest tests/ -x --ignore=tests/test_deployment.py -q
+python -m pytest tests/ -q                 # what CI runs (plus --timeout=300 and coverage)
 python -m pytest tests/test_signal_quality.py -v
 
 # Lint / type-check

@@ -78,7 +78,12 @@ class BillingWebhookVerifier:
         expected = hmac.new(self._secret, raw_body, hashlib.sha256).hexdigest()
         # Strip whitespace/casing variations from the header.
         cleaned = presented_signature.strip().lower()
-        if not hmac.compare_digest(expected, cleaned):
+        # Compare BYTES: a str holding a non-ASCII character makes
+        # compare_digest raise TypeError, which crashed the webhook instead of
+        # refusing it (2026-09-26 audit). It can never match a hex digest.
+        if not hmac.compare_digest(
+            expected.encode("ascii"), cleaned.encode("utf-8", "surrogatepass"),
+        ):
             log.warning("Billing webhook HMAC mismatch")
             return VerificationResult(ok=False, detail="signature mismatch")
         return VerificationResult(ok=True)

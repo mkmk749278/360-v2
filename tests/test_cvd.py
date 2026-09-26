@@ -62,10 +62,13 @@ class TestComputeCVD:
     def test_output_same_length_as_input(self):
         """Output length matches input length."""
         n = 50
-        buy = np.random.rand(n) * 1000
-        sell = np.random.rand(n) * 1000
+        rng = np.random.default_rng(50)
+        buy = rng.random(n) * 1000
+        sell = rng.random(n) * 1000
         result = compute_cvd(buy, sell)
         assert len(result) == n
+        # …and it is the cumulative delta, not merely an array of that length.
+        assert result[-1] == pytest.approx(float((buy - sell).sum()))
 
     # ---- rolling window ----
 

@@ -1,7 +1,6 @@
 """Smoke tests for the JWT auth module + auth endpoints."""
 from __future__ import annotations
 
-import time
 from datetime import timedelta
 
 import pytest
@@ -57,21 +56,39 @@ def test_decode_rejects_garbage() -> None:
         decode_token("not.a.jwt", secret=_SECRET)
 
 
+@pytest.mark.parametrize("token", ["a.b.\u00e9", "\u00e9.b.c", "a.\u00e9.c"])
+def test_decode_rejects_a_non_ascii_token_as_an_auth_error(token) -> None:
+    """Regression (2026-09-26 audit): the signing input was ``.encode("ascii")``-ed
+    and the signature compared as ``str``, so a non-ASCII character raised
+    UnicodeEncodeError/TypeError — an unhandled 500 on every authenticated
+    route instead of a 401."""
+    with pytest.raises(AuthError):
+        decode_token(token, secret=_SECRET)
+
+
 def test_decode_rejects_expired_token() -> None:
     t = mint_token(secret=_SECRET, ttl=timedelta(seconds=-1))
     with pytest.raises(AuthError, match="expired"):
         decode_token(t, secret=_SECRET)
 
 
-def test_refresh_preserves_sub_and_tier() -> None:
+def test_refresh_preserves_sub_and_tier(monkeypatch) -> None:
+    # A controlled clock instead of time.sleep(1), and a strict assertion:
+    # the old ``exp >= exp`` was satisfied by a refresh that renewed nothing.
+    from datetime import datetime, timezone
+
+    from src.api import auth as auth_mod
+
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+    monkeypatch.setattr(auth_mod, "_now", lambda: t0)
     t1 = mint_token(secret=_SECRET, sub="device-abc", tier="paid")
-    time.sleep(1)  # ensure exp moves forward
+    monkeypatch.setattr(auth_mod, "_now", lambda: t0 + timedelta(minutes=10))
     t2 = refresh_token(t1, secret=_SECRET)
     c1 = decode_token(t1, secret=_SECRET)
     c2 = decode_token(t2, secret=_SECRET)
     assert c2.sub == c1.sub
     assert c2.tier == c1.tier
-    assert c2.exp >= c1.exp
+    assert c2.exp - c1.exp == timedelta(minutes=10)
 
 
 def test_refresh_rejects_expired_token() -> None:

@@ -108,8 +108,10 @@ class TestWhaleMomentumTP:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — market-condition filters not met.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — market-condition filters not met."
+        )
 
         entry = sig.entry
         sl = sig.stop_loss
@@ -136,8 +138,10 @@ class TestWhaleMomentumTP:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — market-condition filters not met.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — market-condition filters not met."
+        )
 
         entry = sig.entry
         sl = sig.stop_loss
@@ -168,8 +172,10 @@ class TestWhaleMomentumTP:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — market-condition filters not met.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — market-condition filters not met."
+        )
 
         assert sig.tp1 != 0.0, "tp1 must not be 0.0 — evaluator must set real TP."
         assert sig.tp2 != 0.0, "tp2 must not be 0.0 — evaluator must set real TP."
@@ -197,8 +203,10 @@ class TestWhaleMomentumTP:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — market-condition filters not met.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — market-condition filters not met."
+        )
 
         # TPs must all be positive and above entry for LONG
         entry = sig.entry
