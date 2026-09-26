@@ -237,8 +237,10 @@ class TestFundingExtremeTP1TuningIntegration:
         sig = ch._evaluate_funding_extreme(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — market-condition filters not met in stub.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — market-condition filters not met in stub."
+        )
         # Old 0.5% TP1 would be ~101.505 for close=101; the new TP1 should be 103.0
         assert sig.tp1 != pytest.approx(close * 1.005, abs=0.05), (
             "TP1 must not be the flat 0.5% placeholder (close * 1.005)."
@@ -263,8 +265,10 @@ class TestFundingExtremeTP1TuningIntegration:
         sig = ch._evaluate_funding_extreme(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — market-condition filters not met.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — market-condition filters not met."
+        )
         # With no qualifying level, TP1 must be the 1.5R fallback.
         # Primary assertions: TP1 is positive, above SL, above the non-qualifying FVG
         # level, and TP ordering is correct.
@@ -288,8 +292,10 @@ class TestFundingExtremeTP1TuningIntegration:
         sig = ch._evaluate_funding_extreme(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None."
+        )
         assert sig.setup_class == "FUNDING_EXTREME_SIGNAL"
 
     def test_funding_extreme_sl_degraded_execution_note(self):
@@ -407,8 +413,10 @@ class TestWhaleMomentumSLTuning:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — market-condition filters not met.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — market-condition filters not met."
+        )
         # SL must be below the swing low (99.5) by the buffer (0.1%)
         expected_invalidation = 99.5 * (1.0 - _WHALE_SWING_BUFFER)
         expected_sl_dist = max(close_price - expected_invalidation, 0.3)  # 0.3 ATR floor
@@ -441,8 +449,10 @@ class TestWhaleMomentumSLTuning:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — market-condition filters not met.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — market-condition filters not met."
+        )
         assert sig.stop_loss >= close_arr[-1], "SHORT SL must be above entry."
 
     def test_sl_atr_floor_prevents_mechanically_tight_stop(self):
@@ -471,8 +481,10 @@ class TestWhaleMomentumSLTuning:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None."
+        )
         # SL distance must be at least ATR (floor)
         actual_sl_dist = abs(sig.stop_loss - close_arr[-1])
         assert actual_sl_dist >= atr_val * 0.9, (
@@ -489,8 +501,10 @@ class TestWhaleMomentumSLTuning:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None."
+        )
         assert sig.setup_class == "WHALE_MOMENTUM"
 
     def test_whale_sl_fallback_when_insufficient_candles(self):
@@ -576,8 +590,10 @@ class TestFundingExtremeAuditFixes:
         sig = ch._evaluate_funding_extreme(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — gates not met in this fixture.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — gates not met in this fixture."
+        )
         sl_dist = abs(sig.entry - sig.stop_loss)
         tp1_dist = abs(sig.tp1 - sig.entry)
         tp1_ratio = tp1_dist / sl_dist
@@ -597,8 +613,10 @@ class TestFundingExtremeAuditFixes:
         sig = ch._evaluate_funding_extreme(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — gates not met in this fixture.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — gates not met in this fixture."
+        )
         sl_dist = abs(sig.entry - sig.stop_loss)
         tp1_dist = abs(sig.tp1 - sig.entry)
         tp1_ratio = tp1_dist / sl_dist
@@ -619,8 +637,10 @@ class TestFundingExtremeAuditFixes:
         sig = ch._evaluate_funding_extreme(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
         )
-        if sig is None:
-            pytest.skip("Evaluator returned None — gates not met in this fixture.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None — gates not met in this fixture."
+        )
         sl_dist = abs(sig.entry - sig.stop_loss)
         tp1_dist = abs(sig.tp1 - sig.entry)
         tp1_ratio = tp1_dist / sl_dist

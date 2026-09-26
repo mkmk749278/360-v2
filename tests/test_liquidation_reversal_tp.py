@@ -37,7 +37,10 @@ def _make_m5_candles(closes: list[float], volumes: list[float]) -> dict:
     }
 
 
-def _make_long_scenario(atr_val: float = 0.5) -> tuple[dict, dict, dict]:
+def _make_long_scenario(
+    atr_val: float = 0.5,
+    tail: tuple[float, float, float, float] = (100.0, 99.5, 98.5, 97.5),
+) -> tuple[dict, dict, dict]:
     """
     Craft a scenario where the cascade fell from 100.0 to 97.5 over 3 candles.
 
@@ -53,7 +56,7 @@ def _make_long_scenario(atr_val: float = 0.5) -> tuple[dict, dict, dict]:
     """
     n = 25
     # 21 regular closes + cascade window
-    closes = [100.0] * (n - 4) + [100.0, 99.5, 98.5, 97.5]
+    closes = [100.0] * (n - 4) + list(tail)
     # Last candle volume is a 3× spike (> 2.5× threshold)
     volumes = [100.0] * (n - 1) + [300.0]
 
@@ -63,7 +66,7 @@ def _make_long_scenario(atr_val: float = 0.5) -> tuple[dict, dict, dict]:
     # cvd[-4]=-200 → cvd[-1]=50: cvd_change = 50 - (-200) = 250 > 0 → LONG confirmed
     smc_data = {
         "cvd": [0.0] * (n - 4) + [-200.0, -150.0, -100.0, 50.0],
-        "fvg": [{"level": 97.4}],
+        "fvg": [{"level": min(tail) - 0.1}],
         "orderblocks": [],
         "pair_profile": None,
         "regime_context": None,
@@ -71,7 +74,10 @@ def _make_long_scenario(atr_val: float = 0.5) -> tuple[dict, dict, dict]:
     return candles, indicators, smc_data
 
 
-def _make_short_scenario(atr_val: float = 0.5) -> tuple[dict, dict, dict]:
+def _make_short_scenario(
+    atr_val: float = 0.5,
+    tail: tuple[float, float, float, float] = (100.0, 100.5, 101.5, 102.5),
+) -> tuple[dict, dict, dict]:
     """
     Craft a scenario where the cascade rose from 100.0 to 102.5 over 3 candles.
 
@@ -86,7 +92,7 @@ def _make_short_scenario(atr_val: float = 0.5) -> tuple[dict, dict, dict]:
     Volume spike: last candle 3× the 20-candle average.
     """
     n = 25
-    closes = [100.0] * (n - 4) + [100.0, 100.5, 101.5, 102.5]
+    closes = [100.0] * (n - 4) + list(tail)
     volumes = [100.0] * (n - 1) + [300.0]
 
     candles = {"5m": _make_m5_candles(closes, volumes)}
@@ -95,7 +101,7 @@ def _make_short_scenario(atr_val: float = 0.5) -> tuple[dict, dict, dict]:
     # cvd[-4]=200 → cvd[-1]=-50: cvd_change = -50 - 200 = -250 < 0 → SHORT confirmed
     smc_data = {
         "cvd": [0.0] * (n - 4) + [200.0, 150.0, 100.0, -50.0],
-        "fvg": [{"level": 102.6}],
+        "fvg": [{"level": max(tail) + 0.1}],
         "orderblocks": [],
         "pair_profile": None,
         "regime_context": None,
@@ -124,8 +130,10 @@ class TestLiquidationReversalFibonacciLong:
         sig = _call_evaluator(candles, indicators, smc_data)
 
         # If conditions are not met the evaluator returns None — guard first
-        if sig is None:
-            pytest.skip("Evaluator returned None; environment conditions not met")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None; environment conditions not met"
+        )
 
         assert sig.direction == Direction.LONG
         assert sig.setup_class == "LIQUIDATION_REVERSAL"
@@ -151,8 +159,10 @@ class TestLiquidationReversalFibonacciLong:
     def test_long_tps_are_above_entry(self):
         candles, indicators, smc_data = _make_long_scenario(atr_val=0.5)
         sig = _call_evaluator(candles, indicators, smc_data)
-        if sig is None:
-            pytest.skip("Evaluator returned None")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None"
+        )
         assert sig.tp1 > sig.entry, "TP1 must be above entry for LONG"
         assert sig.tp2 > sig.entry, "TP2 must be above entry for LONG"
         assert sig.tp3 > sig.entry, "TP3 must be above entry for LONG"
@@ -285,8 +295,10 @@ class TestLiquidationReversalFibonacciShort:
         candles, indicators, smc_data = _make_short_scenario(atr_val=0.5)
         sig = _call_evaluator(candles, indicators, smc_data)
 
-        if sig is None:
-            pytest.skip("Evaluator returned None; environment conditions not met")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None; environment conditions not met"
+        )
 
         assert sig.direction == Direction.SHORT
         assert sig.setup_class == "LIQUIDATION_REVERSAL"
@@ -312,8 +324,10 @@ class TestLiquidationReversalFibonacciShort:
     def test_short_tps_are_below_entry(self):
         candles, indicators, smc_data = _make_short_scenario(atr_val=0.5)
         sig = _call_evaluator(candles, indicators, smc_data)
-        if sig is None:
-            pytest.skip("Evaluator returned None")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            + "Evaluator returned None"
+        )
         assert sig.tp1 < sig.entry, "TP1 must be below entry for SHORT"
         assert sig.tp2 < sig.entry, "TP2 must be below entry for SHORT"
         assert sig.tp3 < sig.entry, "TP3 must be below entry for SHORT"
@@ -326,18 +340,28 @@ class TestLiquidationReversalFibonacciShort:
 class TestLiquidationReversalFallbackOnDegenerateCascade:
     """When cascade_range < ATR * 0.5, ATR-based R-multiple TPs are used."""
 
+    # These two tests SKIPPED on every run from the day the cascade detector
+    # became ATR-relative (floor 1.5%, cap 3.5%): their 2.5% cascade no longer
+    # cleared a 3.5% threshold at ATR 10, the evaluator returned None, and the
+    # ``if sig is None: pytest.skip`` turned "the fallback geometry is
+    # untested" into a green run (2026-09-26 audit). A 4% cascade clears the
+    # capped threshold while staying under ATR * 0.5 = 5, so the fallback is
+    # reachable — and a None now FAILS instead of hiding.
+
     def test_liquidation_reversal_tp_fallback_on_degenerate_cascade(self):
-        # ATR = 10.0 → threshold = 5.0 > cascade_range (2.5) → fallback triggered
-        candles, indicators, smc_data = _make_long_scenario(atr_val=10.0)
+        # ATR = 10.0 → threshold = min(3.5, 30)% = 3.5%; cascade 100 → 96 = 4%
+        # clears it, and cascade_range 4.0 < ATR * 0.5 = 5.0 → fallback.
+        candles, indicators, smc_data = _make_long_scenario(
+            atr_val=10.0, tail=(100.0, 99.0, 97.5, 96.0),
+        )
         sig = _call_evaluator(candles, indicators, smc_data)
 
-        if sig is None:
-            pytest.skip("Evaluator returned None; environment conditions not met")
+        assert sig is not None, "the degenerate-cascade fixture must produce a signal"
 
         assert sig.direction == Direction.LONG
-        close_now = 97.5
+        close_now = 96.0
         sl_buffer = close_now * 0.003
-        cascade_low = 97.5
+        cascade_low = 96.0
         sl = cascade_low - sl_buffer
         risk = abs(close_now - sl)
 
@@ -357,16 +381,17 @@ class TestLiquidationReversalFallbackOnDegenerateCascade:
 
     def test_degenerate_cascade_short_fallback(self):
         """Fallback also works for SHORT direction."""
-        candles, indicators, smc_data = _make_short_scenario(atr_val=10.0)
+        candles, indicators, smc_data = _make_short_scenario(
+            atr_val=10.0, tail=(100.0, 101.0, 102.5, 104.0),
+        )
         sig = _call_evaluator(candles, indicators, smc_data)
 
-        if sig is None:
-            pytest.skip("Evaluator returned None; environment conditions not met")
+        assert sig is not None, "the degenerate-cascade fixture must produce a signal"
 
         assert sig.direction == Direction.SHORT
-        close_now = 102.5
+        close_now = 104.0
         sl_buffer = close_now * 0.003
-        cascade_high = 102.5
+        cascade_high = 104.0
         sl = cascade_high + sl_buffer
         risk = abs(close_now - sl)
 

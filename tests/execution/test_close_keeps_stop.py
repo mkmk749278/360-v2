@@ -366,12 +366,17 @@ async def test_an_unrecorded_resting_order_blocks_a_blind_second_stop():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("override", [
-    {"protection_mode": "user_owned"},
-    {"last_event_at": datetime.now(timezone.utc)},
-])
+    lambda: {"protection_mode": "user_owned"},
+    # Built when the test RUNS, not when it is collected: the in-flight
+    # window is ``_ORDER_HEAL_MIN_QUIET_S`` (180s), and a timestamp taken at
+    # collection had aged out by the time a random-order or coverage run
+    # reached this test, so the reconciler correctly re-placed the stop and
+    # the test failed for a reason that had nothing to do with the code.
+    lambda: {"last_event_at": datetime.now(timezone.utc)},
+], ids=["user_owned", "in_flight"])
 async def test_reprotection_respects_user_owned_and_in_flight(override):
     _f, placer = _stub_placer_factory()
-    pos = _bracketed(sl_order_id=0, **override)
+    pos = _bracketed(sl_order_id=0, **override())
     await _reconciler(placer)._ensure_protected(pos, set())
     placer.place_stop_loss.assert_not_called()
 

@@ -187,6 +187,31 @@ class SnapshotCache:
         self._executor.shutdown(wait=False)
         log.info("snapshot_cache: stopped")
 
+    def reset_for_test(self) -> None:
+        """Test-only: forget every cached payload and bound engine.
+
+        ``snapshot_cache`` is a module singleton, so a payload warmed by one
+        test's engine was served to the next test that built an app without
+        running its lifespan — the order-dependence the 2026-09-26 audit found
+        with a shuffled run. Task references are dropped, not cancelled: they
+        belong to an event loop the previous TestClient already closed. The
+        pool is replaced if ``stop()`` shut it down, or every later pre-warm
+        fails into "cache is cold".
+        """
+        self._signals_all = None
+        self._cached_at = 0.0
+        self._activity_all = None
+        self._activity_cached_at = 0.0
+        self._agents_all = None
+        self._agents_cached_at = 0.0
+        self._engine = None
+        self._redis = None
+        self._task = None
+        self._activity_task = None
+        self._agents_task = None
+        if getattr(self._executor, "_shutdown", False):
+            self._executor = _TPE(max_workers=2, thread_name_prefix="snapshot-cache")
+
     # ------------------------------------------------------------------
     # Background loops — engine-backed (single-process mode)
     # ------------------------------------------------------------------

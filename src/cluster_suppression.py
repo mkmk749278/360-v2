@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from typing import Callable, Optional
 
 from src.utils import get_logger
 
@@ -68,17 +69,22 @@ class ClusterSuppressor:
     max_signals:
         Maximum number of unique symbols allowed before cluster blocking
         kicks in (for the directional check).
+    clock:
+        Monotonic time source; injectable so the window can be tested
+        without sleeping (the tripwire classes use the same seam).
     """
 
     def __init__(
         self,
         window_seconds: float = 60.0,
         max_signals: int = 5,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         # Entries: (monotonic_time, symbol, direction)
         self._recent: deque[tuple[float, str, str]] = deque()
         self._window = window_seconds
         self._max_signals = max_signals
+        self._clock = clock or time.monotonic
 
     # ------------------------------------------------------------------
     # Public API
@@ -90,7 +96,7 @@ class ClusterSuppressor:
         Must be called **after** the signal has been successfully enqueued so
         that rejected signals do not inflate the cluster counter.
         """
-        now = time.monotonic()
+        now = self._clock()
         self._recent.append((now, symbol, direction))
         self._prune(now)
         log.debug(
@@ -114,7 +120,7 @@ class ClusterSuppressor:
         -------
         ``(allowed, reason)``
         """
-        now = time.monotonic()
+        now = self._clock()
         self._prune(now)
 
         active = list(self._recent)

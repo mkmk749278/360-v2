@@ -216,26 +216,50 @@ class TestPerPayloadTiming:
         elapsed for whichever payload was in flight and the assertion compared
         two zeroes. The property under test is per-payload attribution, not the
         loop; testing it through the loop tested the cancellation instead.
+
+        Two things made it flaky (2026-09-26 audit: failed 2 of 5 isolated
+        runs with coverage on). The stubbed writers were a HAND-KEPT list that
+        had fallen four behind ``_write_cycle`` — ``_write_exchange_positions``
+        ran for real, raised, and spent its loguru traceback formatting inside
+        the timed block; and the ordering assertion rested on a 30ms real-sleep
+        margin that any slow runner could eat. The writer list is now read off
+        ``_write_cycle``'s own AST, and time is a fake clock the stubs advance,
+        so the ranking is exact and cannot depend on the machine.
         """
+        import ast
+        import inspect
+        import textwrap
+
+        from src.api import snapshot_writer as sw
+
         writer = SnapshotWriter(engine=object(), redis_client=_Redis())
 
-        async def _fast():
-            await asyncio.sleep(0.001)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(SnapshotWriter._write_cycle)))
+        writers = sorted({
+            node.func.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr.startswith("_write_")
+        })
+        assert "_write_signals" in writers and len(writers) >= 10
 
-        async def _slow():
-            await asyncio.sleep(0.03)
+        clock = [1_000_000.0]
+        monkeypatch.setattr(sw.time, "monotonic", lambda: clock[0])
 
-        for name in ("_write_tickers", "_write_engine_state", "_write_positions_diag",
-                     "_write_data_intake", "_write_trail_governor",
-                     "_write_router_delivery", "_write_dark_promotion",
-                     "_write_activity", "_write_alerts", "_write_agents"):
-            monkeypatch.setattr(writer, name, _fast)
-        monkeypatch.setattr(writer, "_write_signals", _slow)
+        def _costs(seconds: float):
+            async def _write():
+                clock[0] += seconds
+            return _write
+
+        for name in writers:
+            monkeypatch.setattr(writer, name, _costs(0.01))
+        monkeypatch.setattr(writer, "_write_signals", _costs(3.0))
 
         await writer._write_cycle()
         times = writer.health()["write_times"]
-        assert times["signals"] >= 0.03
-        assert times["signals"] > times["tickers"]
+        assert times["signals"] == 3.0
+        assert all(v == 0.01 for k, v in times.items() if k != "signals"), times
+        # Every writer the cycle calls reports its own cost — none is silent.
+        assert set(times) == {w.removeprefix("_write_") for w in writers}
         # Slowest first: the reader's next question is always "slow where".
         assert next(iter(times)) == "signals"
 

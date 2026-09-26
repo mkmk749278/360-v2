@@ -239,9 +239,10 @@ class TestQuietCompressionBreakAuditFixes:
         sig = ch._evaluate_quiet_compression_break(
             "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
         )
-        if sig is None:
-            import pytest
-            pytest.skip("Other gates rejected — focused fix is on SL geometry only.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            "another gate now rejects it, so the SL geometry below is untested"
+        )
         sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
         assert sl_dist_pct >= 0.79, (
             f"QCB SL distance {sl_dist_pct:.3f}% is too tight — close-relative "
@@ -3135,9 +3136,10 @@ class TestContinuationLiquiditySweepAuditFixes:
             "BTCUSDT", candles, _cls_indicators_long(), smc_data,
             spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
         )
-        if sig is None:
-            import pytest
-            pytest.skip("Other gates rejected — focused fix is on SL geometry only.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            "another gate now rejects it, so the SL geometry below is untested"
+        )
         sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
         assert sl_dist_pct >= 0.79, (
             f"CLS SL distance {sl_dist_pct:.3f}% is too tight — "
@@ -3906,9 +3908,10 @@ class TestPostDisplacementContinuationAuditFixes:
             "BTCUSDT", candles, _pdc_indicators_long(), {},
             spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
         )
-        if sig is None:
-            import pytest
-            pytest.skip("Other gates rejected — focused fix is on SL geometry only.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            "another gate now rejects it, so the SL geometry below is untested"
+        )
         sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
         assert sl_dist_pct >= 0.79, (
             f"PDC SL distance {sl_dist_pct:.3f}% is too tight — "
@@ -4689,9 +4692,10 @@ class TestFailedAuctionReclaimAuditFixes:
             "BTCUSDT", candles, _far_indicators_long(atr=0.05), {},
             spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
         )
-        if sig is None:
-            import pytest
-            pytest.skip("Other gates rejected — focused fix is on SL geometry only.")
+        assert sig is not None, (
+            "fixture produced no signal (was a silent skip until 2026-09-26): "
+            "another gate now rejects it, so the SL geometry below is untested"
+        )
         sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
         assert sl_dist_pct >= 0.79, (
             f"FAR SL distance {sl_dist_pct:.3f}% is too tight — "

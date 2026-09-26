@@ -326,18 +326,42 @@ class TestPairSnapshot:
         assert snap.liquidity_label == "DEEP"
 
     def test_btc_correlation(self) -> None:
+        # Seeded (it was np.random unseeded), and asserting the answer rather
+        # than "anything but zero, any role": a pair that is half of BTC plus
+        # a little noise moves WITH BTC, in the same bar.
         import numpy as np
-        btc_closes = list(np.cumsum(np.random.randn(100)) + 100)
-        pair_closes = [b * 0.5 + np.random.randn() * 0.1 for b in btc_closes]
+        rng = np.random.default_rng(20260926)
+        btc_closes = list(np.cumsum(rng.standard_normal(100)) + 100)
+        pair_closes = [b * 0.5 + rng.standard_normal() * 0.1 for b in btc_closes]
 
         snap = build_pair_snapshot(
             "ETHUSDT",
             btc_closes=btc_closes,
             pair_closes=pair_closes,
         )
-        # Should detect some correlation
-        assert snap.btc_corr_short != 0.0
-        assert snap.btc_role in ("LEADER", "LAGGER", "SYNC", "UNCORRELATED")
+        assert snap.btc_corr_short > 0.9
+        assert snap.btc_corr_long > 0.9
+        assert snap.btc_role == "SYNC"
+        assert snap.btc_best_lag == 0
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "compute_btc_correlation correlates price LEVELS (detect_lead_lag "
+            "beside it uses returns 'for stationarity'), so two independent "
+            "random walks read |corr| up to ~0.8. No runtime caller today — "
+            "build_pair_snapshot is reached only from tests — so this pins "
+            "the defect rather than fixing unused code (2026-09-26 audit)."
+        ),
+    )
+    def test_independent_walks_read_as_uncorrelated(self) -> None:
+        import numpy as np
+        rng = np.random.default_rng(0)
+        btc_closes = list(np.cumsum(rng.standard_normal(100)) + 100)
+        rng.standard_normal(100)  # decouple the draws
+        independent = list(np.cumsum(rng.standard_normal(100)) + 100)
+        snap = build_pair_snapshot("ETHUSDT", btc_closes=btc_closes, pair_closes=independent)
+        assert snap.btc_role == "UNCORRELATED"
 
     def test_regime_from_indicators(self) -> None:
         # VOLATILE (BB width >= 5%)

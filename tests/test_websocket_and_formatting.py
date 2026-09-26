@@ -660,31 +660,54 @@ class TestReconnectJitter:
         assert ws._data_store is None
 
     def test_jitter_produces_varied_delays(self):
-        """Successive jitter values should not always be identical."""
+        """Drives the REAL backoff. This test used to re-implement the jitter
+        formula in its own body and assert properties of the copy, so it could
+        not fail whatever the reconnect loop did (2026-09-26 audit)."""
         import random
+
         from config import WS_RECONNECT_BASE_DELAY, WS_RECONNECT_MAX_DELAY
-        # Test across different reconnect attempts (exponents 0-3) to verify
-        # jitter is applied regardless of backoff magnitude.
-        all_delays = []
-        for attempt in range(4):
-            delays = set()
-            for _ in range(20):
-                delay = min(WS_RECONNECT_BASE_DELAY * (2 ** attempt), WS_RECONNECT_MAX_DELAY)
-                jitter = delay * random.uniform(-0.25, 0.25)
-                actual = max(0.5, delay + jitter)
-                delays.add(round(actual, 6))
-            # With 20 samples, at least 2 distinct values should appear
-            assert len(delays) > 1, f"No jitter variation at attempt={attempt}"
-            all_delays.extend(delays)
-        # Verify delays stay within the expected ±25% jitter band + min 0.5s floor
+        from src.websocket_manager import _reconnect_delay
+
+        rng = random.Random(20260926)
         for attempt in range(4):
             base = min(WS_RECONNECT_BASE_DELAY * (2 ** attempt), WS_RECONNECT_MAX_DELAY)
-            low = max(0.5, base * 0.75)
-            high = base * 1.25
-            for _ in range(50):
-                jitter = base * random.uniform(-0.25, 0.25)
-                actual = max(0.5, base + jitter)
-                assert low <= actual <= high, f"Delay {actual:.3f} outside [{low:.3f}, {high:.3f}]"
+            delays = {round(_reconnect_delay(attempt, rng.uniform), 6) for _ in range(20)}
+            assert len(delays) > 1, f"No jitter variation at attempt={attempt}"
+            low, high = max(0.5, base * 0.75), base * 1.25
+            assert all(low <= d <= high for d in delays), (attempt, sorted(delays))
+
+    def test_jitter_band_edges_and_cap_are_exact(self):
+        from config import WS_RECONNECT_BASE_DELAY, WS_RECONNECT_MAX_DELAY
+        from src.websocket_manager import _reconnect_delay
+
+        def edge(v):
+            return lambda _lo, _hi: v
+
+        base = WS_RECONNECT_BASE_DELAY
+        assert _reconnect_delay(0, edge(0.0)) == max(0.5, base)
+        assert _reconnect_delay(0, edge(0.25)) == max(0.5, base * 1.25)
+        assert _reconnect_delay(0, edge(-0.25)) == max(0.5, base * 0.75)
+        # Exponential until the cap, then flat — a runaway backoff would
+        # leave a dropped feed disconnected for hours.
+        huge = _reconnect_delay(40, edge(0.0))
+        assert huge == WS_RECONNECT_MAX_DELAY
+        assert _reconnect_delay(40, edge(0.25)) == WS_RECONNECT_MAX_DELAY * 1.25
+
+    def test_the_reconnect_loop_uses_the_tested_backoff(self):
+        """Pin the call site, not just the function — a loop that stopped
+        calling it would leave this file green over untested code."""
+        import ast
+        import inspect
+
+        import src.websocket_manager as wsm
+
+        tree = ast.parse(inspect.getsource(wsm))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", None) == "_reconnect_delay"]
+        assert calls, "the reconnect loop no longer calls _reconnect_delay"
+        assert "random.uniform(-0.25" not in inspect.getsource(wsm).replace(
+            inspect.getsource(wsm._reconnect_delay), "",
+        ), "a second, untested jitter formula appeared in websocket_manager"
 
 
 class TestMultiTimeframeFallbackConfig:
