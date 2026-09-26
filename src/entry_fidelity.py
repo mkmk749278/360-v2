@@ -41,6 +41,26 @@ showed a triumph. Nothing here is a gate.
 The direction convention is fixed once, here, because a signed feature split
 the wrong way scores every SHORT backwards and reads exactly like noise:
 **positive drift means the market had already moved in the TRADE's favour.**
+
+**Two defensible prices for a break-even exit, so both are published
+(2026-09-26).** The rebased book keeps every exit LEVEL and moves only the
+entry — right for a stop or a target, which rest at absolute prices, and wrong
+for a break-even exit on a live position. The book parks break-even at the
+STAMPED entry; a live position parks it at ITS FILL
+(``pretp_dispatcher``: ``entry_price_filled``). So on a drifted trade
+``rebased_pnl_pct`` books every break-even scratch as a loss of the whole
+drift, which no user ever takes. ``rebased_be_at_fill_pct`` prices those rows
+at the book's own offset from its anchor instead (the scratch is the same
+distance from the fill as the book's is from the stamp) and leaves every other
+row exactly as rebased.
+
+Measured on 584 MVRTP LONG rows, 5–26 Sep (docs/LONGS_RESEARCH_2026_09_26.md
+§11): rows with drift ≥ 0.5% read **−0.29%** rebased and **−0.05%** at the
+fill, and a 1m-tape replay with live break-even semantics put the same rows at
+−0.03% to −0.08%. It is still an approximation — a live position's break-even
+also ARMS from its fill, so on a drifted trade it arms later and some book
+scratches would have ended elsewhere — which is why neither figure is called
+"the" real result and both sit beside the recorded one.
 """
 
 from __future__ import annotations
@@ -57,6 +77,8 @@ __all__ = [
     "implied_exit_price",
     "rebased_pnl_pct",
     "rebase",
+    "be_at_fill_pnl_pct",
+    "BREAKEVEN_EXIT",
     "record_fields",
     "summarise",
 ]
@@ -135,6 +157,11 @@ class Rebased:
     rebased_pnl_pct: Optional[float] = None
     observed_entry: Optional[float] = None
     exit_price: Optional[float] = None
+    #: ``rebased_pnl_pct`` with a break-even exit priced at the fill (module
+    #: docstring). ``None`` when the caller did not say what the outcome was —
+    #: an unknown label is not "not a break-even", and guessing either way
+    #: moves the figure.
+    rebased_be_at_fill_pct: Optional[float] = None
 
     @property
     def ok(self) -> bool:
@@ -149,6 +176,7 @@ def rebase(
     observed_entry: Optional[float],
     observation_stale: bool = False,
     allow_stale: bool = False,
+    outcome_label: Optional[str] = None,
 ) -> Rebased:
     """Re-score one closed row from the observed price instead of the stamp.
 
@@ -180,7 +208,30 @@ def rebase(
         rebased_pnl_pct=rebased,
         observed_entry=float(observed_entry),
         exit_price=float(exit_price),
+        rebased_be_at_fill_pct=be_at_fill_pnl_pct(outcome_label, pnl_pct, rebased),
     )
+
+
+#: The outcome whose exit rests relative to the entry rather than at an
+#: absolute level — the one row class the rebased book misprices.
+BREAKEVEN_EXIT = "BREAKEVEN_EXIT"
+
+
+def be_at_fill_pnl_pct(
+    outcome_label: Optional[str], book_pnl_pct: float, rebased: Optional[float]
+) -> Optional[float]:
+    """``rebased`` with a break-even exit priced at the fill.
+
+    A break-even stop sits at a fixed offset from its anchor (zero, or the park
+    tolerance), so the scratch a live position takes is ``book_pnl_pct`` — the
+    same offset, measured from its own fill. Every other exit is an absolute
+    level and keeps its rebased price. ``None`` when the label is unknown.
+    """
+    if outcome_label is None or rebased is None:
+        return None
+    if str(outcome_label).upper() == BREAKEVEN_EXIT:
+        return float(book_pnl_pct)
+    return rebased
 
 
 def _median(values: Sequence[float]) -> Optional[float]:
@@ -207,6 +258,7 @@ def summarise(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     priced: List[Rebased] = []
     refusals: Dict[str, int] = {}
     total = 0
+    be_rows = 0
     for row in rows:
         total += 1
         result = rebase(
@@ -215,9 +267,12 @@ def summarise(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
             direction=row.get("direction") or "",
             observed_entry=row.get("first_observed_price"),
             observation_stale=bool(row.get("first_observed_stale") or False),
+            outcome_label=row.get("outcome_label"),
         )
         if result.ok:
             priced.append(result)
+            if str(row.get("outcome_label") or "").upper() == BREAKEVEN_EXIT:
+                be_rows += 1
         else:
             refusals[result.refusal or "unknown"] = (
                 refusals.get(result.refusal or "unknown", 0) + 1
@@ -238,6 +293,9 @@ def summarise(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     drifts = [r.drift_pct for r in priced if r.drift_pct is not None]
     book = [r.book_pnl_pct for r in priced if r.book_pnl_pct is not None]
     real = [r.rebased_pnl_pct for r in priced if r.rebased_pnl_pct is not None]
+    at_fill = [
+        r.rebased_be_at_fill_pct for r in priced if r.rebased_be_at_fill_pct is not None
+    ]
     return {
         "rows": total,
         "priced": n,
@@ -256,6 +314,14 @@ def summarise(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "rebased_avg_pct": round(sum(real) / len(real), 4) if real else None,
         "book_total_pct": round(sum(book), 2) if book else None,
         "rebased_total_pct": round(sum(real), 2) if real else None,
+        # Beside the rebased figure, never instead of it — and counted on its
+        # own n, because a row with no outcome label is not priced here.
+        "rebased_be_at_fill_avg_pct": (
+            round(sum(at_fill) / len(at_fill), 4) if at_fill else None
+        ),
+        "rebased_be_at_fill_total_pct": round(sum(at_fill), 2) if at_fill else None,
+        "rebased_be_at_fill_priced": len(at_fill),
+        "breakeven_exits": be_rows,
     }
 
 

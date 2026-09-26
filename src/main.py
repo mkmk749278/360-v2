@@ -54,6 +54,7 @@ from src.performance_tracker import (
     PerformanceTracker,
     entry_sl_distance_pct,
     shipped_sl_distance_pct,
+    shipped_tp1_distance_pct,
 )
 from src.predictive_ai import PredictiveEngine
 from src.regime import RegimeService
@@ -883,6 +884,9 @@ class CryptoSignalEngine:
                     # the line above is NOT: predictive scaling and the noise
                     # floor both move it before emit (2026-08-04).
                     shipped_sl_distance_pct=shipped_sl_distance_pct(sig),
+                    # Same stamp as the monitor path, so an expired row is not
+                    # the one population missing its target (2026-09-26).
+                    shipped_tp1_distance_pct=shipped_tp1_distance_pct(sig),
                     create_timestamp=_create_ts,
                     dispatch_timestamp=_dispatch_ts,
                     terminal_outcome_timestamp=_terminal_ts,

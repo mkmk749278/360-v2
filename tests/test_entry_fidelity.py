@@ -150,6 +150,78 @@ class TestRebase:
 # ---------------------------------------------------------------------------
 
 
+class TestBreakevenAtFill:
+    """A break-even stop rests RELATIVE to its anchor; every other exit is an
+    absolute level. The book anchors break-even at the stamp and a live
+    position at its fill, so the rebased book misprices exactly one row class
+    (docs/LONGS_RESEARCH_2026_09_26.md §11)."""
+
+    def test_a_drifted_scratch_is_a_loss_rebased_and_a_scratch_at_the_fill(self):
+        # Book: stamped 100, BE exit at 100 → 0.00%. The fill was 101.2, so the
+        # rebased book prices the same exit at −1.19%. A live position's
+        # break-even sits at 101.2 and scratches there.
+        out = entry_fidelity.rebase(
+            entry=100.0, pnl_pct=0.0, direction="LONG", observed_entry=101.2,
+            outcome_label="BREAKEVEN_EXIT",
+        )
+        assert out.rebased_pnl_pct == pytest.approx(-1.1858, abs=1e-4)
+        assert out.rebased_be_at_fill_pct == pytest.approx(0.0)
+
+    def test_the_park_tolerance_travels_as_an_offset_not_a_level(self):
+        # Parked 0.15% on the loss side of its anchor: the same offset from the
+        # fill, whatever the drift.
+        out = entry_fidelity.rebase(
+            entry=100.0, pnl_pct=-0.15, direction="SHORT", observed_entry=99.0,
+            outcome_label="BREAKEVEN_EXIT",
+        )
+        assert out.rebased_be_at_fill_pct == pytest.approx(-0.15)
+
+    @pytest.mark.parametrize("label", ["SL_HIT", "TP1_HIT", "PROFIT_LOCKED", "EXPIRED"])
+    def test_every_other_exit_keeps_its_rebased_price(self, label):
+        out = entry_fidelity.rebase(
+            entry=100.0, pnl_pct=-3.0, direction="LONG", observed_entry=101.0,
+            outcome_label=label,
+        )
+        assert out.rebased_be_at_fill_pct == pytest.approx(out.rebased_pnl_pct)
+
+    def test_an_unknown_label_is_not_read_as_not_a_breakeven(self):
+        out = entry_fidelity.rebase(
+            entry=100.0, pnl_pct=0.0, direction="LONG", observed_entry=101.0
+        )
+        assert out.ok and out.rebased_pnl_pct is not None
+        assert out.rebased_be_at_fill_pct is None
+
+    def test_a_refused_row_carries_neither(self):
+        out = entry_fidelity.rebase(
+            entry=100.0, pnl_pct=0.0, direction="LONG", observed_entry=None,
+            outcome_label="BREAKEVEN_EXIT",
+        )
+        assert not out.ok and out.rebased_be_at_fill_pct is None
+
+    def test_the_census_publishes_it_beside_rebased_never_instead(self):
+        rows = [
+            # Drifted scratch: rebased −1.19%, at the fill 0.00%.
+            {"entry": 100.0, "pnl_pct": 0.0, "direction": "LONG",
+             "first_observed_price": 101.2, "outcome_label": "BREAKEVEN_EXIT"},
+            # An undrifted scratch still counts as a break-even exit.
+            {"entry": 100.0, "pnl_pct": 0.0, "direction": "LONG",
+             "first_observed_price": 100.0, "outcome_label": "BREAKEVEN_EXIT"},
+            # A stop: identical in both figures.
+            {"entry": 100.0, "pnl_pct": -3.0, "direction": "LONG",
+             "first_observed_price": 101.0, "outcome_label": "SL_HIT"},
+        ]
+        out = entry_fidelity.summarise(rows)
+        assert out["breakeven_exits"] == 2
+        assert out["rebased_be_at_fill_priced"] == 3
+        stop = (97.0 / 101.0 - 1) * 100
+        assert out["rebased_total_pct"] == pytest.approx(
+            (100.0 / 101.2 - 1) * 100 + 0.0 + stop, abs=0.01
+        )
+        assert out["rebased_be_at_fill_total_pct"] == pytest.approx(stop, abs=0.01)
+        # Both books still there, untouched.
+        assert out["book_total_pct"] == pytest.approx(-3.0)
+
+
 class TestSummarise:
     def _row(self, **kw):
         row = dict(entry=100.0, pnl_pct=-3.0, direction="LONG", first_observed_price=99.0)

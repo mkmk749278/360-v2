@@ -79,6 +79,30 @@ def shipped_sl_distance_pct(sig: Any) -> float:
     return max(0.0, float(getattr(sig, "sl_distance_pct_at_entry", 0.0) or 0.0))
 
 
+def shipped_tp1_distance_pct(sig: Any) -> float:
+    """The entry→TP1 distance the trade closed against, in percent, or 0.0.
+
+    The companion to ``shipped_sl_distance_pct``, and missing for the same
+    kind of reason: the closed record kept the stop and never the target, so
+    every entry or exit study older than ``signal_history``'s last 500 signals
+    had to *approximate* TP1 from medians (docs/LONGS_RESEARCH_2026_09_26.md
+    §5 and §11.3 — the limit-entry test could only run on 14–25 Sep because
+    that is the only window whose TP1 was still on disk).
+
+    Read at the terminal transition from ``sig.tp1`` / ``sig.entry``. Nothing
+    after dispatch moves ``sig.tp1`` except a DCA re-average, which rewrites
+    ``entry`` in the same step — so the distance is measured from the same
+    entry ``pnl_pct`` is, which is the pairing a reader needs. Returns 0.0,
+    never a guess, when either is missing: 0.0 means "not knowable", and rows
+    closed before this shipped keep it.
+    """
+    entry = float(getattr(sig, "entry", 0.0) or 0.0)
+    tp1 = float(getattr(sig, "tp1", 0.0) or 0.0)
+    if entry <= 0.0 or tp1 <= 0.0:
+        return 0.0
+    return abs(tp1 - entry) / entry * 100.0
+
+
 @dataclass
 class SignalRecord:
     """A single completed signal record."""
@@ -170,6 +194,9 @@ class SignalRecord:
     #: for why this is a different number from the field above and not a
     #: duplicate of it.  0.0 = written before 2026-08-04, not knowable now.
     shipped_sl_distance_pct: float = 0.0
+    #: The entry→TP1 distance the trade closed against — see
+    #: ``shipped_tp1_distance_pct`` above.  0.0 = written before 2026-09-26.
+    shipped_tp1_distance_pct: float = 0.0
     timestamp: float = field(default_factory=time.time)
     signal_quality_pnl_pct: float = 0.0   # TP-based PnL for signal quality stats
     signal_quality_hit_tp: int = 0         # highest TP reached (for signal quality classification)
@@ -293,6 +320,7 @@ class PerformanceTracker:
         stop_loss: float = 0.0,
         sl_distance_pct_at_entry: float = 0.0,
         shipped_sl_distance_pct: float = 0.0,
+        shipped_tp1_distance_pct: float = 0.0,
         signal_quality_pnl_pct: Optional[float] = None,
         signal_quality_hit_tp: Optional[int] = None,
         session_name: str = "",
@@ -353,6 +381,7 @@ class PerformanceTracker:
             stop_loss=stop_loss,
             sl_distance_pct_at_entry=float(sl_distance_pct_at_entry or 0.0),
             shipped_sl_distance_pct=float(shipped_sl_distance_pct or 0.0),
+            shipped_tp1_distance_pct=float(shipped_tp1_distance_pct or 0.0),
             signal_quality_pnl_pct=normalize_pnl_pct(sq_pnl),
             signal_quality_hit_tp=sq_hit_tp,
             session_name=session_name,
@@ -1255,6 +1284,10 @@ class PerformanceTracker:
                 # means "written before this shipped", never "no tightening".
                 if "shipped_sl_distance_pct" not in item:
                     item["shipped_sl_distance_pct"] = 0.0
+                # And the target beside it, for the same reason: knowable at the
+                # terminal transition only, so older rows stay "unknown".
+                if "shipped_tp1_distance_pct" not in item:
+                    item["shipped_tp1_distance_pct"] = 0.0
                 for _field in (
                     "create_timestamp",
                     "dispatch_timestamp",

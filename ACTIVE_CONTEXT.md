@@ -4,6 +4,88 @@
 
 ---
 
+## OPEN 2026-09-26 — longs research: exits are fine, entry drift is the lever, nothing built
+
+Report: `docs/LONGS_RESEARCH_2026_09_26.md`. Scripts:
+`scripts/research/longs_2026_09_26/`. Owner: *"special investigation of
+longs, like we did for shorts … what to improve, what we are doing wrong"*.
+
+**Data.** 2,622 delivered closed signals from the public
+`/api/track-record/signals`, one call per UTC day (25 Jun → 26 Sep), plus
+Binance 1m archive klines for every long closed in the last 62 days.
+
+**Findings [measured unless marked]:**
+- **Longs vs shorts.** Over 30d, longs run +0.352%/trade [+0.13, +0.58] and
+  shorts −0.234% [−0.46, −0.03]. Both sides win 35% over 93d; payoff is the
+  whole difference.
+- **MVRTP is the long product.** It makes +424.7% of the long side's +420.9%.
+  The other 13 long paths together: n=448, −0.01%/trade.
+- **MVRTP's edge is fat-tailed and period-dependent.**
+  - Its best 50 of 1,253 trades sum to more than its total.
+  - By month: July −0.17%, August +0.47%, September +0.40%.
+- **Exits are not the lever.** Tested on the 1m tape from each trade's actual
+  exit: no BE move, stop 1–3pt wider, and a 50% runner after TP1. Each is
+  worth ≤0.03%/trade, and every interval spans zero.
+  - 78% of stopped MVRTP longs trade back to entry within 24h, and a wider
+    stop still does not pay.
+- **Entry, measured on the engine's own record (§11, ops guest session).**
+  - Sample: 708 longs since 5 Sep with a fill stamp. The book reads +0.45%
+    and the user's fill gets +0.24% [+0.01, +0.47]. For MVRTP longs:
+    +0.49% → +0.26%.
+  - The cause is a stale signal price: 56% of MVRTP longs are created 5–15
+    minutes after the 15m bar they are priced from.
+  - **Ops' rebased column overstates the cost.** It parks break-even at the
+    signal price, while a live user's break-even parks at their fill
+    (`pretp_dispatcher.entry_price_filled`). So high-drift trades read
+    −0.29% rebased but −0.05% at the fill.
+- **Order placement recovers little (§11.3).** Tested on the 1m tape over the
+  last 271 MVRTP longs:
+  - The `FSM_LIMIT_ENTRY` zone-edge design: +0.01. 75% of signals are already
+    inside the zone, so it fills at market.
+  - A drift ≥0.5% skip gate: +0.02. Do not build it.
+  - A 60-minute limit at the signal price: +0.06 to +0.13 per signal,
+    unproven.
+- **MVRTP LONG edge on real fills is on core pairs.** Core pairs make +0.40%
+  (407 trades); promoted movers make −0.06% (177). This is a candidate, not a
+  result.
+- **Red days are long days.** Over 30d the longs account for −99.5% of the
+  −105.5% red-day loss. The worst days are MVRTP stop clusters.
+- **No live long path has a CI below zero.** SR_FLIP LONG and LSR LONG last
+  delivered on 29–30 June.
+- **Shorts.** LSR SHORT went 0 for 9 over the last 7 days; its 30d is −0.56%
+  [−1.08, −0.10]. FAR SHORT went 0 for 7.
+
+**Built 2026-09-26 on the owner's "proceed" (measurement only):**
+- 360-v2 #1070: `SignalRecord.shipped_tp1_distance_pct`, stamped by both
+  terminal writers, and `entry_fidelity.rebased_be_at_fill_pct`, published
+  beside rebased and never instead of it.
+- ops #228: `/track-record` gains a third fidelity row "rebased, break-even at
+  the fill", a pair-admission filter plus a by-admission split in the panel,
+  and CSV columns for both new fields.
+- The TP1 stamp reads 0.0 on every row until #1070 deploys; there is no
+  backfill. Rerun `scripts/research/longs_2026_09_26/entry_limits.py`
+  against a fresh window once about 2 weeks of stamped rows exist.
+
+**Recommendations:**
+1. Entry:
+   - no drift gate;
+   - do not expect `FSM_LIMIT_ENTRY` to improve price;
+   - shadow a 60-minute limit at the signal price before any FSM change
+     (owner sign-off);
+   - persist TP1 on the closed-signal record.
+   Also read MVRTP LONG core vs mover at 60 days.
+2. Leave MVRTP exits alone.
+3. Retire LSR SHORT and set the LSR promotion rule's direction to LONG. These
+   are the owner's clicks, carried from 25 Sep.
+4. Stamp three dark entry features on MVRTP LONG:
+   - the signal's index on its symbol within 24h;
+   - the previous outcome on that symbol;
+   - the lagged count of MVRTP enqueues.
+5. Retire no long path.
+6. Track MVRTP LONG's rolling 30d on the tape as the KPI.
+
+---
+
 ## OPEN 2026-09-25 — guest access + paid live signals: 4 PRs, rollout needs the owner
 
 Owner, from a marketing session: ad visitors bounced off the phone-number
