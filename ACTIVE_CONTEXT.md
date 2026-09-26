@@ -38,11 +38,36 @@ Play financial-features declaration to be kept current.
 
 ---
 
-## OPEN 2026-09-25 — unlock-short dark lane BUILT (engine + ops), shipping in paired PRs
+## OPEN 2026-09-25 — unlock-short dark lane: both halves MERGED, ops page live 2026-09-26
 
 Owner: *"build shorts system … make it live in ops, not for users — that's the
 dark means."* It implements the one mechanism that survived the market-structure
 research (entry below).
+
+**State, 2026-09-26 (owner asked again: *"can we proceed to implement to see in
+ops as live not for users"*).**
+- Engine #1065 merged and deployed 2026-09-25 08:57 UTC. The lane has run since
+  then with **no ops surface for ~17h**.
+- Ops #227 (`/signals/unlock-shorts`, nav: Signals → Unlock shorts) merged
+  2026-09-26 01:45 UTC. It was the missing half; nothing new had to be built.
+- Checked before merge: page tests 23 passed. The local-only contract
+  (`scripts/gen_ops_unlock_shorts_fixture.py` vs the committed ops fixture) is
+  identical on every key and value, on engine `main` @ 24bcbaa. CI never runs
+  that contract.
+- "Not for users" was checked on the imports. `unlock_shorts` / `unlock_calendar`
+  import only `fail_open`, `ledger_schema`, `runtime_tunables`, `config`,
+  symbol admission and the public `BinanceClient`. There is no queue, router,
+  dispatch, push or signed endpoint.
+- **NOT verified:** the live page and the live ledger. The session had no ops
+  login. The first read belongs to the owner:
+  1. The state badge should be `LIVE`.
+  2. The calendar state should be `ok`. `never` / `failing` means the lane has
+     stamped nothing since boot. Look there first, because the probe only pages
+     at 30h.
+  3. Expect `LATE (lane_start)` rows, and possibly the first `OPEN` rows
+     (entries at 00:00 UTC).
+- Earliest possible verdict: **2026-10-12 00:00 UTC** (an Oct-9 unlock
+  entered 2026-09-26). The page prints the real date.
 
 **What runs.**
 - `src/unlock_shorts.py` runs as its own task, `_unlock_shorts_loop`, on a
