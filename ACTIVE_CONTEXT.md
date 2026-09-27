@@ -4,16 +4,34 @@
 
 ---
 
-## OPEN 2026-09-27 — CoinDCX as platform #2: proposal only, owner decisions D1–D5
+## OPEN 2026-09-27 — CoinDCX as platform #2: BUILT, DARK, 4 PRs awaiting owner
 
-`docs/COINDCX_VENUE_PLAN_2026_09_27.md`. No code. Measured: CoinDCX's 503 USDT
-perps are Binance's list (497 shared, 6 commodities), 49 of the last 50 delivered
-signals are listed there, and 28 of 32 decided outcomes end the same way on
-CoinDCX's own candles. INR margin trades the same USDT-priced contracts. Design:
-one signal engine, one lane per platform, not a second scanner. Blockers before
-any order: reduce-only semantics unverified, and CoinDCX keys cannot be checked
-for withdraw/IP binding (B18, owner call D4). The ops CSV `sl` column is the
-CURRENT (possibly BE-shifted) stop, not the original; use `original_stop_loss`.
+Owner: *"proceed to implement properly … ready for users"*; decisions D4 = attest
++ verify IP, INR default / USDT option, go-live = owner's own account, tiny size.
+Everything ships dark: `COINDCX_EXECUTION_ENABLED=false`, so **no CoinDCX order is
+placed for anyone** until the owner arms it. Plan + go-live steps:
+`docs/COINDCX_VENUE_PLAN_2026_09_27.md` §10.
+
+| PR | What | Merge |
+|---|---|---|
+| 360-v2 #1075 | venue (`src/venues/coindcx/`), dispatch lane, reconciler, stream, self-test, connect/venue API; account deletion now also revokes the CoinDCX key (was missed) | **owner sign-off** (money path) |
+| lumin-app #172 | Trading platform page: connect guide + attestation, picker (refused until the engine is open for the user), ₹/USDT, net-of-fees P&L | after #1075 |
+| 360ce-ops #231 | `/control/coindcx`: venue health (graded on the engine's published cadence), self-test button + report, owner-only | after #1075 |
+| lumin-legal #11 | terms/risk/privacy/deletion name CoinDCX | **owner sign-off**; merge only when CoinDCX opens |
+
+Cross-repo contracts are pinned as byte-identical vectors generated from the real
+routes: `tests/venues/fixtures/coindcx/app_contract.json` (→ app) and
+`ops_contract.json` (→ ops). Regenerate with `COINDCX_WRITE_APP_VECTOR=1` /
+`COINDCX_WRITE_OPS_VECTOR=1` and copy both files.
+
+**Go-live order (owner):** merge #1075 → set `COINDCX_EXECUTION_ALLOWED_UIDS=<owner
+uid>` → connect own CoinDCX key in the app → run the self-test from
+`/control/coindcx` (DOGEUSDT, tiny) → read the report (stop and target rest
+together; nothing left after exit) → only then `COINDCX_EXECUTION_ENABLED=true`
+with the allow-list still set → watch → widen. Unverified until that self-test:
+that CoinDCX rests SL + TP together and cancels both on exit (the doc examples
+say so; no testnet exists). The ops CSV `sl` column is the CURRENT (possibly
+BE-shifted) stop; use `original_stop_loss`.
 
 ## OPEN 2026-09-26 — test-suite audit: all 5 PRs merged; 2 owner calls remain
 
