@@ -660,7 +660,9 @@ def build_app(
         allow_credentials=False,
         # POST/PUT include the OTP + billing-grant endpoints; OPTIONS is
         # autoplay'd by browsers for any non-trivial CORS preflight.
-        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        # DELETE: key removal (Binance and CoinDCX) — without it the browser
+        # refuses the preflight and the web app reports "no reply arrived".
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 

@@ -461,7 +461,7 @@ async def test_self_test_full_run_ends_flat_and_writes_report(monkeypatch, tmp_p
     fx = FakeExchange()
 
     async def wallets():
-        return [{"currency_short_name": "USDT", "balance": "50"}]
+        return [{"currency_short_name": "USDT", "balance": "100"}]
 
     fx.wallets = wallets  # type: ignore[attr-defined]
     rep = await ST.run("owner", symbol="BTCUSDT", client=fx,
@@ -472,6 +472,74 @@ async def test_self_test_full_run_ends_flat_and_writes_report(monkeypatch, tmp_p
     assert steps["no_order_left_after_cleanup"]
     assert all(r["active_pos"] == 0 for r in fx.pos.values())
     assert json.loads((tmp_path / "r.json").read_text())["verdict"] == "pass"
+
+
+async def test_self_test_stops_before_any_order_when_the_futures_wallet_is_empty(
+        monkeypatch, tmp_path) -> None:
+    """The owner's first real run: wallets=[] and then "Insufficient funds"
+    from the ORDER.  An empty wallet must fail on the funds step, with the
+    amount to move, and place nothing."""
+    from src.venues.coindcx import self_test as ST
+
+    monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
+    DCX["coindcx_execution_allowed_uids"] = "owner"
+    fx = FakeExchange()
+
+    async def wallets():
+        return []
+
+    fx.wallets = wallets  # type: ignore[attr-defined]
+    rep = await ST.run("owner", symbol="BTCUSDT", client=fx, registry=FakeRegistry(), sleep=_nosleep)
+    steps = {s["step"]: s for s in rep["steps"]}
+    assert rep["verdict"] == "fail"
+    assert steps["funds_available"]["ok"] is False
+    assert "FUTURES wallet" in steps["funds_available"]["detail"]
+    assert not any(c.startswith(("order", "market")) for c in fx.calls), fx.calls
+    assert "entry_accepted" not in steps
+
+
+async def test_self_test_funds_check_reads_the_chosen_margin_currency(monkeypatch, tmp_path) -> None:
+    """USDT in the wallet does not fund an INR-margin test."""
+    from src.venues.coindcx import self_test as ST
+
+    monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
+    DCX["coindcx_execution_allowed_uids"] = "owner"
+    fx = FakeExchange()
+
+    async def wallets():
+        return [{"currency_short_name": "USDT", "balance": "1000"}]
+
+    fx.wallets = wallets  # type: ignore[attr-defined]
+    rep = await ST.run("owner", symbol="BTCUSDT", margin_currency="INR", client=fx,
+                       registry=FakeRegistry(), sleep=_nosleep)
+    step = next(s for s in rep["steps"] if s["step"] == "funds_available")
+    assert step["ok"] is False and step["margin_currency"] == "INR"
+    assert step["required"] > 0 and step["balance"] == 0
+
+
+async def test_self_test_names_an_unreadable_inr_rate_instead_of_crashing(monkeypatch, tmp_path) -> None:
+    from src.venues.coindcx import self_test as ST
+
+    monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
+    DCX["coindcx_execution_allowed_uids"] = "owner"
+    fx = FakeExchange()
+    reg = FakeRegistry()
+
+    async def wallets():
+        return [{"currency_short_name": "INR", "balance": "50000"}]
+
+    fx.wallets = wallets  # type: ignore[attr-defined]
+
+    async def no_rate():
+        return None
+
+    reg.inr_per_usdt = no_rate  # type: ignore[method-assign]
+    rep = await ST.run("owner", symbol="BTCUSDT", margin_currency="INR", client=fx,
+                       registry=reg, sleep=_nosleep)
+    assert rep["verdict"] == "fail"
+    step = rep["steps"][-1]
+    assert step["step"] == "funds_available" and step["required"] is None
+    assert "conversion price" in step["detail"]
 
 
 async def test_self_test_refuses_a_pair_the_owner_holds(monkeypatch, tmp_path) -> None:
@@ -561,7 +629,7 @@ async def test_ops_contract_vector_is_what_the_engine_writes(monkeypatch, tmp_pa
     fx = FakeExchange()
 
     async def wallets():
-        return [{"currency_short_name": "USDT", "balance": "50"}]
+        return [{"currency_short_name": "USDT", "balance": "100"}]
 
     fx.wallets = wallets  # type: ignore[attr-defined]
     await ST.run("owner", symbol="BTCUSDT", client=fx, registry=FakeRegistry(), sleep=_nosleep)

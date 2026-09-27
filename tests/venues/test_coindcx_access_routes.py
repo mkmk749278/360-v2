@@ -174,6 +174,27 @@ def test_access_view_says_unreadable_rather_than_empty(api) -> None:
     assert "allowed" not in r.json()
 
 
+def test_each_row_carries_the_platform_the_engine_will_use(api, monkeypatch) -> None:
+    """The owner switched to CoinDCX in the app, the save came back
+    unconfirmed, and nothing anywhere said which platform was stored.  The
+    row carries the engine's own read — including WHY it fell back, so a
+    failed read never looks like a user who chose Binance."""
+    from src.api import user_overrides as uo
+
+    client, _db = api
+    client.post("/api/admin/coindcx/access", json={"action": "add", "phone": "+919999999999"})
+    client.post("/api/admin/coindcx/access", json={"action": "add", "phone": "+918888888888"})
+    monkeypatch.setattr(uo, "resolve_venue_settings_uid", lambda uid: (
+        {"venue": "coindcx", "margin_currency": "USDT", "leverage": 5.0, "reason": "ok"}
+        if uid == "owner-uid" else
+        {"venue": "binance", "margin_currency": "INR", "leverage": 2.0, "reason": "read_failed"}))
+    rows = {r["uid"]: r["venue"] for r in client.get("/api/admin/coindcx/access").json()["allowed"]}
+    assert rows["owner-uid"] == {"venue": "coindcx", "margin_currency": "USDT",
+                                 "leverage": 5.0, "reason": "ok"}
+    assert rows["tester-uid"]["venue"] == "binance"
+    assert rows["tester-uid"]["reason"] == "read_failed"
+
+
 # ------------------------------------------------- ops contract vector
 #
 # 360ce-ops `tests/fixtures_coindcx_access.json` is a byte-identical copy of
@@ -188,9 +209,14 @@ def test_ops_access_vector_is_what_the_route_returns(api, monkeypatch) -> None:
 
     from src.venues.coindcx import keystore
 
+    from src.api import user_overrides as uo
+
     client, _db = api
     monkeypatch.setattr(keystore, "get_status", lambda uid: {
         "attested": True, "key_public_id_first8": "PUBKEY12"} if uid == "owner-uid" else None)
+    monkeypatch.setattr(uo, "resolve_venue_settings_uid", lambda uid: {
+        "venue": "coindcx" if uid == "owner-uid" else "binance",
+        "margin_currency": "INR", "leverage": 5.0, "reason": "ok"})
     client.post("/api/admin/coindcx/access", json={"action": "add", "phone": "+919999999999"})
     client.post("/api/admin/coindcx/access", json={"action": "add", "phone": "+918888888888"})
     client.post("/api/admin/coindcx/switch", json={"switch": "execution", "enabled": True})
