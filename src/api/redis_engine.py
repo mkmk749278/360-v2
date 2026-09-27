@@ -819,6 +819,23 @@ class RedisEngineFacade:
         await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
         return True
 
+    async def enqueue_coindcx_self_test(
+        self, *, request_id: str, uid: str, symbol: str, margin_currency: str,
+    ) -> bool:
+        """LPUSH the owner's CoinDCX self-test (kind="coindcx_self_test")."""
+        if not self._redis.available:
+            return False
+        envelope = json.dumps({
+            "kind": "coindcx_self_test",
+            "request_id": request_id,
+            "uid": uid,
+            "symbol": symbol,
+            "margin_currency": margin_currency,
+            "ts": time.time(),
+        })
+        await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
+        return True
+
     async def read_manual_take_result(self, request_id: str) -> Optional[dict]:
         """Return the engine's take outcome for ``request_id``, or ``None``
         while it hasn't been written yet (the route polls this)."""

@@ -106,6 +106,9 @@ class ManualTakeConsumer:
         if _kind == "close_position":
             await self._process_close_position(envelope, raw)
             return
+        if _kind == "coindcx_self_test":
+            await self._process_coindcx_self_test(envelope, raw)
+            return
         request_id = str(envelope.get("request_id") or "")
         uid = str(envelope.get("uid") or "")
         signal_id = str(envelope.get("signal_id") or "")
@@ -229,6 +232,43 @@ class ManualTakeConsumer:
                 "ManualTakeConsumer: close_position result write failed "
                 "request_id={} (the close itself is recorded)", request_id,
             )
+
+    async def _process_coindcx_self_test(
+        self, envelope: Dict[str, Any], raw: str
+    ) -> None:
+        """Owner's CoinDCX real-account self-test (kind="coindcx_self_test").
+
+        Places one minimum-size round trip on the OWNER's account — the
+        route is owner-gated and :func:`self_test.run` refuses any uid not on
+        ``COINDCX_EXECUTION_ALLOWED_UIDS``.  Run as a background task: it
+        takes ~30s and must not hold up a user's take behind it.  The report
+        lands in ``data/coindcx_self_test.json`` (ops reads it) and under the
+        result key.
+        """
+        request_id = str(envelope.get("request_id") or "")
+        uid = str(envelope.get("uid") or "")
+        if not (request_id and uid):
+            log.warning("ManualTakeConsumer: dropping incomplete self-test {!r}", raw)
+            return
+
+        async def _run() -> None:
+            from src.venues.coindcx import self_test as _st
+
+            report = await _st.run(
+                uid,
+                symbol=str(envelope.get("symbol") or ""),
+                margin_currency=str(envelope.get("margin_currency") or "USDT"),
+            )
+            try:
+                await self._redis.client.set(
+                    _store.KEY_TAKE_RESULT_PREFIX + request_id,
+                    json.dumps(report, default=str),
+                    ex=3600,
+                )
+            except Exception:
+                log.exception("ManualTakeConsumer: self-test result write failed")
+
+        asyncio.create_task(_run(), name=f"coindcx_self_test:{request_id[:8]}")
 
     async def _process_close(self, envelope: Dict[str, Any], raw: str) -> None:
         """Handle an admin close envelope (kind="close").

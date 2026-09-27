@@ -299,3 +299,44 @@ def test_delete_500_when_user_store_singleton_unset(
 
     assert resp.status_code == 500
     assert resp.json()["detail"] == "server_misconfiguration_user_store"
+
+
+# ---------------------------------------------------------------------------
+# CoinDCX key (2026-09-27) — a second exchange key must not outlive its user
+# ---------------------------------------------------------------------------
+
+
+@patch("src.execution.signal_dispatch.reset_cache_for_test")
+@patch("src.api.users.get_singleton")
+@patch("src.venues.coindcx.keystore.delete_key_blob")
+@patch("src.venues.coindcx.keystore.is_initialised", return_value=True)
+@patch("src.security.firestore_keystore.delete_key_blob")
+@patch("src.security.firestore_keystore.is_initialised", return_value=True)
+def test_delete_also_revokes_the_coindcx_key(
+    _bn_init, _bn_del, _dcx_init, dcx_del, get_store, _reset,
+) -> None:
+    store = MagicMock()
+    store.aget_by_firebase_uid = AsyncMock(return_value=SimpleNamespace(user_id=99))
+    store.adelete_by_id = AsyncMock()
+    get_store.return_value = store
+    resp = TestClient(_build_app(identity=_firebase_user("fb-dcx"))).delete("/api/account")
+    assert resp.status_code == 204
+    dcx_del.assert_called_once_with("fb-dcx")
+
+
+@patch("src.api.users.get_singleton")
+@patch("src.venues.coindcx.keystore.delete_key_blob", side_effect=RuntimeError("firestore down"))
+@patch("src.venues.coindcx.keystore.is_initialised", return_value=True)
+@patch("src.security.firestore_keystore.delete_key_blob")
+@patch("src.security.firestore_keystore.is_initialised", return_value=True)
+def test_a_failed_coindcx_key_delete_keeps_the_user_row(
+    _bn_init, _bn_del, _dcx_init, _dcx_del, get_store,
+) -> None:
+    store = MagicMock()
+    store.aget_by_firebase_uid = AsyncMock(return_value=SimpleNamespace(user_id=99))
+    store.adelete_by_id = AsyncMock()
+    get_store.return_value = store
+    resp = TestClient(_build_app(identity=_firebase_user())).delete("/api/account")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "coindcx_key_delete_failed"
+    store.adelete_by_id.assert_not_called()

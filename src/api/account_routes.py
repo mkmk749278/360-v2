@@ -8,7 +8,8 @@ is rejected at the Data Safety review stage.
 
 **The deletion sequence (orchestrated; soft-fails partial):**
 
-1. **Revoke the Binance key blob from Firestore** (if present).
+1. **Revoke the Binance key blob from Firestore** (if present), then the
+   CoinDCX key (``src/venues/coindcx/keystore``), under the same rule.
    This is the highest-priority step because a leftover encrypted
    key tied to a deleted user is the worst failure mode — the
    engine could in principle still dispatch orders to that key.
@@ -121,6 +122,28 @@ def register(
                 "skipping blob delete for uid={}",
                 firebase_uid,
             )
+
+        # ---- Step 1b: revoke the CoinDCX key blob (2026-09-27) ----
+        # Same priority and the same failure semantics as the Binance key:
+        # a key that outlives its user is the worst leftover, so a failed
+        # delete aborts before the user row goes.  Any CoinDCX position still
+        # open keeps its stop and target resting ON the exchange, which is
+        # where they were placed, so removing the key does not unprotect it.
+        from src.venues.coindcx import keystore as _dcx_keys
+
+        if _dcx_keys.is_initialised():
+            try:
+                await asyncio.to_thread(_dcx_keys.delete_key_blob, firebase_uid)
+            except Exception:
+                log.exception(
+                    "delete_account: CoinDCX key delete failed for uid={} — "
+                    "orphan key requires operator cleanup",
+                    firebase_uid,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="coindcx_key_delete_failed",
+                )
 
         # ---- Step 2: delete the SQLite user row ----
         user_store = _users.get_singleton()

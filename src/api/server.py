@@ -3177,6 +3177,19 @@ def build_app(
         identity_dep=user_claims,
     )
 
+    # ---- CoinDCX venue (2026-09-27) ----
+    # Key connect with the owner-mandated attestation, platform choice,
+    # positions, and the owner's real-account self-test.  Placing orders is
+    # still gated engine-side by COINDCX_EXECUTION_ENABLED (default OFF).
+    from . import coindcx_routes as _coindcx_routes
+    _coindcx_routes.register(
+        app,
+        auth=auth,
+        identity_dep=user_claims,
+        owner_required=owner_required,
+        engine=engine,
+    )
+
     # ---- Server-side manual take (owner-approved 2026-07-17) ----
     # POST /api/auto-trade/take — assist+ user takes one ACTIVE signal;
     # the engine places it on their server-connected key via the same

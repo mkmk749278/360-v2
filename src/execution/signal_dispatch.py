@@ -868,6 +868,28 @@ async def dispatch_signal_to_active_users(
         # The DECISION is untouched: every branch below still skips and
         # still fails closed per B12.
         from src.api import user_overrides as _uo
+
+        # Venue gate (2026-09-27).  A user who chose CoinDCX is dispatched by
+        # ``src.venues.coindcx.dispatch`` and never here, even if a Binance key
+        # is still connected — one signal, one exchange, the one they chose.
+        # Every unreadable case resolves to "binance", so an existing user can
+        # only leave this path by an explicit, stored choice.  A manual take
+        # by a CoinDCX user is routed to the CoinDCX executor.
+        _venue = _uo.resolve_venue_uid(uid)
+        if _venue != "binance":
+            if _manual:
+                from src.venues.coindcx import dispatch as _dcx
+
+                _dcx_out = await _dcx.dispatch_signal(
+                    signal_id=signal_id, symbol=symbol, direction=direction,
+                    entry_price=entry_price, sl_price=sl_price, tp1_price=tp1_price,
+                    regime_label=regime_label, setup_class=setup_class,
+                    risk_scale=risk_scale, _only_uid=uid, _manual=True,
+                )
+                _capture(**(_dcx_out.get("result") or {"outcome": "rejected"}))
+            _note(f"skip:venue:{_venue}")
+            return False
+
         user_mode, _mode_reason = _uo.resolve_user_mode_uid_detailed(uid)
         if not _manual and user_mode not in ("live", "both"):
             # Bound the key space: ``mode`` is a bare TEXT column with no

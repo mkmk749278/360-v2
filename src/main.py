@@ -1177,6 +1177,29 @@ class CryptoSignalEngine:
                 "reject_detail": "A user and a signal are both required.",
                 "signal_id": signal_id,
             }
+        # A CoinDCX position on this signal (2026-09-27) is closed by the
+        # CoinDCX executor; a user holds a signal on one exchange only.
+        try:
+            from src.venues.coindcx import execution as _dcx_ex
+            from src.venues.coindcx import positions as _dcx_pos
+
+            _dcx_rec = await asyncio.to_thread(
+                _dcx_pos.get_store().get, firebase_uid, signal_id
+            )
+        except Exception:
+            log.exception("close_position_for_user: CoinDCX store read failed")
+            _dcx_rec = None
+        if _dcx_rec is not None:
+            out = await _dcx_ex.get_executor().close_position(
+                firebase_uid, signal_id, reason="USER_CLOSE",
+            )
+            out.setdefault("signal_id", signal_id)
+            out.setdefault("symbol", _dcx_rec.symbol)
+            if out.get("outcome") == "closed":
+                out.setdefault("side", _dcx_rec.side)
+                out.setdefault("close_reason", "USER_CLOSE")
+            return out
+
         if not _ps.is_initialised():
             return {
                 "outcome": "rejected",

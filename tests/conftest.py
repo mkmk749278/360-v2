@@ -32,6 +32,11 @@ os.environ.setdefault("DISPATCH_COOLDOWN_SEC", "0")
 _TEST_LOG_DIR = _tempfile.mkdtemp(prefix="engine-test-logs-")
 os.environ.setdefault("LOG_DIR", _TEST_LOG_DIR)
 os.environ.setdefault("WS_TRACE_LOG_PATH", os.path.join(_TEST_LOG_DIR, "ws_trace.log"))
+# CoinDCX venue artifacts (2026-09-27) — the engine writes these on the shared
+# data volume; under pytest they belong in a temp dir, never in the checkout.
+os.environ.setdefault("COINDCX_POSITIONS_DB", os.path.join(_TEST_LOG_DIR, "coindcx_positions.sqlite"))
+os.environ.setdefault("COINDCX_STATUS_FILE", os.path.join(_TEST_LOG_DIR, "coindcx_status.json"))
+os.environ.setdefault("COINDCX_SELF_TEST_REPORT", os.path.join(_TEST_LOG_DIR, "coindcx_self_test.json"))
 
 import pytest  # noqa: E402 - the env above must be set before anything imports src
 

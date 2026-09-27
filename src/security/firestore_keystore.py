@@ -156,6 +156,18 @@ def is_initialised() -> bool:
         return _db is not None
 
 
+def firestore_client() -> Any:
+    """The initialised Firestore client, or ``None``.
+
+    Shared with ``src.venues.coindcx.keystore`` so a second venue's key store
+    uses the same Admin SDK client (same credentials, same process lifetime)
+    instead of opening another one.  It never exposes key material: callers
+    get a client and must read documents themselves.
+    """
+    with _lock:
+        return _db
+
+
 def _doc_ref(uid: str) -> Any:
     """Resolve the Firestore document ref for the user's key blob.
 
