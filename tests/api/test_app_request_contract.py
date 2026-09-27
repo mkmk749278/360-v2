@@ -79,3 +79,21 @@ def test_take_close_and_auto_mode_bodies() -> None:
     assert set(TakeSignalRequest.model_fields) == {"signal_id"}
     assert set(ClosePositionRequest.model_fields) == {"signal_id"}
     assert set(AutoModeChangeRequest.model_fields) == {"mode"}
+
+
+#: CoinDCX (2026-09-27). The app's ``connectCoinDCX`` sends all five; its
+#: ``updateVenue`` sends only the keys the user changed.
+APP_COINDCX_CONNECT_KEYS = {
+    "api_key", "api_secret",
+    "attest_ip_bound", "attest_no_withdraw", "attest_trading_consent",
+}
+APP_VENUE_UPDATE_KEYS = {"venue", "margin_currency", "leverage"}
+
+
+def test_coindcx_connect_and_venue_bodies_match_the_app() -> None:
+    from src.api.coindcx_routes import CoinDCXConnectRequest, VenueUpdateRequest
+
+    assert set(CoinDCXConnectRequest.model_fields) == APP_COINDCX_CONNECT_KEYS
+    assert set(VenueUpdateRequest.model_fields) == APP_VENUE_UPDATE_KEYS
+    # Partial update: an omitted key must not reach the store as a value.
+    assert VenueUpdateRequest(leverage=3).model_dump(exclude_unset=True) == {"leverage": 3}

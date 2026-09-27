@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
@@ -271,3 +272,74 @@ def test_self_test_route_is_owner_gated_and_queues(monkeypatch) -> None:
                             owner_required=_deny, engine=None)
     r = TestClient(app).post("/api/admin/coindcx/self-test", json={"uid": "owner-uid"})
     assert r.status_code == 403
+
+
+# ------------------------------------------------- app contract vector
+#
+# `lumin-app/test/data/fixtures/coindcx_app_contract.json` is a byte-identical
+# copy of the file below and the app parses it in its own CI.  This test
+# pins that the file is what these routes REALLY return, so a renamed key
+# fails here instead of silently emptying a field on the user's screen (the
+# #817 class across a repo boundary).  Regenerate with
+# `COINDCX_WRITE_APP_VECTOR=1 pytest tests/venues/test_coindcx_keystore_routes.py`
+# and copy the file to the app.
+
+_VECTOR = Path(__file__).parent / "fixtures" / "coindcx" / "app_contract.json"
+
+
+def _live_responses(db, monkeypatch, tmp_path, pos_store) -> Dict[str, Any]:
+    import config
+    from src.api import user_overrides as uo
+    from src.api import users as users_mod
+    from src.venues.coindcx import instruments as I
+
+    monkeypatch.setenv("ENGINE_VPS_PUBLIC_IP", "203.0.113.9")
+    monkeypatch.setattr(I.get_registry(), "inr_per_usdt", AsyncMock(return_value=102.0))
+    st = uo.UserOverridesStore(tmp_path / "x.sqlite")
+    st._conn.execute("CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY)")
+    st._conn.execute("INSERT INTO users(user_id) VALUES (1)")
+    monkeypatch.setattr(uo, "_SINGLETON", st)
+    monkeypatch.setattr(users_mod, "get_singleton",
+                        lambda: SimpleNamespace(get_by_firebase_uid=lambda u: SimpleNamespace(user_id=1)))
+    c = _app(SimpleNamespace(firebase_uid="u1", user_id=1))
+    out: Dict[str, Any] = {"status_not_connected": c.get("/api/coindcx/connect/status").json()}
+    _put()
+    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "u1")
+    out["info"] = c.get("/api/coindcx/info").json()
+    out["venue_coindcx"] = c.put("/api/venue", json={"venue": "coindcx", "leverage": 3}).json()
+    pos_store.put(P.CoinDCXPosition(
+        uid="u1", signal_id="SIG-1", symbol="DOGEUSDT", pair="B-DOGE_USDT", side="LONG",
+        state=P.CLOSED, margin_currency="INR", leverage=3, qty=100.0, entry_target=0.2,
+        entry_filled=0.2001, sl_price=0.196, tp_price=0.205, conversion_price=102.0,
+        notional_usdt=20.01, close_reason="TP1", exit_price=0.205,
+        realized_pnl_usdt=0.49, fees_usdt=0.02))
+    out["positions"] = c.get("/api/coindcx/positions").json()
+    db.fail_reads = True
+    K.invalidate_roster()
+    out["status_unreadable"] = c.get("/api/coindcx/connect/status").json()
+    return out
+
+
+def _strip_volatile(o: Any) -> Any:
+    """Timestamps differ per run; the contract is the keys and the types."""
+    if isinstance(o, dict):
+        return {k: ("<ts>" if k in ("connected_at", "last_validated_at", "created_at",
+                                     "updated_at", "opened_at", "closed_at") and o[k] else
+                    _strip_volatile(v)) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_strip_volatile(v) for v in o]
+    return o
+
+
+def test_app_contract_vector_is_what_the_routes_return(db, monkeypatch, tmp_path, pos_store) -> None:
+    import json
+    import os
+
+    live = _strip_volatile(_live_responses(db, monkeypatch, tmp_path, pos_store))
+    text = json.dumps(live, indent=2, sort_keys=True) + "\n"
+    if os.environ.get("COINDCX_WRITE_APP_VECTOR") == "1":
+        _VECTOR.write_text(text)
+    assert _VECTOR.read_text() == text, (
+        "the CoinDCX routes no longer return the shape the app was built against — "
+        "regenerate the vector and update lumin-app's copy + parser together")
