@@ -43,6 +43,7 @@ import asyncio
 import math
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
@@ -50,6 +51,7 @@ from typing import Any, Dict, List, Optional, Union
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -590,6 +592,54 @@ async def _verify_pubsub_oidc(token: str, audience: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+class _UnhandledErrorAsJson:
+    """Answer an unhandled exception with a JSON 500 that names its cause.
+
+    Registered just inside CORS, so the 500 carries CORS headers.  Without it,
+    Starlette's outermost error handler answers a crash with no CORS headers,
+    the browser hides the response, and the web app can only say "no reply
+    arrived in time" — how the owner's CoinDCX platform switch (2026-09-27)
+    failed with nothing on screen or in any artifact saying why.  The class
+    name is safe to show; the message is not (it can carry request data), so
+    it goes to the log with the traceback, under a short reference.
+
+    Plain ASGI rather than ``@app.middleware``: a ``BaseHTTPMiddleware`` does
+    not reliably see an exception raised below another one.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def _send(message: Any) -> None:
+            nonlocal started
+            if message.get("type") == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception as exc:  # noqa: BLE001 — converted and logged, never swallowed
+            ref = uuid.uuid4().hex[:8]
+            log.exception(
+                "api.request.unhandled ref={} {} {}: {}",
+                ref, scope.get("method"), scope.get("path"), type(exc).__name__,
+            )
+            if started:
+                raise  # headers already sent: nothing honest left to say
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": f"Server error ({type(exc).__name__}, ref {ref})."},
+                headers={"X-Error-Class": type(exc).__name__, "X-Error-Ref": ref},
+            )
+            await response(scope, receive, send)
+
+
 def build_app(
     engine: Any,
     *,
@@ -654,17 +704,8 @@ def build_app(
     app.state.engine = engine
     app.state.boot_monotonic = time.monotonic()
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins or ["*"],
-        allow_credentials=False,
-        # POST/PUT include the OTP + billing-grant endpoints; OPTIONS is
-        # autoplay'd by browsers for any non-trivial CORS preflight.
-        # DELETE: key removal (Binance and CoinDCX) — without it the browser
-        # refuses the preflight and the web app reports "no reply arrived".
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
-    )
+    # CORS is added LAST (below), so it is the outermost layer: every
+    # response — a rate-limit 429, an unhandled 500 — carries its headers.
 
     # Response compression — kicks in only for payloads >= 1 KiB so the
     # cheap health/auth-token endpoints don't pay the gzip CPU cost,
@@ -725,6 +766,27 @@ def build_app(
         # with Cloudflare logs without needing log access on both sides.
         response.headers["X-Response-Time-Ms"] = f"{dur_s * 1000.0:.0f}"
         return response
+
+    # Unhandled errors → a JSON 500 that names its cause, INSIDE the CORS
+    # layer.  Without this, Starlette's outermost error handler answers a
+    # crash with no CORS headers, the browser hides the response, and the web
+    # app can only say "no reply arrived in time" — which is how the owner's
+    # CoinDCX platform switch (2026-09-27) failed with nothing on screen or in
+    # any artifact saying why.  The class name is safe to show (no message:
+    # an exception string can carry request data); the traceback is logged.
+    app.add_middleware(_UnhandledErrorAsJson)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins or ["*"],
+        allow_credentials=False,
+        # POST/PUT include the OTP + billing-grant endpoints; OPTIONS is
+        # autoplay'd by browsers for any non-trivial CORS preflight.
+        # DELETE: key removal (Binance and CoinDCX) — without it the browser
+        # refuses the preflight and the web app reports "no reply arrived".
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
 
     auth = _make_auth_dep(
         jwt_secret, static_token, allow_static, user_store=user_store,
