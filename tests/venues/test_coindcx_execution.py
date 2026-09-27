@@ -8,6 +8,8 @@ per leg with an order or ``{"success": false, "error": ...}``.
 """
 from __future__ import annotations
 
+from tests.venues.conftest import DCX
+
 import time
 from typing import Any, Dict, List, Optional
 
@@ -442,7 +444,7 @@ async def test_self_test_refuses_unless_owner_allow_listed(monkeypatch, tmp_path
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "")
+    DCX["coindcx_execution_allowed_uids"] = ""
     fx = FakeExchange()
     rep = await ST.run("owner", client=fx, registry=FakeRegistry(), sleep=_nosleep)
     assert rep["verdict"] == "refused" and fx.calls == []
@@ -455,7 +457,7 @@ async def test_self_test_full_run_ends_flat_and_writes_report(monkeypatch, tmp_p
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "owner")
+    DCX["coindcx_execution_allowed_uids"] = "owner"
     fx = FakeExchange()
 
     async def wallets():
@@ -477,7 +479,7 @@ async def test_self_test_refuses_a_pair_the_owner_holds(monkeypatch, tmp_path) -
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "owner")
+    DCX["coindcx_execution_allowed_uids"] = "owner"
     fx = FakeExchange()
     fx._row("B-BTC_USDT", "USDT")["active_pos"] = 1.0
 
@@ -535,7 +537,7 @@ async def test_ops_contract_vector_is_what_the_engine_writes(monkeypatch, tmp_pa
 
     monkeypatch.setattr(R, "STATUS_PATH", str(tmp_path / "s.json"))
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "owner")
+    DCX["coindcx_execution_allowed_uids"] = "owner"
     # Module-global counters carry state from earlier tests; the vector must
     # not depend on test order.
     from collections import Counter

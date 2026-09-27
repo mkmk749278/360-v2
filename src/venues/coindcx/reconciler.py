@@ -216,11 +216,7 @@ def set_stream_manager(mgr: Any) -> None:
 
 def status_snapshot(rec: Optional["CoinDCXReconciler"] = None) -> Dict[str, Any]:
     """Everything ops needs to grade the venue, from THIS (engine) process."""
-    from config import (
-        COINDCX_EXECUTION_ENABLED,
-        COINDCX_RECONCILE_INTERVAL_SEC,
-        COINDCX_STREAM_ENABLED,
-    )
+    from config import COINDCX_RECONCILE_INTERVAL_SEC, COINDCX_STREAM_ENABLED
     from src.venues.coindcx import dispatch as _dcx
     from src.venues.coindcx import instruments as _inst
 
@@ -235,8 +231,9 @@ def status_snapshot(rec: Optional["CoinDCXReconciler"] = None) -> Dict[str, Any]
         # the engine's own clock instead of inventing a bound (the /truth
         # defect, 2026-08-18).
         "reconcile_interval_sec": float(COINDCX_RECONCILE_INTERVAL_SEC),
-        "execution_enabled": bool(COINDCX_EXECUTION_ENABLED),
+        "execution_enabled": _dcx.execution_enabled(),
         "allow_list": {"active": allowed is not None, "size": len(allowed or ())},
+        "open_to_all": allowed is None,
         "stream_enabled": bool(COINDCX_STREAM_ENABLED),
         "positions": store,
         "reconciler": (rec or get_reconciler()).snapshot(),

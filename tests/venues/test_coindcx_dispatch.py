@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+from tests.venues.conftest import DCX
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -38,8 +40,8 @@ def _gates(monkeypatch):
     from src.execution import position_fsm
     monkeypatch.setattr(position_fsm, "_enforce_safety_gates", lambda **kw: None)
     import config
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", True)
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "")
+    DCX["coindcx_execution_enabled"] = True
+    DCX["coindcx_open_to_all"] = True  # the fan-out tests mean "every connected user"
     yield
     signal_dispatch.reset_cache_for_test()
     symbol_filters.reset_for_test()
@@ -63,7 +65,7 @@ async def test_binance_fanout_skips_a_user_who_chose_coindcx() -> None:
 
 async def test_coindcx_fanout_off_by_default_does_nothing(monkeypatch) -> None:
     import config
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", False)
+    DCX["coindcx_execution_enabled"] = False
     opened = AsyncMock()
     monkeypatch.setattr(E.get_executor(), "open_position", opened)
     out = await dcx.dispatch_signal(**_SIG)
@@ -85,12 +87,54 @@ async def test_coindcx_fanout_only_opens_for_coindcx_users(monkeypatch) -> None:
 async def test_allow_list_restricts_to_owner(monkeypatch) -> None:
     import config
     from src.venues.coindcx import keystore
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "owner")
+    DCX["coindcx_open_to_all"] = False
+    DCX["coindcx_execution_allowed_uids"] = "owner"
     monkeypatch.setattr(keystore, "list_active_uids", lambda: ["u_dcx"])
     opened = AsyncMock()
     monkeypatch.setattr(E.get_executor(), "open_position", opened)
     await dcx.dispatch_signal(**_SIG)
     assert opened.await_count == 0
+
+
+async def test_an_empty_allow_list_means_nobody_not_everybody(monkeypatch) -> None:
+    """Clearing the list must never open the venue: that is its own switch."""
+    from src.venues.coindcx import keystore
+    DCX["coindcx_open_to_all"] = False
+    DCX["coindcx_execution_allowed_uids"] = ""
+    monkeypatch.setattr(keystore, "list_active_uids", lambda: ["u_dcx"])
+    opened = AsyncMock()
+    monkeypatch.setattr(E.get_executor(), "open_position", opened)
+    await dcx.dispatch_signal(**_SIG)
+    assert opened.await_count == 0
+    assert dcx._allowed_uids() == set()
+
+
+async def test_open_to_all_ignores_the_allow_list(monkeypatch) -> None:
+    DCX["coindcx_open_to_all"] = True
+    DCX["coindcx_execution_allowed_uids"] = "owner"
+    assert dcx._allowed_uids() is None
+
+
+def test_the_gate_reads_the_live_tunables_not_config(monkeypatch) -> None:
+    """A config patch must not move the gate — the live value is the tunable."""
+    import config
+    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", True)
+    DCX["coindcx_execution_enabled"] = False
+    assert dcx.execution_enabled() is False
+    DCX["coindcx_execution_enabled"] = True
+    assert dcx.execution_enabled() is True
+
+
+def test_the_three_switches_are_registered_tunables() -> None:
+    from src import runtime_tunables as _rt
+    reg = _rt.registry()
+    assert reg["coindcx_execution_enabled"].type == "bool"
+    assert reg["coindcx_execution_enabled"].default is False
+    assert reg["coindcx_open_to_all"].type == "bool"
+    assert reg["coindcx_open_to_all"].default is False
+    assert reg["coindcx_execution_allowed_uids"].type == "str"
+    assert {reg[k].category for k in ("coindcx_execution_enabled", "coindcx_open_to_all",
+                                      "coindcx_execution_allowed_uids")} == {"CoinDCX"}
 
 
 async def test_unreadable_roster_dispatches_to_nobody(monkeypatch) -> None:

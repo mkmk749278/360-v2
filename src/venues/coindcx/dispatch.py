@@ -8,8 +8,10 @@ exchange — the one they chose.
 Gates, in the Binance fan-out's order and with its semantics (a test pins
 the list), so choosing an exchange never changes *which* signals trade:
 
-1. master switch ``COINDCX_EXECUTION_ENABLED`` (default OFF) and the rollout
-   allow-list ``COINDCX_EXECUTION_ALLOWED_UIDS``;
+1. master switch and the rollout allow-list — runtime tunables
+   ``coindcx_execution_enabled`` / ``coindcx_execution_allowed_uids`` /
+   ``coindcx_open_to_all``, set from ops ``/control/coindcx`` (the
+   ``COINDCX_*`` env values are only their boot defaults);
 2. venue chosen = coindcx (a venue we could not read resolves to Binance);
 3. mode ``live``/``both`` (manual take skips);
 4. tier ``auto`` (manual take: ``assist``);
@@ -40,18 +42,43 @@ def totals() -> Dict[str, int]:
     return dict(_TOTALS)
 
 
-def _allowed_uids() -> Optional[set]:
-    from config import COINDCX_EXECUTION_ALLOWED_UIDS
+def parse_uids(raw: Any) -> list[str]:
+    """The stored comma-separated list → ordered, de-duplicated uids."""
+    out: list[str] = []
+    for part in str(raw or "").split(","):
+        uid = part.strip()
+        if uid and uid not in out:
+            out.append(uid)
+    return out
 
-    raw = [u.strip() for u in (COINDCX_EXECUTION_ALLOWED_UIDS or "").split(",")]
-    uids = {u for u in raw if u}
-    return uids or None
+
+def _tunable(key: str) -> Any:
+    """Live value from ops (runtime tunables); env boot default when the
+    store is not wired.  Both processes read the same Firestore document, so
+    the api's venue gate and the engine's dispatch agree."""
+    from src import runtime_tunables as _rt
+
+    return _rt.get(key)
+
+
+def open_to_all() -> bool:
+    return bool(_tunable("coindcx_open_to_all"))
+
+
+def _allowed_uids() -> Optional[set]:
+    """``None`` = every connected user (only when OPEN TO ALL is on).
+
+    Otherwise the allow-list as a set — and an EMPTY set means nobody.  It
+    used to mean everybody, which made clearing the list the way to open the
+    venue: one mistaken edit away from trading every connected user.
+    """
+    if open_to_all():
+        return None
+    return set(parse_uids(_tunable("coindcx_execution_allowed_uids")))
 
 
 def execution_enabled() -> bool:
-    from config import COINDCX_EXECUTION_ENABLED
-
-    return bool(COINDCX_EXECUTION_ENABLED)
+    return bool(_tunable("coindcx_execution_enabled"))
 
 
 async def dispatch_signal(

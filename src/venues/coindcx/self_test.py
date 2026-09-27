@@ -96,7 +96,7 @@ async def run(
     allowed = _dcx._allowed_uids()
     if not allowed or uid not in allowed:
         rep.step("owner_allow_list", False,
-                 detail="Set COINDCX_EXECUTION_ALLOWED_UIDS to the owner's uid first.")
+                 detail="Add yourself to the CoinDCX allow-list in ops (/control/coindcx) first.")
         out = rep.finish("refused")
         _write(out)
         return out
