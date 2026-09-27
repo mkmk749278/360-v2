@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -319,6 +320,17 @@ def register(
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                                 detail="Settings store unavailable.")
         partial = body.model_dump(exclude_unset=True)
+        started = time.monotonic()
+        try:
+            return await _put_venue(uid, user_id, partial, identity, store)
+        finally:
+            # One line per change, with how long it took: the owner's first
+            # switch to CoinDCX came back to the app as "no reply arrived in
+            # time" and nothing recorded whether it landed or what it waited on.
+            log.info("PUT /api/venue uid={} fields={} took {:.0f}ms",
+                     uid, sorted(partial), (time.monotonic() - started) * 1000)
+
+    async def _put_venue(uid: str, user_id: int, partial: dict, identity: Any, store: Any) -> dict:
         if str(partial.get("venue") or "").lower() == "coindcx":
             key = await asyncio.to_thread(_key_status, uid)
             if key.get("readable") is not True:
@@ -406,6 +418,7 @@ def register(
 
     async def _access_view() -> dict:
         from src import runtime_tunables as _rt
+        from src.api import user_overrides as _uo
         from src.api import users as _users
         from src.venues.coindcx import dispatch as _dcx
 
@@ -423,6 +436,7 @@ def register(
                 except Exception as exc:  # noqa: BLE001
                     log.warning("coindcx access: user lookup failed uid={}: {}", uid, exc)
             key = await asyncio.to_thread(_key_status, uid)
+            venue = await asyncio.to_thread(_uo.resolve_venue_settings_uid, uid)
             rows.append({
                 "uid": uid,
                 "found": user is not None,
@@ -430,6 +444,11 @@ def register(
                 "display_name": getattr(user, "display_name", None),
                 "key": {k: key.get(k) for k in ("readable", "connected", "attested",
                                                 "key_public_id_first8")},
+                # The platform the engine will actually use for this user —
+                # "binance" with a reason other than "ok" means it could not
+                # read the choice and fell back, never that the user chose it.
+                "venue": {k: venue.get(k) for k in ("venue", "margin_currency",
+                                                    "leverage", "reason")},
             })
         return {
             "readable": True,

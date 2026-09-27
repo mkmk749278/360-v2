@@ -131,6 +131,38 @@ async def _run(rep, client, registry, symbol, margin, sleep) -> Dict[str, Any]:
                     price=price, min_notional=getattr(inst, "min_notional", None)):
         return rep.finish("fail")
 
+    # 2b — funds, BEFORE any order.  A wallet the key can read but that
+    # holds nothing reads ``[]``; the first run on a real account went on to
+    # place the entry and was refused with "Insufficient funds", which is a
+    # finding about the account reached the expensive way.
+    need_usdt = max(inst.min_notional * 1.15, inst.min_quantity * price * 1.15)
+    margin_usdt = need_usdt / 2 * 1.5  # 2x leverage, 50% headroom for fees/move
+    rate = None
+    if margin == "INR":
+        rate = await registry.inr_per_usdt()
+    required: Optional[float]
+    if margin == "INR":
+        required = margin_usdt * rate if rate else None
+    else:
+        required = margin_usdt
+    balance = 0.0
+    for w in wallets or []:
+        if str(w.get("currency_short_name") or "").upper() == margin:
+            balance += _ex._num(w.get("balance"))
+    funded = required is not None and balance >= required
+    if not rep.step(
+        "funds_available", funded,
+        margin_currency=margin, balance=round(balance, 4),
+        required=round(required, 4) if required is not None else None,
+        detail=None if funded else (
+            f"Move at least {required:.2f} {margin} into your CoinDCX FUTURES wallet "
+            f"(it holds {balance:.2f}), then run again."
+            if required is not None else
+            "CoinDCX's INR/USDT conversion price could not be read — try USDT margin, "
+            "or run again in a minute."),
+    ):
+        return rep.finish("fail")
+
     # 3 — pair flat
     rows = await client.positions(pairs=[inst.pair], margin_currencies=(margin,))
     row = _ex.position_row(rows, inst.pair, margin)
