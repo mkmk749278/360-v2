@@ -4,6 +4,17 @@
 
 ---
 
+## OPEN 2026-09-27 — CoinDCX as platform #2: proposal only, owner decisions D1–D5
+
+`docs/COINDCX_VENUE_PLAN_2026_09_27.md`. No code. Measured: CoinDCX's 503 USDT
+perps are Binance's list (497 shared, 6 commodities), 49 of the last 50 delivered
+signals are listed there, and 28 of 32 decided outcomes end the same way on
+CoinDCX's own candles. INR margin trades the same USDT-priced contracts. Design:
+one signal engine, one lane per platform, not a second scanner. Blockers before
+any order: reduce-only semantics unverified, and CoinDCX keys cannot be checked
+for withdraw/IP binding (B18, owner call D4). The ops CSV `sl` column is the
+CURRENT (possibly BE-shifted) stop, not the original; use `original_stop_loss`.
+
 ## OPEN 2026-09-26 — test-suite audit: all 5 PRs merged; 2 owner calls remain
 
 Owner asked for a QA audit of every repo's tests, then "fix everything". Five
