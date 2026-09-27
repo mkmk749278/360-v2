@@ -4,6 +4,25 @@
 
 ---
 
+## OPEN 2026-09-27 — web app PUT/DELETE blocked by nginx preflight (fix in this PR; live until its deploy runs)
+
+Owner: choosing CoinDCX in the web app returns *"no reply arrived in time"* even
+with CoinDCX open to everyone. **Root cause, measured from outside:** the nginx
+site written once by `tools/setup-vps-api.sh` answers every `OPTIONS` itself —
+`204`, `Access-Control-Allow-Methods: GET, POST, OPTIONS`, max-age 86400 — so the
+browser never sends a PUT or DELETE. Every web-app write on those verbs was dead:
+`PUT /api/venue` (platform, margin, leverage), `DELETE` of CoinDCX and Binance
+keys. The engine never saw the request, which is why #1079's CORS-safe 500s
+changed nothing. Android is unaffected (no CORS).
+
+Fix: setup script no longer answers preflight (FastAPI's CORSMiddleware is the
+one writer); `tools/nginx_cors_passthrough.py` removes the block from the LIVE
+site on every deploy (backup, `nginx -t` gate with rollback, reload); hourly
+`vps-liveness` probes PUT/DELETE preflight from outside and pages if blocked.
+**After the deploy: re-probe** (`curl -X OPTIONS https://api.luminapp.org/api/venue
+-H 'Origin: https://app.luminapp.org' -H 'Access-Control-Request-Method: PUT'`
+must list PUT) and have the owner retry the CoinDCX switch.
+
 ## OPEN 2026-09-27 — CoinDCX as platform #2: MERGED + DEPLOYED DARK; owner self-test next
 
 All four PRs merged ~06:07 UTC (360-v2 #1075, lumin-app #172, 360ce-ops #231,
