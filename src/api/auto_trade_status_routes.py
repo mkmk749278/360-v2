@@ -1250,6 +1250,7 @@ def register(
                 "not_traded_detail": e.reject_detail,
                 "binance_code": e.reject_binance_code,
                 "source": e.source,
+                "venue": getattr(e, "venue", "binance"),
             }
 
         ordered = sorted(
@@ -1353,6 +1354,7 @@ def register(
                     "reject_binance_code": e.reject_binance_code,
                     "reject_binance_msg": e.reject_binance_msg,
                     "source": e.source,
+                    "venue": getattr(e, "venue", "binance"),
                 }
                 for e in events
             ],

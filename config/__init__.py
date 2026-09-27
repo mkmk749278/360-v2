@@ -4936,3 +4936,56 @@ AI_GOV_TRIGGER_TP_PROXIMITY_PCT: float = _safe_float(
 LIFECYCLE_ALERTS_ENABLED: bool = _safe_bool("LIFECYCLE_ALERTS_ENABLED", "true")
 LIFECYCLE_ALERT_QUEUE_MAX: int = _safe_int("LIFECYCLE_ALERT_QUEUE_MAX", "500")
 LIFECYCLE_ALERT_MAX_PER_MIN: int = _safe_int("LIFECYCLE_ALERT_MAX_PER_MIN", "12")
+
+
+# ---------------------------------------------------------------------------
+# CoinDCX execution venue (2026-09-27) — docs/COINDCX_VENUE_PLAN_2026_09_27.md
+# ---------------------------------------------------------------------------
+# Dark-first: the switch that lets a CoinDCX order be placed ships OFF.  The
+# owner arms it after the real-account self-test passes, first with the
+# allow-list set to his own uid (one watched window), then with the allow-list
+# cleared.  With the switch off, no CoinDCX order, no CoinDCX roster read and
+# no CoinDCX stream exists.
+COINDCX_EXECUTION_ENABLED: bool = _safe_bool("COINDCX_EXECUTION_ENABLED", "false")
+#: Comma-separated Firebase uids.  Non-empty = ONLY these users are dispatched
+#: to on CoinDCX (the owner-only rollout stage).  Empty = every user who chose
+#: CoinDCX and connected an attested key.
+COINDCX_EXECUTION_ALLOWED_UIDS: str = os.getenv("COINDCX_EXECUTION_ALLOWED_UIDS", "")
+#: The engine writes, the api reads — same shared volume as ``LUMIN_DB_PATH``.
+COINDCX_POSITIONS_DB: str = os.getenv("COINDCX_POSITIONS_DB", "data/coindcx_positions.sqlite")
+#: Reconciler period.  It makes calls only for users holding an open CoinDCX
+#: position, so with none open it costs nothing (Cost Discipline).
+COINDCX_RECONCILE_INTERVAL_SEC: float = _safe_float("COINDCX_RECONCILE_INTERVAL_SEC", "30")
+#: Users examined per reconcile cycle — the budget is spent per USER examined,
+#: before any call, so it bounds the branch that does nothing (CLAUDE.md,
+#: 2026-09-01).  One positions call per user examined.
+COINDCX_RECONCILE_MAX_USERS_PER_CYCLE: int = _safe_int(
+    "COINDCX_RECONCILE_MAX_USERS_PER_CYCLE", "40"
+)
+#: Parity with the Binance reconciler's age cap, so a CoinDCX user's position
+#: lives exactly as long as a Binance user's would on the same signal.
+COINDCX_MAX_POSITION_AGE_SEC: int = _safe_int(
+    "COINDCX_MAX_POSITION_AGE_SEC", str(RECONCILER_MAX_POSITION_AGE_SEC)
+)
+#: Per-signal fan-out concurrency (each user is ~4 CoinDCX calls; CoinDCX
+#: limits a key to 16/s, and every key is a different user, so this bounds our
+#: own socket count, not their limit).
+COINDCX_DISPATCH_CONCURRENCY: int = _safe_int("COINDCX_DISPATCH_CONCURRENCY", "5")
+#: How long to wait for a market entry to appear as a position before
+#: cancelling it.
+COINDCX_FILL_WAIT_SEC: float = _safe_float("COINDCX_FILL_WAIT_SEC", "10")
+#: A sanity bound, not a strategy gate: a signal whose entry is further than
+#: this from CoinDCX's live price means one of the two prices is wrong, and no
+#: order is placed on a price we cannot trust.  Measured gap on 49 signals:
+#: median 0.35%, p90 1.17% (the same drift the Binance path already takes).
+COINDCX_MAX_ENTRY_GAP_PCT: float = _safe_float("COINDCX_MAX_ENTRY_GAP_PCT", "2.5")
+#: Liquidation must sit at least this many stop-distances beyond the entry,
+#: so an isolated position is stopped long before it could be liquidated.
+#: Leverage is lowered (never raised) until this holds.
+COINDCX_LIQUIDATION_STOP_MULTIPLE: float = _safe_float(
+    "COINDCX_LIQUIDATION_STOP_MULTIPLE", "2.0"
+)
+#: The private event stream only NUDGES the reconciler (a fill seen in
+#: milliseconds instead of at the next cycle).  Exits are exchange-resident,
+#: so the stream is latency, never safety; OFF leaves the reconciler alone.
+COINDCX_STREAM_ENABLED: bool = _safe_bool("COINDCX_STREAM_ENABLED", "true")

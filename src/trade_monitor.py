@@ -3184,6 +3184,19 @@ class TradeMonitor:
                 sig.symbol, reason, exc,
             )
 
+        # ── Path 3: CoinDCX positions on this signal (2026-09-27) ──
+        # Same rule as path 2, including the loose-mode exemption on
+        # invalidation.  No-op when no CoinDCX position is open.
+        try:
+            from src.venues.coindcx import dispatch as _dcx
+
+            await _dcx.close_positions_for_signal(sig.signal_id, reason=reason)
+        except Exception as exc:
+            log.warning(
+                "CoinDCX close_positions_for_signal failed for %s (reason=%s): %s",
+                sig.symbol, reason, exc,
+            )
+
 
 
     async def _check_pre_tp_grab(

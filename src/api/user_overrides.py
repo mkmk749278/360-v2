@@ -260,6 +260,20 @@ ON user_paper_subscriptions(user_id, started_at DESC);
 # does not force-close — honoured at dispatch via grab_fraction=0 +
 # invalidation_mode='loose' + skip-TP-bracket).  The protective SL is
 # always placed, so the naked-position invariant (B12/B18) holds.
+_VENUE_SCHEMA = """
+-- 2026-09-27 — execution venue per user (docs/COINDCX_VENUE_PLAN_2026_09_27.md).
+-- NULL / no row = binance: every existing user keeps exactly the execution
+-- path they have always had until they choose otherwise.
+CREATE TABLE IF NOT EXISTS user_venue_settings (
+    user_id          INTEGER PRIMARY KEY,
+    venue            TEXT,     -- "binance" | "coindcx"
+    margin_currency  TEXT,     -- CoinDCX only: "INR" | "USDT"
+    leverage         REAL,     -- CoinDCX only: requested leverage (clamped at dispatch)
+    updated_at       TEXT    NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+"""
+
 _SYMBOL_MGMT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS user_symbol_management (
     user_id    INTEGER NOT NULL,
@@ -645,6 +659,7 @@ class UserOverridesStore:
         self._conn.executescript(
             _PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA
             + _SYMBOL_MGMT_SCHEMA + _REFERRAL_SCHEMA + _TRIAL_SCHEMA
+            + _VENUE_SCHEMA
         )
         self._migrate_pretp_grab_fraction()
         self._migrate_pretp_protect_manual_entries()
@@ -1110,6 +1125,51 @@ class UserOverridesStore:
             return self.get_auto_trade(user_id)
 
     # ---- per-symbol management mode (Signals-tab full vs entry) ---------
+
+    def get_venue_settings(self, user_id: int) -> Dict[str, Any]:
+        """Stored venue row as a partial dict (NULL columns omitted)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT venue, margin_currency, leverage, updated_at "
+                "FROM user_venue_settings WHERE user_id = ?",
+                (int(user_id),),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return {}
+        return {k: row[k] for k in row.keys() if row[k] is not None}
+
+    def update_venue_settings(self, user_id: int, partial: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge validated fields into the row and return the stored result.
+
+        Unknown values are refused (``ValueError``), never coerced: this row
+        decides which exchange a real order goes to.
+        """
+        cleaned = _coerce_venue_settings(partial)
+        with self._lock:
+            merged = dict(self.get_venue_settings(user_id))
+            merged.pop("updated_at", None)
+            merged.update(cleaned)
+            self._conn.execute(
+                """
+                INSERT INTO user_venue_settings
+                    (user_id, venue, margin_currency, leverage, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    venue = excluded.venue,
+                    margin_currency = excluded.margin_currency,
+                    leverage = excluded.leverage,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(user_id),
+                    merged.get("venue"),
+                    merged.get("margin_currency"),
+                    merged.get("leverage"),
+                    _now_iso(),
+                ),
+            )
+        return self.get_venue_settings(user_id)
 
     def get_symbol_management_map(self, user_id: int) -> Dict[str, str]:
         """Return ``{SYMBOL: mode}`` for every symbol the user has set to a
@@ -2436,6 +2496,104 @@ def resolve_invalidation_mode_uid(firebase_uid: str, default: str) -> str:
             firebase_uid, type(exc).__name__, default,
         )
         return default
+
+
+#: Venue settings (2026-09-27).  Defaults are the owner's decisions: Binance
+#: until a user chooses; INR margin for CoinDCX users; 5x leverage requested,
+#: always clamped at dispatch by the instrument's cap and the stop distance.
+VENUE_DEFAULT = "binance"
+VENUE_VALUES = ("binance", "coindcx")
+COINDCX_MARGIN_DEFAULT = "INR"
+COINDCX_MARGIN_VALUES = ("INR", "USDT")
+COINDCX_LEVERAGE_DEFAULT = 5.0
+COINDCX_LEVERAGE_MIN = 1.0
+#: Below B12's 30x ceiling on purpose: an isolated position's liquidation
+#: distance is roughly 1/leverage, and every CoinDCX entry is also checked so
+#: the stop sits well inside it.
+COINDCX_LEVERAGE_MAX = 20.0
+
+
+def _coerce_venue_settings(partial: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if "venue" in partial and partial["venue"] is not None:
+        v = str(partial["venue"]).strip().lower()
+        if v not in VENUE_VALUES:
+            raise ValueError(f"unknown venue: {partial['venue']!r}")
+        out["venue"] = v
+    if "margin_currency" in partial and partial["margin_currency"] is not None:
+        m = str(partial["margin_currency"]).strip().upper()
+        if m not in COINDCX_MARGIN_VALUES:
+            raise ValueError(f"unknown margin currency: {partial['margin_currency']!r}")
+        out["margin_currency"] = m
+    if "leverage" in partial and partial["leverage"] is not None:
+        try:
+            lev = float(partial["leverage"])
+        except (TypeError, ValueError):
+            raise ValueError(f"leverage must be a number: {partial['leverage']!r}")
+        if not (COINDCX_LEVERAGE_MIN <= lev <= COINDCX_LEVERAGE_MAX):
+            raise ValueError(
+                f"leverage must be between {COINDCX_LEVERAGE_MIN:g} and "
+                f"{COINDCX_LEVERAGE_MAX:g}"
+            )
+        out["leverage"] = lev
+    return out
+
+
+#: Why a venue could not be read.  ``ok`` is the only reason whose value is a
+#: reading; every other reason resolves to Binance — the path the user has
+#: always had — and says so, so "chose Binance" and "could not tell" never
+#: share a counter.
+VENUE_REASON_OK = "ok"
+VENUE_REASON_STORE_COLD = "store_cold"
+VENUE_REASON_NO_USER = "no_user"
+VENUE_REASON_READ_FAILED = "read_failed"
+
+
+def resolve_venue_settings_uid(firebase_uid: str) -> Dict[str, Any]:
+    """``{venue, margin_currency, leverage, reason}`` for a Firebase uid.
+
+    Every failure resolves to ``venue="binance"``: a CoinDCX order must only
+    ever follow an explicit, stored choice.  The CoinDCX fields carry their
+    defaults whatever the venue, so a reader never has to guess them.
+    """
+    base = {
+        "venue": VENUE_DEFAULT,
+        "margin_currency": COINDCX_MARGIN_DEFAULT,
+        "leverage": COINDCX_LEVERAGE_DEFAULT,
+    }
+    if _SINGLETON is None:
+        return {**base, "reason": VENUE_REASON_STORE_COLD}
+    try:
+        from src.api import users as _users
+
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return {**base, "reason": VENUE_REASON_STORE_COLD}
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return {**base, "reason": VENUE_REASON_NO_USER}
+        row = _SINGLETON.get_venue_settings(int(user.user_id))
+    except Exception as exc:
+        log.warning(
+            "resolve_venue_settings_uid: read failed uid={} ({}) — binance",
+            firebase_uid, type(exc).__name__,
+        )
+        return {**base, "reason": VENUE_REASON_READ_FAILED}
+    out = dict(base)
+    if row.get("venue") in VENUE_VALUES:
+        out["venue"] = row["venue"]
+    if row.get("margin_currency") in COINDCX_MARGIN_VALUES:
+        out["margin_currency"] = row["margin_currency"]
+    lev = row.get("leverage")
+    if isinstance(lev, (int, float)) and COINDCX_LEVERAGE_MIN <= float(lev) <= COINDCX_LEVERAGE_MAX:
+        out["leverage"] = float(lev)
+    out["reason"] = VENUE_REASON_OK
+    return out
+
+
+def resolve_venue_uid(firebase_uid: str) -> str:
+    """Just the venue — ``binance`` on any failure."""
+    return resolve_venue_settings_uid(firebase_uid)["venue"]
 
 
 def resolve_exit_mechanism_uid(firebase_uid: str) -> str:

@@ -1760,6 +1760,32 @@ class SignalRouter:
                 "app feed and the active book; subscribers see it regardless"
             )
 
+        # ── CoinDCX fan-out (2026-09-27) — users who chose CoinDCX ───────────
+        # Independent of the Binance fan-out above (each skips the other's
+        # users) and a no-op while COINDCX_EXECUTION_ENABLED is off.  Levels
+        # are the signal's own: CoinDCX's contracts track Binance's price.
+        try:
+            from src.venues.coindcx import dispatch as _dcx
+
+            if _dcx.execution_enabled():
+                await _dcx.dispatch_signal(
+                    signal_id=signal.signal_id,
+                    symbol=signal.symbol,
+                    direction=signal.direction.value,
+                    entry_price=float(signal.entry),
+                    sl_price=float(signal.stop_loss),
+                    tp1_price=float(signal.tp1),
+                    regime_label=getattr(signal, "entry_regime", None),
+                    setup_class=getattr(signal, "setup_class", None),
+                    risk_scale=(
+                        1.0 / float(getattr(signal, "noise_floor_widen_factor", 1.0) or 1.0)
+                        if float(getattr(signal, "noise_floor_widen_factor", 1.0) or 1.0) > 1.0
+                        else 1.0
+                    ),
+                )
+        except Exception:
+            log.exception("CoinDCX dispatch raised — Binance dispatch is unaffected")
+
         # ── Latency tracking ─────────────────────────────────────────────────
         signal.posted_at = time.time()
         signal.dispatch_timestamp = datetime.now(timezone.utc)

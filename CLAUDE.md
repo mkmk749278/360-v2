@@ -525,6 +525,7 @@ Telegram are both acceptable paging paths.
 | **Cross-process invalidation** for the control documents — the Redis generation that replaced the 5s TTLs | `src/control_generation.py` |
 | **Safety-switch bridge** — the engine end of the kill switch, so the stop is throwable when the api container is blind | `src/execution/safety_switch_bridge.py` |
 | Firestore read census + cost-at-N-members projection | `src/firestore_reads.py` |
+| **CoinDCX venue** — keys, instruments, execution, reconciler, stream, fan-out, owner self-test (dark, `COINDCX_EXECUTION_ENABLED`) | `src/venues/coindcx/`, `src/api/coindcx_routes.py` |
 | Host resources — CPU against the cgroup **quota**, memory, disk, and the config the running process is using | `src/host_resources.py` |
 
 ---

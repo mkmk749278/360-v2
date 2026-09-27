@@ -612,6 +612,36 @@ class Bootstrap:
                     )
                 )
 
+                # CoinDCX venue (2026-09-27).  The reconciler makes exchange
+                # calls ONLY for users holding a live CoinDCX record, and such
+                # a record can only exist after the owner armed
+                # COINDCX_EXECUTION_ENABLED — so with the venue off this loop
+                # reads one local SQLite query and writes the status file ops
+                # renders, nothing else.  It runs regardless of the switch so
+                # positions opened before a disarm keep their protection.
+                try:
+                    from config import COINDCX_STREAM_ENABLED as _dcx_stream_on
+                    from src.venues.coindcx import keystore as _dcx_keys
+                    from src.venues.coindcx import positions as _dcx_pos
+                    from src.venues.coindcx import reconciler as _dcx_rec
+                    from src.venues.coindcx import stream as _dcx_stream
+
+                    _dcx_keys.register_generation_listeners()
+                    _dcx_reconciler = _dcx_rec.get_reconciler()
+                    tasks.append(
+                        asyncio.create_task(_dcx_reconciler.run(), name="coindcx_reconciler")
+                    )
+                    if _dcx_stream_on:
+                        _dcx_mgr = _dcx_stream.CoinDCXStreamManager(
+                            _dcx_reconciler, _dcx_pos.get_store,
+                        )
+                        _dcx_rec.set_stream_manager(_dcx_mgr)
+                        tasks.append(
+                            asyncio.create_task(_dcx_mgr.run(), name="coindcx_stream")
+                        )
+                except Exception:
+                    log.exception("CoinDCX venue tasks failed to start")
+
                 # Defensive periodic resync of the in-memory position
                 # index — bounds staleness from any write that ever
                 # bypasses put_position / delete_position.  Off the event

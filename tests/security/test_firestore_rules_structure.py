@@ -211,3 +211,20 @@ def test_braces_are_balanced(rules_text: str) -> None:
     assert opens == closes, (
         f"unbalanced braces in firestore.rules: {opens} open, {closes} close"
     )
+
+
+def test_coindcx_key_subcollection_fully_locked_to_clients(rules_text: str) -> None:
+    """``users/{uid}/coindcx_key/**`` carries the same custody as
+    ``binance_key``: no client read or write, gated structurally (``if
+    false``), never on ``request.auth``.  The default-deny rule would also
+    cover it; the explicit rule is here so an edit that widens the default
+    cannot open a key store by accident."""
+    m = re.search(
+        r"match\s+/users/\{uid\}/coindcx_key/\{doc=\*\*\}\s*\{([^}]*)\}",
+        rules_text,
+        re.DOTALL,
+    )
+    assert m is not None, "coindcx_key must have its own explicit lockdown rule"
+    block = m.group(1)
+    assert re.search(r"allow\s+read,\s*write\s*:\s*if\s+false\s*;", block)
+    assert "request.auth" not in block

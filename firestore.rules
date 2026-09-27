@@ -69,6 +69,15 @@ service cloud.firestore {
     }
 
     // --------------------------------------------------------------------
+    // ENCRYPTED COINDCX KEY BLOB (2026-09-27) — same custody as binance_key.
+    // DENY ALL CLIENT ACCESS; only the engine (Admin SDK) writes it at
+    // /api/coindcx/connect and only the signing service reads it.
+    // --------------------------------------------------------------------
+    match /users/{uid}/coindcx_key/{doc=**} {
+      allow read, write: if false;
+    }
+
+    // --------------------------------------------------------------------
     // Positions (FSM state): user can READ their own positions for the
     // app's live-position view; only the engine writes.  Writes happen
     // via Admin SDK as the Position FSM transitions through

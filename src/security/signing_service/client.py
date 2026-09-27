@@ -95,7 +95,9 @@ class SigningClient:
             response = await asyncio.wait_for(
                 conn.send_and_receive(request), timeout=self.timeout
             )
-        if request.verb != "ping":
+        # The census is Binance's IP-weight meter; a CoinDCX call carries no
+        # Binance weight and must not read as one.
+        if request.verb.startswith("binance_"):
             _record_weight(request, response)
         return response
 
@@ -158,6 +160,35 @@ class SigningClient:
                 base=base,
                 path=path,
                 params=dict(params or {}),
+            )
+        )
+
+
+    async def coindcx_signed_post(
+        self, *, firebase_uid: str, path: str, body: Optional[Dict[str, Any]] = None,
+    ) -> SignResponse:
+        return await self._rpc(
+            SignRequest(
+                id=_new_id(), verb="coindcx_signed_post", firebase_uid=firebase_uid,
+                base="coindcx", path=path, params=dict(body or {}),
+            )
+        )
+
+    async def coindcx_signed_get(
+        self, *, firebase_uid: str, path: str, body: Optional[Dict[str, Any]] = None,
+    ) -> SignResponse:
+        return await self._rpc(
+            SignRequest(
+                id=_new_id(), verb="coindcx_signed_get", firebase_uid=firebase_uid,
+                base="coindcx", path=path, params=dict(body or {}),
+            )
+        )
+
+    async def coindcx_stream_auth(self, *, firebase_uid: str) -> SignResponse:
+        return await self._rpc(
+            SignRequest(
+                id=_new_id(), verb="coindcx_stream_auth", firebase_uid=firebase_uid,
+                base="coindcx",
             )
         )
 

@@ -58,6 +58,7 @@ from .protocol import (
     ERR_CRYPTO_DECRYPT_FAILED,
     ERR_INTERNAL_ERROR,
     ERR_KEY_BLOB_NOT_FOUND,
+    ERR_KEY_NOT_ATTESTED,
     ERR_KMS_DECRYPT_FAILED,
     SignRequest,
     SignResponse,
@@ -111,6 +112,11 @@ async def handle_request(
         return SignResponse.ok_reply(
             request.id, binance_status=200, binance_body={"pong": True}
         )
+
+    # CoinDCX verbs have their own key store, signer and allow-list; they
+    # share nothing with the Binance path below except the KMS client.
+    if request.verb in _COINDCX_VERBS:
+        return await handle_coindcx_request(request, session=session)
 
     # All binance_signed_* verbs share the same unwrap-and-call body.
     if request.verb not in (
@@ -481,3 +487,210 @@ def _used_weight_from(resp: Any) -> Optional[int]:
         return value if value >= 0 else None
     except Exception:  # noqa: BLE001 — a header must never fail the call
         return None
+
+
+# ---------------------------------------------------------------------------
+# CoinDCX (2026-09-27) — docs/COINDCX_VENUE_PLAN_2026_09_27.md
+# ---------------------------------------------------------------------------
+#
+# Same custody chain as Binance — ciphertext from Firestore, DEK unwrapped by
+# KMS, secret decrypted in this frame and dropped on return — with three
+# differences, each deliberate:
+#
+# * **Allow-list, enforced here.**  The path and method must be on
+#   ``coindcx.signing.PRIVATE_ENDPOINTS``.  The engine is not trusted to only
+#   ask for order paths: this process is the one holding the key, so this is
+#   where "a CoinDCX key can never reach a wallet transfer" is made true.
+# * **Attestation required.**  CoinDCX cannot report a key's permissions, so a
+#   key without the owner-mandated attestation is refused before decryption.
+# * **Body signing.**  The signature covers the exact JSON text sent.
+
+_COINDCX_VERBS = frozenset({"coindcx_signed_post", "coindcx_signed_get", "coindcx_stream_auth"})
+_COINDCX_KEY_REJECTION_STATUSES = frozenset({401})
+
+
+async def handle_coindcx_request(
+    request: SignRequest,
+    *,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> SignResponse:
+    """Handle one CoinDCX verb end to end."""
+    from src.venues.coindcx import keystore as _dcx_keys
+    from src.venues.coindcx import signing as _dcx_sign
+
+    if not request.firebase_uid:
+        return SignResponse.error_reply(
+            request.id, code=ERR_BAD_REQUEST, message="firebase_uid is required",
+        )
+    method = ""
+    if request.verb != "coindcx_stream_auth":
+        method = "POST" if request.verb == "coindcx_signed_post" else "GET"
+        if not _dcx_sign.is_allowed(request.path, method):
+            log.warning(
+                "signing handler: refused CoinDCX {} {} — not on the allow-list",
+                method, request.path,
+            )
+            return SignResponse.error_reply(
+                request.id, code=ERR_BAD_REQUEST,
+                message=f"CoinDCX endpoint not allowed: {method} {request.path}",
+            )
+
+    used: list = []
+    resp = await _coindcx_attempt(
+        request, method=method, session=session,
+        blob_getter=_dcx_keys.get_key_blob_cached, used=used,
+    )
+    # A cached blob from before a key rotation is rejected with 401 before
+    # anything executes, so one retry from a fresh read is safe — and only
+    # when the blob on file actually differs.
+    if (
+        used
+        and not resp.ok
+        and resp.error_code == ERR_BINANCE_HTTP_ERROR
+        and resp.binance_status in _COINDCX_KEY_REJECTION_STATUSES
+    ):
+        _dcx_keys.invalidate_key_blob(request.firebase_uid)
+        try:
+            current = await asyncio.to_thread(_dcx_keys.get_key_blob, request.firebase_uid)
+        except Exception:  # noqa: BLE001 — keep the original rejection
+            return resp
+        if (current.api_key_full, current.encrypted_dek) != (
+            used[0].api_key_full, used[0].encrypted_dek,
+        ):
+            resp = await _coindcx_attempt(
+                request, method=method, session=session,
+                blob_getter=lambda _uid: current, used=[],
+            )
+    return resp
+
+
+async def _coindcx_attempt(
+    request: SignRequest,
+    *,
+    method: str,
+    session: Optional[aiohttp.ClientSession],
+    blob_getter: Any,
+    used: list,
+) -> SignResponse:
+    from src.venues.coindcx import keystore as _dcx_keys
+    from src.venues.coindcx import signing as _dcx_sign
+
+    try:
+        blob = await asyncio.to_thread(blob_getter, request.firebase_uid)
+        used.append(blob)
+    except _dcx_keys.CoinDCXKeyNotFoundError:
+        return SignResponse.error_reply(
+            request.id, code=ERR_KEY_BLOB_NOT_FOUND,
+            message=f"no CoinDCX key for uid={request.firebase_uid}",
+        )
+    except _dcx_keys.CoinDCXKeystoreNotInitialisedError:
+        return SignResponse.error_reply(
+            request.id, code=ERR_INTERNAL_ERROR,
+            message="CoinDCX keystore not initialised at boot",
+        )
+    if not blob.attested:
+        return SignResponse.error_reply(
+            request.id, code=ERR_KEY_NOT_ATTESTED,
+            message="CoinDCX key has no valid attestation — reconnect it",
+        )
+
+    try:
+        kms = kms_client.get_client()
+        plaintext_dek = await asyncio.to_thread(kms.decrypt, blob.encrypted_dek)
+    except kms_client.KmsNotInitialisedError:
+        return SignResponse.error_reply(
+            request.id, code=ERR_INTERNAL_ERROR, message="KMS client not initialised at boot",
+        )
+    except Exception as exc:
+        log.warning("signing handler: KMS Decrypt failed (coindcx): {}", exc)
+        return SignResponse.error_reply(
+            request.id, code=ERR_KMS_DECRYPT_FAILED, message=f"KMS Decrypt failed: {exc}",
+        )
+    try:
+        secret_bytes = envelope_crypto.decrypt_secret(
+            plaintext_dek, envelope_crypto.EncryptedBlob.unpack(blob.encrypted_secret),
+        )
+    except (InvalidTag, ValueError):
+        log.error(
+            "signing handler: CoinDCX blob decrypt failed for uid={}", request.firebase_uid,
+        )
+        del plaintext_dek
+        return SignResponse.error_reply(
+            request.id, code=ERR_CRYPTO_DECRYPT_FAILED,
+            message="encrypted CoinDCX key failed authentication — user must reconnect",
+        )
+    del plaintext_dek
+    try:
+        secret = secret_bytes.decode("utf-8")
+    finally:
+        del secret_bytes
+
+    try:
+        if request.verb == "coindcx_stream_auth":
+            return SignResponse.ok_reply(
+                request.id,
+                binance_status=200,
+                binance_body={
+                    "api_key": blob.api_key_full,
+                    "auth_signature": _dcx_sign.stream_auth_signature(secret),
+                },
+            )
+        body_text, headers = _dcx_sign.signed_request(
+            blob.api_key_full, secret, request.params,
+        )
+    finally:
+        del secret
+
+    try:
+        status_code, body = await _coindcx_http(
+            method, _dcx_sign.BASE_URL + request.path, body_text, headers, session,
+        )
+    except _BinanceUnreachable as exc:
+        return SignResponse.error_reply(
+            request.id, code=ERR_BINANCE_UNREACHABLE, message=str(exc),
+        )
+    except Exception as exc:
+        log.exception("signing handler: unexpected error during CoinDCX call")
+        return SignResponse.error_reply(
+            request.id, code=ERR_INTERNAL_ERROR,
+            message=f"unexpected error: {type(exc).__name__}",
+        )
+    if not (200 <= status_code < 300):
+        detail = None
+        if isinstance(body, dict):
+            detail = body.get("message") or body.get("error") or body.get("msg")
+        return SignResponse.error_reply(
+            request.id, code=ERR_BINANCE_HTTP_ERROR,
+            message=f"CoinDCX returned {status_code} ({detail!r})",
+            binance_status=status_code, binance_body=body,
+        )
+    return SignResponse.ok_reply(request.id, binance_status=status_code, binance_body=body)
+
+
+async def _coindcx_http(
+    method: str,
+    url: str,
+    body_text: str,
+    headers: dict,
+    session: Optional[aiohttp.ClientSession],
+) -> tuple[int, Any]:
+    """Send the signed body as-is.  Only the path is ever logged."""
+    own = session is None
+    if session is None:
+        session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_S)
+        )
+    try:
+        async with session.request(method, url, data=body_text, headers=headers) as resp:
+            try:
+                parsed = await resp.json(content_type=None)
+            except (aiohttp.ContentTypeError, ValueError):
+                parsed = None
+            return resp.status, parsed
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        raise _BinanceUnreachable(
+            f"network error calling CoinDCX {url.split('.com', 1)[-1]}: {type(exc).__name__}"
+        )
+    finally:
+        if own:
+            await session.close()

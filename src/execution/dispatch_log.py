@@ -94,6 +94,9 @@ class DispatchEvent:
     # Dispatch source: "auto" (signal fan-out) | "manual_take" (user tapped
     # Take trade in the app — owner-approved server-side take, 2026-07-17).
     source: str = "auto"
+    # Execution venue (2026-09-27): "binance" unless the row says otherwise.
+    # Rows written before the field existed are Binance rows by construction.
+    venue: str = "binance"
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +161,7 @@ def record_placed(
     entry_price: float,
     total_qty: float,
     source: str = "auto",
+    venue: Optional[str] = None,
 ) -> None:
     """Record a successful dispatch attempt.
 
@@ -181,6 +185,8 @@ def record_placed(
             "total_qty": float(total_qty),
             "source": source,
         }
+        if venue:
+            doc["venue"] = venue
         _events_collection(firebase_uid).document(event_id).set(doc)
     except Exception:
         log.exception(
@@ -201,6 +207,7 @@ def record_rejected(
     reject_binance_code: Optional[int] = None,
     reject_binance_msg: Optional[str] = None,
     source: str = "auto",
+    venue: Optional[str] = None,
 ) -> None:
     """Record a rejected dispatch attempt.
 
@@ -238,6 +245,8 @@ def record_rejected(
             "reject_binance_msg": reject_binance_msg,
             "source": source,
         }
+        if venue:
+            doc["venue"] = venue
         _events_collection(firebase_uid).document(event_id).set(doc)
     except Exception:
         log.exception(
@@ -256,6 +265,7 @@ def record_skipped(
     skip_reason: str,
     skip_detail: str,
     source: str = "auto",
+    venue: Optional[str] = None,
 ) -> None:
     """Record a signal this user's own PER-SIGNAL preference declined.
 
@@ -314,6 +324,8 @@ def record_skipped(
             "reject_detail": skip_detail,
             "source": source,
         }
+        if venue:
+            doc["venue"] = venue
         _events_collection(firebase_uid).document(event_id).set(doc)
     except Exception:
         log.exception(
@@ -421,4 +433,5 @@ def _from_firestore_dict(data: dict) -> DispatchEvent:
         reject_binance_msg=data.get("reject_binance_msg"),
         skip_reason=data.get("skip_reason"),
         source=str(data.get("source") or "auto"),
+        venue=str(data.get("venue") or "binance"),
     )

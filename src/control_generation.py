@@ -84,6 +84,12 @@ DOC_DISABLED_UIDS = "disabled_uids"
 #: written or deleted.  Read per signed call by the signing service's blob
 #: cache (:func:`current`), not polled — see ``firestore_keystore``.
 DOC_KEY_BLOBS = "key_blobs"
+#: The CoinDCX counterparts (2026-09-27): a user's encrypted CoinDCX key
+#: (``users/{uid}/coindcx_key/current``) was written or deleted, and the
+#: CoinDCX roster moved.  Separate documents because a Binance key write must
+#: not cost CoinDCX readers a Firestore read, and vice versa.
+DOC_COINDCX_KEY_BLOBS = "coindcx_key_blobs"
+DOC_COINDCX_ACTIVE_UIDS = "coindcx_active_uids"
 
 _ALL_DOCS = (
     DOC_KILL_SWITCH,
@@ -91,6 +97,8 @@ _ALL_DOCS = (
     DOC_ACTIVE_UIDS,
     DOC_DISABLED_UIDS,
     DOC_KEY_BLOBS,
+    DOC_COINDCX_KEY_BLOBS,
+    DOC_COINDCX_ACTIVE_UIDS,
 )
 
 #: Documents read ON DEMAND by :func:`current` rather than watched by
@@ -102,7 +110,7 @@ _ALL_DOCS = (
 #: key-blob cache that is a signature under a rotated key, so these documents
 #: start from a millisecond epoch instead of zero: a value from before a flush
 #: cannot recur after it.
-_ON_DEMAND_DOCS = frozenset({DOC_KEY_BLOBS})
+_ON_DEMAND_DOCS = frozenset({DOC_KEY_BLOBS, DOC_COINDCX_KEY_BLOBS})
 
 
 def _seed_epoch(client: Any, key: str) -> None:

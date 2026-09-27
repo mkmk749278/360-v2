@@ -417,6 +417,21 @@ invariant:** SL placement failure force-closes at market.
 cached); the plaintext secret materialises only inside the signing-service process for
 one request. Connect-time validation auto-rejects any key with withdraw permission.
 
+### 4.4b Second venue — CoinDCX (dark, 2026-09-27)
+
+A user executes on **one** exchange, the one stored in `user_venue_settings`
+(no row = Binance).  The Binance fan-out skips CoinDCX users and
+`src/venues/coindcx/dispatch.py` skips everyone else, with the same account
+gates in the same order.  CoinDCX lives in its own package with its own key
+store (`users/{uid}/coindcx_key`, attestation instead of B18's permission
+check — CoinDCX cannot report key permissions), its own position store
+(SQLite `data/coindcx_positions.sqlite`) and its own reconciler, so no Binance
+consumer can act on a CoinDCX position.  One exit shape only: CoinDCX's
+position-level TP/SL (TP1-full + fixed stop), because its order API has no
+client order id and no reduce-only flag.  Switch: `COINDCX_EXECUTION_ENABLED`
+(default OFF) + owner allow-list; go-live gate is the owner self-test.
+Full design and measurements: `docs/COINDCX_VENUE_PLAN_2026_09_27.md`.
+
 ### 4.5 Measure — the Autonomous Portfolio (Layers A–G)
 
 Edge lives in `session × regime × strategy` cells, not in a global confidence number.

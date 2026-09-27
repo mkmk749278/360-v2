@@ -49,13 +49,24 @@ Verb = Literal[
     "binance_signed_get",
     "binance_signed_post",
     "binance_signed_delete",
+    # CoinDCX futures (2026-09-27).  ``path`` must be on
+    # ``src.venues.coindcx.signing.PRIVATE_ENDPOINTS`` for the verb's method;
+    # ``params`` is the JSON body (the service adds the timestamp).  The
+    # response reuses the ``binance_*`` field names — they are wire names,
+    # and renaming them is a breaking protocol change for no gain.
+    "coindcx_signed_post",
+    "coindcx_signed_get",
+    # Returns the public key + the private-stream ``authSignature`` (an HMAC
+    # of a constant).  That signature can read the user's own futures events
+    # and do nothing else; it is never logged.
+    "coindcx_stream_auth",
 ]
 
 
 # Binance base URL selector — strings rather than full URLs so a future
 # pivot to testnet / regional endpoints touches only the handler, not
 # every call site.
-BinanceBase = Literal["spot", "futures"]
+BinanceBase = Literal["spot", "futures", "coindcx"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +94,12 @@ ERR_BINANCE_HTTP_ERROR = "BINANCE_HTTP_ERROR"
 
 # Network / timeout / aiohttp ClientError reaching Binance.
 ERR_BINANCE_UNREACHABLE = "BINANCE_UNREACHABLE"
+
+# CoinDCX key on file without a valid attestation (IP bound to our server,
+# no withdraw permission).  CoinDCX cannot report either fact, so the
+# attestation is the B18 control on that venue (owner decision 2026-09-27) and
+# a key without one is never used to sign.
+ERR_KEY_NOT_ATTESTED = "KEY_NOT_ATTESTED"
 
 # Wire-format error: malformed JSON, missing required field, unknown
 # verb, unknown base.  Indicates a programming bug, not user state.

@@ -1,8 +1,11 @@
 # CoinDCX as a second trading platform — research, measurements and plan
 
-*2026-09-27 · status: **PROPOSAL, owner sign-off required before any code** ·
-touches signing service, connect-time validation, dispatch and the Position FSM
-(all owner-sign-off items per `CLAUDE.md`).*
+*2026-09-27 · status: **IMPLEMENTED DARK** (engine: `src/venues/coindcx/`),
+switch `COINDCX_EXECUTION_ENABLED` **OFF**.  Owner decisions taken the same day:
+D1 CoinDCX first · D2 one engine, one lane per platform · D3 INR margin default
+with a USDT option · D4 **attest + verify**.  Going live is gated on the §6
+checklist, run by the owner's self-test (§10).  Touches the signing service,
+connect-time validation and dispatch — owner-sign-off items per `CLAUDE.md`.*
 
 Owner's ask (2026-09-27): *"find which app most Indians use for crypto trading …
 scan that app universe separately … run parallel to our Binance system with same
@@ -370,3 +373,103 @@ Market: [CoinSwitch 2.5 Cr](https://www.theweek.in/wire-updates/business/2025/09
 [Futures 70–80% of volume](https://www.tradingview.com/news/moneycontrol:2cc09dfe3094b:0-crypto-futures-driving-70-80-trading-volumes-say-indian-exchanges/) ·
 [Mudrex INR futures](https://m.thewire.in/article/ptiprnews/mudrex-rolls-out-inr-margined-crypto-futures-simplifying-digital-assets-for-indian-traders) ·
 [Delta India guide](https://guides.delta.exchange/delta-exchange-india-user-guide).
+
+
+---
+
+## 10. What was built (2026-09-27)
+
+Everything below ships **dark**: `COINDCX_EXECUTION_ENABLED=false`, so no
+CoinDCX order, roster read or stream exists until the owner arms it.
+
+### Facts from CoinDCX's own spec that changed the design
+
+Read from `docs.coindcx.com` while implementing, after §5.4 was written:
+
+* **The futures order-create call has no `client_order_id` and no
+  `reduce_only`.**  So the Binance FSM's phase-by-client-order-id model cannot
+  map CoinDCX fills, and a standalone take-profit could open a reverse
+  position after the stop closed the trade.  The venue therefore uses **only
+  the position-level TP/SL** (`positions/create_tpsl`, stage `tpsl_exit`),
+  which closes the entire position — exactly the engine's default exit
+  profile (TP1-full against a fixed stop; `PRE_TP_GRAB_FRACTION=0`, TP1
+  fraction 1.0).  Pre-TP, TP2/TP3 and the trail governor stay Binance-only,
+  and the app says so.
+* **Cross margin exists only for USDT margin**, so INR positions are
+  isolated.  Every CoinDCX position is placed isolated (one rule).
+* **One position per pair per margin currency** (fixed position id).  An
+  entry is refused unless the pair is flat.
+* The rate limit is **16 req/s, 960/min per key**; the INR conversion is a
+  published fixed price (`/api/v1/derivatives/futures/data/conversions`,
+  ₹102/USDT on 2026-09-27); the feed's glossary names `btST` the
+  **third-party exchange's** tick time.
+
+### Architecture as built
+
+```
+signal_router ─┬─ signal_dispatch (Binance) ── skips users whose venue = coindcx
+               └─ venues.coindcx.dispatch  ─── only users whose venue = coindcx
+                    same gates, same order: venue · mode · tier · auto-pause ·
+                    path/regime prefs · notional + B18 cap · shared safety chain
+                    (global enable, kill switch, per-user disable, symbol
+                    allow-list, user symbol pref, both breakers, rate limit)
+                  → CoinDCXExecutor.open_position
+                    plan (pure) → pair flat? → record (INSERT OR IGNORE) →
+                    leverage → market entry → wait fill → create_tpsl →
+                    liquidation-vs-stop check → OPEN   (else exit at market)
+                  → signing service  verbs coindcx_signed_post/get,
+                    coindcx_stream_auth — allow-list + attestation enforced
+                    IN the signing process
+CoinDCXReconciler (30s + stream nudges): exchange is truth; finalise closes
+  with the exchange's own exit order; repair a missing stop (or exit); adopt /
+  retire uncertain entries; same 2h age cap as Binance; count orphans, never
+  touch them.  Budget spent per user examined.  No live record → no call.
+Stream: Engine.IO v3 on aiohttp (no new dependency), one socket per user with a
+  live record; events only nudge the reconciler — latency, never safety.
+```
+
+| Piece | File |
+|---|---|
+| Signing (pure) + endpoint allow-list | `src/venues/coindcx/signing.py` |
+| Instruments, symbol map (feed `mkt`), INR rate | `src/venues/coindcx/instruments.py` |
+| Encrypted keys + attestation + roster | `src/venues/coindcx/keystore.py` (Firestore `users/{uid}/coindcx_key/current`, `control/coindcx_active_uids`) |
+| Connect-time validation | `src/venues/coindcx/connect_validator.py` |
+| Exchange client (typed errors → shared breakers) | `src/venues/coindcx/client.py` |
+| Position records (SQLite, engine writes / api reads) | `src/venues/coindcx/positions.py` → `data/coindcx_positions.sqlite` |
+| Lifecycle | `src/venues/coindcx/execution.py` |
+| Reconciler + status file | `src/venues/coindcx/reconciler.py` → `data/coindcx_status.json` |
+| Private stream | `src/venues/coindcx/stream.py` |
+| Fan-out + signal close | `src/venues/coindcx/dispatch.py` |
+| Owner self-test | `src/venues/coindcx/self_test.py` → `data/coindcx_self_test.json` |
+| API | `src/api/coindcx_routes.py` |
+| Venue settings | `user_venue_settings` table in `src/api/user_overrides.py` |
+
+### Invariants, each with a test that fails when it is removed
+
+1. **Never naked** — stop refused twice ⇒ market exit.
+2. **Never merged** — pair not flat ⇒ refused, nothing sent.
+3. **Never twice** — record inserted before the order; a second dispatch stops.
+4. **Never liquidated before stopped** — leverage lowered until liquidation is
+   ≥ 2 stop-distances away; the reported liquidation price is re-checked.
+
+Mutation-checked: removing each one turns exactly its test red.
+
+### Cost
+
+No Firestore reads per signal: the roster is one cached document invalidated
+by a Redis generation (`coindcx_active_uids`), key blobs are cached against
+`coindcx_key_blobs`, and positions live in SQLite.  Exchange calls happen only
+for users with a live position.
+
+### Go-live, in order (owner)
+
+1. Connect your own CoinDCX key in the app (the attestation is required).
+2. Set `COINDCX_EXECUTION_ALLOWED_UIDS=<your uid>`.
+3. Run the self-test from ops (CoinDCX tab).  It spends one minimum round trip
+   (~6 USDT notional) and records every §6 answer.  **Continue only on
+   `verdict: pass`.**
+4. Set `COINDCX_EXECUTION_ENABLED=true`, choose CoinDCX in the app, and watch
+   one real signal end to end on the ops CoinDCX tab.
+5. Clear the allow-list.  Switching back is setting the flag to false: open
+   positions keep their exchange-resident stop and the reconciler keeps
+   running.
