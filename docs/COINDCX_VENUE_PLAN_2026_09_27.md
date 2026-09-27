@@ -461,16 +461,24 @@ by a Redis generation (`coindcx_active_uids`), key blobs are cached against
 `coindcx_key_blobs`, and positions live in SQLite.  Exchange calls happen only
 for users with a live position.
 
-### Go-live, in order (owner)
+### Go-live, in order (owner) — everything from ops, no `.env` edit
 
-1. Connect your own CoinDCX key in the app (the attestation is required).
-2. Set `COINDCX_EXECUTION_ALLOWED_UIDS=<your uid>`.
-3. Run the self-test from ops (`/control/coindcx`, Control → CoinDCX; 360ce-ops #231).  It spends one minimum round trip
+Owner, 2026-09-27: *"don't make me add anything to the engine through a
+command."*  The master switch, the allow-list and open-to-all are runtime
+tunables (`coindcx_*`), set from **ops → Control → CoinDCX**
+(`/control/coindcx`).  The `COINDCX_*` env values are only boot defaults.
+
+1. In the app, connect your own CoinDCX key (Settings → Auto Trade →
+   Trading platform).  The attestation is required.
+2. In ops, **add yourself to the allow-list by phone number**.  The engine
+   resolves the phone to your Firebase uid; you never handle the uid.
+3. Run the self-test from the same page.  It spends one minimum round trip
    (~6 USDT notional) and records every §6 answer.  **Continue only on
    `verdict: pass`.**
-4. Set `COINDCX_EXECUTION_ENABLED=true`, choose CoinDCX in the app, and watch
-   one real signal end to end on the ops CoinDCX tab.
-5. Merge lumin-legal #11 (terms/risk/privacy name CoinDCX), THEN clear the
-   allow-list — users must not be offered CoinDCX before the documents say so.  Switching back is setting the flag to false: open
+4. Turn the **master switch** on (confirm required), choose CoinDCX in the
+   app, and watch one real signal end to end on the same page.
+5. When ready for everyone, turn on **Open to all users** (confirm
+   required).  An EMPTY allow-list means NOBODY — clearing it can no longer
+   open the venue by accident.  Switching back is the master switch off: open
    positions keep their exchange-resident stop and the reconciler keeps
    running.

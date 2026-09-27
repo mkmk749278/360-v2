@@ -211,9 +211,54 @@ def _build_registry() -> Dict[str, Tunable]:
         MAX_SAME_DIRECTION_CUMULATIVE,
         CHANNEL_CAP_MODE,
         MAX_CONCURRENT_SIGNALS_BOOK,
+        COINDCX_EXECUTION_ENABLED,
+        COINDCX_EXECUTION_ALLOWED_UIDS,
+        COINDCX_OPEN_TO_ALL,
     )
 
     items = [
+        # ---- CoinDCX venue (2026-09-27) — edited ONLY from ops
+        # /control/coindcx, which re-reads the list at write time and resolves
+        # users by phone.  The generic /control tunables form hides this
+        # category: a stale form re-posting the whole allow-list could undo an
+        # add made a minute earlier (the retired_paths lesson).
+        Tunable(
+            key="coindcx_execution_enabled",
+            label="CoinDCX auto-trade — master switch",
+            description=(
+                "OFF: no CoinDCX order is placed for anyone. ON: orders are "
+                "placed for the users the allow-list admits. Positions already "
+                "open keep their exchange-resident stop and the reconciler "
+                "keeps running either way. Arm only after the owner's "
+                "real-account self-test reads PASS."
+            ),
+            type="bool",
+            default=COINDCX_EXECUTION_ENABLED,
+            category="CoinDCX",
+        ),
+        Tunable(
+            key="coindcx_execution_allowed_uids",
+            label="CoinDCX auto-trade — allowed users (Firebase uids)",
+            description=(
+                "Comma-separated Firebase uids. Only these users are traded on "
+                "CoinDCX. EMPTY MEANS NOBODY unless 'open to all' is on."
+            ),
+            type="str",
+            default=COINDCX_EXECUTION_ALLOWED_UIDS,
+            category="CoinDCX",
+        ),
+        Tunable(
+            key="coindcx_open_to_all",
+            label="CoinDCX auto-trade — open to every connected user",
+            description=(
+                "ON ignores the allow-list: every user who chose CoinDCX and "
+                "connected an attested key is traded. The public-launch step; "
+                "the legal pages already describe CoinDCX."
+            ),
+            type="bool",
+            default=COINDCX_OPEN_TO_ALL,
+            category="CoinDCX",
+        ),
         Tunable(
             key="dual_universe_enabled",
             label="Dual universe — a promoted core pair keeps its own paths",
@@ -1904,6 +1949,27 @@ class RuntimeTunables:
         log.info("runtime_tunables updated: {}", coerced)
         return coerced
 
+    def read_fresh(self) -> Optional[Dict[str, Any]]:
+        """One blocking read for a READ-MODIFY-WRITE.  ``None`` = Firestore
+        did not answer.
+
+        ``_refresh`` keeps the last-known values on a failed read, which is
+        right for a hot-path reader and wrong for a writer: editing a list
+        you could not read overwrites whatever it really holds.  A caller
+        that gets ``None`` must refuse the write.
+        """
+        try:
+            doc = self._db.collection(_DOC_PATH[0]).document(_DOC_PATH[1]).get()
+            _reads.record("runtime_tunables.doc", 1)
+            values = dict(doc.to_dict() or {}) if getattr(doc, "exists", False) else {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("runtime_tunables fresh read failed: {}", exc)
+            return None
+        with self._lock:
+            self._cache = values
+            self._cache_read_at = self._clock()
+        return values
+
     def invalidate(self) -> None:
         """Mark the cache due for refresh — the generation listener's entry.
 
@@ -2003,6 +2069,29 @@ def get(key: str) -> Any:
     except Exception:  # pragma: no cover — defensive: never break scan/monitor
         log.exception("runtime_tunables get({}) failed — using default", key)
         return registry()[key].default
+
+
+def read_fresh(key: str) -> tuple[bool, Any]:
+    """``(readable, value)`` from a blocking read, for a read-modify-write.
+
+    ``(False, None)`` when the store is not wired or did not answer — never
+    the env default, which would let a write overwrite a list nobody read.
+    """
+    tun = registry().get(key)
+    if tun is None:
+        raise KeyError(f"unknown tunable: {key}")
+    with _lock:
+        client = _client
+    if client is None:
+        return False, None
+    values = client.read_fresh()
+    if values is None:
+        return False, None
+    raw = values.get(key)
+    if raw is None:
+        return True, tun.default
+    coerced = _coerce(tun, raw)
+    return True, (coerced if coerced is not None else tun.default)
 
 
 def set_values(updates: Dict[str, Any]) -> Dict[str, Any]:

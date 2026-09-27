@@ -4947,10 +4947,16 @@ LIFECYCLE_ALERT_MAX_PER_MIN: int = _safe_int("LIFECYCLE_ALERT_MAX_PER_MIN", "12"
 # cleared.  With the switch off, no CoinDCX order, no CoinDCX roster read and
 # no CoinDCX stream exists.
 COINDCX_EXECUTION_ENABLED: bool = _safe_bool("COINDCX_EXECUTION_ENABLED", "false")
-#: Comma-separated Firebase uids.  Non-empty = ONLY these users are dispatched
-#: to on CoinDCX (the owner-only rollout stage).  Empty = every user who chose
-#: CoinDCX and connected an attested key.
+#: Comma-separated Firebase uids — ONLY these users are dispatched to on
+#: CoinDCX.  Empty means NOBODY, unless ``COINDCX_OPEN_TO_ALL`` is on: opening
+#: the venue to every connected user is its own deliberate switch, never the
+#: side effect of an emptied list.
+#:
+#: These three are BOOT DEFAULTS only.  The live values are runtime tunables
+#: (``coindcx_*`` in ``src/runtime_tunables.py``) set from ops
+#: ``/control/coindcx`` — no ``.env`` edit or redeploy (owner, 2026-09-27).
 COINDCX_EXECUTION_ALLOWED_UIDS: str = os.getenv("COINDCX_EXECUTION_ALLOWED_UIDS", "")
+COINDCX_OPEN_TO_ALL: bool = _safe_bool("COINDCX_OPEN_TO_ALL", "false")
 #: The engine writes, the api reads — same shared volume as ``LUMIN_DB_PATH``.
 COINDCX_POSITIONS_DB: str = os.getenv("COINDCX_POSITIONS_DB", "data/coindcx_positions.sqlite")
 #: Reconciler period.  It makes calls only for users holding an open CoinDCX

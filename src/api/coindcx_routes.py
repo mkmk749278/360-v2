@@ -17,6 +17,8 @@ Owner routes:
 * ``POST /api/admin/coindcx/self-test``  — queue the real-account checklist.
 * ``GET  /api/admin/coindcx/status``     — the engine's status file + the last
   self-test report (both written by the engine on the shared data volume).
+* ``GET/POST /api/admin/coindcx/access`` — the allow-list, by phone or uid.
+* ``POST /api/admin/coindcx/switch``     — the master switch / open-to-all.
 
 Readability rule (CLAUDE.md, *unknown is not a value*): every field a user
 reads carries whether we could observe it.  ``readable: false`` never renders
@@ -62,6 +64,22 @@ class VenueUpdateRequest(BaseModel):
     venue: Optional[str] = None
     margin_currency: Optional[str] = None
     leverage: Optional[float] = None
+
+
+class AccessChangeRequest(BaseModel):
+    """Add or remove one user on the CoinDCX allow-list.  ``phone`` (E.164,
+    what ops has) or ``firebase_uid`` (what the list stores) — exactly one."""
+
+    action: str = Field(pattern="^(add|remove)$")
+    phone: Optional[str] = Field(default=None, min_length=8, max_length=18)
+    firebase_uid: Optional[str] = Field(default=None, min_length=4, max_length=128)
+
+
+class SwitchRequest(BaseModel):
+    """Flip one of the two CoinDCX switches."""
+
+    switch: str = Field(pattern="^(execution|open_to_all)$")
+    enabled: bool
 
 
 class SelfTestRequest(BaseModel):
@@ -136,8 +154,8 @@ def register(
 
     @app.get("/api/coindcx/info", tags=["coindcx"], dependencies=[Depends(auth)])
     async def coindcx_info() -> dict:
-        from config import COINDCX_EXECUTION_ENABLED
         from src.api import user_overrides as _uo
+        from src.venues.coindcx import dispatch as _dcx
         from src.venues.coindcx import instruments as _inst
         from src.venues.coindcx import keystore as _keys
 
@@ -155,7 +173,7 @@ def register(
             "leverage_max": _uo.COINDCX_LEVERAGE_MAX,
             "leverage_default": _uo.COINDCX_LEVERAGE_DEFAULT,
             "inr_per_usdt": inr,
-            "execution_enabled": bool(COINDCX_EXECUTION_ENABLED),
+            "execution_enabled": _dcx.execution_enabled(),
             "exit_profile": (
                 "On CoinDCX every trade uses one exit: the whole position closes "
                 "at TP1 or at the stop, placed on CoinDCX the moment the entry "
@@ -268,7 +286,6 @@ def register(
 
     @app.get("/api/venue", tags=["coindcx"], dependencies=[Depends(auth)])
     async def get_venue(identity: Any = Depends(identity_dep)) -> dict:
-        from config import COINDCX_EXECUTION_ENABLED
         from src.api import user_overrides as _uo
         from src.venues.coindcx import dispatch as _dcx
 
@@ -285,7 +302,7 @@ def register(
             "coindcx": {
                 **{k: key.get(k) for k in ("readable", "connected", "attested",
                                            "key_public_id_first8")},
-                "execution_enabled": bool(COINDCX_EXECUTION_ENABLED),
+                "execution_enabled": _dcx.execution_enabled(),
                 "allow_listed": (allowed is None) or (uid in allowed),
             },
         }
@@ -313,11 +330,10 @@ def register(
             # Choosing CoinDCX takes the user OFF the Binance fan-out.  While
             # CoinDCX execution is not live for them, that choice would leave
             # them trading on neither exchange without a word — refuse it.
-            from config import COINDCX_EXECUTION_ENABLED
             from src.venues.coindcx import dispatch as _dcx
 
             allowed = _dcx._allowed_uids()
-            if not COINDCX_EXECUTION_ENABLED or (allowed is not None and uid not in allowed):
+            if not _dcx.execution_enabled() or (allowed is not None and uid not in allowed):
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
                     detail="CoinDCX auto-trade is not open yet. Your key is saved; "
@@ -380,3 +396,114 @@ def register(
             "status": await asyncio.to_thread(_read_json, _rec.STATUS_PATH),
             "self_test": await asyncio.to_thread(_read_json, _st.REPORT_PATH),
         }
+
+    # ------------------------------------------------------------------
+    # Who may trade on CoinDCX — owner-only, from ops /control/coindcx.
+    # The values live in runtime tunables (one Firestore document shared by
+    # the engine and api containers, generation-invalidated), so a change
+    # reaches the dispatch gate and the venue gate without a redeploy.
+    # ------------------------------------------------------------------
+
+    async def _access_view() -> dict:
+        from src import runtime_tunables as _rt
+        from src.api import users as _users
+        from src.venues.coindcx import dispatch as _dcx
+
+        readable, raw = await asyncio.to_thread(
+            _rt.read_fresh, "coindcx_execution_allowed_uids")
+        if not readable:
+            return {"readable": False, "store_initialised": _rt.is_initialised()}
+        store = _users.get_singleton()
+        rows = []
+        for uid in _dcx.parse_uids(raw):
+            user = None
+            if store is not None:
+                try:
+                    user = await store.aget_by_firebase_uid(uid)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("coindcx access: user lookup failed uid={}: {}", uid, exc)
+            key = await asyncio.to_thread(_key_status, uid)
+            rows.append({
+                "uid": uid,
+                "found": user is not None,
+                "phone": getattr(user, "phone_e164", None),
+                "display_name": getattr(user, "display_name", None),
+                "key": {k: key.get(k) for k in ("readable", "connected", "attested",
+                                                "key_public_id_first8")},
+            })
+        return {
+            "readable": True,
+            "store_initialised": True,
+            "execution_enabled": _dcx.execution_enabled(),
+            "open_to_all": _dcx.open_to_all(),
+            "allowed": rows,
+        }
+
+    @app.get("/api/admin/coindcx/access", tags=["admin"],
+             dependencies=[Depends(owner_required)])
+    async def coindcx_access() -> dict:
+        return await _access_view()
+
+    @app.post("/api/admin/coindcx/access", tags=["admin"],
+              dependencies=[Depends(owner_required)])
+    async def coindcx_access_change(body: AccessChangeRequest) -> dict:
+        from src import runtime_tunables as _rt
+        from src.api import users as _users
+        from src.venues.coindcx import dispatch as _dcx
+
+        if (body.phone is None) == (body.firebase_uid is None):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                detail="Give exactly one of phone or firebase_uid.")
+        uid = (body.firebase_uid or "").strip()
+        if body.phone is not None:
+            store = _users.get_singleton()
+            if store is None:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                                    detail="User store unavailable.")
+            user = await store.aget_by_phone(body.phone.strip())
+            if user is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    detail=f"No Lumin user with phone {body.phone}.")
+            uid = str(getattr(user, "firebase_uid", "") or "")
+            if not uid:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail="That user has no Firebase sign-in yet — ask them to "
+                           "open the app and sign in once, then add them again.")
+        # Read-modify-write against the store AT WRITE TIME, never a list the
+        # caller loaded earlier — and never over a list we could not read.
+        readable, raw = await asyncio.to_thread(
+            _rt.read_fresh, "coindcx_execution_allowed_uids")
+        if not readable:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="Could not read the current allow-list — "
+                                       "nothing was changed.")
+        uids = _dcx.parse_uids(raw)
+        if body.action == "add":
+            if uid not in uids:
+                uids.append(uid)
+        else:
+            uids = [u for u in uids if u != uid]
+        try:
+            await asyncio.to_thread(
+                _rt.set_values, {"coindcx_execution_allowed_uids": ",".join(uids)})
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        log.info("coindcx access: {} uid={}", body.action, uid)
+        view = await _access_view()
+        view["changed_uid"] = uid
+        return view
+
+    @app.post("/api/admin/coindcx/switch", tags=["admin"],
+              dependencies=[Depends(owner_required)])
+    async def coindcx_switch(body: SwitchRequest) -> dict:
+        from src import runtime_tunables as _rt
+
+        key = {"execution": "coindcx_execution_enabled",
+               "open_to_all": "coindcx_open_to_all"}[body.switch]
+        try:
+            await asyncio.to_thread(_rt.set_values, {key: bool(body.enabled)})
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        log.info("coindcx switch: {} -> {}", body.switch, body.enabled)
+        return await _access_view()

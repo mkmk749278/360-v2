@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from tests.venues.conftest import DCX
+
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -219,13 +221,13 @@ def test_choosing_coindcx_requires_an_attested_key(db, monkeypatch, tmp_path) ->
     _put()
     # key is fine, but CoinDCX execution is not open → still refused, so the
     # user is never taken off Binance onto an exchange that will not trade
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", False)
+    DCX["coindcx_execution_enabled"] = False
     r = c.put("/api/venue", json={"venue": "coindcx"})
     assert r.status_code == 409 and r.headers["X-Venue-Error-Code"] == "COINDCX_NOT_OPEN"
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", True)
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "someone-else")
+    DCX["coindcx_execution_enabled"] = True
+    DCX["coindcx_execution_allowed_uids"] = "someone-else"
     assert c.put("/api/venue", json={"venue": "coindcx"}).status_code == 409
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "u1")
+    DCX["coindcx_execution_allowed_uids"] = "u1"
     r = c.put("/api/venue", json={"venue": "coindcx", "margin_currency": "INR"})
     assert r.status_code == 200
     body = r.json()
@@ -304,8 +306,8 @@ def _live_responses(db, monkeypatch, tmp_path, pos_store) -> Dict[str, Any]:
     c = _app(SimpleNamespace(firebase_uid="u1", user_id=1))
     out: Dict[str, Any] = {"status_not_connected": c.get("/api/coindcx/connect/status").json()}
     _put()
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", True)
-    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "u1")
+    DCX["coindcx_execution_enabled"] = True
+    DCX["coindcx_execution_allowed_uids"] = "u1"
     out["info"] = c.get("/api/coindcx/info").json()
     out["venue_coindcx"] = c.put("/api/venue", json={"venue": "coindcx", "leverage": 3}).json()
     pos_store.put(P.CoinDCXPosition(
