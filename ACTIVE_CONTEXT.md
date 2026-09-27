@@ -4,7 +4,19 @@
 
 ---
 
-## OPEN 2026-09-27 — CoinDCX as platform #2: BUILT, DARK, 4 PRs awaiting owner
+## OPEN 2026-09-27 — CoinDCX as platform #2: MERGED + DEPLOYED DARK; owner self-test next
+
+All four PRs merged ~06:07 UTC (360-v2 #1075, lumin-app #172, 360ce-ops #231,
+lumin-legal #11). Watched after deploy (07:44 UTC, via a guest session): engine
+restarted 06:07, all eight liveness links up, router delivered 2 signals since
+the restart (WUSDT opened after it), daily-loss budget untouched. Not visible to
+a guest and therefore NOT verified: per-user Binance placement outcomes and the
+CoinDCX status file (`/control/coindcx` is owner-only) — the owner should open
+that page once and confirm it reads RUNNING / execution OFF.
+
+**Note: lumin-legal #11 is merged, so the public terms/risk/privacy already name
+CoinDCX while no user can choose it yet.** Accurate (they describe an option
+gated in the app), but the plan's order was legal-last.
 
 Owner: *"proceed to implement properly … ready for users"*; decisions D4 = attest
 + verify IP, INR default / USDT option, go-live = owner's own account, tiny size.
@@ -12,7 +24,7 @@ Everything ships dark: `COINDCX_EXECUTION_ENABLED=false`, so **no CoinDCX order 
 placed for anyone** until the owner arms it. Plan + go-live steps:
 `docs/COINDCX_VENUE_PLAN_2026_09_27.md` §10.
 
-| PR | What | Merge |
+| PR | What | State |
 |---|---|---|
 | 360-v2 #1075 | venue (`src/venues/coindcx/`), dispatch lane, reconciler, stream, self-test, connect/venue API; account deletion now also revokes the CoinDCX key (was missed) | **owner sign-off** (money path) |
 | lumin-app #172 | Trading platform page: connect guide + attestation, picker (refused until the engine is open for the user), ₹/USDT, net-of-fees P&L | after #1075 |
