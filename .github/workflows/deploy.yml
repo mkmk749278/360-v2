@@ -214,4 +214,16 @@ jobs:
             # leaves the 'api' container on a stale image in isolated mode.
             bash deploy.sh
 
+            # ── nginx: let the API answer CORS preflight itself ──────────────
+            # The nginx site from tools/setup-vps-api.sh answered every OPTIONS
+            # with "GET, POST, OPTIONS", so the browser refused every PUT and
+            # DELETE from the web app (2026-09-27: choosing CoinDCX never
+            # saved). That script ran once by hand; this is the only thing that
+            # reaches the live file. Idempotent, backed up, `nginx -t`-gated
+            # with rollback — a refused edit warns and leaves nginx as it was.
+            NGINX_SUDO=""
+            if [ "$(id -u)" != "0" ]; then NGINX_SUDO="sudo -n"; fi
+            $NGINX_SUDO python3 tools/nginx_cors_passthrough.py \
+              || echo "::warning::nginx CORS passthrough not applied — PUT/DELETE from the web app stay blocked"
+
             echo "✅ Deploy complete"

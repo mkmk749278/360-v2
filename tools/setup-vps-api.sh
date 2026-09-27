@@ -212,18 +212,16 @@ server {
         proxy_read_timeout 30s;
         proxy_connect_timeout 5s;
 
-        # CORS preflight for the Lumin app.  GET/POST only — same as the
-        # FastAPI app's CORS allow-list.  Browsers / WebView clients send
-        # OPTIONS first; we answer them at the proxy layer to keep the
-        # FastAPI handler chain short.
-        if (\$request_method = 'OPTIONS') {
-            add_header 'Access-Control-Allow-Origin' '*' always;
-            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-            add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type' always;
-            add_header 'Access-Control-Max-Age' 86400;
-            add_header 'Content-Length' 0;
-            return 204;
-        }
+        # CORS preflight is NOT answered here.  It used to be, with a
+        # hardcoded "GET, POST, OPTIONS" and a 24h max-age — so every PUT
+        # and DELETE from the web app (platform choice, margin, leverage,
+        # key removal) was refused by the browser before it left the phone,
+        # and the app could only say "no reply arrived in time" (owner,
+        # 2026-09-27: choosing CoinDCX never saved).  FastAPI's
+        # CORSMiddleware is the one writer of the allowed methods, derived
+        # from the routes it serves; a second list here can only drift.
+        # tools/nginx_cors_passthrough.py removes the old block from a
+        # live box on every deploy.
     }
 
     # Block obvious WordPress / vuln-scanner probes early so they don't

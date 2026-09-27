@@ -81,6 +81,30 @@ jobs:
           echo "----- runtime_health.json -----"; cat probe/runtime_health.json
           echo "----- heartbeat.txt -----"; cat probe/heartbeat.txt
 
+      # The web app's writes (platform choice, margin, leverage, key removal)
+      # are PUT / DELETE, and a browser sends none of them unless the preflight
+      # allows it.  2026-09-27: nginx answered preflight with "GET, POST,
+      # OPTIONS" and every one of those writes failed as "no reply arrived",
+      # found only from the owner's phone.  Probed from outside, like a
+      # browser: a transport failure is recorded as unknown, never as a page.
+      - name: Probe CORS preflight for the app's writes
+        run: |
+          mkdir -p probe
+          : > probe/cors.txt
+          for m in PUT DELETE; do
+            h=$(curl -sS -m 15 -o /dev/null -D - -X OPTIONS https://api.luminapp.org/api/venue \
+                  -H 'Origin: https://app.luminapp.org' \
+                  -H "Access-Control-Request-Method: $m" \
+                  -H 'Access-Control-Request-Headers: authorization,content-type' 2>/dev/null) \
+              || { echo "$m UNKNOWN" >> probe/cors.txt; continue; }
+            allow=$(printf '%s' "$h" | tr -d '\r' | grep -i '^access-control-allow-methods:' | cut -d: -f2- | tr -d ' ')
+            case ",$allow," in
+              *",$m,"*) echo "$m OK" >> probe/cors.txt ;;
+              *) echo "$m BLOCKED allow=$allow" >> probe/cors.txt ;;
+            esac
+          done
+          cat probe/cors.txt
+
       - name: Evaluate and page owner on problems
         uses: actions/github-script@v7
         env:
@@ -117,6 +141,14 @@ jobs:
             for (const line of hb.split('\n')) {
               const m = line.match(/^INVARIANT_WARN:\s*(.+)$/);
               if (m) problems.push(m[1]);
+            }
+
+            // Web-app writes blocked at CORS preflight (see the probe step).
+            let cors = '';
+            try { cors = fs.readFileSync('probe/cors.txt', 'utf8'); } catch { cors = ''; }
+            for (const line of cors.split('\n')) {
+              const m = line.match(/^(PUT|DELETE) BLOCKED(.*)$/);
+              if (m) problems.push(`API preflight refuses ${m[1]} (${m[2].trim()}) — every web-app ${m[1]} fails as "no reply arrived"; nginx is answering OPTIONS instead of the API (tools/nginx_cors_passthrough.py)`);
             }
 
             const now = new Date().toISOString();
