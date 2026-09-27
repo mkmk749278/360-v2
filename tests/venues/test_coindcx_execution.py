@@ -502,3 +502,75 @@ def test_status_snapshot_writes_without_exchange_calls(tmp_path, monkeypatch) ->
     snap = json.loads((tmp_path / "s.json").read_text())
     assert snap["execution_enabled"] is False
     assert "positions" in snap and "reconciler" in snap
+
+
+# ------------------------------------------------- ops contract vector
+#
+# 360ce-ops `tests/fixtures_coindcx.json` is a byte-identical copy of the
+# file below: the status file and the self-test report exactly as this engine
+# writes them.  Ops renders its CoinDCX page from both, and a fixture ops
+# wrote by hand would choose a shape and then agree with itself about it
+# (`zone_distance_atr`, the price-action lane card).  Regenerate with
+# `COINDCX_WRITE_OPS_VECTOR=1 pytest tests/venues/test_coindcx_execution.py -k ops_contract`.
+
+def _stable(o: Any) -> Any:
+    """Clock-valued keys → a marker; the contract is keys and types."""
+    clock = {"written_at", "started_at", "finished_at", "last_cycle_at",
+             "pairs_age_s", "prices_age_s"}
+    if isinstance(o, dict):
+        return {k: ("<clock>" if k in clock and o[k] is not None else _stable(v))
+                for k, v in o.items()}
+    if isinstance(o, list):
+        return [_stable(v) for v in o]
+    return o
+
+
+async def test_ops_contract_vector_is_what_the_engine_writes(monkeypatch, tmp_path) -> None:
+    import json
+    import os
+    from pathlib import Path
+
+    import config
+    from src.venues.coindcx import self_test as ST
+
+    monkeypatch.setattr(R, "STATUS_PATH", str(tmp_path / "s.json"))
+    monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
+    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "owner")
+    # Module-global counters carry state from earlier tests; the vector must
+    # not depend on test order.
+    from collections import Counter
+
+    from src.venues.coindcx import dispatch as D
+
+    monkeypatch.setattr(E, "_counters", {})
+    monkeypatch.setattr(D, "_TOTALS", Counter())
+    monkeypatch.setattr(I, "_REGISTRY", I.InstrumentRegistry())
+    store = P.CoinDCXPositionStore(":memory:")
+    P.set_store_for_test(store)
+    try:
+        store.put(P.CoinDCXPosition(uid="owner", signal_id="S1", symbol="BTCUSDT",
+                                    pair="B-BTC_USDT", side="LONG", state=P.CLOSED,
+                                    margin_currency="INR", leverage=5, qty=0.001,
+                                    entry_target=1, sl_price=1, tp_price=2, close_reason="TP1"))
+        rec = R.CoinDCXReconciler()
+        await rec.cycle(now=1.0)
+    finally:
+        P.set_store_for_test(None)
+    fx = FakeExchange()
+
+    async def wallets():
+        return [{"currency_short_name": "USDT", "balance": "50"}]
+
+    fx.wallets = wallets  # type: ignore[attr-defined]
+    await ST.run("owner", symbol="BTCUSDT", client=fx, registry=FakeRegistry(), sleep=_nosleep)
+    vector = {
+        "status": _stable(json.loads((tmp_path / "s.json").read_text())),
+        "self_test_pass": _stable(json.loads((tmp_path / "r.json").read_text())),
+    }
+    text = json.dumps(vector, indent=2, sort_keys=True) + "\n"
+    path = Path(__file__).parent / "fixtures" / "coindcx" / "ops_contract.json"
+    if os.environ.get("COINDCX_WRITE_OPS_VECTOR") == "1":
+        path.write_text(text)
+    assert path.read_text() == text, (
+        "the CoinDCX status file / self-test report changed shape — regenerate "
+        "and update 360ce-ops' tests/fixtures_coindcx.json + reducer together")
