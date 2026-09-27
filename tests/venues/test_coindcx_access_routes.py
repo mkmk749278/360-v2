@@ -172,3 +172,33 @@ def test_access_view_says_unreadable_rather_than_empty(api) -> None:
     r = client.get("/api/admin/coindcx/access")
     assert r.status_code == 200 and r.json()["readable"] is False
     assert "allowed" not in r.json()
+
+
+# ------------------------------------------------- ops contract vector
+#
+# 360ce-ops `tests/fixtures_coindcx_access.json` is a byte-identical copy of
+# the file below: GET /api/admin/coindcx/access exactly as these routes
+# answer, for an allow-listed owner with an attested key and the master switch
+# on.  Regenerate with `COINDCX_WRITE_OPS_VECTOR=1` and copy it to ops.
+
+def test_ops_access_vector_is_what_the_route_returns(api, monkeypatch) -> None:
+    import json
+    import os
+    from pathlib import Path
+
+    from src.venues.coindcx import keystore
+
+    client, _db = api
+    monkeypatch.setattr(keystore, "get_status", lambda uid: {
+        "attested": True, "key_public_id_first8": "PUBKEY12"} if uid == "owner-uid" else None)
+    client.post("/api/admin/coindcx/access", json={"action": "add", "phone": "+919999999999"})
+    client.post("/api/admin/coindcx/access", json={"action": "add", "phone": "+918888888888"})
+    client.post("/api/admin/coindcx/switch", json={"switch": "execution", "enabled": True})
+    body = client.get("/api/admin/coindcx/access").json()
+    text = json.dumps(body, indent=2, sort_keys=True) + "\n"
+    path = Path(__file__).parent / "fixtures" / "coindcx" / "ops_access_contract.json"
+    if os.environ.get("COINDCX_WRITE_OPS_VECTOR") == "1":
+        path.write_text(text)
+    assert path.read_text() == text, (
+        "GET /api/admin/coindcx/access changed shape — regenerate and update "
+        "360ce-ops' tests/fixtures_coindcx_access.json + grade_access together")
