@@ -465,11 +465,12 @@ for users with a live position.
 
 1. Connect your own CoinDCX key in the app (the attestation is required).
 2. Set `COINDCX_EXECUTION_ALLOWED_UIDS=<your uid>`.
-3. Run the self-test from ops (CoinDCX tab).  It spends one minimum round trip
+3. Run the self-test from ops (`/control/coindcx`, Control → CoinDCX; 360ce-ops #231).  It spends one minimum round trip
    (~6 USDT notional) and records every §6 answer.  **Continue only on
    `verdict: pass`.**
 4. Set `COINDCX_EXECUTION_ENABLED=true`, choose CoinDCX in the app, and watch
    one real signal end to end on the ops CoinDCX tab.
-5. Clear the allow-list.  Switching back is setting the flag to false: open
+5. Merge lumin-legal #11 (terms/risk/privacy name CoinDCX), THEN clear the
+   allow-list — users must not be offered CoinDCX before the documents say so.  Switching back is setting the flag to false: open
    positions keep their exchange-resident stop and the reconciler keeps
    running.
