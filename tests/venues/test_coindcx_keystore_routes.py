@@ -212,9 +212,19 @@ def test_choosing_coindcx_requires_an_attested_key(db, monkeypatch, tmp_path) ->
     monkeypatch.setattr(uo, "_SINGLETON", st)
     monkeypatch.setattr(users_mod, "get_singleton",
                         lambda: SimpleNamespace(get_by_firebase_uid=lambda u: SimpleNamespace(user_id=1)))
+    import config
     c = _app(SimpleNamespace(firebase_uid="u1", user_id=1))
     assert c.put("/api/venue", json={"venue": "coindcx"}).status_code == 409
     _put()
+    # key is fine, but CoinDCX execution is not open → still refused, so the
+    # user is never taken off Binance onto an exchange that will not trade
+    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", False)
+    r = c.put("/api/venue", json={"venue": "coindcx"})
+    assert r.status_code == 409 and r.headers["X-Venue-Error-Code"] == "COINDCX_NOT_OPEN"
+    monkeypatch.setattr(config, "COINDCX_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "someone-else")
+    assert c.put("/api/venue", json={"venue": "coindcx"}).status_code == 409
+    monkeypatch.setattr(config, "COINDCX_EXECUTION_ALLOWED_UIDS", "u1")
     r = c.put("/api/venue", json={"venue": "coindcx", "margin_currency": "INR"})
     assert r.status_code == 200
     body = r.json()

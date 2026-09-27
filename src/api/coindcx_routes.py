@@ -310,6 +310,21 @@ def register(
             if not (key.get("connected") and key.get("attested")):
                 raise HTTPException(status.HTTP_409_CONFLICT,
                                     detail="Connect your CoinDCX API key before choosing CoinDCX.")
+            # Choosing CoinDCX takes the user OFF the Binance fan-out.  While
+            # CoinDCX execution is not live for them, that choice would leave
+            # them trading on neither exchange without a word — refuse it.
+            from config import COINDCX_EXECUTION_ENABLED
+            from src.venues.coindcx import dispatch as _dcx
+
+            allowed = _dcx._allowed_uids()
+            if not COINDCX_EXECUTION_ENABLED or (allowed is not None and uid not in allowed):
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail="CoinDCX auto-trade is not open yet. Your key is saved; "
+                           "you can switch as soon as it opens. Until then you keep "
+                           "trading on Binance.",
+                    headers={"X-Venue-Error-Code": "COINDCX_NOT_OPEN"},
+                )
         try:
             await asyncio.to_thread(store.update_venue_settings, user_id, partial)
         except ValueError as exc:
