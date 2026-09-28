@@ -696,10 +696,48 @@ def register(
         # app builds already render armed=false with green legacy rows
         # (their client-side pause AND), so they degrade to an honest
         # badge that under-explains, never a lying one.
+        # Venue (2026-09-28).  A user who chose CoinDCX is dispatched by the
+        # CoinDCX executor and never needs a Binance key; gating ``armed`` on
+        # the Binance key read "not armed" to a CoinDCX user whose trades
+        # were being placed (owner screenshots).  The CoinDCX key gate is:
+        # connected, attested, and CoinDCX execution open for this uid —
+        # the same conditions the dispatch lane checks.  Readability travels
+        # with it: a failed read is never reported as "not connected".
+        venue = "binance"
+        venue_key_connected: Optional[bool] = binance_key_connected
+        venue_key_readable = bool(key_readable)
+        venue_open = True
+        try:
+            from src.api import user_overrides as _uo_v
+            venue = await asyncio.to_thread(_uo_v.resolve_venue_uid, firebase_uid)
+        except Exception:
+            log.exception("runtime_status: venue read failed uid={}", firebase_uid)
+            venue = "binance"
+        if venue == "coindcx":
+            from src.venues.coindcx import dispatch as _dcx
+            from src.venues.coindcx import keystore as _dcx_keys
+
+            try:
+                blob = await asyncio.to_thread(_dcx_keys.get_key_blob_cached, firebase_uid)
+                venue_key_connected = bool(getattr(blob, "attested", False))
+                venue_key_readable = True
+            except _dcx_keys.CoinDCXKeyNotFoundError:
+                venue_key_connected = False
+                venue_key_readable = True
+            except Exception:
+                log.exception("runtime_status: coindcx key read failed uid={}", firebase_uid)
+                venue_key_connected = False
+                venue_key_readable = False
+            _allowed = _dcx._allowed_uids()
+            venue_open = bool(_dcx.execution_enabled()) and (
+                _allowed is None or firebase_uid in _allowed
+            )
+
         armed = (
             globally_enabled
             and not user_disabled
-            and binance_key_connected
+            and bool(venue_key_connected)
+            and venue_open
             and user_mode in ("live", "both")
             and tier_allows_auto
             and not auto_paused
@@ -716,6 +754,12 @@ def register(
             "binance_key_readable": bool(key_readable),
             "auto_trade_user_disabled": user_disabled,
             "binance_key_connected": binance_key_connected,
+            # The exchange the user trades on, and ITS key gate.  Older apps
+            # read only the Binance pair above; newer ones read these.
+            "venue": venue,
+            "venue_key_connected": bool(venue_key_connected),
+            "venue_key_readable": bool(venue_key_readable),
+            "venue_open": bool(venue_open),
             "user_mode": user_mode,
             "user_tier": user_tier,
             "tier_gate_enabled": tier_gate_enabled,
