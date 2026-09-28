@@ -281,6 +281,63 @@ async def test_rejected_entry_records_and_places_nothing_else(env) -> None:
     assert "tpsl" not in fx.calls
 
 
+async def test_manual_take_after_a_refusal_is_a_fresh_attempt(env) -> None:
+    # Owner, 2026-09-28: a refused CoinDCX attempt left a REJECTED row and
+    # every later Take answered "already sent" with nothing on the account.
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXRejected("x", status=400, body={"message": "Insufficient funds"})
+    await ex.open_position(**_open_kwargs())
+    assert store.get("u1", "S1").state == P.REJECTED
+    fx.order_raise = None
+    out = await ex.open_position(**_open_kwargs(source="manual_take"))
+    assert out["outcome"] == "placed"
+    assert store.get("u1", "S1").state == P.OPEN
+    assert len([c for c in fx.calls if c.startswith("order")]) == 2
+
+
+async def test_auto_fanout_never_retries_a_refusal_and_says_why(env) -> None:
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXRejected("x", status=400, body={"message": "Insufficient funds"})
+    await ex.open_position(**_open_kwargs())
+    fx.order_raise = None
+    out = await ex.open_position(**_open_kwargs())   # source="auto"
+    assert out["reject_class"] == "AlreadyHandled"
+    assert "nothing was placed" in out["reject_detail"]
+    assert "already sent" not in out["reject_detail"]
+    assert len([c for c in fx.calls if c.startswith("order")]) == 1
+
+
+async def test_manual_take_never_retries_a_live_or_finished_record(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    out = await ex.open_position(**_open_kwargs(source="manual_take"))
+    assert out["reject_class"] == "AlreadyActive" and "already open" in out["reject_detail"]
+    rec = store.get("u1", "S1")
+    rec.state = P.ENTRY_UNCERTAIN
+    store.put(rec)
+    out = await ex.open_position(**_open_kwargs(source="manual_take"))
+    assert out["reject_class"] == "AlreadyActive" and "being confirmed" in out["reject_detail"]
+    rec.state = P.CLOSED
+    store.put(rec)
+    out = await ex.open_position(**_open_kwargs(source="manual_take"))
+    assert out["reject_class"] == "AlreadyHandled" and "has closed" in out["reject_detail"]
+    assert len([c for c in fx.calls if c.startswith("order")]) == 1
+
+
+def test_reclaim_rejected_only_replaces_a_rejected_row() -> None:
+    store = P.CoinDCXPositionStore(":memory:")
+    base = dict(uid="u", signal_id="s", symbol="BTCUSDT", pair="B-BTC_USDT", side="LONG",
+                margin_currency="USDT", leverage=5.0, qty=0.001, entry_target=1.0,
+                sl_price=0.9, tp_price=1.1, notional_usdt=10.0)
+    assert store.reclaim_rejected(P.CoinDCXPosition(state=P.PENDING, **base)) is False
+    store.put(P.CoinDCXPosition(state=P.OPEN, **base))
+    assert store.reclaim_rejected(P.CoinDCXPosition(state=P.PENDING, **base)) is False
+    assert store.get("u", "s").state == P.OPEN
+    store.put(P.CoinDCXPosition(state=P.REJECTED, **base))
+    assert store.reclaim_rejected(P.CoinDCXPosition(state=P.PENDING, **base)) is True
+    assert store.get("u", "s").state == P.PENDING
+
+
 async def test_unknown_entry_outcome_is_left_for_the_reconciler(env) -> None:
     fx, store, _, ex = env
     fx.order_raise = C.CoinDCXUnreachable("timeout")

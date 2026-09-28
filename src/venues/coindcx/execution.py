@@ -211,6 +211,41 @@ def row_is_flat(row: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+def duplicate_outcome(existing: "_pos.CoinDCXPosition") -> Dict[str, Any]:
+    """Say what actually happened to this signal on CoinDCX, by state.
+
+    One sentence ("already sent") used to cover five different worlds, two of
+    which placed nothing at all.  The class stays ``AlreadyActive`` for a live
+    record and ``AlreadyHandled`` for a finished one, so consumers keyed on
+    those names are unchanged; only the sentence now tells the truth.
+    """
+    st = existing.state
+    if st in (_pos.PENDING, _pos.ENTRY_UNCERTAIN):
+        return _outcome(
+            "rejected", "AlreadyActive",
+            "Your earlier order for this signal is still being confirmed with "
+            "CoinDCX. Check the Trade tab in a minute — do not place it again.",
+        )
+    if st in (_pos.OPEN, _pos.CLOSING):
+        return _outcome(
+            "rejected", "AlreadyActive",
+            "This signal is already open on your CoinDCX account — see the "
+            "Trade tab.",
+        )
+    if st == _pos.CLOSED:
+        return _outcome(
+            "rejected", "AlreadyHandled",
+            "This signal already traded on your CoinDCX account and has closed.",
+        )
+    why = (existing.last_error or "").strip()
+    return _outcome(
+        "rejected", "AlreadyHandled",
+        "CoinDCX refused this signal earlier, so nothing was placed"
+        + (f" ({why[:160]})" if why else "")
+        + ". Tap Take to try again.",
+    )
+
+
 def liquidation_inside_stop(direction: str, liquidation: float, sl: float) -> bool:
     """True when liquidation would be hit before the stop."""
     if liquidation <= 0:
@@ -302,12 +337,19 @@ class CoinDCXExecutor:
         direction, margin = kw["direction"], kw["margin_currency"]
 
         existing = await asyncio.to_thread(self.store.get, uid, signal_id)
-        if existing is not None:
+        # A manual Take after a refusal is a fresh attempt: REJECTED means
+        # CoinDCX placed nothing, so answering "already sent" would be false
+        # and would block the signal for this user forever (owner, 2026-09-28:
+        # PENGUUSDT "already sent" with nothing on the account).  The auto
+        # fan-out never retries — a refusal there stays a refusal.
+        retry = (
+            existing is not None
+            and existing.state == _pos.REJECTED
+            and kw.get("source") == "manual_take"
+        )
+        if existing is not None and not retry:
             _count("skip_duplicate")
-            return _outcome(
-                "rejected", "AlreadyActive" if existing.live else "AlreadyHandled",
-                "This signal was already sent to your CoinDCX account.",
-            )
+            return duplicate_outcome(existing)
 
         instrument = await self.registry.instrument(symbol)
         live = await self.registry.last_price(symbol)
@@ -353,10 +395,16 @@ class CoinDCXExecutor:
             sl_price=plan.sl, tp_price=plan.tp, notional_usdt=plan.notional_usdt,
             conversion_price=float(rate or 0.0), source=kw.get("source", "auto"),
         )
-        if not await asyncio.to_thread(self.store.insert_new, pos):
+        claim = self.store.reclaim_rejected if retry else self.store.insert_new
+        if not await asyncio.to_thread(claim, pos):
             _count("skip_duplicate")
+            again = await asyncio.to_thread(self.store.get, uid, signal_id)
+            if again is not None:
+                return duplicate_outcome(again)
             return _outcome("rejected", "AlreadyActive",
-                            "This signal was already sent to your CoinDCX account.")
+                            "This signal is already being placed on your CoinDCX account.")
+        if retry:
+            _count("manual_retry_after_reject")
 
         # Leverage first: CoinDCX refuses an order whose leverage differs from
         # the position's.  A refusal here means nothing was opened.

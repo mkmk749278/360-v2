@@ -133,9 +133,17 @@ def register(
         # Server-connected key pre-check — a take without a key would
         # only fail later inside the signing chain; refuse up-front with
         # actionable copy instead.
+        # A user who chose CoinDCX is routed to the CoinDCX executor, which
+        # checks its own key; demanding a Binance key here refused every
+        # CoinDCX-only user with "Connect your Binance key first" (2026-09-28).
+        try:
+            from src.api import user_overrides as _uo
+            _venue = await asyncio.to_thread(_uo.resolve_venue_uid, firebase_uid)
+        except Exception:
+            _venue = "binance"
         try:
             from src.security import firestore_keystore as _fk
-            if _fk.is_initialised():
+            if _venue == "binance" and _fk.is_initialised():
                 try:
                     await asyncio.to_thread(_fk.get_key_blob, firebase_uid)
                 except _fk.KeyBlobNotFoundError:

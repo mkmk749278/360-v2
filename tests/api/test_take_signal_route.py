@@ -137,6 +137,26 @@ def test_no_server_key_returns_409(monkeypatch) -> None:
     assert "Server-side auto-trade" in r.json()["detail"]
 
 
+def test_coindcx_user_is_not_asked_for_a_binance_key(monkeypatch) -> None:
+    # 2026-09-28: the Binance-key pre-check refused every CoinDCX-only user
+    # before the take could reach the CoinDCX executor.
+    from src.api import user_overrides as _uo
+    from src.security import firestore_keystore as _fk
+
+    _fk._db = MagicMock()  # initialised
+    def _no_blob(uid: str):
+        raise _fk.KeyBlobNotFoundError(uid)
+    monkeypatch.setattr(_fk, "get_key_blob", _no_blob)
+    monkeypatch.setattr(_uo, "resolve_venue_uid", lambda uid: "coindcx")
+
+    app = _build_app(engine=_direct_engine(), identity=_firebase_user())
+    r = TestClient(app).post(
+        "/api/auto-trade/take", json={"signal_id": "sig-1"},
+    )
+    assert r.status_code == 200
+    assert r.json()["outcome"] == "placed"
+
+
 def test_direct_mode_relays_engine_result() -> None:
     engine = _direct_engine(
         result={
