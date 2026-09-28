@@ -4,38 +4,42 @@
 
 ---
 
-## OPEN 2026-09-28 — CoinDCX live position left WITHOUT a stop (HBARUSDT); fix in #1081
+## 2026-09-28 — CoinDCX HBARUSDT naked stop: CAUSE CONFIRMED, fixed by #1081 (merged 06:46 UTC)
 
-Owner screenshot 11:34 IST: Lumin placed HBARUSDT LONG 5x (~$10, qty 102,
-entry 0.09743) on the owner's CoinDCX account; 3 minutes later CoinDCX showed
-**no TP/SL and no resting orders**. Signal SL 0.09428 / TP1 0.10101. Owner was
-told to set the SL by hand or close it.
+Owner screenshot 11:34 IST: Lumin placed HBARUSDT LONG 5x (~$10) on CoinDCX and
+three minutes later CoinDCX showed no TP/SL and no resting orders.
 
-**Most likely cause (from the code + CoinDCX docs, NOT yet confirmed on prod
-data):** the CoinDCX reconciler read `positions()` with no `pairs` — a paged
-list, page 1 of 100, one row per pair ever traded — and treated a live pair's
-absence as flat → `finalize_closed` → `cancel_all_for_position`, removing the
-stop and marking the record CLOSED so nothing re-protected it. Fixed in #1081:
-reconciler asks for the user's own pairs; an absent row on a filled record is
-`row_missing` and left untouched.
+**Confirmed on prod** (guest session → `read.coindcx`, right after #1081
+deployed): the HBAR record is `CLOSED`, `close_reason EXTERNAL`, `last_error`
+empty, closed **8.4s after it was created** (06:00:28 → 06:00:36 UTC) while the
+position stayed live. The only path that closes a record with no error is the
+reconciler's `finalize_closed`, reached when an unfiltered, page-1-of-100
+`positions()` read did not return the pair. The stream's position event nudged
+the reconciler within seconds. `finalize_closed` then ran
+`cancel_all_for_position`, which cancelled the stop, and the closed record meant
+nothing ever re-protected it. #1081 asks for the user's own pairs only and never
+reads an absent row as flat (`row_missing`).
 
-**Confirm on prod after deploy** (guest session → Diagnostics → Console →
-`read.coindcx`, new in #1081): the HBAR record's `state` / `close_reason` /
-`last_error`. If it reads CLOSED with `close_reason` EXTERNAL or SL while the
-exchange still held the position, the theory is confirmed. If it reads OPEN
-with `sl_resting: true`, the cause is elsewhere (create_tpsl answered success
-but nothing rested) — re-open this.
+**Still OPEN for the owner:**
+- **HBAR on CoinDCX has no engine record.** It was closed at 06:00:36, so no
+  reconciler will re-protect it. The owner was told to set SL 0.09428 / TP
+  0.10101 by hand, or close it.
+- **13 of 16 CoinDCX attempts were refused `Insufficient funds`** (USDT margin),
+  on every symbol from XLM to LYN, 04:10–06:45 UTC. That is the account, not a
+  fault: the CoinDCX USDT futures wallet cannot cover even a $10 order at the
+  chosen leverage. PENGU's "already sent" was one of these rows; since #1081 a
+  retake retries.
+- **ONEUSDT:** its record reads `stop refused: 422 "Can't create TPSL order on
+  zero position"`, then closed `SL` 9 minutes after opening (06:20:44 →
+  06:29:38). Reading: the stop fired, and a reconciler repair raced the flat row.
+  Not confirmed. If it recurs after #1081, look for a repair against a position
+  that has just gone flat.
+- SEIUSDT (opened 06:15:35) is `OPEN` with SL and TP resting per the engine. Its
+  exchange triggers are re-read every 30s by the fixed reconciler.
 
-Until confirmed: **recommend `COINDCX_EXECUTION_ENABLED=false`** (owner call).
-
-Same PR / lumin-app #175: manual Take after a refused attempt no longer says
-"already sent"; take route no longer demands a Binance key from a CoinDCX
-user; runtime-status `armed` follows the chosen venue; the app names the
-exchange everywhere (take sheet, Trade tab activity, positions, gates) and
-shows NO STOP in red on a naked CoinDCX position; Trading platform page shows
-Binance API and CoinDCX API side by side. Also fixed while there: footprint
-store race (`deque mutated during iteration` on the liveness probe) and the
-test-suite lint backlog.
+App side (lumin-app #175, green, awaiting merge): the take sheet, Trade tab,
+gates and activity all name the chosen exchange, and a naked CoinDCX position
+reads NO STOP in red.
 
 ## OPEN 2026-09-27 — web app PUT/DELETE blocked by nginx preflight (fix in this PR; live until its deploy runs)
 
