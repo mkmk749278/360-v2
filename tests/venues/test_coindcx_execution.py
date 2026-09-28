@@ -462,6 +462,42 @@ async def test_reconciler_budget_is_spent_per_user_examined(env, monkeypatch) ->
     assert out["users"] == 2 and calls == 2
 
 
+async def test_reconciler_never_reads_a_missing_row_as_flat(env) -> None:
+    # Owner, HBARUSDT 2026-09-28: the reconciler read page 1 of the WHOLE
+    # account; a live pair not on that page was treated as flat, finalised,
+    # and cancel_all_for_position removed its stop.  A live position sat naked.
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    assert store.get("u1", "S1").state == P.OPEN
+    fx.calls.clear()
+    real = fx.positions
+
+    async def page_without_our_pair(**kw):
+        await real(**kw)
+        return []          # CoinDCX answered, our row simply was not in it
+    fx.positions = page_without_our_pair  # type: ignore[method-assign]
+    rec = R.CoinDCXReconciler(ex)
+    await rec.cycle()
+    assert store.get("u1", "S1").state == P.OPEN
+    assert "cancel_all" not in fx.calls and "exit" not in fx.calls
+    assert rec.stats["row_missing"] == 1
+
+
+async def test_reconciler_asks_for_the_users_own_pairs(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    seen = []
+    real = fx.positions
+
+    async def spy(**kw):
+        seen.append(kw)
+        return await real(**kw)
+    fx.positions = spy  # type: ignore[method-assign]
+    await R.CoinDCXReconciler(ex).cycle()
+    assert seen and seen[0]["pairs"] == ["B-BTC_USDT"]
+    assert seen[0]["margin_currencies"] == ("INR",)
+
+
 async def test_reconciler_makes_no_call_without_live_records(env) -> None:
     fx, _, _, ex = env
     await R.CoinDCXReconciler(ex).cycle()
@@ -476,7 +512,6 @@ async def test_reconciler_never_touches_a_position_it_did_not_open(env) -> None:
     rec = R.CoinDCXReconciler(ex)
     await rec.cycle()
     assert [c for c in fx.calls if c in ("exit", "tpsl")] == before
-    assert rec.stats["orphans_seen"] == 1
 
 
 # ------------------------------------------------------------- tpsl parse
@@ -497,7 +532,6 @@ def test_tpsl_leg_parses_documented_partial_answer() -> None:
 
 
 async def test_self_test_refuses_unless_owner_allow_listed(monkeypatch, tmp_path) -> None:
-    import config
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
@@ -510,7 +544,6 @@ async def test_self_test_refuses_unless_owner_allow_listed(monkeypatch, tmp_path
 async def test_self_test_full_run_ends_flat_and_writes_report(monkeypatch, tmp_path) -> None:
     import json
 
-    import config
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
@@ -600,7 +633,6 @@ async def test_self_test_names_an_unreadable_inr_rate_instead_of_crashing(monkey
 
 
 async def test_self_test_refuses_a_pair_the_owner_holds(monkeypatch, tmp_path) -> None:
-    import config
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
@@ -657,7 +689,6 @@ async def test_ops_contract_vector_is_what_the_engine_writes(monkeypatch, tmp_pa
     import os
     from pathlib import Path
 
-    import config
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(R, "STATUS_PATH", str(tmp_path / "s.json"))

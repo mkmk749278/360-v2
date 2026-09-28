@@ -14,8 +14,13 @@ stream nudges a user), for each user holding a live CoinDCX record:
 * a position older than ``COINDCX_MAX_POSITION_AGE_SEC`` is exited, the same
   cap the Binance reconciler applies, so a CoinDCX subscriber's trade lives
   exactly as long as a Binance subscriber's on the same signal;
-* exchange positions with **no** record of ours are counted as orphans and
-  never touched — they are the user's own trades.
+* exchange positions with **no** record of ours are never touched — they are
+  the user's own trades.  (They used to be "counted as orphans", off one
+  page of an unfiltered list; that count described a page, not the account,
+  and is gone.)
+* the exchange is asked only about the user's own live pairs, and a filled
+  record whose row does not come back is UNKNOWN — counted as
+  ``row_missing`` and left alone, never finalised (HBARUSDT, 2026-09-28).
 
 Cost discipline: calls are made only for users with a live record, and the
 per-cycle budget (``COINDCX_RECONCILE_MAX_USERS_PER_CYCLE``) is spent per user
@@ -127,21 +132,38 @@ class CoinDCXReconciler:
 
         ex = self.executor
         client = ex._client_factory(uid)
+        # Ask for THIS user's live pairs, never "the account".  CoinDCX's
+        # positions list is paged (page/size) and carries a row for every pair
+        # ever traded, so an unfiltered page-1-of-100 can simply not contain a
+        # live pair — and the loop below used to read that absence as FLAT,
+        # finalise the record and cancel_all_for_position: the stop removed
+        # from a live position, which then sat naked with its record closed
+        # and nothing left to re-protect it (owner, HBARUSDT 2026-09-28).
+        pairs = sorted({r.pair for r in records})
+        currencies = tuple(sorted({r.margin_currency for r in records})) or ("USDT", "INR")
         try:
-            rows = await client.positions()
+            rows = await client.positions(
+                pairs=pairs, margin_currencies=currencies,
+                size=max(10, 2 * len(pairs) * len(currencies)),
+            )
         except Exception as exc:  # noqa: BLE001
             self.stats["positions_failed"] += 1
             log.info("CoinDCX reconcile uid={} positions failed: {}", uid, exc)
             return
         self.stats["users_checked"] += 1
-        ours = {(r.pair, r.margin_currency) for r in records}
-        for row in rows:
-            key = (row.get("pair"), str(row.get("margin_currency_short_name") or "USDT").upper())
-            if _ex._num(row.get("active_pos")) != 0 and key not in ours:
-                self.stats["orphans_seen"] += 1
-
         for rec in records:
             prow = _ex.position_row(rows, rec.pair, rec.margin_currency)
+            if prow is None and rec.state not in (_pos.PENDING, _pos.ENTRY_UNCERTAIN):
+                # Absent is UNKNOWN, not flat.  Finalising here cancels the
+                # resting stop of a position that may be live, so a filled
+                # record whose row we could not see is left exactly as it is
+                # and counted; the next cycle asks again.
+                self.stats["row_missing"] += 1
+                log.warning(
+                    "CoinDCX reconcile uid={} {} {}: no position row returned — "
+                    "left untouched", uid, rec.pair, rec.margin_currency,
+                )
+                continue
             active = _ex._num((prow or {}).get("active_pos"))
             async with ex._lock(uid):
                 fresh = await asyncio.to_thread(ex.store.get, uid, rec.signal_id)

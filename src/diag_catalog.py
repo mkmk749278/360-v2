@@ -555,6 +555,47 @@ def _reconciler_protection_counts() -> Dict[str, Any]:
     return {"reported": True, **dict(getattr(inst, "protection_counts", {}))}
 
 
+def _coindcx(ctx: Ctx) -> Dict[str, Any]:
+    """CoinDCX venue health plus the newest position records, with their stop
+    state and last error.
+
+    Added 2026-09-28: a live CoinDCX position sat with no stop and the only
+    place its record could be read was the owner-only ops page, so a
+    diagnosing session could not see which of protect / reconcile / exit had
+    failed.  Uids are shortened to a prefix — enough to tell users apart,
+    not enough to identify one.
+    """
+    from src.venues.coindcx import positions as _pos
+    from src.venues.coindcx import reconciler as _rec
+
+    rows = []
+    for p in _pos.get_store().recent(limit=30):
+        rows.append({
+            "user": (p.uid or "")[:6],
+            "signal_id": p.signal_id,
+            "symbol": p.symbol,
+            "side": p.side,
+            "state": p.state,
+            "margin_currency": p.margin_currency,
+            "leverage": p.leverage,
+            "qty": p.qty,
+            "entry_filled": p.entry_filled,
+            "sl_price": p.sl_price,
+            "tp_price": p.tp_price,
+            "sl_resting": p.sl_resting,
+            "tp_resting": p.tp_resting,
+            "has_position_id": bool(p.position_id),
+            "liquidation_price": p.liquidation_price,
+            "close_reason": p.close_reason,
+            "last_error": p.last_error,
+            "source": p.source,
+            "created_at": p.created_at,
+            "updated_at": p.updated_at,
+            "closed_at": p.closed_at,
+        })
+    return {"venue": _rec.status_snapshot(), "records": rows}
+
+
 def _dispatch_funnel(ctx: Ctx) -> Dict[str, Any]:
     """Where every delivered signal went, per user, since boot.
 
@@ -725,6 +766,12 @@ for _e in (
     Entry("read.tasks", "Asyncio task census", "read",
           "Engine tasks, and which have finished or been cancelled.",
           _asyncio_tasks),
+    Entry("read.coindcx", "CoinDCX venue + records", "read",
+          "Venue health (reconciler cycles, row_missing, protection repairs, "
+          "executor counters) and the newest 30 CoinDCX position records with "
+          "their stop state and last error. Read `sl_resting` on every live "
+          "row first: false on a filled position is the naked-stop fault.",
+          _coindcx),
     Entry("read.dispatch_funnel", "Signal → order funnel", "read",
           "Per delivered signal, how many users got an order placed, how "
           "many were rejected and how many were skipped before the order "

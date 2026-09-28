@@ -281,6 +281,15 @@ class CoinDCXPositionStore:
             rows = cur.fetchall()
         return [_from_row(r) for r in rows]
 
+    def recent(self, *, limit: int = 30) -> List[CoinDCXPosition]:
+        """The most recently updated records, any state — for diagnosis."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM coindcx_positions ORDER BY updated_at DESC LIMIT ?",
+                (int(max(1, min(limit, 200))),),
+            )
+            return [_from_row(r) for r in cur.fetchall()]
+
     def summary(self) -> Dict[str, Any]:
         """Counts for ops — per state, plus users with a live position."""
         with self._lock:
