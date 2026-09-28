@@ -19,12 +19,11 @@ Integration:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
-from src.auto_trade.risk_manager import RiskGateResult, RiskManager
+from src.auto_trade.risk_manager import RiskManager
 from src.paper_order_manager import PaperOrderManager
 from src.smc import Direction
 

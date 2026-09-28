@@ -18,7 +18,6 @@ ledger or the paper history JSON.
 """
 from __future__ import annotations
 
-import math
 from unittest.mock import MagicMock
 
 import pytest

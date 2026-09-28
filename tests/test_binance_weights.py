@@ -17,7 +17,6 @@ import pathlib
 import pytest
 
 from src.binance_weights import (
-    BY_LIMIT,
     CARRIED,
     FIXED,
     VERIFIED,

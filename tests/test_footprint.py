@@ -292,3 +292,41 @@ class TestWiring:
         mgr._mark_footprint_gap(_AggConn())
         assert store.open_bar("BTCUSDT").incomplete is True
         reset_store(None)
+
+
+class TestReadersAreSafeAgainstTheStreamThread:
+    def test_health_and_bars_survive_concurrent_sealing(self):
+        """2026-09-28: the liveness probe recorded ``RuntimeError: deque
+        mutated during iteration`` from ``health()`` — the stream thread
+        sealed a bar while the probe walked the rings.  Readers copy under a
+        lock now; this drives the two threads against each other."""
+        import threading
+
+        s = FootprintStore(bars=50)
+        stop = threading.Event()
+        errors = []
+
+        def writer():
+            i = 0
+            while not stop.is_set():
+                for sym in ("AUSDT", "BUSDT", "CUSDT"):
+                    s.add_row(sym, _row(ts_s=1_000_000.0 + i * 60))
+                i += 1
+
+        def reader():
+            try:
+                for _ in range(3000):
+                    s.health()
+                    s.bars("AUSDT")
+            except Exception as exc:  # pragma: no cover — the failure mode
+                errors.append(exc)
+
+        w = threading.Thread(target=writer)
+        w.start()
+        try:
+            reader()
+        finally:
+            stop.set()
+            w.join()
+        assert errors == []
+        assert s.health()["sealed_bars"] > 0

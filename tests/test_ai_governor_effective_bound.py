@@ -26,7 +26,6 @@ Every test here fails against the pre-fix tree.
 """
 from __future__ import annotations
 
-from typing import Optional
 
 import pytest
 

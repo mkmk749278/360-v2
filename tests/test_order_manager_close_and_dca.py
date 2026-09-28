@@ -7,7 +7,6 @@ when the engine fires DCA.  Mirrors the paper-mode coverage in
 """
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

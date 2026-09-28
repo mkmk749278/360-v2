@@ -12,7 +12,6 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from src.signal_quality import (
     SetupClass,

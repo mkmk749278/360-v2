@@ -134,9 +134,14 @@ def test_the_snapshot_carries_the_instrument_block():
     from src.execution import ai_governor_snapshot as snap
 
     class _Sig:
-        signal_id = "s1"; symbol = "BULLAUSDT"; direction = "LONG"
-        entry = 100.0; stop_loss = 98.0; tp1 = 104.0
-        setup_class = "MOVER_TREND_PULLBACK"; entry_regime = "VOLATILE"
+        signal_id = "s1"
+        symbol = "BULLAUSDT"
+        direction = "LONG"
+        entry = 100.0
+        stop_loss = 98.0
+        tp1 = 104.0
+        setup_class = "MOVER_TREND_PULLBACK"
+        entry_regime = "VOLATILE"
         original_sl_distance = 2.0
 
     built = snap.build_snapshot(

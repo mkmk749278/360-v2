@@ -1,8 +1,6 @@
 """Tests for src.scanner.common_gates — shared gate logic."""
 
 from src.scanner.common_gates import (
-    GateCheckResult,
-    GateResult,
     apply_soft_gate_penalty,
     check_regime_compatibility,
     check_spread_gate,

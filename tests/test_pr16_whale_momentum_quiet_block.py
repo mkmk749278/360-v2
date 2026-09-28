@@ -234,7 +234,7 @@ class TestVsbBdsRegimeGateRemoved:
         ind = self._full_indicators()
         smc = self._fvg_smc()
 
-        sig = ch._evaluate_volume_surge_breakout(
+        ch._evaluate_volume_surge_breakout(
             "ETHUSDT", candles, ind, smc, 0.01, 5_000_000, regime="QUIET"
         )
         # Signal still likely None due to thesis gates, but rejection
@@ -254,7 +254,7 @@ class TestVsbBdsRegimeGateRemoved:
         ind = self._full_indicators()
         smc = self._fvg_smc()
 
-        sig = ch._evaluate_breakdown_short(
+        ch._evaluate_breakdown_short(
             "ETHUSDT", candles, ind, smc, 0.01, 5_000_000, regime="QUIET"
         )
         assert ch._active_no_signal_reason != "regime_blocked", (

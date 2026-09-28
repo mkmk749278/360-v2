@@ -3,11 +3,10 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-import src.signal_router as signal_router_module
 from src.channels.base import Signal
 from src.signal_router import (
     SignalRouter,
@@ -1413,7 +1412,6 @@ class TestChannelCapMode:
         as ``count >= 0`` refuses every candidate on an empty book and would
         take the whole feed down silently.
         """
-        import src.signal_router as sr_mod
 
         self._tunables(monkeypatch, channel_cap_mode="off",
                        max_concurrent_signals_book=0)

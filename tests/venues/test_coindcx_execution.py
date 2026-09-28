@@ -281,6 +281,63 @@ async def test_rejected_entry_records_and_places_nothing_else(env) -> None:
     assert "tpsl" not in fx.calls
 
 
+async def test_manual_take_after_a_refusal_is_a_fresh_attempt(env) -> None:
+    # Owner, 2026-09-28: a refused CoinDCX attempt left a REJECTED row and
+    # every later Take answered "already sent" with nothing on the account.
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXRejected("x", status=400, body={"message": "Insufficient funds"})
+    await ex.open_position(**_open_kwargs())
+    assert store.get("u1", "S1").state == P.REJECTED
+    fx.order_raise = None
+    out = await ex.open_position(**_open_kwargs(source="manual_take"))
+    assert out["outcome"] == "placed"
+    assert store.get("u1", "S1").state == P.OPEN
+    assert len([c for c in fx.calls if c.startswith("order")]) == 2
+
+
+async def test_auto_fanout_never_retries_a_refusal_and_says_why(env) -> None:
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXRejected("x", status=400, body={"message": "Insufficient funds"})
+    await ex.open_position(**_open_kwargs())
+    fx.order_raise = None
+    out = await ex.open_position(**_open_kwargs())   # source="auto"
+    assert out["reject_class"] == "AlreadyHandled"
+    assert "nothing was placed" in out["reject_detail"]
+    assert "already sent" not in out["reject_detail"]
+    assert len([c for c in fx.calls if c.startswith("order")]) == 1
+
+
+async def test_manual_take_never_retries_a_live_or_finished_record(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    out = await ex.open_position(**_open_kwargs(source="manual_take"))
+    assert out["reject_class"] == "AlreadyActive" and "already open" in out["reject_detail"]
+    rec = store.get("u1", "S1")
+    rec.state = P.ENTRY_UNCERTAIN
+    store.put(rec)
+    out = await ex.open_position(**_open_kwargs(source="manual_take"))
+    assert out["reject_class"] == "AlreadyActive" and "being confirmed" in out["reject_detail"]
+    rec.state = P.CLOSED
+    store.put(rec)
+    out = await ex.open_position(**_open_kwargs(source="manual_take"))
+    assert out["reject_class"] == "AlreadyHandled" and "has closed" in out["reject_detail"]
+    assert len([c for c in fx.calls if c.startswith("order")]) == 1
+
+
+def test_reclaim_rejected_only_replaces_a_rejected_row() -> None:
+    store = P.CoinDCXPositionStore(":memory:")
+    base = dict(uid="u", signal_id="s", symbol="BTCUSDT", pair="B-BTC_USDT", side="LONG",
+                margin_currency="USDT", leverage=5.0, qty=0.001, entry_target=1.0,
+                sl_price=0.9, tp_price=1.1, notional_usdt=10.0)
+    assert store.reclaim_rejected(P.CoinDCXPosition(state=P.PENDING, **base)) is False
+    store.put(P.CoinDCXPosition(state=P.OPEN, **base))
+    assert store.reclaim_rejected(P.CoinDCXPosition(state=P.PENDING, **base)) is False
+    assert store.get("u", "s").state == P.OPEN
+    store.put(P.CoinDCXPosition(state=P.REJECTED, **base))
+    assert store.reclaim_rejected(P.CoinDCXPosition(state=P.PENDING, **base)) is True
+    assert store.get("u", "s").state == P.PENDING
+
+
 async def test_unknown_entry_outcome_is_left_for_the_reconciler(env) -> None:
     fx, store, _, ex = env
     fx.order_raise = C.CoinDCXUnreachable("timeout")
@@ -405,6 +462,42 @@ async def test_reconciler_budget_is_spent_per_user_examined(env, monkeypatch) ->
     assert out["users"] == 2 and calls == 2
 
 
+async def test_reconciler_never_reads_a_missing_row_as_flat(env) -> None:
+    # Owner, HBARUSDT 2026-09-28: the reconciler read page 1 of the WHOLE
+    # account; a live pair not on that page was treated as flat, finalised,
+    # and cancel_all_for_position removed its stop.  A live position sat naked.
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    assert store.get("u1", "S1").state == P.OPEN
+    fx.calls.clear()
+    real = fx.positions
+
+    async def page_without_our_pair(**kw):
+        await real(**kw)
+        return []          # CoinDCX answered, our row simply was not in it
+    fx.positions = page_without_our_pair  # type: ignore[method-assign]
+    rec = R.CoinDCXReconciler(ex)
+    await rec.cycle()
+    assert store.get("u1", "S1").state == P.OPEN
+    assert "cancel_all" not in fx.calls and "exit" not in fx.calls
+    assert rec.stats["row_missing"] == 1
+
+
+async def test_reconciler_asks_for_the_users_own_pairs(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    seen = []
+    real = fx.positions
+
+    async def spy(**kw):
+        seen.append(kw)
+        return await real(**kw)
+    fx.positions = spy  # type: ignore[method-assign]
+    await R.CoinDCXReconciler(ex).cycle()
+    assert seen and seen[0]["pairs"] == ["B-BTC_USDT"]
+    assert seen[0]["margin_currencies"] == ("INR",)
+
+
 async def test_reconciler_makes_no_call_without_live_records(env) -> None:
     fx, _, _, ex = env
     await R.CoinDCXReconciler(ex).cycle()
@@ -419,7 +512,6 @@ async def test_reconciler_never_touches_a_position_it_did_not_open(env) -> None:
     rec = R.CoinDCXReconciler(ex)
     await rec.cycle()
     assert [c for c in fx.calls if c in ("exit", "tpsl")] == before
-    assert rec.stats["orphans_seen"] == 1
 
 
 # ------------------------------------------------------------- tpsl parse
@@ -440,7 +532,6 @@ def test_tpsl_leg_parses_documented_partial_answer() -> None:
 
 
 async def test_self_test_refuses_unless_owner_allow_listed(monkeypatch, tmp_path) -> None:
-    import config
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
@@ -453,7 +544,6 @@ async def test_self_test_refuses_unless_owner_allow_listed(monkeypatch, tmp_path
 async def test_self_test_full_run_ends_flat_and_writes_report(monkeypatch, tmp_path) -> None:
     import json
 
-    import config
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
@@ -543,7 +633,6 @@ async def test_self_test_names_an_unreadable_inr_rate_instead_of_crashing(monkey
 
 
 async def test_self_test_refuses_a_pair_the_owner_holds(monkeypatch, tmp_path) -> None:
-    import config
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(ST, "REPORT_PATH", str(tmp_path / "r.json"))
@@ -600,7 +689,6 @@ async def test_ops_contract_vector_is_what_the_engine_writes(monkeypatch, tmp_pa
     import os
     from pathlib import Path
 
-    import config
     from src.venues.coindcx import self_test as ST
 
     monkeypatch.setattr(R, "STATUS_PATH", str(tmp_path / "s.json"))

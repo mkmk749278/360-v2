@@ -11,7 +11,6 @@ from src.structure_state import (
     LEG_DOMINANCE_THRESHOLD,
     PIVOT_WINDOW,
     STRUCTURE_REFRESH_SEC,
-    StructureState,
     StructureTracker,
     _classify_recent,
     _classify_state,

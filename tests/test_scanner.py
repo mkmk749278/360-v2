@@ -390,7 +390,7 @@ class TestLifecycleCooldownExtension:
         sig.setup_class = "SR_FLIP_RETEST"
         sig.direction = type("D", (), {"value": "SHORT"})()
 
-        before = self._now()
+        self._now()
         scanner.on_signal_lifecycle_outcome(sig, "EXPIRED")
         after = self._now()
 
@@ -454,7 +454,6 @@ class TestLifecycleCooldownExtension:
         """If a longer cooldown is already active, a softer outcome
         must NOT shorten it.  E.g. an EXPIRED → INVALIDATED sequence
         must keep the 2h expiry, not drop to 30 min."""
-        import time
         scanner = _make_scanner()
         sig = _make_signal(channel="360_SCALP")
         sig.setup_class = "SR_FLIP_RETEST"

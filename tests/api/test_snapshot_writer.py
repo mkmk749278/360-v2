@@ -5,8 +5,7 @@ these are synchronous and don't require a running asyncio loop or real Redis.
 The async ``_write_*`` and ``_apply_pending_mode_cmd`` paths are integration
 concerns validated by docker-compose smoke tests on the VPS.
 """
-import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 _SAMPLE_TASKS = [
     "trade_monitor", "reconciler", "mark_price_feed",

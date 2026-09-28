@@ -1669,7 +1669,7 @@ class TestSignalInvalidation:
         sig.current_price = 30050.0  # slightly above entry 30000
 
         # EMA9 < EMA21 = bearish crossover, but price is above entry
-        closes_high = [30100.0] * 9 + [30050.0] * 15  # drives EMA9 above
+        [30100.0] * 9 + [30050.0] * 15  # drives EMA9 above
         # Force EMA9 < EMA21 via decreasing close series
         ema_kill_closes = [30200.0] + [30100.0] * 6 + [29900.0] * 5 + [30050.0] * 13
         monitor, _, _ = self._build_monitor(
@@ -3028,7 +3028,7 @@ class TestTerminalStatusGuard:
     def monitor(self):
         from unittest.mock import AsyncMock
         active: Dict[str, Signal] = {}
-        send_tg = AsyncMock(return_value=True)
+        AsyncMock(return_value=True)
         data_store = MagicMock()
         data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         m = TradeMonitor(

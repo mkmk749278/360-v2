@@ -1,6 +1,5 @@
 """Unit tests for snapshot_store encode/decode round-trips."""
-import pytest
-from src.api.snapshot_store import encode, decode, KEY_SIGNALS_ALL, KEY_ENGINE_STATE
+from src.api.snapshot_store import encode, decode
 
 
 def test_encode_decode_roundtrip_dict():

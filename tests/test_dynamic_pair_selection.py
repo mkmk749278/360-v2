@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.pair_manager import PairInfo, PairManager, PairTier
+from src.pair_manager import PairInfo, PairManager
 
 
 def _make_pair(

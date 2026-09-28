@@ -17,8 +17,6 @@ even if the HTTP layer is rewired.  The API-level happy path is in
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
 
 import pytest
 

@@ -1044,3 +1044,51 @@ def test_resume_disabled_mine_invalidates_runtime_cache() -> None:
     app = _build_app(identity=_firebase_user(uid="fb-rdm-6"))
     TestClient(app).post("/api/auto-trade/resume-disabled-mine")
     assert "fb-rdm-6" not in mod._runtime_cache
+
+
+def test_runtime_status_coindcx_user_is_armed_on_the_coindcx_key(monkeypatch) -> None:
+    """2026-09-28: ``armed`` required a Binance key, so a CoinDCX user whose
+    orders were being placed read "not armed".  The key gate follows the
+    chosen venue."""
+    from src.api import user_overrides as _uo
+    from src.security import firestore_keystore as _fk
+    from src.venues.coindcx import dispatch as _dcx
+    from src.venues.coindcx import keystore as _dcx_keys
+
+    _install_green_gates(monkeypatch, user=_user_row(user_id=1, tier="auto"),
+                         auto_trade_row={"mode": "live"})
+    def _no_binance(uid):
+        raise _fk.KeyBlobNotFoundError(uid)
+    monkeypatch.setattr(_fk, "has_key", _no_binance)
+    monkeypatch.setattr(_uo, "resolve_venue_uid", lambda uid: "coindcx")
+    monkeypatch.setattr(_dcx_keys, "get_key_blob_cached",
+                        lambda uid: MagicMock(attested=True))
+    # The gates are runtime tunables: patching ``config`` is inert once any
+    # earlier test has wired the tunable client (CLAUDE.md), so patch the
+    # accessors the route actually calls.
+    monkeypatch.setattr(_dcx, "execution_enabled", lambda: True)
+    monkeypatch.setattr(_dcx, "_allowed_uids", lambda: None)
+    app = _build_app(identity=_firebase_user(uid="fb-dcx"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["venue"] == "coindcx"
+    assert body["binance_key_connected"] is False
+    assert body["venue_key_connected"] is True
+    assert body["venue_open"] is True
+    assert body["armed"] is True
+
+
+def test_runtime_status_coindcx_unreadable_key_is_not_armed_and_says_so(monkeypatch) -> None:
+    from src.api import user_overrides as _uo
+    from src.venues.coindcx import keystore as _dcx_keys
+
+    _install_green_gates(monkeypatch, user=_user_row(user_id=1, tier="auto"),
+                         auto_trade_row={"mode": "live"})
+    monkeypatch.setattr(_uo, "resolve_venue_uid", lambda uid: "coindcx")
+    def _boom(uid):
+        raise RuntimeError("firestore down")
+    monkeypatch.setattr(_dcx_keys, "get_key_blob_cached", _boom)
+    app = _build_app(identity=_firebase_user(uid="fb-dcx2"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["armed"] is False
+    assert body["venue_key_readable"] is False
+

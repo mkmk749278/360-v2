@@ -20,6 +20,8 @@ import pytest
 from src.channels.scalp import ScalpChannel
 from src.shadow_strategies import evaluate_mean_revert as shadow_mean_revert
 from src.smc import Direction
+from types import SimpleNamespace
+from src.signal_quality import MarketState, SetupClass, execution_quality_check
 
 _IND = {"15m": {"atr_last": 0.4}}
 _SMC = {"pair_profile": None, "regime_context": None}
@@ -181,9 +183,7 @@ def test_pair_profile_reaches_basic_filters(monkeypatch):
 # (always exceeded by a 2.5σ entry).  These tests pin the fade branch.
 # ---------------------------------------------------------------------------
 
-from types import SimpleNamespace
 
-from src.signal_quality import MarketState, SetupClass, execution_quality_check
 
 
 def _gate_indicators(ema9: float, ema21: float, atr: float = 0.4) -> dict:

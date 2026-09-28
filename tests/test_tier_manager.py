@@ -6,7 +6,6 @@ Network calls are mocked via ``unittest.mock``.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 

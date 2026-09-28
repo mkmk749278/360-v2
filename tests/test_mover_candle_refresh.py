@@ -9,7 +9,6 @@ throttled per symbol and bounded per cycle.
 """
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 

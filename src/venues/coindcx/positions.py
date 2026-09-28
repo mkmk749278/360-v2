@@ -201,6 +201,45 @@ class CoinDCXPositionStore:
             )
             return cur.rowcount == 1
 
+    def reclaim_rejected(self, pos: CoinDCXPosition) -> bool:
+        """Replace a ``REJECTED`` row for (uid, signal_id) with ``pos``.
+
+        A ``REJECTED`` record means CoinDCX placed nothing (the leverage or
+        entry was refused, or an uncertain entry stayed flat past its grace).
+        The duplicate guard must not turn that into "already sent" forever:
+        a user who taps Take again after a refusal is asking for a new
+        attempt, not a second entry.  Atomic under the store lock and keyed
+        on the state, so a row that became live in the meantime is never
+        overwritten.  Returns ``False`` when there was no rejected row to
+        reclaim (the caller then refuses as a duplicate).
+        """
+        pos.updated_at = time.time()
+        row = asdict(pos)
+        row["sl_resting"] = int(bool(pos.sl_resting))
+        row["tp_resting"] = int(bool(pos.tp_resting))
+        cols = ",".join(_COLUMNS)
+        marks = ",".join("?" for _ in _COLUMNS)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self._conn.execute(
+                    "DELETE FROM coindcx_positions "
+                    "WHERE uid = ? AND signal_id = ? AND state = ?",
+                    (pos.uid, pos.signal_id, REJECTED),
+                )
+                if cur.rowcount != 1:
+                    self._conn.execute("ROLLBACK")
+                    return False
+                self._conn.execute(
+                    f"INSERT INTO coindcx_positions ({cols}) VALUES ({marks})",
+                    tuple(row[c] for c in _COLUMNS),
+                )
+                self._conn.execute("COMMIT")
+                return True
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
     def get(self, uid: str, signal_id: str) -> Optional[CoinDCXPosition]:
         with self._lock:
             cur = self._conn.execute(
@@ -241,6 +280,15 @@ class CoinDCXPositionStore:
             )
             rows = cur.fetchall()
         return [_from_row(r) for r in rows]
+
+    def recent(self, *, limit: int = 30) -> List[CoinDCXPosition]:
+        """The most recently updated records, any state — for diagnosis."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM coindcx_positions ORDER BY updated_at DESC LIMIT ?",
+                (int(max(1, min(limit, 200))),),
+            )
+            return [_from_row(r) for r in cur.fetchall()]
 
     def summary(self) -> Dict[str, Any]:
         """Counts for ops — per state, plus users with a live position."""

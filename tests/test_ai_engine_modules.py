@@ -209,10 +209,6 @@ class TestBackwardCompatibility:
         from src.ai_engine import (
             SentimentResult,
             WhaleAlert,
-            detect_whale_trade,
-            detect_volume_delta_spike,
-            get_ai_insight,
-            close_shared_session,
         )
         assert SentimentResult is not None
         assert WhaleAlert is not None

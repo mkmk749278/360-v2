@@ -10,8 +10,7 @@ TradeMonitor stub so they collect without a live GCP / Firestore environment.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 import pytest
 
 from src.smc import Direction

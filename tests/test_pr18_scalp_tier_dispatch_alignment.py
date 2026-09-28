@@ -32,7 +32,6 @@ import asyncio
 
 import pytest
 
-import src.signal_router as signal_router_module
 from src.channels.base import Signal
 from src.scanner import classify_signal_tier
 from src.signal_router import SignalRouter

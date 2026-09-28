@@ -20,7 +20,7 @@ from src.channels.scalp import ScalpChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
 from src.channels.scalp_fvg import ScalpFVGChannel
 from src.confidence import score_order_flow
-from src.smc import Direction, FVGZone, LiquiditySweep, MSSSignal
+from src.smc import Direction, FVGZone, LiquiditySweep
 
 
 # ---------------------------------------------------------------------------

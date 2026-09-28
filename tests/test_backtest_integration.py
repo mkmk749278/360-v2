@@ -17,10 +17,10 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
-from config import PAIR_PROFILES, PairProfile
+from config import PAIR_PROFILES
 from src.channels.base import Signal
 from src.channels.scalp import ScalpChannel
-from src.confidence_calibration import ConfidenceCalibrator, wilson_lower_bound
+from src.confidence_calibration import ConfidenceCalibrator
 from src.confluence_detector import ConfluenceDetector
 from src.mtf import compute_mtf_confluence, compute_mtf_confluence_with_decay
 from src.regime_transition import RegimeTransitionDetector

@@ -5,9 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
-from unittest.mock import patch
 
-import pytest
 
 from src.confluence_detector import ConfluenceDetector, ConfluenceResult
 

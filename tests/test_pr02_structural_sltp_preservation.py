@@ -514,7 +514,6 @@ class TestPredictiveAdjustmentBypassesProtectedPaths:
             suggested_tp_adjustment=1.2,
             suggested_sl_adjustment=1.0,
         )
-        original_tp1 = sig.tp1
         engine.adjust_tp_sl(sig, pred)
         # Non-protected path must not bypass the adjustment.
         expected_tp1 = 100.0 + (102.0 - 100.0) * 1.2   # 102.4

@@ -12,7 +12,6 @@ The TelegramBot is mocked.  What we pin:
 """
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

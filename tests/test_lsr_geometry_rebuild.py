@@ -7,7 +7,6 @@ R-scaling lives in signal_dispatch (mirrors SR_FLIP change B) and ships dark.
 """
 from __future__ import annotations
 
-import importlib
 
 import config
 import src.signal_quality as sq

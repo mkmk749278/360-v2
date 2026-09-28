@@ -19,7 +19,6 @@ process and the signing service.  These tests pin:
 """
 from __future__ import annotations
 
-import json
 
 import pytest
 

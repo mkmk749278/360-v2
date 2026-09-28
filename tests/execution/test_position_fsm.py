@@ -18,9 +18,7 @@ OrderPlacer mocked).  What we pin:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1566,7 +1564,7 @@ async def test_place_signal_reanchors_sl_for_long_fill_below_sl() -> None:
         )
     )
     with patch.object(position_state, "put_position"):
-        result = await position_fsm.place_signal(
+        await position_fsm.place_signal(
             firebase_uid="fb-x",
             signal_id="sig-1",
             symbol="SOLUSDT",
