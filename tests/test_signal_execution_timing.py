@@ -20,7 +20,6 @@ from config import (
 )
 from src.channels.base import Direction, Signal, build_channel_signal
 from src.channels.scalp import ScalpChannel
-from src.telegram_bot import TelegramBot
 from src.utils import utcnow
 
 

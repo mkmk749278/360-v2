@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from src.suppression_telemetry import (
     REASON_CLUSTER,

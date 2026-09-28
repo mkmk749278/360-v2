@@ -7,7 +7,6 @@ branches on ``type(engine).__name__ == "RedisEngineFacade"``).
 """
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 

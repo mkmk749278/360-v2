@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from src.level_book import (
-    AGE_DECAY_BUCKETS,
     AGE_DECAY_FLOOR,
     CONFLUENCE_TOLERANCE_PCT,
     Level,

@@ -14,14 +14,12 @@ GCP / network.  What we pin:
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.execution import listen_key as listen_key_mod
 from src.execution import position_worker
-from src.security.signing_service.protocol import SignResponse
 
 
 def _make_listen_key_handle(uid: str = "fb-x") -> MagicMock:

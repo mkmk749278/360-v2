@@ -429,7 +429,6 @@ class TestCloseForFunding:
 class TestFsmFundingClosePhase:
     async def test_funding_close_fill_sets_funding_exit_reason(self):
         from src.execution import events as events_mod
-        from src.execution import order_placer as _op
         from src.execution import position_state
         from src.execution.position_fsm import PositionFSM
         from src.execution.position_state import coid_funding_close

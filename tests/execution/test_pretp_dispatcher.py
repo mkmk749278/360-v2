@@ -14,15 +14,12 @@ Firestore.  What we pin:
 """
 from __future__ import annotations
 
-import asyncio
 from typing import List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.execution import mark_price_feed
 from src.execution import position_state
-from src.execution import pretp_controller
 from src.execution import pretp_dispatcher
 
 

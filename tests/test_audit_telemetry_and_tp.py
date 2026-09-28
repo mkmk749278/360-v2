@@ -24,6 +24,11 @@ import pytest
 from src.channels import scalp as scalp_module
 from src.channels.scalp import ScalpChannel, _CLS_DISABLED_2026_05_17
 from src.smc import Direction, LiquiditySweep
+from datetime import timedelta as _timedelta
+from unittest.mock import MagicMock as _MagicMock
+from src.channels.base import Signal as _Signal
+from src.trade_monitor import TradeMonitor as _TradeMonitor
+from src.utils import utcnow as _utcnow
 
 
 @pytest.fixture(autouse=True)
@@ -788,11 +793,6 @@ class TestQ4BHelperWiredIntoEvaluators:
 # ---------------------------------------------------------------------------
 
 
-from datetime import timedelta as _timedelta
-from unittest.mock import MagicMock as _MagicMock
-from src.channels.base import Signal as _Signal
-from src.trade_monitor import TradeMonitor as _TradeMonitor
-from src.utils import utcnow as _utcnow
 
 
 def _build_invalidation_test_monitor(sig, candles_close=None, regime_detector=None):

@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import tempfile
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -376,7 +375,7 @@ class TestHealthcheckEngineUptime:
         pid = 0
         try:
             with open(f"/proc/{pid}/stat") as fh:
-                stat = fh.read()
+                fh.read()
             # If somehow this succeeded, just ensure we got some value
             pytest.skip("PID 0 stat unexpectedly readable — skipping")
         except (FileNotFoundError, PermissionError):

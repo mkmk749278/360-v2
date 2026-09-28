@@ -45,7 +45,6 @@ class TestMaCrossRegistration:
         assert SetupClass.MA_CROSS_TREND_SHIFT in CHANNEL_SETUP_COMPATIBILITY["360_SCALP"]
 
     def test_in_trending_regime_sets_only(self):
-        from src.signal_quality import MarketState
 
         member_states = {
             st.name

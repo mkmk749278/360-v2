@@ -2,7 +2,6 @@
 
 from src.scanner.ws_optimizer import (
     LatencyTracker,
-    ShardHealth,
     compute_reconnect_delay,
     score_shard_health,
     select_priority_pairs,
@@ -67,7 +66,7 @@ def test_latency_tracker_recommended_limit():
 
 def test_compute_reconnect_delay():
     d0 = compute_reconnect_delay(0)
-    d1 = compute_reconnect_delay(1)
+    compute_reconnect_delay(1)
     d5 = compute_reconnect_delay(5)
     assert d0 > 0
     assert d5 > d0  # Generally increases (ignoring jitter)

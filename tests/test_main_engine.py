@@ -522,11 +522,8 @@ class TestSignalExpiryHandler:
     def _make_engine_with_mocks(self):
         """Build a CryptoSignalEngine whose perf-tracker, order-manager,
         and history persistence are mocked so we can assert on them."""
-        from datetime import datetime, timezone
         from unittest.mock import MagicMock, patch
 
-        from src.channels.base import Signal
-        from src.smc import Direction
 
         with patch("src.main.TelegramBot"), \
              patch("src.main.TelemetryCollector"), \

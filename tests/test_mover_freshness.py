@@ -5,7 +5,6 @@ exhaustion' (owner finding 2026-06-26).
 The gate is a pure helper (no instance state), so we exercise it directly
 across the band boundaries + the recency cap + the off-switch + fail-open.
 """
-import pytest
 
 import src.channels.scalp as scalp
 from src.channels.scalp import ScalpChannel

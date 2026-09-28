@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from src.auto_trade.position_reconciler import (
     PositionReconciler,

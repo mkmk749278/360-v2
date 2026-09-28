@@ -6,7 +6,6 @@ events stay admin-only (operational signal, not subscriber content).
 """
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock
 
 import pytest

@@ -226,7 +226,7 @@ def test_list_recent_events_caps_limit() -> None:
     _MAX_LIMIT.  Test by checking the query.limit was called with
     the cap, not 1000."""
     now = datetime.now(timezone.utc)
-    fake_query = _install_fake_db_with_stream([
+    _install_fake_db_with_stream([
         _make_snap("a", "placed", now),
     ])
     # Re-grab the limit mock so we can inspect the args passed in.

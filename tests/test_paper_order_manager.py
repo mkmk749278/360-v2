@@ -18,7 +18,6 @@ Coverage:
 """
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -254,7 +253,6 @@ async def test_partial_close_pays_maker_exit_fee_plus_proportional_entry_share()
     proportional share of the entry-time taker fee."""
     from config import (
         BINANCE_FUTURES_MAKER_FEE_PCT,
-        BINANCE_FUTURES_TAKER_FEE_PCT,
     )
     pm = PaperOrderManager(starting_equity_usd=10000.0, max_position_usd=500.0)
     entry = 100.0

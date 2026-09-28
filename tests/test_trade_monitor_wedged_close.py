@@ -25,7 +25,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from src.channels.base import Signal
 from src.smc import Direction

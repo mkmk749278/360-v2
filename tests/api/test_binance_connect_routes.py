@@ -24,7 +24,6 @@ module boundary.
 """
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -185,7 +184,6 @@ def test_happy_path_validates_encrypts_persists_returns_truncated_key() -> None:
     app uses to confirm-back to the user)."""
     from src.security import (
         binance_connect_validator,
-        envelope_crypto,
         firestore_keystore,
         kms_client,
     )

@@ -12,7 +12,6 @@ from __future__ import annotations
 import time
 
 import numpy as np
-import pytest
 
 from src.data_intake import SCHEMA, build_data_intake
 

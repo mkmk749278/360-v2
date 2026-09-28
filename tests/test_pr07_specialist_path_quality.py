@@ -419,7 +419,7 @@ class TestWhaleMomentumSLTuning:
         )
         # SL must be below the swing low (99.5) by the buffer (0.1%)
         expected_invalidation = 99.5 * (1.0 - _WHALE_SWING_BUFFER)
-        expected_sl_dist = max(close_price - expected_invalidation, 0.3)  # 0.3 ATR floor
+        max(close_price - expected_invalidation, 0.3)  # 0.3 ATR floor
         assert sig.stop_loss <= close_price, "LONG SL must be below entry."
         # The stop distance must reflect the swing, not just a flat ATR multiple
         actual_sl_dist = close_price - sig.stop_loss

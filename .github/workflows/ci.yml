@@ -36,7 +36,10 @@ jobs:
       # Blocking gate: src/ + config/ are ruff-clean as of this PR, so lint
       # failures now fail CI. Keep new code clean to keep this green.
       - name: Lint (ruff)
-        run: ruff check src/ config/
+        # tests/ joined 2026-09-28: it had quietly grown 203 findings because
+        # nothing checked it — unused imports hiding dead fixtures, and
+        # assigned-never-read results where a test forgot its assertion.
+        run: ruff check src/ config/ tests/
 
       # Blocking gate. Mirrors the local command in CLAUDE.md.
       # Coverage is measured and REPORTED, not gated (2026-07-17): the

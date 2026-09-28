@@ -76,7 +76,7 @@ def _build_monitor(*, order_manager=None, data_store=None,
     regime_detector.classify.return_value = MagicMock(
         regime=MagicMock(value=regime_label)
     )
-    send = AsyncMock(return_value=True)
+    AsyncMock(return_value=True)
     monitor = TradeMonitor(
         data_store=data_store or MagicMock(),
         get_active_signals=lambda: {},

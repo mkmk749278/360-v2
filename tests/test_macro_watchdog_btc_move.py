@@ -12,7 +12,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
-import pytest
 
 from src.macro_watchdog import MacroWatchdog
 

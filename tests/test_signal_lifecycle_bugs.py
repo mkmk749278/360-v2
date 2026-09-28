@@ -18,7 +18,6 @@ suite (re-enable to assert the contract).
 from __future__ import annotations
 
 import time
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np

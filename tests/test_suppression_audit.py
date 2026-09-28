@@ -61,9 +61,12 @@ def test_insufficient_geometry():
 
 # ------------------------------------------------------------------- R math / EV
 def test_suppression_value_delta_signs():
-    win = _rec(); win["classification"] = sa.WOULD_WIN
-    lose = _rec(); lose["classification"] = sa.WOULD_LOSE
-    exp = _rec(); exp["classification"] = sa.WOULD_EXPIRE
+    win = _rec()
+    win["classification"] = sa.WOULD_WIN
+    lose = _rec()
+    lose["classification"] = sa.WOULD_LOSE
+    exp = _rec()
+    exp["classification"] = sa.WOULD_EXPIRE
     assert sa.suppression_value_delta_r(lose) == 1.0            # saved a stop
     assert sa.suppression_value_delta_r(win) == -2.0           # R_to_tp1 = 2/1
     assert sa.suppression_value_delta_r(exp) == 0.0
@@ -71,7 +74,8 @@ def test_suppression_value_delta_signs():
 
 
 def test_candidate_outcome_maps_to_edge_fields():
-    win = _rec(); win["classification"] = sa.WOULD_WIN
+    win = _rec()
+    win["classification"] = sa.WOULD_WIN
     out = sa.candidate_outcome(win)
     assert out["won"] is True and out["r_multiple"] == 2.0
 
@@ -80,7 +84,8 @@ def test_candidate_outcome_maps_to_edge_fields():
 def test_gate_metrics_keep_when_suppressing_losers():
     recs = []
     for _ in range(25):
-        r = _rec(); r["classification"] = sa.WOULD_LOSE
+        r = _rec()
+        r["classification"] = sa.WOULD_LOSE
         recs.append(r)
     m = sa.compute_gate_suppression_metrics(recs)
     g = m["quiet_scalp_block"]
@@ -91,7 +96,8 @@ def test_gate_metrics_keep_when_suppressing_losers():
 def test_gate_metrics_drop_when_killing_winners():
     recs = []
     for _ in range(25):
-        r = _rec(); r["classification"] = sa.WOULD_WIN
+        r = _rec()
+        r["classification"] = sa.WOULD_WIN
         recs.append(r)
     m = sa.compute_gate_suppression_metrics(recs)
     g = m["quiet_scalp_block"]

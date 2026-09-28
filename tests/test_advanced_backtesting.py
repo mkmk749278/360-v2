@@ -8,7 +8,6 @@ import pytest
 from src.backtester import (
     AnalyticsReport,
     Backtester,
-    BacktestConfig,
     MonteCarloReport,
     RegimeStressReport,
 )

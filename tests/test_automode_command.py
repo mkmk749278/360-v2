@@ -9,10 +9,8 @@ tests).
 """
 from __future__ import annotations
 
-from typing import List
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from src.commands.engine import _format_auto_status, handle_automode
 from src.commands.registry import CommandContext

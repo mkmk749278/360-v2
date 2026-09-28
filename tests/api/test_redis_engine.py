@@ -8,11 +8,6 @@ a direct state injection so no running Redis is required.
 import pytest
 from src.api.redis_engine import (
     RedisEngineFacade,
-    _MockRiskManager,
-    _MockOrderManager,
-    _MockRouter,
-    _MockSignal,
-    _MockPosition,
 )
 from unittest.mock import MagicMock
 

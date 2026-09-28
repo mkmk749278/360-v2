@@ -1300,7 +1300,8 @@ def test_coverage_survives_a_restart():
     while reading exactly like the whole window — the same shape as the two
     structural ledgers that erased their own evidence on every deploy.
     """
-    import tempfile, os as _os
+    import tempfile
+    import os as _os
 
     live.reset_sar_cache()
     fd, path = tempfile.mkstemp(suffix=".json")

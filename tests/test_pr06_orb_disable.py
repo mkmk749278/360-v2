@@ -211,7 +211,6 @@ class TestORBAuditFixes:
         """
         from datetime import datetime, timezone
         from src.channels.scalp import ScalpChannel
-        from unittest.mock import MagicMock
         ch = ScalpChannel()
         candles, indicators, smc_data = self._make_orb_long_setup()
         # Force session-time gate (London 7-9 UTC) and active flag.

@@ -215,7 +215,6 @@ def test_choosing_coindcx_requires_an_attested_key(db, monkeypatch, tmp_path) ->
     monkeypatch.setattr(uo, "_SINGLETON", st)
     monkeypatch.setattr(users_mod, "get_singleton",
                         lambda: SimpleNamespace(get_by_firebase_uid=lambda u: SimpleNamespace(user_id=1)))
-    import config
     c = _app(SimpleNamespace(firebase_uid="u1", user_id=1))
     assert c.put("/api/venue", json={"venue": "coindcx"}).status_code == 409
     _put()
@@ -290,7 +289,6 @@ _VECTOR = Path(__file__).parent / "fixtures" / "coindcx" / "app_contract.json"
 
 
 def _live_responses(db, monkeypatch, tmp_path, pos_store) -> Dict[str, Any]:
-    import config
     from src.api import user_overrides as uo
     from src.api import users as users_mod
     from src.venues.coindcx import instruments as I

@@ -13,7 +13,6 @@ from __future__ import annotations
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from src.channels.base import Signal
 from src.execution import signal_dispatch
@@ -68,9 +67,7 @@ def _make_position(
     *,
     invalidation_mode: str = "standard",
 ):
-    from dataclasses import dataclass
     from src.execution.position_state import Position, PositionState
-    from datetime import datetime, timezone
 
     return Position(
         signal_id=signal_id,
@@ -162,7 +159,6 @@ async def test_loose_user_skipped_by_excluded_modes():
 
 async def test_loose_user_closed_when_excluded_modes_absent():
     """Without excluded_modes, loose-mode users ARE closed (e.g. SL_HIT path)."""
-    from src.execution import position_state as _ps
 
     loose_pos = _make_position("uid-loose2", "INV-F4-002", invalidation_mode="loose")
 
@@ -247,7 +243,7 @@ async def test_tight_user_gets_early_atrl_kill(monkeypatch):
                      new_callable=AsyncMock) as mock_close_single,
         patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "standard"),
         patch.object(monitor, "_check_invalidation",
-                     wraps=monitor._check_invalidation) as spy,
+                     wraps=monitor._check_invalidation),
     ):
         await monitor._check_per_user_invalidation(sig)
 
@@ -309,7 +305,6 @@ def test_get_fsm_positions_returns_empty_when_not_initialised():
 
 
 def test_get_fsm_positions_skips_terminal():
-    from src.execution import position_state as _ps
 
     open_pos = _make_position("uid-open", "SIG-001", invalidation_mode="standard")
     closed_pos = _make_position("uid-closed", "SIG-001", invalidation_mode="standard")

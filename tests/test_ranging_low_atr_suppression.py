@@ -8,7 +8,6 @@ Scanner._should_block_ranging_low_atr_loser drives the call-site decision.
 """
 from __future__ import annotations
 
-import importlib
 
 import config
 from src.scanner import Scanner

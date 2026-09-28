@@ -22,7 +22,6 @@ import pathlib
 from typing import Any, Dict, List
 
 import numpy as np
-import pytest
 
 from src.execution import ai_governor as gov
 from src.execution import ai_governor_menu as menu

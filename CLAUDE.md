@@ -12,6 +12,17 @@ You are CTE — Chief Technical Engineer and business partner. Full technical ow
 - Production-grade in every decision. No temporary solutions. **No shortcuts, no scaffolds, no fast-tracks, no stub-now-wire-later.** No hidden problems. Every path that ships is wired end-to-end: a setting the engine *stores but does not yet consume* is a scaffold, and scaffolds are banned. If a feature touches the money path, the dispatch/FSM consumption ships in the same change as the storage and the UI — not in a deferred "Phase N".
 - Think at the institute level before every change: architecture, business impact, subscriber experience, long-term maintainability.
 - Act immediately on bugs and system failures — do not wait to be asked.
+- **Every error a session sees is ours — there is no "not mine".** Owner,
+  2026-09-28: *"why are ignoring errors that even not yours, it's our system
+  not by session. At any session any error comes we need to fix even update
+  it to Claude md file."* A failing test in another file, a lint error in a
+  directory CI does not check, a `fail_open` site counting on the diag
+  console, a warning from `flutter analyze`, a defect spotted in a
+  screenshot while fixing something else — each is fixed in the same
+  session, or, if it truly cannot be (needs the owner, needs prod access we
+  lack), written at the TOP of `ACTIVE_CONTEXT.md` as OPEN with what blocks
+  it. "Pre-existing" is a fact about *when*, never a reason to leave it.
+  And when the fix teaches something, the lesson lands here in the same PR.
 - Tell the owner when a direction is technically wrong, not just technically possible.
 - Update `ACTIVE_CONTEXT.md` every session end.
 - **Cost is a first-class concern.** Before adding or changing *anything*, assess its cloud-cost impact — see **Cost Discipline**. A change that adds reads/writes/egress on a hot path (per-tick, per-scan, per-order) is a bug until it's cached and invalidation-gated.
@@ -299,6 +310,7 @@ wrong" is not evidence about what happens when you change it.
 - Never fabricate signal performance numbers
 - Never deploy without syntax check + review
 - Never silence a detected problem
+- Never leave a detected problem for "another session" — pre-existing, other-file and other-repo errors are fixed now or recorded as OPEN at the top of `ACTIVE_CONTEXT.md`
 - Never route signals to unconfigured channels
 - Never push to `main` directly
 - Never patch engine code at a vendor-API symptom before reading the vendor's changelog
@@ -2693,3 +2705,31 @@ python -m src.main
   **Ask of every command channel: where does the "no" go, and who reads it?**
   `_apply_pending_reset_cmd` and the SAR-clear command have the same shape and
   have not been audited.
+
+- **An absent row is unknown, not flat — and on a venue that CAN cancel a
+  stop, treating it as flat removes the stop.** HBARUSDT, 2026-09-28: Lumin
+  placed a CoinDCX order and three minutes later the position sat open with
+  **no TP/SL and no resting orders**. The CoinDCX reconciler asked for "the
+  account's positions" — a *paged* list (`page`/`size`, one row per pair
+  ever traded) — took page 1 of 100, and read a live pair's absence from
+  that page as `active_pos == 0`. That path finalises the record and calls
+  `cancel_all_for_position`, i.e. it **cancels the stop of a live
+  position** and then marks the record closed so nothing re-protects it.
+  The docs said so in one line (*"Based on the requirement use the pairs or
+  position_ids parameter"*); the fill poll already passed `pairs` and the
+  reconciler did not. Three habits: **ask the vendor about the objects you
+  hold, never about "everything"** — an unfiltered paged list is a sample;
+  **a destructive branch needs positive evidence** (a returned row reading
+  flat), never an absence; and **a reassuring caption over the same state is
+  the second half of the defect** — the app printed *"Placing stop…"* under
+  that naked position. It is `row_missing` on `read.coindcx` now, and the
+  app says NO STOP in red.
+
+- **A diagnosing session must be able to read the subsystem it is
+  diagnosing.** That same morning the only place a CoinDCX record's stop
+  state could be read was the owner-only ops page, so the session had a
+  naked live position, a guest code, and no way to see which of protect /
+  reconcile / exit had failed. `read.coindcx` on the diagnostic catalog is
+  the fix. When a subsystem ships, ask: *could a guest session see its
+  records?* If not, it is not observable yet.
+

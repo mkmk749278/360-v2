@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.chart_patterns import (
     detect_bear_flag,
     detect_bull_flag,
-    detect_head_and_shoulders,
     detect_patterns,
     pattern_confidence_bonus,
 )

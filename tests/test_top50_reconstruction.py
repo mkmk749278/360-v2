@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
-import pytest
 
 from src.pair_manager import PairInfo, PairManager, PairTier
 from src.ai_engine.predictor import PredictionFeatures, SignalPredictor
@@ -219,7 +217,7 @@ class TestSignalPredictorAllowedPairs:
         predictor.set_allowed_pairs(["btcusdt"])  # lowercase
 
         # Should still be allowed (normalised to upper)
-        result = await predictor.predict("BTCUSDT", PredictionFeatures())
+        await predictor.predict("BTCUSDT", PredictionFeatures())
         assert predictor.prediction_count == 1
 
     async def test_predict_batch_filters_non_allowed(self):

@@ -56,6 +56,7 @@ whole one is the fabrication class arriving as a shape.
 from __future__ import annotations
 
 import time
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -246,6 +247,12 @@ class FootprintStore:
         self._bin_bps = float(bin_bps)
         self._max_bins = int(max_bins)
         self._by_symbol: Dict[str, Deque[BarFootprint]] = {}
+        #: Guards the sealed rings.  Trades are folded in on the stream's
+        #: thread while readers (the liveness probe, evaluators) walk the
+        #: rings on another, and CPython raises "deque mutated during
+        #: iteration" — the probe recorded exactly that as a fail-open
+        #: (2026-09-28).  Held only for an append or a copy, never for work.
+        self._rings_lock = threading.Lock()
         self._open_bar: Dict[str, BarFootprint] = {}
         self._started_at = time.time()
         #: Bars whose shape was refused for exceeding the bin cap. Counted
@@ -341,19 +348,21 @@ class FootprintStore:
             self.incomplete_bars += 1
 
     def _seal(self, sym: str, bar: BarFootprint) -> None:
-        ring = self._by_symbol.get(sym)
-        if ring is None:
-            ring = deque(maxlen=self._bars)
-            self._by_symbol[sym] = ring
-        ring.append(bar)
+        with self._rings_lock:
+            ring = self._by_symbol.get(sym)
+            if ring is None:
+                ring = deque(maxlen=self._bars)
+                self._by_symbol[sym] = ring
+            ring.append(bar)
 
     # ── reads ─────────────────────────────────────────────────────────────
     def bars(self, symbol: str, limit: Optional[int] = None) -> List[BarFootprint]:
         """Sealed bars, oldest first. The open bar is deliberately excluded —
         a bar still being filled is not comparable with a finished one, and
         including it would make every "latest bar" read low."""
-        ring = self._by_symbol.get(str(symbol).upper())
-        rows = list(ring) if ring else []
+        with self._rings_lock:
+            ring = self._by_symbol.get(str(symbol).upper())
+            rows = list(ring) if ring else []
         return rows[-limit:] if limit else rows
 
     def open_bar(self, symbol: str) -> Optional[BarFootprint]:
@@ -388,13 +397,13 @@ class FootprintStore:
         return rows[len(rows) // 2]
 
     def health(self) -> Dict[str, Any]:
-        sealed = sum(len(r) for r in self._by_symbol.values())
-        bins = sum(len(b.bins) for r in self._by_symbol.values() for b in r)
-        incomplete = sum(
-            1 for r in self._by_symbol.values() for b in r if b.incomplete
-        )
+        with self._rings_lock:
+            rings = [list(r) for r in self._by_symbol.values()]
+        sealed = sum(len(r) for r in rings)
+        bins = sum(len(b.bins) for r in rings for b in r)
+        incomplete = sum(1 for r in rings for b in r if b.incomplete)
         return {
-            "symbols": len(self._by_symbol),
+            "symbols": len(rings),
             "open_bars": len(self._open_bar),
             "sealed_bars": sealed,
             "bins_held": bins,

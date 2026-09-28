@@ -1565,7 +1565,7 @@ class TestVolumeSurgeBreakoutRefinements:
         """
         ch = ScalpChannel()
         candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
-        sig = ch._evaluate_volume_surge_breakout(
+        ch._evaluate_volume_surge_breakout(
             "BTCUSDT", candles, _surge_indicators(), _surge_smc(),
             0.01, 10_000_000, regime="QUIET",
         )
@@ -1988,7 +1988,7 @@ class TestBreakdownShortRefinements:
         """
         ch = ScalpChannel()
         candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
-        sig = ch._evaluate_breakdown_short(
+        ch._evaluate_breakdown_short(
             "BTCUSDT", candles, _breakdown_indicators(), _breakdown_smc(),
             0.01, 10_000_000, regime="QUIET",
         )
@@ -5161,7 +5161,7 @@ class TestSrFlipHtfLevelBookIntegration:
         smc = _srflip_smc(direction="LONG")
         # Multi-TF CLUSTERED level: source_tfs=["1h","4h"] qualifies.
         smc["level_book_levels"] = [_lb_level(100.0, source_tfs=["1h", "4h"])]
-        sig = self._call_long(candles, _srflip_indicators_long(), smc)
+        self._call_long(candles, _srflip_indicators_long(), smc)
         # Don't require sig is not None (other downstream gates may reject);
         # just require that we got past the HTF + 1H-break gates.  Reason
         # tokens after those gates: reclaim_hold_failed, wick_quality_failed,

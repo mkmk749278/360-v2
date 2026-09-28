@@ -1011,7 +1011,6 @@ class TestStreamShardingCap:
 
     def test_single_shard_for_small_stream_list(self):
         """A small stream list that fits within the cap uses exactly one shard."""
-        from config import WS_MAX_STREAMS_PER_CONN
         ws = WebSocketManager(lambda data: None, market="spot")
         ws._running = True
         ws._session = mock.MagicMock()
@@ -1818,7 +1817,6 @@ class TestCombinedStreamPayloadUnwrap:
         ``data_store.update_candle`` on candle close.  Use a SimpleNamespace
         engine stub with just the surfaces _on_ws_message reads.
         """
-        from types import SimpleNamespace
         from src.main import CryptoSignalEngine
 
         # Build a minimal engine via __new__ to bypass full __init__;

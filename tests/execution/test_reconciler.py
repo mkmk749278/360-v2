@@ -468,7 +468,6 @@ def test_default_positions_for_user_empty_when_uninitialised() -> None:
 # ---------------------------------------------------------------------------
 
 
-from datetime import datetime, timedelta, timezone
 
 
 def _pos_with_orders(**kw) -> position_state.Position:

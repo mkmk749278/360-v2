@@ -10,7 +10,6 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock
 
-import pytest
 
 from src.api.snapshot import _signal_to_detail, _hold_mins
 

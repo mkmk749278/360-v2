@@ -1,10 +1,8 @@
 """Tests for src.regime_kill_switch — BTC whipsaw detection."""
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock
 
-import pytest
 
 from src.regime_kill_switch import (
     BtcRegimeKillSwitch,

@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import pytest
 
@@ -314,7 +313,7 @@ class TestPerUserVisibility:
         )
         # Wire a fresh user (uid=2) who has NEVER enabled paper.
         from src.api import user_overrides as _uo, users as _users
-        store = _uo.get_singleton()
+        _uo.get_singleton()
         us = _users.get_singleton()
         us.get_or_create_by_phone("+15550000002")  # uid=2 — never enabled paper
         # User 1 (set up by autouse fixture) DOES have a subscription, so

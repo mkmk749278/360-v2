@@ -4,6 +4,39 @@
 
 ---
 
+## OPEN 2026-09-28 — CoinDCX live position left WITHOUT a stop (HBARUSDT); fix in #1081
+
+Owner screenshot 11:34 IST: Lumin placed HBARUSDT LONG 5x (~$10, qty 102,
+entry 0.09743) on the owner's CoinDCX account; 3 minutes later CoinDCX showed
+**no TP/SL and no resting orders**. Signal SL 0.09428 / TP1 0.10101. Owner was
+told to set the SL by hand or close it.
+
+**Most likely cause (from the code + CoinDCX docs, NOT yet confirmed on prod
+data):** the CoinDCX reconciler read `positions()` with no `pairs` — a paged
+list, page 1 of 100, one row per pair ever traded — and treated a live pair's
+absence as flat → `finalize_closed` → `cancel_all_for_position`, removing the
+stop and marking the record CLOSED so nothing re-protected it. Fixed in #1081:
+reconciler asks for the user's own pairs; an absent row on a filled record is
+`row_missing` and left untouched.
+
+**Confirm on prod after deploy** (guest session → Diagnostics → Console →
+`read.coindcx`, new in #1081): the HBAR record's `state` / `close_reason` /
+`last_error`. If it reads CLOSED with `close_reason` EXTERNAL or SL while the
+exchange still held the position, the theory is confirmed. If it reads OPEN
+with `sl_resting: true`, the cause is elsewhere (create_tpsl answered success
+but nothing rested) — re-open this.
+
+Until confirmed: **recommend `COINDCX_EXECUTION_ENABLED=false`** (owner call).
+
+Same PR / lumin-app #175: manual Take after a refused attempt no longer says
+"already sent"; take route no longer demands a Binance key from a CoinDCX
+user; runtime-status `armed` follows the chosen venue; the app names the
+exchange everywhere (take sheet, Trade tab activity, positions, gates) and
+shows NO STOP in red on a naked CoinDCX position; Trading platform page shows
+Binance API and CoinDCX API side by side. Also fixed while there: footprint
+store race (`deque mutated during iteration` on the liveness probe) and the
+test-suite lint backlog.
+
 ## OPEN 2026-09-27 — web app PUT/DELETE blocked by nginx preflight (fix in this PR; live until its deploy runs)
 
 Owner: choosing CoinDCX in the web app returns *"no reply arrived in time"* even

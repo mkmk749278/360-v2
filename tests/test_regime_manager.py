@@ -1,7 +1,7 @@
 """Tests for src.scanner.regime_manager — regime-adaptive scheduling."""
 
 
-from src.scanner.regime_manager import RegimeManager, RegimeSchedule
+from src.scanner.regime_manager import RegimeManager
 
 
 class _FakeChannel:

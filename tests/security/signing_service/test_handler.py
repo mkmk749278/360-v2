@@ -27,12 +27,10 @@ What we pin:
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from cryptography.exceptions import InvalidTag
 
 from src.security import envelope_crypto, firestore_keystore, kms_client
 from src.security.signing_service import handler, protocol

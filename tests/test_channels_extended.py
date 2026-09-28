@@ -6,7 +6,6 @@ SIGNAL_CHANNEL_AUDIT.md §5 (P0 recommendation).
 """
 
 import numpy as np
-import pytest
 
 from src.channels.scalp_divergence import ScalpDivergenceChannel
 from src.channels.scalp_supertrend import ScalpSupertrendChannel
@@ -344,7 +343,7 @@ class TestScalpIchimokuChannel:
             "15m": _make_indicators(adx_val=25, rsi_val=55),
         }
         # Should attempt 15m evaluation (won't necessarily fire but shouldn't crash)
-        sig = ch.evaluate("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
+        ch.evaluate("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
         # Just verify no crash — signal may or may not be generated
 
 

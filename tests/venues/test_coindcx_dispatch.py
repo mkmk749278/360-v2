@@ -39,7 +39,6 @@ def _gates(monkeypatch):
         "reason": "ok"})
     from src.execution import position_fsm
     monkeypatch.setattr(position_fsm, "_enforce_safety_gates", lambda **kw: None)
-    import config
     DCX["coindcx_execution_enabled"] = True
     DCX["coindcx_open_to_all"] = True  # the fan-out tests mean "every connected user"
     yield
@@ -64,7 +63,6 @@ async def test_binance_fanout_skips_a_user_who_chose_coindcx() -> None:
 
 
 async def test_coindcx_fanout_off_by_default_does_nothing(monkeypatch) -> None:
-    import config
     DCX["coindcx_execution_enabled"] = False
     opened = AsyncMock()
     monkeypatch.setattr(E.get_executor(), "open_position", opened)
@@ -85,7 +83,6 @@ async def test_coindcx_fanout_only_opens_for_coindcx_users(monkeypatch) -> None:
 
 
 async def test_allow_list_restricts_to_owner(monkeypatch) -> None:
-    import config
     from src.venues.coindcx import keystore
     DCX["coindcx_open_to_all"] = False
     DCX["coindcx_execution_allowed_uids"] = "owner"

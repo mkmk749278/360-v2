@@ -13,7 +13,6 @@ What we pin:
 """
 from __future__ import annotations
 
-from typing import List
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -1467,7 +1466,7 @@ async def test_position_cap_exceeded_blocks_order(
     """When assert_position_cap raises PositionCapExceeded the order must be
     rejected and recorded in dispatch_log — place_signal never called."""
     from unittest.mock import patch as _patch
-    from src.execution import position_fsm, dispatch_log as _dl
+    from src.execution import position_fsm
     from src.execution import tripwires as _tw
 
     modes, _paused = _mode_state_stub

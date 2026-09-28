@@ -10,8 +10,7 @@ wide-SL signals don't bank at 0.2R.
 """
 from __future__ import annotations
 
-import pytest
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -78,7 +77,6 @@ def _run_check(sig, indicators, monkeypatch, *, consecutive_override=None):
     monkeypatch.setattr("src.trade_monitor.INVALIDATION_CONSECUTIVE_THRESHOLD", base)
 
     # Supply indicators directly
-    original_fn = tm._indicators_fn
     tm._indicators_fn = lambda _sym: indicators
 
     return tm._check_invalidation(sig)

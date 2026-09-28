@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from src.channels.base import Signal
-from src.level_book import LevelBook, Level
+from src.level_book import LevelBook
 from src.scanner import (
     Scanner,
     _STRUCTURE_ALIGN_BONUS,
