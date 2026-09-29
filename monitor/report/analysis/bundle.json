@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-28T05:48:36.809525+00:00",
-  "generated_at_ts": 1790574516.8095245,
+  "generated_at": "2026-09-29T06:06:05.937866+00:00",
+  "generated_at_ts": 1790661965.9378657,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "8aee63dde86d916706a0fa4f7c30916979953270",
+  "git_sha": "ab19b683d2e6cc29db5818694d07d10f3a7880b1",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 11451,
-    "strategy_matrix_scored_cells": 3535,
+    "strategy_matrix_cells": 11563,
+    "strategy_matrix_scored_cells": 3647,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -45,16 +45,16 @@
       },
       {
         "strategy": "VOLUME_SURGE_BREAKOUT",
-        "context_key": "NY/MARKUP/NORMAL/BTC_RISING/MIDCAP",
-        "edge_r": 2.0311127885451046,
-        "n": 15,
+        "context_key": "OFF_HOURS/QUIET/COMPRESSED/BTC_NEUTRAL/MIDCAP",
+        "edge_r": 2.428730327528485,
+        "n": 33,
         "verdict": "STRONG"
       },
       {
-        "strategy": "TREND_PULLBACK_EMA",
-        "context_key": "NY/MARKUP/NORMAL/BTC_NEUTRAL/MAJOR",
-        "edge_r": 2.010604360792581,
-        "n": 44,
+        "strategy": "VOLUME_SURGE_BREAKOUT",
+        "context_key": "NY/MARKUP/NORMAL/BTC_RISING/MIDCAP",
+        "edge_r": 2.0311127885451046,
+        "n": 15,
         "verdict": "STRONG"
       }
     ],
@@ -88,10 +88,10 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "MEAN_REVERT",
-        "context_key": "OFF_HOURS/QUIET/NORMAL/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.5313073832715764,
-        "n": 15,
+        "strategy": "MOVER_TREND_PULLBACK@TUNED",
+        "context_key": "ASIA/VOLATILE_EXPANSION/NORMAL/BTC_FALLING",
+        "edge_r": -1.5863021887807967,
+        "n": 18,
         "verdict": "NEGATIVE"
       }
     ],
