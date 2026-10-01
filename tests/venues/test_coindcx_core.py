@@ -144,6 +144,31 @@ async def test_fetch_failure_keeps_previous_cache_and_counts() -> None:
     assert await reg.pair_for("BTCUSDT") == "B-BTC_USDT"
 
 
+async def test_an_order_is_never_planned_on_a_stale_price(monkeypatch) -> None:
+    """A failed refresh keeps the old snapshot — right for the symbol map,
+    wrong for a price: during a CoinDCX outage ``last_price`` used to return
+    a number of any age and the gap / levels-crossed checks ran on it."""
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    reg = inst.InstrumentRegistry()
+
+    async def ok(url, params=None):
+        return _load("prices_rt_subset.json")
+
+    reg._get_json = ok  # type: ignore[assignment]
+    assert await reg.last_price("BTCUSDT")
+
+    async def boom(url, params=None):
+        raise RuntimeError("down")
+
+    reg._get_json = boom  # type: ignore[assignment]
+    clock[0] += inst.PRICE_MAX_AGE_FOR_ORDER_S + 1
+    assert await reg.last_price("BTCUSDT") is None
+    assert reg.stats["price_stale_refusals"] == 1
+    # the symbol map still answers from the old snapshot
+    assert await reg.pair_for("BTCUSDT") == "B-BTC_USDT"
+
+
 # ------------------------------------------------------------------ stream
 
 

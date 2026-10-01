@@ -446,6 +446,81 @@ async def test_reconciler_adopts_or_retires_uncertain_entries(env) -> None:
     assert store.get("u2", "S2").state == P.REJECTED
 
 
+async def test_reconciler_never_retires_an_uncertain_entry_on_an_absent_row(env) -> None:
+    # Absence is not evidence of flat (HBARUSDT).  Retiring on it abandons a
+    # position that may be live and naked; only a returned flat row may
+    # retire at the short grace.
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXUnreachable("timeout")
+    fx.fill = False
+    await ex.open_position(**_open_kwargs())
+    real = fx.positions
+
+    async def absent(**kw):
+        await real(**kw)
+        return []
+    fx.positions = absent  # type: ignore[method-assign]
+    rec = store.get("u1", "S1")
+    rec.created_at = time.time() - (R.UNRESOLVED_GRACE_S + 10)
+    store.put(rec)
+    await R.CoinDCXReconciler(ex).cycle()
+    assert store.get("u1", "S1").state == P.ENTRY_UNCERTAIN
+
+    rec = store.get("u1", "S1")
+    rec.created_at = time.time() - (R.UNRESOLVED_ABSENT_GRACE_S + 10)
+    store.put(rec)
+    r = R.CoinDCXReconciler(ex)
+    await r.cycle()
+    assert store.get("u1", "S1").state == P.REJECTED
+    assert r.stats["entries_retired_row_absent"] == 1
+
+
+async def test_reconciler_retires_on_a_returned_flat_row_at_the_short_grace(env) -> None:
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXUnreachable("timeout")
+    fx.fill = False
+    await ex.open_position(**_open_kwargs())
+    fx._row("B-BTC_USDT", "INR")          # the exchange returns the pair, flat
+    rec = store.get("u1", "S1")
+    rec.created_at = time.time() - (R.UNRESOLVED_GRACE_S + 10)
+    store.put(rec)
+    await R.CoinDCXReconciler(ex).cycle()
+    assert store.get("u1", "S1").state == P.REJECTED
+
+
+async def test_target_repair_failure_never_exits_a_position_whose_stop_rests(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    fx.pos[("B-BTC_USDT", "INR")]["take_profit_trigger"] = None   # target vanished
+
+    async def down(**kw):
+        raise C.CoinDCXUnreachable("502")
+    fx.create_tpsl = down  # type: ignore[method-assign]
+    fx.calls.clear()
+    await R.CoinDCXReconciler(ex).cycle()
+    rec = store.get("u1", "S1")
+    assert rec.state == P.OPEN and rec.sl_resting
+    assert "exit" not in fx.calls
+    assert "take profit not placed" in rec.last_error
+    assert E.counters().get("tp_repair_failed", 0) >= 1
+
+
+async def test_close_asked_during_an_unresolved_entry_is_honoured_on_adoption(env) -> None:
+    # This refusal used to say "the reconciler will close it", and nothing did:
+    # the reconciler adopted the entry, protected it and let it run.
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXUnreachable("timeout")
+    await ex.open_position(**_open_kwargs())
+    fx.order_raise = None
+    out = await ex.close_position("u1", "S1", reason="signal_closed")
+    assert out["reject_class"] == "EntryUnresolved"
+    fx._row("B-BTC_USDT", "INR").update(active_pos=0.001, avg_price=100_000.0)
+    await R.CoinDCXReconciler(ex).cycle()
+    rec = store.get("u1", "S1")
+    assert rec.state == P.CLOSED
+    assert "exit" in fx.calls
+
+
 async def test_reconciler_budget_is_spent_per_user_examined(env, monkeypatch) -> None:
     fx, store, _, ex = env
     import config

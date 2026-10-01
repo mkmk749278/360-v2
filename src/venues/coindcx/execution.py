@@ -281,6 +281,11 @@ class CoinDCXExecutor:
         self._sleep = sleep
         self._fill_wait_s = COINDCX_FILL_WAIT_SEC if fill_wait_s is None else fill_wait_s
         self._uid_locks: Dict[str, asyncio.Lock] = {}
+        # (uid, signal_id) asked to close while the entry was still being
+        # confirmed.  Honoured the moment the position is known to exist —
+        # after the fill here, or when the reconciler adopts it.  In memory:
+        # a restart loses it and the age cap is then the backstop.
+        self._close_requested: Dict[tuple, str] = {}
 
     @property
     def store(self) -> _pos.CoinDCXPositionStore:
@@ -462,6 +467,14 @@ class CoinDCXExecutor:
         await self._put(pos)
         _count("entry_filled")
         await self.protect(pos, client=client)
+        if pos.state == _pos.OPEN:
+            await self.honour_close_request(pos, client)
+            if pos.state != _pos.OPEN:
+                return _outcome(
+                    "rejected", "ClosedOnRequest",
+                    "The signal closed while your entry was being placed, so the "
+                    "position was closed straight away.",
+                )
         if pos.state != _pos.OPEN:
             return _outcome(
                 "rejected", pos.close_reason or "ProtectionFailed",
@@ -556,6 +569,12 @@ class CoinDCXExecutor:
         sl_str = _inst.format_number(pos.sl_price, tick) if tick else repr(pos.sl_price)
         tp_str = _inst.format_number(pos.tp_price, tick) if tick else repr(pos.tp_price)
 
+        # The reconciler sets ``sl_resting`` from the exchange's own trigger.
+        # When the stop already rests, this call is a target repair, and a
+        # failure must leave a protected position alone — exiting it would
+        # turn a missing take-profit into a forced close.
+        stop_already_resting = pos.sl_resting
+
         last_err = ""
         for attempt in range(2):
             try:
@@ -585,10 +604,29 @@ class CoinDCXExecutor:
             last_err = sl_err
             await self._sleep(0.5)
 
+        if stop_already_resting:
+            _count("tp_repair_failed")
+            pos.last_error = f"take profit not placed: {last_err}"[:500]
+            pos.state = _pos.OPEN
+            await self._put(pos)
+            return
         _count("stop_refused")
         await self._exit(pos, client, CLOSE_PROTECTION_FAILED, note=f"stop refused: {last_err}")
 
     # -- Close ------------------------------------------------------------
+
+    async def honour_close_request(
+        self, pos: _pos.CoinDCXPosition, client: _client.CoinDCXClient,
+    ) -> None:
+        """Exit ``pos`` if a close was asked for while its entry was unresolved."""
+        reason = self._close_requested.pop((pos.uid, pos.signal_id), None)
+        if reason is None or pos.state != _pos.OPEN:
+            return
+        _count("close_request_honoured")
+        await self._exit(pos, client, CLOSE_EXIT, note=f"{reason} (requested during entry)")
+
+    def forget_close_request(self, uid: str, signal_id: str) -> None:
+        self._close_requested.pop((uid, signal_id), None)
 
     async def close_position(
         self, uid: str, signal_id: str, *, reason: str,
@@ -603,9 +641,15 @@ class CoinDCXExecutor:
             if not pos.live:
                 return _outcome("closed", None, None, already=True)
             if pos.state in (_pos.PENDING, _pos.ENTRY_UNCERTAIN) or not pos.position_id:
+                # Recorded, not dropped: the moment the entry is confirmed
+                # (fill seen here, or adopted by the reconciler) it is exited.
+                # This sentence used to promise that and nothing did it.
+                self._close_requested[(uid, signal_id)] = reason
+                _count("close_requested_during_entry")
                 return _outcome(
                     "rejected", "EntryUnresolved",
-                    "The entry is still being confirmed; the reconciler will close it.",
+                    "The entry is still being confirmed; it will be closed as "
+                    "soon as CoinDCX confirms it.",
                 )
             client = self._client_factory(uid)
             await self._exit(pos, client, CLOSE_EXIT, note=reason)

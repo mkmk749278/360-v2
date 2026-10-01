@@ -47,6 +47,11 @@ log = get_logger("venues.coindcx.reconciler")
 #: A PENDING / ENTRY_UNCERTAIN record whose pair is still flat after this long
 #: is retired: the entry never became a position.
 UNRESOLVED_GRACE_S = 90.0
+#: The same, when the exchange returned NO row for the pair at all.  Absence
+#: is not evidence of flat (the HBARUSDT rule); a pair never traded before may
+#: legitimately have no row, so the record is still retired eventually — but
+#: only after long enough that a real position would have shown up.
+UNRESOLVED_ABSENT_GRACE_S = 900.0
 
 
 class CoinDCXReconciler:
@@ -177,7 +182,18 @@ class CoinDCXReconciler:
                         await ex._put(rec)
                         self.stats["entries_adopted"] += 1
                         await ex.protect(rec, client=client)
-                    elif now - rec.created_at > UNRESOLVED_GRACE_S:
+                        await ex.honour_close_request(rec, client)
+                    elif now - rec.created_at > (
+                        UNRESOLVED_GRACE_S if prow is not None else UNRESOLVED_ABSENT_GRACE_S
+                    ):
+                        # A returned flat row is evidence the entry never
+                        # opened.  An ABSENT row is not (HBARUSDT): retiring
+                        # on it abandons a position that may be live and
+                        # naked, so absence waits far longer and is counted
+                        # apart.
+                        if prow is None:
+                            self.stats["entries_retired_row_absent"] += 1
+                        ex.forget_close_request(uid, rec.signal_id)
                         rec.state = _pos.REJECTED
                         rec.closed_at = now
                         rec.last_error = (rec.last_error + " | no position after grace").strip(" |")

@@ -4,6 +4,60 @@
 
 ---
 
+## OPEN 2026-10-01 — CoinDCX auto-trade audit (owner: "fully audit … I enabled it for users")
+
+**Fixed on `ccr-6cb7a978-b2fabm`** (engine, money path, so owner sign-off; ops
+fixture re-synced on the same branch name in 360ce-ops). Each fix has a test
+that fails on the old code:
+1. **Uncertain entry retired on an ABSENT row** (the HBAR rule, missed in one
+   branch). A `PENDING`/`ENTRY_UNCERTAIN` record whose pair returned no row
+   was marked `REJECTED` after 90s, which abandons a position that may be live
+   and naked. Now only a returned flat row retires at 90s. Absence waits 900s
+   and is counted as `entries_retired_row_absent`.
+2. **A target-only repair could close a protected position.** When the
+   exchange showed the stop resting but the TP missing, two failed
+   `create_tpsl` calls (a CoinDCX 5xx, for example) ran `_exit`
+   (`PROTECTION_FAILED`). Now it records `tp_repair_failed`, stays OPEN and
+   retries next cycle.
+3. **Orders planned on a stale price.** A failed price refresh kept the old
+   snapshot, and `last_price` served it at any age to the gap and
+   levels-crossed checks. Now it refuses past 15s (`price_unavailable`,
+   counted as `price_stale_refusals`).
+4. **"The reconciler will close it" was false.** A close during an unresolved
+   entry (signal closed, or the user tapped Close) was dropped. The reconciler
+   adopted the position, protected it and let it run to TP/SL or the age cap.
+   Now the request is held in memory and honoured on fill or adoption. A
+   restart loses it, and the age cap is then the backstop.
+
+**Still OPEN. Each needs an owner decision or verified vendor behaviour:**
+- **CoinDCX failures feed the SHARED global breaker** (10 failures in 60s
+  across users → `kill_switch.engage_global`). A CoinDCX-only outage, or a
+  CoinDCX-specific rejection repeated across CoinDCX users on one signal,
+  therefore halts **Binance** auto-trade for everyone. Insufficient-funds and
+  other user-setup refusals are excluded. Proposed: a CoinDCX-scoped global
+  breaker that pauses only CoinDCX dispatch. This is a blast-radius change,
+  so owner sign-off.
+- **The router awaits the CoinDCX fan-out inline**, before `_active_signals`,
+  the position lock and `push_signal_published`. Each user costs about 4
+  signed calls plus fill polling, at concurrency 5 (`COINDCX_DISPATCH_CONCURRENCY`).
+  So push, monitor tracking and the next queued signal all wait on CoinDCX.
+  Inferred, not measured: ~1.5s per user is ~30s per signal at 100 users and
+  minutes at 1,000. Proposed: a background task, safe now that #4 above
+  honours closes that arrive during entry.
+- **Close bookkeeping reads page 1 of the account's whole order list.**
+  CoinDCX's list-orders endpoint has no pair filter (checked against
+  docs.coindcx.com 2026-10-01). On a busy account the exit order can be off
+  page 1, so the record reads `EXTERNAL` with no exit price, PnL or fees.
+  This is not destructive, but the app's net-of-fees P&L is wrong for those
+  rows. Proposed: `/futures/trades`, which takes `pair` and dates; it needs a
+  signing-service allow-list entry and a live check of its response shape.
+- **`row_missing` has no pager.** A record whose row keeps coming back absent
+  is skipped forever, and the age cap is skipped with it, because the
+  `continue` comes first. Proposed: a feature-liveness probe on
+  `row_missing` growth.
+- **Instrument filters are always fetched for USDT margin**, including for
+  INR-margined users. Unverified whether INR minimums or leverage differ.
+
 ## 2026-09-28 — CoinDCX HBARUSDT naked stop: CAUSE CONFIRMED, fixed by #1081 (merged 06:46 UTC)
 
 Owner screenshot 11:34 IST: Lumin placed HBARUSDT LONG 5x (~$10) on CoinDCX and

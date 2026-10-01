@@ -50,6 +50,11 @@ MARGIN_CURRENCIES = (MARGIN_USDT, MARGIN_INR)
 LIST_TTL_S = 6 * 3600.0
 DETAIL_TTL_S = 6 * 3600.0
 PRICE_TTL_S = 3.0
+#: The oldest snapshot an ORDER may be planned against.  A failed refresh
+#: keeps the previous snapshot (right for the symbol map, which rarely
+#: changes); it is wrong for a price, which during a CoinDCX outage could be
+#: hours old and would then decide the gap and levels-crossed checks.
+PRICE_MAX_AGE_FOR_ORDER_S = 15.0
 CONVERSION_TTL_S = 60.0
 _HTTP_TIMEOUT_S = 8.0
 
@@ -211,7 +216,7 @@ class InstrumentRegistry:
         self.stats: Dict[str, int] = {
             "list_fetches": 0, "list_failures": 0,
             "detail_fetches": 0, "detail_failures": 0,
-            "price_fetches": 0, "price_failures": 0,
+            "price_fetches": 0, "price_failures": 0, "price_stale_refusals": 0,
             "conversion_fetches": 0, "conversion_failures": 0,
         }
 
@@ -298,7 +303,14 @@ class InstrumentRegistry:
         return row.get("pair") if row else None
 
     async def last_price(self, symbol: str) -> Optional[float]:
-        row = (await self.prices()).get(symbol.upper())
+        """Last price, or ``None`` when no snapshot younger than
+        :data:`PRICE_MAX_AGE_FOR_ORDER_S` exists — the caller refuses with
+        ``price_unavailable`` rather than trading on a stale number."""
+        snapshot = await self.prices()
+        if self._prices_stale(PRICE_MAX_AGE_FOR_ORDER_S):
+            self.stats["price_stale_refusals"] += 1
+            return None
+        row = snapshot.get(symbol.upper())
         px = _num(row.get("ls")) if row else 0.0
         return px if px > 0 else None
 
