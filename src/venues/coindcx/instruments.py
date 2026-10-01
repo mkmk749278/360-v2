@@ -316,19 +316,32 @@ class InstrumentRegistry:
 
     # -- Instrument detail ------------------------------------------------
 
-    async def instrument(self, symbol: str) -> Optional[Instrument]:
-        """The instrument for Binance ``symbol`` — ``None`` means refuse."""
+    async def instrument(
+        self, symbol: str, margin_currency: str = MARGIN_USDT,
+    ) -> Optional[Instrument]:
+        """The instrument for Binance ``symbol`` on ``margin_currency`` —
+        ``None`` means refuse.
+
+        Fetched per margin currency: an INR-margined position is bound by the
+        INR instrument's status, exit-only flag and leverage caps, which
+        CoinDCX publishes separately (until 2026-10-01 INR users were planned
+        against the USDT instrument).  Sizes stay in USDT either way — the
+        contract is quoted and settled in USDT on both, and a payload quoting
+        anything else is refused rather than read.
+        """
         pair = await self.pair_for(symbol)
         if not pair:
             return None
-        cached = self._details.get(pair)
+        ccy = (margin_currency or MARGIN_USDT).upper()
+        key = pair if ccy == MARGIN_USDT else f"{pair}|{ccy}"
+        cached = self._details.get(key)
         if cached is not None and (time.monotonic() - cached[1]) < DETAIL_TTL_S:
             return cached[0]
         self.stats["detail_fetches"] += 1
         try:
             data = await self._get_json(
                 API_BASE + INSTRUMENT_PATH,
-                params={"pair": pair, "margin_currency_short_name": MARGIN_USDT},
+                params={"pair": pair, "margin_currency_short_name": ccy},
             )
         except Exception as exc:
             self.stats["detail_failures"] += 1
@@ -336,8 +349,11 @@ class InstrumentRegistry:
             # A stale entry is better than none for filters that rarely change.
             return cached[0] if cached is not None else None
         raw = (data or {}).get("instrument") if isinstance(data, dict) else None
+        if isinstance(raw, dict) and str(raw.get("quote_currency_short_name") or "USDT").upper() != "USDT":
+            self.stats["detail_refused_quote"] = self.stats.get("detail_refused_quote", 0) + 1
+            raw = None  # a non-USDT quote would mis-scale every size check
         inst = parse_instrument(raw, symbol.upper()) if isinstance(raw, dict) else None
-        self._details[pair] = (inst, time.monotonic())
+        self._details[key] = (inst, time.monotonic())
         return inst
 
     # -- INR conversion ---------------------------------------------------

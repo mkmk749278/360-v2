@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -286,6 +287,11 @@ class CoinDCXExecutor:
         # after the fill here, or when the reconciler adopts it.  In memory:
         # a restart loses it and the age cap is then the backstop.
         self._close_requested: Dict[tuple, str] = {}
+        # signal_id → close reason, for signals the engine has closed.  The
+        # router fans CoinDCX out in the background, so a signal can close
+        # before a user's record exists; the entry is then refused, or exited
+        # if it filled first.  Bounded; a restart forgets it (age cap backstop).
+        self._closed_signals: "OrderedDict[str, str]" = OrderedDict()
 
     @property
     def store(self) -> _pos.CoinDCXPositionStore:
@@ -341,6 +347,11 @@ class CoinDCXExecutor:
         uid, signal_id, symbol = kw["uid"], kw["signal_id"], kw["symbol"]
         direction, margin = kw["direction"], kw["margin_currency"]
 
+        if self.close_reason_for(uid, signal_id) is not None:
+            _count("refused:signal_closed")
+            return _outcome("rejected", "SignalClosed",
+                            "This signal has already closed, so nothing was placed.")
+
         existing = await asyncio.to_thread(self.store.get, uid, signal_id)
         # A manual Take after a refusal is a fresh attempt: REJECTED means
         # CoinDCX placed nothing, so answering "already sent" would be false
@@ -356,7 +367,7 @@ class CoinDCXExecutor:
             _count("skip_duplicate")
             return duplicate_outcome(existing)
 
-        instrument = await self.registry.instrument(symbol)
+        instrument = await self.registry.instrument(symbol, margin)
         live = await self.registry.last_price(symbol)
         plan = plan_entry(
             instrument=instrument, symbol=symbol, direction=direction,
@@ -564,7 +575,7 @@ class CoinDCXExecutor:
                              note=f"liquidation {pos.liquidation_price:g} inside stop {pos.sl_price:g}")
             return
 
-        inst = await self.registry.instrument(pos.symbol)
+        inst = await self.registry.instrument(pos.symbol, pos.margin_currency)
         tick = inst.price_increment if inst else 0.0
         sl_str = _inst.format_number(pos.sl_price, tick) if tick else repr(pos.sl_price)
         tp_str = _inst.format_number(pos.tp_price, tick) if tick else repr(pos.tp_price)
@@ -620,10 +631,37 @@ class CoinDCXExecutor:
     ) -> None:
         """Exit ``pos`` if a close was asked for while its entry was unresolved."""
         reason = self._close_requested.pop((pos.uid, pos.signal_id), None)
+        if reason is None:
+            reason = self.close_reason_for(pos.uid, pos.signal_id)
         if reason is None or pos.state != _pos.OPEN:
             return
         _count("close_request_honoured")
         await self._exit(pos, client, CLOSE_EXIT, note=f"{reason} (requested during entry)")
+
+    _CLOSED_SIGNALS_MAX = 5000
+
+    def mark_signal_closed(self, signal_id: str, reason: str) -> None:
+        self._closed_signals[signal_id] = reason
+        self._closed_signals.move_to_end(signal_id)
+        while len(self._closed_signals) > self._CLOSED_SIGNALS_MAX:
+            self._closed_signals.popitem(last=False)
+
+    def close_reason_for(self, uid: str, signal_id: str) -> Optional[str]:
+        """Why this user's position on ``signal_id`` must close, or ``None``.
+
+        ``invalidated`` spares users on the loose invalidation mode, exactly
+        as :func:`dispatch.close_positions_for_signal` does.
+        """
+        reason = self._closed_signals.get(signal_id)
+        if reason == "invalidated":
+            try:
+                from src.api import user_overrides as _uo
+
+                if _uo.resolve_invalidation_mode_uid(uid, "standard") == "loose":
+                    return None
+            except Exception as exc:  # noqa: BLE001 — unknown mode: close
+                _fail_open("coindcx.execution.invalidation_mode", exc)
+        return reason
 
     def forget_close_request(self, uid: str, signal_id: str) -> None:
         self._close_requested.pop((uid, signal_id), None)
@@ -714,14 +752,39 @@ class CoinDCXExecutor:
         clear anything still resting against the position."""
         exit_side = "sell" if pos.side == "LONG" else "buy"
         entry_side = "buy" if pos.side == "LONG" else "sell"
+        since_ms = (pos.opened_at or pos.created_at) * 1000.0 - 1000.0
+
+        # Price and fees come from the pair's own fills — a pair-scoped query.
+        # The order list (needed only for the stage: stop, target or
+        # liquidation) is account-wide with no pair filter, so it is paged;
+        # reading page 1 alone missed the exit on any busy account and
+        # recorded the close as EXTERNAL with no price, PnL or fees.
+        fills: list = []
+        try:
+            fills = await client.trades(
+                pair=pos.pair, from_date=_utc_date(since_ms / 1000.0),
+                to_date=_utc_date(time.time()), margin_currencies=(pos.margin_currency,),
+            )
+        except Exception as exc:  # noqa: BLE001 — fall back to the orders
+            _count("close_trades_lookup_failed")
+            log.info("coindcx close trades lookup failed uid={} {}", pos.uid, exc)
+        mine = [
+            f for f in fills
+            if f.get("pair") == pos.pair and _num(f.get("timestamp")) >= since_ms
+        ]
+        exit_fills = [f for f in mine if f.get("side") == exit_side]
+        entry_fills = [
+            f for f in mine if f.get("side") == entry_side
+            and (not pos.entry_order_id or str(f.get("order_id")) == pos.entry_order_id)
+        ]
+        exit_ids = {str(f.get("order_id")) for f in exit_fills if f.get("order_id")}
+
         exit_order = entry_order = None
         try:
-            exits = await client.orders(statuses="filled", side=exit_side)
-            exit_order = _latest_exit_order(exits, pos)
-            if pos.entry_order_id:
-                entries = await client.orders(statuses="filled", side=entry_side)
-                entry_order = next(
-                    (o for o in entries if str(o.get("id")) == pos.entry_order_id), None,
+            exit_order = await _find_order(client, exit_side, pos, since_ms, exit_ids)
+            if pos.entry_order_id and not entry_fills:
+                entry_order = await _find_order(
+                    client, entry_side, pos, since_ms, {pos.entry_order_id},
                 )
         except Exception as exc:  # noqa: BLE001 — record what we know
             log.info("coindcx close lookup failed uid={} {}", pos.uid, exc)
@@ -733,14 +796,24 @@ class CoinDCXExecutor:
             reason = classified
         else:
             reason = forced_reason or classified
-        exit_px = _num((exit_order or {}).get("avg_price"))
+        exit_px = _vwap(exit_fills) or _num((exit_order or {}).get("avg_price"))
         pos.exit_price = exit_px
         if exit_px > 0 and pos.entry_filled > 0:
             pos.realized_pnl_usdt = round(
                 (exit_px - pos.entry_filled) * pos.qty * pos.direction_sign, 8,
             )
-        fees = _num((exit_order or {}).get("fee_amount")) + _num((entry_order or {}).get("fee_amount"))
-        pos.fees_usdt = round(fees, 8) if (exit_order or entry_order) else None
+        exit_fee = (
+            sum(_num(f.get("fee_amount")) for f in exit_fills) if exit_fills
+            else _num((exit_order or {}).get("fee_amount"))
+        )
+        entry_fee = (
+            sum(_num(f.get("fee_amount")) for f in entry_fills) if entry_fills
+            else _num((entry_order or {}).get("fee_amount"))
+        )
+        known = exit_fills or entry_fills or exit_order or entry_order
+        pos.fees_usdt = round(exit_fee + entry_fee, 8) if known else None
+        if exit_px <= 0:
+            _count("close_exit_price_unknown")
         pos.close_reason = reason
         pos.state = _pos.CLOSED
         pos.closed_at = time.time()
@@ -752,6 +825,47 @@ class CoinDCXExecutor:
                 await client.cancel_all_for_position(position_id=pos.position_id)
             except Exception as exc:  # noqa: BLE001 — nothing may be resting
                 log.debug("coindcx cancel_all after close: {}", exc)
+
+
+#: Pages of the account-wide order list read to find one order (50 per page).
+_ORDER_PAGES = 4
+
+
+async def _find_order(
+    client: _client.CoinDCXClient, side: str, pos: _pos.CoinDCXPosition,
+    since_ms: float, ids: set,
+) -> Optional[Dict[str, Any]]:
+    """The order with an id in ``ids`` — or, with no ids, the newest one on
+    this pair since ``since_ms`` — paging the newest-first list.  Stops at
+    the first page that is short or reaches back before ``since_ms``."""
+    seen: list = []
+    size = 50
+    for page in range(1, _ORDER_PAGES + 1):
+        rows = await client.orders(statuses="filled", side=side, size=size, page=page)
+        if ids:
+            hit = next((o for o in rows if str(o.get("id")) in ids), None)
+            if hit is not None:
+                return hit
+        seen.extend(rows)
+        stamps = [_num(o.get("updated_at")) for o in rows]
+        if len(rows) < size or (stamps and min(stamps) < since_ms):
+            break
+    else:
+        _count("close_order_lookup_page_cap")
+    if ids:
+        _count("close_order_id_not_found")
+    return _latest_exit_order(seen, pos)
+
+
+def _vwap(fills: list) -> float:
+    qty = sum(abs(_num(f.get("quantity"))) for f in fills)
+    if qty <= 0:
+        return 0.0
+    return sum(_num(f.get("price")) * abs(_num(f.get("quantity"))) for f in fills) / qty
+
+
+def _utc_date(ts: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))
 
 
 def _latest_exit_order(orders: list, pos: _pos.CoinDCXPosition) -> Optional[Dict[str, Any]]:
@@ -806,13 +920,25 @@ def _outcome(outcome: str, reject_class: Optional[str], detail: Optional[str], *
 
 
 def _record_breaker(uid: str, exc: BaseException) -> None:
-    """Feed a failure to the shared breakers — user-setup refusals excluded."""
+    """Feed a failure to the per-user breaker and the CoinDCX venue breaker.
+
+    Never to the shared global breaker: its trip engages the global kill
+    switch, so a CoinDCX outage used to halt every Binance user too.
+    User-setup refusals (funds, size) count nowhere.
+    """
     if isinstance(exc, _client.CoinDCXRejected) and exc.user_setup:
         return
     try:
+        from src.execution import order_placer as _op
         from src.execution import tripwires as _tw
 
-        _tw.record_order_placement_failure(firebase_uid=uid, exc=exc)  # type: ignore[arg-type]
+        _tw.record_order_placement_failure(
+            firebase_uid=uid, exc=exc, count_global=False,  # type: ignore[arg-type]
+        )
+        if isinstance(exc, _op.OrderPlacementError):
+            from src.venues.coindcx import breaker as _br
+
+            _br.get_breaker().record_failure(exc)
     except Exception:  # pragma: no cover
         log.exception("coindcx: breaker record failed")
 

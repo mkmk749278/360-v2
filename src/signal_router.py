@@ -1764,11 +1764,19 @@ class SignalRouter:
         # Independent of the Binance fan-out above (each skips the other's
         # users) and a no-op while COINDCX_EXECUTION_ENABLED is off.  Levels
         # are the signal's own: CoinDCX's contracts track Binance's price.
+        #
+        # A background task since 2026-10-01.  Awaited here it held the push,
+        # the active book (so trade_monitor could not see the signal), the
+        # position lock and the next queued signal behind ~4 signed calls plus
+        # fill polling per CoinDCX user, five at a time — tens of seconds at
+        # 100 users, minutes at the 1,000 target, all paid by Binance users
+        # too.  A close that lands while an entry is still in flight is held
+        # by the executor and honoured once the fill is confirmed.
         try:
             from src.venues.coindcx import dispatch as _dcx
 
             if _dcx.execution_enabled():
-                await _dcx.dispatch_signal(
+                _dcx.spawn_dispatch(
                     signal_id=signal.signal_id,
                     symbol=signal.symbol,
                     direction=signal.direction.value,

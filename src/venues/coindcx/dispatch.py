@@ -78,7 +78,42 @@ def _allowed_uids() -> Optional[set]:
 
 
 def execution_enabled() -> bool:
-    return bool(_tunable("coindcx_execution_enabled"))
+    """The master switch — and OFF while the venue breaker holds a trip it
+    could not write to that switch (``breaker.py``)."""
+    from src.venues.coindcx import breaker as _br
+
+    return bool(_tunable("coindcx_execution_enabled")) and not _br.get_breaker().tripped_in_memory()
+
+
+#: Strong references to in-flight background fan-outs (asyncio keeps only a
+#: weak one, and a collected task is a fan-out that silently stops).
+_INFLIGHT: set = set()
+
+
+def spawn_dispatch(**kw: Any) -> "asyncio.Task":
+    """Run :func:`dispatch_signal` in the background (the router's path).
+
+    The router must not wait on CoinDCX: every second spent here delays the
+    push, the active book and the next signal for Binance users as well.
+    """
+    task = asyncio.get_running_loop().create_task(
+        dispatch_signal(**kw), name=f"coindcx_dispatch:{str(kw.get('signal_id'))[:12]}",
+    )
+    _INFLIGHT.add(task)
+    _TOTALS["spawned"] += 1
+
+    def _done(t: "asyncio.Task") -> None:
+        _INFLIGHT.discard(t)
+        if not t.cancelled() and t.exception() is not None:  # dispatch_signal never raises
+            _TOTALS["crashed"] += 1
+            _ex._fail_open("coindcx.dispatch.task", t.exception())  # type: ignore[arg-type]
+
+    task.add_done_callback(_done)
+    return task
+
+
+def inflight() -> int:
+    return len(_INFLIGHT)
 
 
 async def dispatch_signal(
@@ -305,6 +340,9 @@ async def close_positions_for_signal(signal_id: str, *, reason: str) -> int:
     from src.api import user_overrides as _uo
     from src.venues.coindcx import positions as _pos
 
+    # Remember the close before reading the book: a background fan-out may
+    # not have written its record yet, and must not open on a closed signal.
+    _ex.get_executor().mark_signal_closed(signal_id, reason)
     try:
         live = await asyncio.to_thread(_pos.get_store().live_for_signal, signal_id)
     except Exception as exc:  # noqa: BLE001

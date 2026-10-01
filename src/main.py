@@ -5351,6 +5351,20 @@ class CryptoSignalEngine:
             fn=_aig.probe_blindness,
             min_streak=3,
         ))
+
+        # CoinDCX (2026-10-01): a live position on a user's real account that
+        # rests without a stop, or that the exchange stops returning a row for
+        # (skipped every cycle, age cap included), must page — the owner is
+        # not the monitoring system (HBARUSDT was found from a screenshot).
+        from src.venues.coindcx import reconciler as _dcx_rec
+
+        fl.add_predicate(PredicateProbe(
+            name="coindcx_positions",
+            fn=_dcx_rec.probe_health,
+            # The thresholds inside already wait 2 / 10 minutes; one audit
+            # cycle more is enough to rule out a read during a deploy.
+            min_streak=1,
+        ))
         return fl
 
     def _governor_cvd_series(self, symbol: str):

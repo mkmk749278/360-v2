@@ -124,7 +124,7 @@ async def _run(rep, client, registry, symbol, margin, sleep) -> Dict[str, Any]:
         return rep.finish("fail")
 
     # 2 — instrument + price
-    inst = await registry.instrument(symbol)
+    inst = await registry.instrument(symbol, margin)
     price = await registry.last_price(symbol)
     if not rep.step("instrument_tradable", bool(inst and inst.refusal() is None and price),
                     pair=getattr(inst, "pair", None), refusal=inst.refusal() if inst else "none",

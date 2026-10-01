@@ -718,8 +718,14 @@ def record_order_placement_failure(
     firebase_uid: str,
     exc: Exception,
     binance_code: Optional[int] = None,
+    count_global: bool = True,
 ) -> None:
     """Feed one order-placement failure into the circuit breakers.
+
+    ``count_global=False`` feeds the per-user breaker only.  CoinDCX uses it:
+    its failures go to its own venue breaker
+    (``src.venues.coindcx.breaker``), so a CoinDCX outage pauses CoinDCX
+    rather than engaging the global kill switch over Binance users.
 
     The single production entry point for tripwires #4 and #5 — called
     from the dispatch failure handler, which every server-side order
@@ -769,7 +775,7 @@ def record_order_placement_failure(
     if user_attributable and per_user_breaker().record_rejection(firebase_uid):
         _persist_user_trip(firebase_uid)
 
-    if global_breaker().record_rejection():
+    if count_global and global_breaker().record_rejection():
         _persist_global_trip()
 
 

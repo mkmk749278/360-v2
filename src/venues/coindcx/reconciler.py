@@ -63,6 +63,12 @@ class CoinDCXReconciler:
         self.stats: Dict[str, Any] = defaultdict(int)
         self.last_cycle_at: Optional[float] = None
         self.last_cycle_users = 0
+        # (uid, signal_id) → when first seen in a fault state.  A record whose
+        # row keeps coming back absent is skipped, and so is its age cap, so
+        # without a clock on it nothing would ever say so.  Same for a live
+        # position the exchange shows without a stop.
+        self._missing_since: Dict[tuple, float] = {}
+        self._unprotected_since: Dict[tuple, float] = {}
 
     @property
     def executor(self) -> _ex.CoinDCXExecutor:
@@ -99,6 +105,10 @@ class CoinDCXReconciler:
 
         now = time.time() if now is None else now
         live = await asyncio.to_thread(self.executor.store.live_positions)
+        live_keys = {(p.uid, p.signal_id) for p in live}
+        for book in (self._missing_since, self._unprotected_since):
+            for k in [k for k in book if k not in live_keys]:
+                del book[k]
         by_uid: Dict[str, List[_pos.CoinDCXPosition]] = defaultdict(list)
         for p in live:
             by_uid[p.uid].append(p)
@@ -164,11 +174,13 @@ class CoinDCXReconciler:
                 # record whose row we could not see is left exactly as it is
                 # and counted; the next cycle asks again.
                 self.stats["row_missing"] += 1
+                self._missing_since.setdefault((uid, rec.signal_id), now)
                 log.warning(
                     "CoinDCX reconcile uid={} {} {}: no position row returned — "
                     "left untouched", uid, rec.pair, rec.margin_currency,
                 )
                 continue
+            self._missing_since.pop((uid, rec.signal_id), None)
             active = _ex._num((prow or {}).get("active_pos"))
             async with ex._lock(uid):
                 fresh = await asyncio.to_thread(ex.store.get, uid, rec.signal_id)
@@ -229,18 +241,63 @@ class CoinDCXReconciler:
                     await ex._exit(rec, client, rec.close_reason or _ex.CLOSE_EXIT,
                                    note="retrying exit")
                     continue
+                key = (uid, rec.signal_id)
+                if rec.sl_resting:
+                    self._unprotected_since.pop(key, None)
+                else:
+                    self._unprotected_since.setdefault(key, now)
                 if not rec.sl_resting or not rec.tp_resting:
                     self.stats["protection_repairs"] += 1
                     await ex.protect(rec, client=client)
+                    if rec.sl_resting or not rec.live:
+                        self._unprotected_since.pop(key, None)
                     continue
                 await ex._put(rec)
+
+    def fault_ages(self, *, now: Optional[float] = None) -> Dict[str, Any]:
+        now = time.time() if now is None else now
+        miss = [now - t for t in self._missing_since.values()]
+        bare = [now - t for t in self._unprotected_since.values()]
+        return {
+            "rows_missing_now": len(miss),
+            "oldest_row_missing_s": round(max(miss), 1) if miss else None,
+            "unprotected_now": len(bare),
+            "oldest_unprotected_s": round(max(bare), 1) if bare else None,
+        }
 
     def snapshot(self) -> Dict[str, Any]:
         return {
             "last_cycle_at": self.last_cycle_at,
             "last_cycle_users": self.last_cycle_users,
             "stats": dict(self.stats),
+            "faults": self.fault_ages(),
         }
+
+
+#: A record whose row has been absent this long is paged.  Ten minutes is
+#: twenty reconcile cycles: a flake does not page, a stuck record does.
+ROW_MISSING_PAGE_S = 600.0
+#: A live position the exchange shows WITHOUT a stop for this long is paged.
+#: The reconciler retries protection every cycle, so two minutes means the
+#: retries are failing — a naked position on a user's real account.
+UNPROTECTED_PAGE_S = 120.0
+
+
+def probe_health(rec: Optional["CoinDCXReconciler"] = None) -> tuple[bool, str]:
+    """Feature-liveness predicate: CoinDCX positions we cannot see or that
+    rest without a stop.  ``True`` with no live records — idle is healthy."""
+    f = (rec or get_reconciler()).fault_ages()
+    bad = []
+    if (f["oldest_unprotected_s"] or 0) > UNPROTECTED_PAGE_S:
+        bad.append(f"{f['unprotected_now']} live CoinDCX position(s) without a stop, "
+                   f"oldest {f['oldest_unprotected_s']:.0f}s")
+    if (f["oldest_row_missing_s"] or 0) > ROW_MISSING_PAGE_S:
+        bad.append(f"{f['rows_missing_now']} CoinDCX record(s) the exchange returns no row "
+                   f"for, oldest {f['oldest_row_missing_s']:.0f}s — skipped every cycle, "
+                   f"age cap included")
+    if bad:
+        return False, "; ".join(bad)
+    return True, "no unprotected or unseen CoinDCX positions"
 
 
 STATUS_PATH = os.getenv("COINDCX_STATUS_FILE", "data/coindcx_status.json")
@@ -276,10 +333,17 @@ def status_snapshot(rec: Optional["CoinDCXReconciler"] = None) -> Dict[str, Any]
         "positions": store,
         "reconciler": (rec or get_reconciler()).snapshot(),
         "executor": _ex.counters(),
+        "breaker": _breaker_snapshot(),
         "dispatch": _dcx.totals(),
         "instruments": _inst.get_registry().snapshot(),
         "stream": _stream_manager.snapshot() if _stream_manager is not None else None,
     }
+
+
+def _breaker_snapshot() -> Dict[str, Any]:
+    from src.venues.coindcx import breaker as _br
+
+    return _br.get_breaker().snapshot()
 
 
 def write_status_file(rec: Optional["CoinDCXReconciler"] = None) -> None:
