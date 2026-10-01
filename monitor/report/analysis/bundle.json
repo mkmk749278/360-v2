@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-30T05:55:28.389122+00:00",
-  "generated_at_ts": 1790747728.3891215,
+  "generated_at": "2026-10-01T06:28:41.364558+00:00",
+  "generated_at_ts": 1790836121.364558,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "ab19b683d2e6cc29db5818694d07d10f3a7880b1",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 11645,
-    "strategy_matrix_scored_cells": 3699,
+    "strategy_matrix_cells": 11772,
+    "strategy_matrix_scored_cells": 3796,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -51,10 +51,10 @@
         "verdict": "STRONG"
       },
       {
-        "strategy": "VOLUME_SURGE_BREAKOUT",
-        "context_key": "NY/MARKUP/NORMAL/BTC_RISING/MIDCAP",
-        "edge_r": 2.0311127885451046,
-        "n": 15,
+        "strategy": "TREND_PULLBACK_EMA",
+        "context_key": "NY/MARKUP/NORMAL/BTC_NEUTRAL/MAJOR",
+        "edge_r": 2.010604360792581,
+        "n": 44,
         "verdict": "STRONG"
       }
     ],
@@ -76,8 +76,8 @@
       {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
         "context_key": "ASIA/MARKDOWN/COMPRESSED/BTC_FALLING",
-        "edge_r": -2.381951388057962,
-        "n": 38,
+        "edge_r": -2.257039371150436,
+        "n": 40,
         "verdict": "NEGATIVE"
       },
       {
@@ -89,9 +89,9 @@
       },
       {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
-        "context_key": "LONDON/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -1.5889991960607466,
-        "n": 50,
+        "context_key": "ASIA/VOLATILE_EXPANSION/NORMAL/BTC_FALLING",
+        "edge_r": -1.5863021887807967,
+        "n": 18,
         "verdict": "NEGATIVE"
       }
     ],

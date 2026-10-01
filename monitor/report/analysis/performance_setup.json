@@ -1,30 +1,30 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 1542,
-    "wins": 519,
-    "losses": 616,
-    "neutral": 407,
-    "win_rate_pct": 33.7,
-    "avg_pnl_pct": 0.3097
+    "n": 1571,
+    "wins": 534,
+    "losses": 625,
+    "neutral": 412,
+    "win_rate_pct": 34.0,
+    "avg_pnl_pct": 0.3269
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 296,
+    "n": 301,
     "wins": 68,
-    "losses": 102,
-    "neutral": 126,
-    "win_rate_pct": 23.0,
-    "avg_pnl_pct": 0.2003
+    "losses": 105,
+    "neutral": 128,
+    "win_rate_pct": 22.6,
+    "avg_pnl_pct": 0.1807
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 221,
-    "wins": 58,
-    "losses": 105,
-    "neutral": 58,
-    "win_rate_pct": 26.2,
-    "avg_pnl_pct": 0.057
+    "n": 229,
+    "wins": 59,
+    "losses": 110,
+    "neutral": 60,
+    "win_rate_pct": 25.8,
+    "avg_pnl_pct": 0.0422
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
@@ -46,30 +46,30 @@
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
-    "n": 131,
+    "n": 133,
     "wins": 27,
-    "losses": 60,
+    "losses": 62,
     "neutral": 44,
-    "win_rate_pct": 20.6,
-    "avg_pnl_pct": -0.1231
+    "win_rate_pct": 20.3,
+    "avg_pnl_pct": -0.1378
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
-    "n": 123,
+    "n": 126,
     "wins": 41,
-    "losses": 56,
+    "losses": 59,
     "neutral": 26,
-    "win_rate_pct": 33.3,
-    "avg_pnl_pct": 0.0986
+    "win_rate_pct": 32.5,
+    "avg_pnl_pct": 0.0666
   },
   {
     "setup": "BREAKDOWN_SHORT",
-    "n": 54,
-    "wins": 14,
-    "losses": 23,
+    "n": 56,
+    "wins": 15,
+    "losses": 24,
     "neutral": 17,
-    "win_rate_pct": 25.9,
-    "avg_pnl_pct": 0.6737
+    "win_rate_pct": 26.8,
+    "avg_pnl_pct": 0.6551
   },
   {
     "setup": "VOLUME_SURGE_BREAKOUT",
@@ -109,12 +109,12 @@
   },
   {
     "setup": "MA_CROSS_TREND_SHIFT",
-    "n": 6,
+    "n": 7,
     "wins": 2,
-    "losses": 3,
+    "losses": 4,
     "neutral": 1,
-    "win_rate_pct": 33.3,
-    "avg_pnl_pct": 0.8373
+    "win_rate_pct": 28.6,
+    "avg_pnl_pct": 0.5273
   },
   {
     "setup": "WHALE_MOMENTUM",
@@ -126,6 +126,15 @@
     "avg_pnl_pct": -1.1875
   },
   {
+    "setup": "RANGE_FADE",
+    "n": 2,
+    "wins": 1,
+    "losses": 1,
+    "neutral": 0,
+    "win_rate_pct": 50.0,
+    "avg_pnl_pct": 0.0767
+  },
+  {
     "setup": "POST_DISPLACEMENT_CONTINUATION",
     "n": 1,
     "wins": 0,
@@ -133,14 +142,5 @@
     "neutral": 1,
     "win_rate_pct": 0.0,
     "avg_pnl_pct": 0.2151
-  },
-  {
-    "setup": "RANGE_FADE",
-    "n": 1,
-    "wins": 1,
-    "losses": 0,
-    "neutral": 0,
-    "win_rate_pct": 100.0,
-    "avg_pnl_pct": 1.5669
   }
 ]
