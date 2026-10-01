@@ -4,6 +4,53 @@
 
 ---
 
+## 2026-10-01 — CoinDCX auto-trade audit: every gap fixed (owner: "fix everything … merge after green")
+
+Owner enabled CoinDCX for users and asked for a full audit, then said: *"some
+choose binance some choose coin dcx — we should give the best for both."*
+The engine PR also carries the ops vector; ops shows it on `/control/coindcx`
+under **Safety**. Every fix has a test that fails on the old code.
+
+1. **Uncertain entries are no longer retired on an ABSENT row** (the HBAR
+   rule). Only a returned flat row retires at 90s. Absence waits 900s and is
+   counted as `entries_retired_row_absent`.
+2. **A take-profit repair never closes a position whose stop rests.** The
+   failure is counted as `tp_repair_failed` and retried next cycle.
+3. **No order is planned on a price older than 15s**
+   (`price_stale_refusals`).
+4. **A close requested during entry is honoured** once the fill is confirmed
+   or the reconciler adopts the position.
+5. **CoinDCX failures no longer trip the shared global breaker**, whose trip
+   engaged the global kill switch over Binance users. A CoinDCX venue breaker
+   (`src/venues/coindcx/breaker.py`, same 10/60s) writes the CoinDCX master
+   switch OFF and alerts. **Reset = turning that switch back ON in
+   `/control/coindcx`.** If the write fails, the trip is held in memory until
+   restart. The per-user breaker, kill switch and global-breaker *gate* still
+   apply to CoinDCX. A signing or KMS outage still stops both venues.
+6. **The router no longer waits on CoinDCX.** The fan-out is a background task
+   (`dispatch.spawn_dispatch`), so the push, the active book, the position
+   lock and the next signal no longer wait behind CoinDCX orders. That helps
+   Binance users too. The executor remembers closed signals, refuses entries
+   on them (`SignalClosed`), and exits an entry that fills after the close
+   (`ClosedOnRequest`). Loose-mode users stay exempt on invalidation.
+7. **Close bookkeeping is pair-scoped.** Exit price and fees now come from
+   `/futures/trades` for the pair, a qty-weighted average. The order lookup,
+   needed only for the stop/target/liquidation stage, pages the account-wide
+   list (up to 4 × 50, newest first) instead of reading page 1. If trades
+   fail, it falls back to the order list.
+8. **Pager:** the `coindcx_positions` liveness probe fires on a live position
+   without a stop for over 2 min, or a record with no exchange row for over
+   10 min.
+9. **INR positions are planned on the INR instrument** (status, exit-only,
+   leverage). A payload quoting anything but USDT is refused.
+
+**Watch after deploy:**
+- `/control/coindcx` → Safety should read 0 / 0 / armed.
+- Executor counters: `close_trades_lookup_failed` (the trades endpoint has
+  never been called on a live account; the fallback keeps closes correct) and
+  `close_order_id_not_found`.
+- Dispatch: `spawned`.
+
 ## 2026-09-28 — CoinDCX HBARUSDT naked stop: CAUSE CONFIRMED, fixed by #1081 (merged 06:46 UTC)
 
 Owner screenshot 11:34 IST: Lumin placed HBARUSDT LONG 5x (~$10) on CoinDCX and

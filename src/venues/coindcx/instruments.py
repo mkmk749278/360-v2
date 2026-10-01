@@ -50,6 +50,11 @@ MARGIN_CURRENCIES = (MARGIN_USDT, MARGIN_INR)
 LIST_TTL_S = 6 * 3600.0
 DETAIL_TTL_S = 6 * 3600.0
 PRICE_TTL_S = 3.0
+#: The oldest snapshot an ORDER may be planned against.  A failed refresh
+#: keeps the previous snapshot (right for the symbol map, which rarely
+#: changes); it is wrong for a price, which during a CoinDCX outage could be
+#: hours old and would then decide the gap and levels-crossed checks.
+PRICE_MAX_AGE_FOR_ORDER_S = 15.0
 CONVERSION_TTL_S = 60.0
 _HTTP_TIMEOUT_S = 8.0
 
@@ -211,7 +216,7 @@ class InstrumentRegistry:
         self.stats: Dict[str, int] = {
             "list_fetches": 0, "list_failures": 0,
             "detail_fetches": 0, "detail_failures": 0,
-            "price_fetches": 0, "price_failures": 0,
+            "price_fetches": 0, "price_failures": 0, "price_stale_refusals": 0,
             "conversion_fetches": 0, "conversion_failures": 0,
         }
 
@@ -298,25 +303,45 @@ class InstrumentRegistry:
         return row.get("pair") if row else None
 
     async def last_price(self, symbol: str) -> Optional[float]:
-        row = (await self.prices()).get(symbol.upper())
+        """Last price, or ``None`` when no snapshot younger than
+        :data:`PRICE_MAX_AGE_FOR_ORDER_S` exists — the caller refuses with
+        ``price_unavailable`` rather than trading on a stale number."""
+        snapshot = await self.prices()
+        if self._prices_stale(PRICE_MAX_AGE_FOR_ORDER_S):
+            self.stats["price_stale_refusals"] += 1
+            return None
+        row = snapshot.get(symbol.upper())
         px = _num(row.get("ls")) if row else 0.0
         return px if px > 0 else None
 
     # -- Instrument detail ------------------------------------------------
 
-    async def instrument(self, symbol: str) -> Optional[Instrument]:
-        """The instrument for Binance ``symbol`` — ``None`` means refuse."""
+    async def instrument(
+        self, symbol: str, margin_currency: str = MARGIN_USDT,
+    ) -> Optional[Instrument]:
+        """The instrument for Binance ``symbol`` on ``margin_currency`` —
+        ``None`` means refuse.
+
+        Fetched per margin currency: an INR-margined position is bound by the
+        INR instrument's status, exit-only flag and leverage caps, which
+        CoinDCX publishes separately (until 2026-10-01 INR users were planned
+        against the USDT instrument).  Sizes stay in USDT either way — the
+        contract is quoted and settled in USDT on both, and a payload quoting
+        anything else is refused rather than read.
+        """
         pair = await self.pair_for(symbol)
         if not pair:
             return None
-        cached = self._details.get(pair)
+        ccy = (margin_currency or MARGIN_USDT).upper()
+        key = pair if ccy == MARGIN_USDT else f"{pair}|{ccy}"
+        cached = self._details.get(key)
         if cached is not None and (time.monotonic() - cached[1]) < DETAIL_TTL_S:
             return cached[0]
         self.stats["detail_fetches"] += 1
         try:
             data = await self._get_json(
                 API_BASE + INSTRUMENT_PATH,
-                params={"pair": pair, "margin_currency_short_name": MARGIN_USDT},
+                params={"pair": pair, "margin_currency_short_name": ccy},
             )
         except Exception as exc:
             self.stats["detail_failures"] += 1
@@ -324,8 +349,11 @@ class InstrumentRegistry:
             # A stale entry is better than none for filters that rarely change.
             return cached[0] if cached is not None else None
         raw = (data or {}).get("instrument") if isinstance(data, dict) else None
+        if isinstance(raw, dict) and str(raw.get("quote_currency_short_name") or "USDT").upper() != "USDT":
+            self.stats["detail_refused_quote"] = self.stats.get("detail_refused_quote", 0) + 1
+            raw = None  # a non-USDT quote would mis-scale every size check
         inst = parse_instrument(raw, symbol.upper()) if isinstance(raw, dict) else None
-        self._details[pair] = (inst, time.monotonic())
+        self._details[key] = (inst, time.monotonic())
         return inst
 
     # -- INR conversion ---------------------------------------------------

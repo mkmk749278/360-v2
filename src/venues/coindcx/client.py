@@ -33,6 +33,7 @@ P_CANCEL_FOR_POSITION = (
     "/exchange/v1/derivatives/futures/positions/cancel_all_open_orders_for_position"
 )
 P_WALLETS = "/exchange/v1/derivatives/futures/wallets"
+P_TRADES = "/exchange/v1/derivatives/futures/trades"
 
 _KEY_ERRORS = frozenset({
     _proto.ERR_KEY_BLOB_NOT_FOUND,
@@ -150,10 +151,26 @@ class CoinDCXClient:
 
     async def orders(
         self, *, statuses: str, side: str, margin_currencies: tuple = ("USDT", "INR"),
-        size: int = 50,
+        size: int = 50, page: int = 1,
     ) -> List[Dict[str, Any]]:
+        """One page of the ACCOUNT's orders, newest first.  CoinDCX offers
+        no pair filter here, so a caller looking for one order must page."""
         data = await self._call("POST", P_ORDERS_LIST, {
-            "status": statuses, "side": side, "page": "1", "size": str(size),
+            "status": statuses, "side": side, "page": str(int(page)), "size": str(size),
+            "margin_currency_short_name": list(margin_currencies),
+        })
+        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+    async def trades(
+        self, *, pair: str, from_date: str, to_date: str,
+        margin_currencies: tuple = ("USDT",), size: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Fills for ONE pair between two UTC dates (``YYYY-MM-DD``).  Each
+        carries ``price``, ``quantity``, ``fee_amount`` (USDT, also for INR
+        futures), ``side``, ``timestamp`` (ms) and ``order_id``."""
+        data = await self._call("POST", P_TRADES, {
+            "pair": pair, "from_date": from_date, "to_date": to_date,
+            "page": "1", "size": str(size),
             "margin_currency_short_name": list(margin_currencies),
         })
         return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []

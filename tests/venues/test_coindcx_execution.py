@@ -35,7 +35,8 @@ class FakeRegistry:
         self.price = price
         self.inst = instrument
 
-    async def instrument(self, symbol):
+    async def instrument(self, symbol, margin_currency="USDT"):
+        self.margins_asked = getattr(self, "margins_asked", []) + [margin_currency]
         return self.inst
 
     async def last_price(self, symbol):
@@ -58,6 +59,8 @@ class FakeExchange:
         self.order_raise: Optional[BaseException] = None
         self.liquidation = 0.0
         self.pending_not_flat = False
+        self.foreign_orders: List[Dict[str, Any]] = []   # orders on the user's other pairs
+        self.trades_raise = False
 
     def _row(self, pair, ccy):
         return self.pos.setdefault((pair, ccy), {
@@ -136,9 +139,23 @@ class FakeExchange:
                             "margin_currency_short_name": row["margin_currency_short_name"],
                             "updated_at": time.time() * 1000 + 10})
 
-    async def orders(self, *, statuses, side, margin_currencies=("USDT", "INR"), size=50):
+    async def orders(self, *, statuses, side, margin_currencies=("USDT", "INR"), size=50, page=1):
+        """Account-wide, newest first, paged — CoinDCX has no pair filter."""
         self.calls.append("orders")
-        return [o for o in self.order_log if o["side"] == side]
+        rows = sorted(
+            [o for o in self.order_log + self.foreign_orders if o["side"] == side],
+            key=lambda o: o["updated_at"], reverse=True)
+        return rows[(page - 1) * size: page * size]
+
+    async def trades(self, *, pair, from_date, to_date, margin_currencies=("USDT",), size=100):
+        """Pair-scoped fills, one per filled order."""
+        self.calls.append("trades")
+        if self.trades_raise:
+            raise C.CoinDCXUnreachable("trades down")
+        return [{"pair": o["pair"], "side": o["side"], "order_id": o["id"],
+                 "price": o["avg_price"], "quantity": 0.001, "fee_amount": o["fee_amount"],
+                 "timestamp": o["updated_at"]}
+                for o in self.order_log if o["pair"] == pair][:size]
 
     async def cancel_all_for_position(self, *, position_id):
         self.calls.append("cancel_all")
@@ -446,6 +463,81 @@ async def test_reconciler_adopts_or_retires_uncertain_entries(env) -> None:
     assert store.get("u2", "S2").state == P.REJECTED
 
 
+async def test_reconciler_never_retires_an_uncertain_entry_on_an_absent_row(env) -> None:
+    # Absence is not evidence of flat (HBARUSDT).  Retiring on it abandons a
+    # position that may be live and naked; only a returned flat row may
+    # retire at the short grace.
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXUnreachable("timeout")
+    fx.fill = False
+    await ex.open_position(**_open_kwargs())
+    real = fx.positions
+
+    async def absent(**kw):
+        await real(**kw)
+        return []
+    fx.positions = absent  # type: ignore[method-assign]
+    rec = store.get("u1", "S1")
+    rec.created_at = time.time() - (R.UNRESOLVED_GRACE_S + 10)
+    store.put(rec)
+    await R.CoinDCXReconciler(ex).cycle()
+    assert store.get("u1", "S1").state == P.ENTRY_UNCERTAIN
+
+    rec = store.get("u1", "S1")
+    rec.created_at = time.time() - (R.UNRESOLVED_ABSENT_GRACE_S + 10)
+    store.put(rec)
+    r = R.CoinDCXReconciler(ex)
+    await r.cycle()
+    assert store.get("u1", "S1").state == P.REJECTED
+    assert r.stats["entries_retired_row_absent"] == 1
+
+
+async def test_reconciler_retires_on_a_returned_flat_row_at_the_short_grace(env) -> None:
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXUnreachable("timeout")
+    fx.fill = False
+    await ex.open_position(**_open_kwargs())
+    fx._row("B-BTC_USDT", "INR")          # the exchange returns the pair, flat
+    rec = store.get("u1", "S1")
+    rec.created_at = time.time() - (R.UNRESOLVED_GRACE_S + 10)
+    store.put(rec)
+    await R.CoinDCXReconciler(ex).cycle()
+    assert store.get("u1", "S1").state == P.REJECTED
+
+
+async def test_target_repair_failure_never_exits_a_position_whose_stop_rests(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    fx.pos[("B-BTC_USDT", "INR")]["take_profit_trigger"] = None   # target vanished
+
+    async def down(**kw):
+        raise C.CoinDCXUnreachable("502")
+    fx.create_tpsl = down  # type: ignore[method-assign]
+    fx.calls.clear()
+    await R.CoinDCXReconciler(ex).cycle()
+    rec = store.get("u1", "S1")
+    assert rec.state == P.OPEN and rec.sl_resting
+    assert "exit" not in fx.calls
+    assert "take profit not placed" in rec.last_error
+    assert E.counters().get("tp_repair_failed", 0) >= 1
+
+
+async def test_close_asked_during_an_unresolved_entry_is_honoured_on_adoption(env) -> None:
+    # This refusal used to say "the reconciler will close it", and nothing did:
+    # the reconciler adopted the entry, protected it and let it run.
+    fx, store, _, ex = env
+    fx.order_raise = C.CoinDCXUnreachable("timeout")
+    await ex.open_position(**_open_kwargs())
+    fx.order_raise = None
+    out = await ex.close_position("u1", "S1", reason="signal_closed")
+    assert out["reject_class"] == "EntryUnresolved"
+    fx._row("B-BTC_USDT", "INR").update(active_pos=0.001, avg_price=100_000.0)
+    await R.CoinDCXReconciler(ex).cycle()
+    rec = store.get("u1", "S1")
+    assert rec.state == P.CLOSED
+    assert "exit" in fx.calls
+
+
 async def test_reconciler_budget_is_spent_per_user_examined(env, monkeypatch) -> None:
     fx, store, _, ex = env
     import config
@@ -732,3 +824,209 @@ async def test_ops_contract_vector_is_what_the_engine_writes(monkeypatch, tmp_pa
     assert path.read_text() == text, (
         "the CoinDCX status file / self-test report changed shape — regenerate "
         "and update 360ce-ops' tests/fixtures_coindcx.json + reducer together")
+
+
+# ------------------------------------------------- 2026-10-01 audit, round 2
+
+
+async def test_coindcx_failures_never_reach_the_shared_global_breaker(monkeypatch) -> None:
+    """A CoinDCX outage used to trip the global breaker, whose trip engages
+    the global kill switch and halts every BINANCE user."""
+    from src.execution import tripwires as TW
+    from src.venues.coindcx import breaker as B
+
+    TW.reset_for_test() if hasattr(TW, "reset_for_test") else None
+    gb = TW.GlobalCircuitBreaker(threshold=3, window_s=60)
+    monkeypatch.setattr(TW, "global_breaker", lambda: gb)
+    monkeypatch.setattr(TW, "_persist_global_trip", lambda: None)
+    monkeypatch.setattr(TW, "_persist_user_trip", lambda uid: None)
+    writes = []
+    monkeypatch.setattr(B, "_switch_off", lambda: writes.append("off") or True)
+    monkeypatch.setattr(B, "_alert", lambda *a: None)
+    vb = B.CoinDCXVenueBreaker(threshold=3, window_s=60)
+    B.set_breaker_for_test(vb)
+    try:
+        for i in range(5):
+            E._record_breaker(f"u{i}", C.CoinDCXUnreachable("502 from CoinDCX"))
+        gb.check()                     # global breaker untouched: Binance trades on
+        assert vb.trips == 1 and writes == ["off"]
+        # user-setup refusals count nowhere
+        before = vb.failures_total
+        E._record_breaker("u9", C.CoinDCXRejected(
+            "x", status=400, body={"message": "Insufficient funds"}))
+        assert vb.failures_total == before
+    finally:
+        B.set_breaker_for_test(None)
+
+
+def test_a_breaker_trip_that_cannot_be_written_is_held_in_memory(monkeypatch) -> None:
+    from src.venues.coindcx import breaker as B
+    from src.venues.coindcx import dispatch as D
+
+    monkeypatch.setattr(B, "_alert", lambda *a: None)
+    monkeypatch.setattr(D, "_tunable", lambda k: True if k == "coindcx_execution_enabled" else None)
+    vb = B.CoinDCXVenueBreaker(threshold=2, window_s=60)
+    B.set_breaker_for_test(vb)
+    try:
+        def boom(_u):
+            raise RuntimeError("runtime tunables not initialised")
+        import src.runtime_tunables as RT
+        monkeypatch.setattr(RT, "set_values", boom)
+        assert D.execution_enabled()
+        vb.record_failure(C.CoinDCXUnreachable("a"))
+        vb.record_failure(C.CoinDCXUnreachable("b"))
+        assert vb.snapshot()["held_in_memory"] is True
+        assert not D.execution_enabled()      # refused although the switch reads ON
+    finally:
+        B.set_breaker_for_test(None)
+
+
+def test_the_router_never_awaits_the_coindcx_fanout() -> None:
+    """Awaited, it held the push, the active book and the next signal behind
+    every CoinDCX user's orders — for Binance users too."""
+    import ast
+    import inspect
+    from src import signal_router as SR
+
+    tree = ast.parse(inspect.getsource(SR))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Await):
+            src = ast.unparse(node.value)
+            assert "dispatch_signal" not in src or "_dcx" not in src, src
+    assert "_dcx.spawn_dispatch(" in inspect.getsource(SR)
+
+
+async def test_spawn_dispatch_runs_in_the_background_and_holds_a_reference(monkeypatch) -> None:
+    import asyncio
+    from src.venues.coindcx import dispatch as D
+
+    gate = asyncio.Event()
+    seen = []
+
+    async def slow(**kw):
+        await gate.wait()
+        seen.append(kw["signal_id"])
+        return {"placed": 0, "outcomes": {}}
+    monkeypatch.setattr(D, "dispatch_signal", slow)
+    before = D.inflight()   # other tests' router fan-outs may still be pending
+    task = D.spawn_dispatch(signal_id="S9")
+    assert D.inflight() == before + 1 and not seen   # returned before the work
+    gate.set()
+    await task
+    assert seen == ["S9"] and D.inflight() == before
+
+
+async def test_an_entry_on_a_signal_that_already_closed_is_refused(env) -> None:
+    fx, store, _, ex = env
+    ex.mark_signal_closed("S1", "sl_hit")
+    out = await ex.open_position(**_open_kwargs())
+    assert out["reject_class"] == "SignalClosed"
+    assert not any(c.startswith("order:") for c in fx.calls)
+    assert store.get("u1", "S1") is None
+
+
+async def test_a_signal_that_closes_while_the_entry_fills_is_exited(env, monkeypatch) -> None:
+    fx, store, _, ex = env
+    real = ex._await_fill
+
+    async def fill_then_close(client, pos, **kw):
+        row = await real(client, pos, **kw)
+        ex.mark_signal_closed("S1", "sl_hit")    # the engine closed it meanwhile
+        return row
+    monkeypatch.setattr(ex, "_await_fill", fill_then_close)
+    out = await ex.open_position(**_open_kwargs())
+    assert out["reject_class"] == "ClosedOnRequest"
+    assert store.get("u1", "S1").state == P.CLOSED and "exit" in fx.calls
+
+
+async def test_invalidation_spares_loose_users_on_the_closed_signal_guard(env, monkeypatch) -> None:
+    from src.api import user_overrides as UO
+
+    fx, store, _, ex = env
+    monkeypatch.setattr(UO, "resolve_invalidation_mode_uid", lambda uid, d: "loose")
+    ex.mark_signal_closed("S1", "invalidated")
+    out = await ex.open_position(**_open_kwargs())
+    assert out["outcome"] == "placed"
+
+
+async def test_close_on_a_busy_account_reads_price_and_fees_from_the_pairs_fills(env) -> None:
+    """The order list has no pair filter; 120 newer orders on the user's other
+    pairs pushed our exit off page 1 and the close read EXTERNAL, no price."""
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    fx.trigger("sl")
+    now_ms = time.time() * 1000 + 1000
+    fx.foreign_orders = [
+        {"id": f"f{i}", "pair": "B-ETH_USDT", "side": "sell", "status": "filled",
+         "stage": "default", "avg_price": 3000.0, "fee_amount": 0.01,
+         "margin_currency_short_name": "INR", "updated_at": now_ms + i}
+        for i in range(120)
+    ]
+    await R.CoinDCXReconciler(ex).cycle()
+    rec = store.get("u1", "S1")
+    assert rec.close_reason == E.CLOSE_SL
+    assert rec.exit_price == pytest.approx(98_000.0)
+    assert rec.fees_usdt == pytest.approx(0.05 + 0.06)
+    assert rec.realized_pnl_usdt == pytest.approx(-2.0)
+
+
+async def test_close_falls_back_to_the_order_list_when_fills_are_unavailable(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    fx.trades_raise = True
+    fx.trigger("tp")
+    await R.CoinDCXReconciler(ex).cycle()
+    rec = store.get("u1", "S1")
+    assert rec.close_reason == E.CLOSE_TP1 and rec.exit_price > 0
+
+
+async def test_probe_pages_a_position_resting_without_a_stop(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    fx.pos[("B-BTC_USDT", "INR")]["stop_loss_trigger"] = None
+
+    async def down(**kw):
+        raise C.CoinDCXUnreachable("502")
+    fx.create_tpsl = down  # type: ignore[method-assign]
+    fx.exit_raises = True   # the safety exit fails too: genuinely naked
+    rec = R.CoinDCXReconciler(ex)
+    await rec.cycle()
+    assert R.probe_health(rec)[0] is True            # not yet two minutes
+    # the probe reads the wall clock: put the first sighting in the past
+    rec2 = R.CoinDCXReconciler(ex)
+    await rec2.cycle(now=time.time() - R.UNPROTECTED_PAGE_S - 5)
+    await rec2.cycle()
+    rec = rec2
+    ok, detail = R.probe_health(rec)
+    assert not ok and "without a stop" in detail
+
+
+async def test_probe_pages_a_record_whose_row_stays_missing(env) -> None:
+    fx, store, _, ex = env
+    await ex.open_position(**_open_kwargs())
+    real = fx.positions
+
+    async def absent(**kw):
+        await real(**kw)
+        return []
+    fx.positions = absent  # type: ignore[method-assign]
+    rec = R.CoinDCXReconciler(ex)
+    await rec.cycle()
+    assert R.probe_health(rec)[0] is True
+    # the probe reads the wall clock: put the first sighting in the past
+    rec2 = R.CoinDCXReconciler(ex)
+    await rec2.cycle(now=time.time() - R.ROW_MISSING_PAGE_S - 5)
+    await rec2.cycle()
+    rec = rec2
+    ok, detail = R.probe_health(rec)
+    assert not ok and "no row" in detail
+
+
+def test_probe_is_healthy_with_no_live_records() -> None:
+    assert R.probe_health(R.CoinDCXReconciler())[0] is True
+
+
+async def test_inr_positions_are_planned_on_the_inr_instrument(env) -> None:
+    fx, store, reg, ex = env
+    await ex.open_position(**_open_kwargs(margin_currency="INR"))
+    assert reg.margins_asked and set(reg.margins_asked) == {"INR"}
