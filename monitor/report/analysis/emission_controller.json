@@ -215,12 +215,6 @@
       "SR_FLIP_RETEST@ATR|min_samples": [
         "LOWER"
       ],
-      "SHADOW_CASCADE_REVERSAL|suppress_negative": [
-        "SKIP"
-      ],
-      "SHADOW_CASCADE_REVERSAL|min_samples": [
-        "LOWER"
-      ],
       "LIQUIDATION_REVERSAL|suppress_negative": [
         "SKIP",
         "SKIP",
@@ -252,7 +246,7 @@
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157,
       "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251
     },
-    "cycle": 3283
+    "cycle": 3325
   },
   "ledger": [
     {
