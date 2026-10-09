@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-10-08T06:35:09.704026+00:00",
-  "generated_at_ts": 1791441309.7040262,
+  "generated_at": "2026-10-09T06:37:26.481441+00:00",
+  "generated_at_ts": 1791527846.4814415,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "f8f317a9b3b544f4fe5e4ae79773d869119c86a0",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 12467,
-    "strategy_matrix_scored_cells": 4061,
+    "strategy_matrix_cells": 12655,
+    "strategy_matrix_scored_cells": 4172,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -51,21 +51,14 @@
         "verdict": "STRONG"
       },
       {
-        "strategy": "LIQUIDITY_SWEEP_REVERSAL",
-        "context_key": "NY/MARKUP/COMPRESSED/BTC_FALLING",
-        "edge_r": 2.268582925813519,
-        "n": 15,
+        "strategy": "DIVERGENCE_CONTINUATION",
+        "context_key": "OVERLAP/MARKDOWN/CASCADE/BTC_FALLING",
+        "edge_r": 2.3919868915394886,
+        "n": 50,
         "verdict": "STRONG"
       }
     ],
     "weakest_cells": [
-      {
-        "strategy": "MOVER_TREND_PULLBACK@TUNED",
-        "context_key": "LONDON/QUIET/NORMAL/BTC_NEUTRAL",
-        "edge_r": -14.055136898460903,
-        "n": 15,
-        "verdict": "NEGATIVE"
-      },
       {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
         "context_key": "ASIA/VOLATILE_EXPANSION/NORMAL/BTC_RISING",
@@ -75,9 +68,9 @@
       },
       {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
-        "context_key": "NY/MARKDOWN/EXPANDED/BTC_FALLING",
-        "edge_r": -2.4432671066162253,
-        "n": 20,
+        "context_key": "LONDON/QUIET/NORMAL/BTC_NEUTRAL",
+        "edge_r": -12.365320439238072,
+        "n": 17,
         "verdict": "NEGATIVE"
       },
       {
@@ -92,6 +85,13 @@
         "context_key": "OVERLAP/MARKUP/COMPRESSED/BTC_NEUTRAL",
         "edge_r": -1.9461020800740227,
         "n": 22,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "LIQUIDITY_SWEEP_REVERSAL",
+        "context_key": "LONDON/MARKUP/EXPANDED/BTC_NEUTRAL/MIDCAP",
+        "edge_r": -1.6588394026641695,
+        "n": 42,
         "verdict": "NEGATIVE"
       }
     ],
