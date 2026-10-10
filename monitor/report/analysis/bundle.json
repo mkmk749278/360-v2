@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-10-09T06:37:26.481441+00:00",
-  "generated_at_ts": 1791527846.4814415,
+  "generated_at": "2026-10-10T06:19:59.682957+00:00",
+  "generated_at_ts": 1791613199.6829574,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "f8f317a9b3b544f4fe5e4ae79773d869119c86a0",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 12655,
-    "strategy_matrix_scored_cells": 4172,
+    "strategy_matrix_cells": 12694,
+    "strategy_matrix_scored_cells": 4195,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -90,8 +90,8 @@
       {
         "strategy": "LIQUIDITY_SWEEP_REVERSAL",
         "context_key": "LONDON/MARKUP/EXPANDED/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.6588394026641695,
-        "n": 42,
+        "edge_r": -1.6308533974038537,
+        "n": 43,
         "verdict": "NEGATIVE"
       }
     ],
