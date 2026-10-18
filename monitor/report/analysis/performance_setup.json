@@ -1,39 +1,39 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 1885,
-    "wins": 635,
-    "losses": 755,
-    "neutral": 495,
+    "n": 1916,
+    "wins": 645,
+    "losses": 768,
+    "neutral": 503,
     "win_rate_pct": 33.7,
-    "avg_pnl_pct": 0.2839
+    "avg_pnl_pct": 0.2791
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 325,
-    "wins": 92,
-    "losses": 159,
-    "neutral": 74,
+    "n": 329,
+    "wins": 93,
+    "losses": 161,
+    "neutral": 75,
     "win_rate_pct": 28.3,
-    "avg_pnl_pct": 0.095
+    "avg_pnl_pct": 0.0927
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 310,
+    "n": 311,
     "wins": 70,
-    "losses": 111,
+    "losses": 112,
     "neutral": 129,
-    "win_rate_pct": 22.6,
-    "avg_pnl_pct": 0.1628
+    "win_rate_pct": 22.5,
+    "avg_pnl_pct": 0.1589
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 236,
+    "n": 238,
     "wins": 58,
     "losses": 109,
-    "neutral": 69,
-    "win_rate_pct": 24.6,
-    "avg_pnl_pct": -0.1782
+    "neutral": 71,
+    "win_rate_pct": 24.4,
+    "avg_pnl_pct": -0.1767
   },
   {
     "setup": "SR_FLIP_RETEST",
@@ -45,6 +45,15 @@
     "avg_pnl_pct": 0.0502
   },
   {
+    "setup": "DIVERGENCE_CONTINUATION",
+    "n": 153,
+    "wins": 48,
+    "losses": 75,
+    "neutral": 30,
+    "win_rate_pct": 31.4,
+    "avg_pnl_pct": -0.0576
+  },
+  {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
     "n": 151,
     "wins": 31,
@@ -52,15 +61,6 @@
     "neutral": 48,
     "win_rate_pct": 20.5,
     "avg_pnl_pct": -0.2054
-  },
-  {
-    "setup": "DIVERGENCE_CONTINUATION",
-    "n": 147,
-    "wins": 46,
-    "losses": 72,
-    "neutral": 29,
-    "win_rate_pct": 31.3,
-    "avg_pnl_pct": -0.0419
   },
   {
     "setup": "BREAKDOWN_SHORT",
@@ -73,12 +73,12 @@
   },
   {
     "setup": "TREND_PULLBACK_EMA",
-    "n": 36,
-    "wins": 10,
+    "n": 37,
+    "wins": 11,
     "losses": 11,
     "neutral": 15,
-    "win_rate_pct": 27.8,
-    "avg_pnl_pct": 0.2338
+    "win_rate_pct": 29.7,
+    "avg_pnl_pct": 0.2663
   },
   {
     "setup": "VOLUME_SURGE_BREAKOUT",
