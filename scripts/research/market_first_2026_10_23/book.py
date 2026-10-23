@@ -10,7 +10,9 @@ book rather than one symbol. In time order, a candidate is kept only if:
   * the symbol has no active signal (the router's correlation lock);
   * the symbol has not enqueued in the last 600 s (SIGNAL_SCAN_COOLDOWN_SECONDS);
   * its (setup, direction) holds fewer than 3 active signals across the book
-    (same-direction throttle, PER_PATH mode, budget 3).
+    (same-direction throttle, PER_PATH mode, budget 3);
+  * its pre-penalty composite score is at least --min-score (default 65, the
+    scanner's floor; replay.py mirrors the scorer).
 
 Same-bar candidates on one symbol keep the evaluator dispatch order, so the
 first one wins, as it does in the scanner. Not applied: the scoring floor, the
@@ -34,6 +36,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--replay", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--min-score", type=float, default=65.0)
     a = ap.parse_args()
     frames = []
     for p in sorted(glob.glob(os.path.join(a.replay, "*.csv"))):
@@ -42,7 +45,7 @@ def main() -> None:
             d["seq"] = range(len(d))
             frames.append(d)
     c = pd.concat(frames, ignore_index=True)
-    c = c[c.outcome.isin(RESOLVED)].sort_values(["t_ms", "symbol", "seq"], kind="stable")
+    c = c[c.outcome.isin(RESOLVED) & (c.score >= a.min_score)].sort_values(["t_ms", "symbol", "seq"], kind="stable")
 
     active_until: dict = {}   # symbol -> exit_ms of its active signal
     last_enq: dict = {}       # symbol -> t_ms of last enqueue

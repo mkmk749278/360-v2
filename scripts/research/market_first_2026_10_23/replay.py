@@ -58,7 +58,10 @@ from src.detector import SMCDetector  # noqa: E402
 from src.level_book import LevelBook  # noqa: E402
 from src.pair_manager import classify_pair_tier  # noqa: E402
 from src.regime import RegimeService  # noqa: E402
-from src.signal_quality import SetupClass, build_risk_plan  # noqa: E402
+from src.chart_patterns import detect_all_patterns  # noqa: E402
+from src.mtf import check_mtf_gate, compute_mtf_confluence  # noqa: E402
+from src.scanner import Scanner  # noqa: E402
+from src.signal_quality import ScoringInput, SetupClass, SignalScoringEngine, build_risk_plan  # noqa: E402
 import src.scanner.indicator_compute as indicator_compute_mod  # noqa: E402
 from src.scanner.indicator_compute import compute_indicators_for_candle_dict  # noqa: E402
 
@@ -96,8 +99,54 @@ BE_FLAT, BE_R, BE_NOISE, BE_PARK, BE_TP1_CAP = 1.0, 1.0, 0.75, 0.15, 0.5
 SPREAD_PCT = 0.02
 
 FIELDS = ["symbol", "t_ms", "setup", "direction", "entry", "sl", "tp1", "sl_pct",
-          "tp1_pct", "noise_pct", "confidence", "regime", "outcome", "pnl_pct",
-          "exit_ms", "mfe_pct", "mae_pct"]
+          "tp1_pct", "noise_pct", "confidence", "score", "mtf_score", "mtf_pass", "regime",
+          "outcome", "pnl_pct", "exit_ms", "mfe_pct", "mae_pct"]
+SCORER = SignalScoringEngine()
+
+
+def composite_score(sig, win: dict, ind: dict, res, regime: str, regime_ctx) -> tuple:
+    """Mirror of the scanner's pre-penalty composite score (Scanner, ~L8870-8937).
+
+    Inputs the replay has no source for take the scanner's own defaults: no
+    CVD divergence, OI trend NEUTRAL, no liquidation volume, no funding rate.
+    Returns (total, mtf_score, basic MTF gate pass). The gate flag uses the
+    generic 0.55 floor only; the regime/family/semantic relaxations are not
+    mirrored, so it is reported, never filtered on.
+    """
+    direction = sig.direction.value
+    mtf_data = {}
+    for tf in ("5m", "15m", "1h", "4h"):
+        i = ind.get(tf, {})
+        if i.get("ema9_last") is not None and i.get("ema21_last") is not None and tf in win:
+            mtf_data[tf] = {"ema_fast": float(i["ema9_last"]), "ema_slow": float(i["ema21_last"]),
+                            "close": float(win[tf]["close"][-1])}
+    mtf_score = compute_mtf_confluence(direction, mtf_data).score if mtf_data else 0.0
+    mtf_pass = bool(check_mtf_gate(direction, mtf_data, min_score=0.55)[0]) if mtf_data else True
+    ptf = Scanner._get_primary_timeframe("360_SCALP", getattr(sig, "setup_class", ""))
+    pcd = win.get(ptf) or win["5m"]
+    pind = ind.get(ptf, {})
+    usd = [c * v for c, v in zip(pcd["close"][-20:], pcd["volume"][-20:])]
+    try:
+        patterns = detect_all_patterns(np.asarray(pcd["open"]), np.asarray(pcd["high"]),
+                                       np.asarray(pcd["low"]), np.asarray(pcd["close"]),
+                                       np.asarray(pcd["volume"]))
+    except Exception:  # noqa: BLE001 — the scanner fails open here too
+        patterns = []
+    try:
+        atr_pctile = float(regime_ctx.atr_percentile)
+    except (AttributeError, TypeError, ValueError):
+        atr_pctile = 50.0
+    inp = ScoringInput(
+        sweeps=res.sweeps, mss=res.mss, fvg_zones=res.fvg, regime=regime,
+        setup_class=sig.setup_class, htf_trend_aligned=getattr(sig, "htf_trend_aligned", False),
+        atr_percentile=atr_pctile, volume_last_usd=float(usd[-1]) if usd else 0.0,
+        volume_avg_usd=float(np.mean(usd)) if usd else 0.0,
+        breakout_volume_ratio=getattr(sig, "breakout_volume_ratio", 0.0) or 0.0,
+        macd_histogram_last=pind.get("macd_histogram_last"), macd_histogram_prev=pind.get("macd_histogram_prev"),
+        rsi_last=pind.get("rsi_last"), ema_fast=pind.get("ema9_last"), ema_slow=pind.get("ema21_last"),
+        adx_last=pind.get("adx_last"), direction=direction, chart_patterns=patterns, mtf_score=mtf_score,
+    )
+    return float(SCORER.score(inp)["total"]), float(mtf_score), mtf_pass
 
 
 def load_tf(zdir: str, symbol: str, tf: str) -> dict:
@@ -319,6 +368,8 @@ def main() -> None:
             long_ = sig.direction.value == "LONG"
             if entry <= 0 or (long_ and not (sl < entry < tp1)) or (not long_ and not (tp1 < entry < sl)):
                 continue
+            score, mtf_score, mtf_pass = composite_score(sig, win, ind, res, regime,
+                                                         smc_data["regime_context"])
             outcome, pnl, exit_ms, mfe, mae = walk(s5, int(k), long_, entry, sl, tp1, noise)
             w.writerow({
                 "symbol": sym, "t_ms": int(t), "setup": getattr(sig, "setup_class", ""),
@@ -326,6 +377,7 @@ def main() -> None:
                 "sl_pct": round(abs(entry - sl) / entry * 100, 4),
                 "tp1_pct": round(abs(tp1 - entry) / entry * 100, 4),
                 "noise_pct": round(noise, 4), "confidence": round(float(getattr(sig, "confidence", 0) or 0), 2),
+                "score": round(score, 2), "mtf_score": round(mtf_score, 3), "mtf_pass": int(mtf_pass),
                 "regime": regime, "outcome": outcome, "pnl_pct": round(pnl, 4),
                 "exit_ms": exit_ms, "mfe_pct": round(mfe, 4), "mae_pct": round(mae, 4),
             })
