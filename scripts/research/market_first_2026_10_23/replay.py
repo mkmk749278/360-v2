@@ -100,7 +100,9 @@ SPREAD_PCT = 0.02
 
 FIELDS = ["symbol", "t_ms", "setup", "direction", "entry", "sl", "tp1", "sl_pct",
           "tp1_pct", "noise_pct", "confidence", "score", "mtf_score", "mtf_pass", "regime",
-          "outcome", "pnl_pct", "exit_ms", "mfe_pct", "mae_pct"]
+          "outcome", "pnl_pct", "exit_ms", "mfe_pct", "mae_pct",
+          "c_smc", "c_regime", "c_volume", "c_indicators", "c_patterns", "c_mtf", "c_thesis"]
+COMPONENTS = ("smc", "regime", "volume", "indicators", "patterns", "mtf", "thesis_adj")
 SCORER = SignalScoringEngine()
 
 
@@ -146,7 +148,8 @@ def composite_score(sig, win: dict, ind: dict, res, regime: str, regime_ctx) -> 
         rsi_last=pind.get("rsi_last"), ema_fast=pind.get("ema9_last"), ema_slow=pind.get("ema21_last"),
         adx_last=pind.get("adx_last"), direction=direction, chart_patterns=patterns, mtf_score=mtf_score,
     )
-    return float(SCORER.score(inp)["total"]), float(mtf_score), mtf_pass
+    out = SCORER.score(inp)
+    return float(out["total"]), float(mtf_score), mtf_pass, {k: float(out.get(k, 0.0)) for k in COMPONENTS}
 
 
 def load_tf(zdir: str, symbol: str, tf: str) -> dict:
@@ -368,8 +371,8 @@ def main() -> None:
             long_ = sig.direction.value == "LONG"
             if entry <= 0 or (long_ and not (sl < entry < tp1)) or (not long_ and not (tp1 < entry < sl)):
                 continue
-            score, mtf_score, mtf_pass = composite_score(sig, win, ind, res, regime,
-                                                         smc_data["regime_context"])
+            score, mtf_score, mtf_pass, comps = composite_score(sig, win, ind, res, regime,
+                                                                smc_data["regime_context"])
             outcome, pnl, exit_ms, mfe, mae = walk(s5, int(k), long_, entry, sl, tp1, noise)
             w.writerow({
                 "symbol": sym, "t_ms": int(t), "setup": getattr(sig, "setup_class", ""),
@@ -380,6 +383,7 @@ def main() -> None:
                 "score": round(score, 2), "mtf_score": round(mtf_score, 3), "mtf_pass": int(mtf_pass),
                 "regime": regime, "outcome": outcome, "pnl_pct": round(pnl, 4),
                 "exit_ms": exit_ms, "mfe_pct": round(mfe, 4), "mae_pct": round(mae, 4),
+                **{f"c_{k.replace('_adj', '')}": round(v, 2) for k, v in comps.items()},
             })
             n_sig += 1
     f.close()
