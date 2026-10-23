@@ -112,10 +112,10 @@ def test_stat_filter_allows_when_below_min_samples():
 
 
 def test_stat_filter_suppresses_below_threshold():
-    """Hard suppress must fire when win rate is below 25%."""
+    """Hard suppress fires when the Wilson UPPER bound is below 25%."""
     store = RollingWinRateStore(window=30, min_samples=15)
-    # 3 wins / 23 total ≈ 13% WR — well below the 25% suppress threshold
-    _fill_store(store, "360_SCALP", "BTCUSDT", "RANGING", wins=3, losses=20)
+    # 1 win / 29 total ≈ 3% WR, Wilson UB ~17% — confidently below 25%
+    _fill_store(store, "360_SCALP", "BTCUSDT", "RANGING", wins=1, losses=28)
     sf = StatisticalFilter(store)
     allow, conf, reason = sf.check("360_SCALP", "BTCUSDT", "RANGING", 80.0)
     assert allow is False
@@ -129,7 +129,7 @@ def test_stat_filter_suppress_reason_contains_win_rate():
     _fill_store(store, "SWING", "ETHUSDT", "VOLATILE", wins=2, losses=18)
     sf = StatisticalFilter(store)
     _allow, _conf, reason = sf.check("SWING", "ETHUSDT", "VOLATILE", 70.0)
-    assert "wilson=" in reason
+    assert "wilson_ub=" in reason
 
 
 # ===========================================================================
@@ -138,10 +138,10 @@ def test_stat_filter_suppress_reason_contains_win_rate():
 
 
 def test_stat_filter_soft_penalty_at_40pct_win_rate():
-    """Soft penalty must fire and deduct 10 pts when Wilson LB is in the 25–45% range."""
+    """Soft penalty must fire and deduct 10 pts when Wilson UB is in the 25–45% range."""
     store = RollingWinRateStore(window=30, min_samples=15)
-    # 13 wins + 17 losses ≈ 43% raw WR, Wilson LB ~27% → soft penalty zone
-    _fill_store(store, "SWING", "ETHUSDT", "VOLATILE", wins=13, losses=17)
+    # 6 wins + 24 losses = 20% raw WR, Wilson UB ~37% → soft penalty zone
+    _fill_store(store, "SWING", "ETHUSDT", "VOLATILE", wins=6, losses=24)
     sf = StatisticalFilter(store)
     allow, conf, reason = sf.check("SWING", "ETHUSDT", "VOLATILE", 70.0)
     assert allow is True
@@ -152,12 +152,25 @@ def test_stat_filter_soft_penalty_at_40pct_win_rate():
 def test_stat_filter_soft_penalty_clamps_at_zero():
     """Soft penalty must never produce a negative confidence value."""
     store = RollingWinRateStore(window=30, min_samples=15)
-    # 13 wins / 30 total → Wilson LB ~0.27 — inside soft-penalty zone;
+    # 6 wins / 30 total → Wilson UB ~0.37 — inside soft-penalty zone;
     # start with very low confidence
-    _fill_store(store, "360_SCALP", "SOLUSDT", "RANGING", wins=13, losses=17)
+    _fill_store(store, "360_SCALP", "SOLUSDT", "RANGING", wins=6, losses=24)
     sf = StatisticalFilter(store)
     _allow, conf, _reason = sf.check("360_SCALP", "SOLUSDT", "RANGING", 2.0)
     assert conf >= 0.0
+
+
+def test_stat_filter_does_not_punish_an_ordinary_pair_on_thin_evidence():
+    """2026-10-23: 6 wins in 15 (40%) has a Wilson LOWER bound near 20%, so the
+    old lower-bound comparison hard-suppressed it. The upper bound is ~64%:
+    nothing says this pair is bad, so it must pass untouched."""
+    store = RollingWinRateStore(window=30, min_samples=15)
+    _fill_store(store, "360_SCALP", "ADAUSDT", "RANGING", wins=6, losses=9)
+    sf = StatisticalFilter(store)
+    allow, conf, reason = sf.check("360_SCALP", "ADAUSDT", "RANGING", 70.0)
+    assert allow is True
+    assert conf == pytest.approx(70.0)
+    assert reason.startswith("ok:")
 
 
 # ===========================================================================

@@ -76,6 +76,23 @@ def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
     return (centre - spread) / denominator
 
 
+def wilson_upper_bound(wins: int, total: int, z: float = 1.96) -> float:
+    """Upper bound of the Wilson score interval; 1.0 when *total* is zero.
+
+    Use it to ask "are we confident the true rate is BELOW x?" — the
+    question a filter that penalises a pair has to answer.  The lower
+    bound answers the opposite question.
+    """
+    if total == 0:
+        return 1.0
+    p_hat = wins / total
+    z2 = z * z
+    denominator = 1.0 + z2 / total
+    centre = p_hat + z2 / (2.0 * total)
+    spread = z * math.sqrt((p_hat * (1.0 - p_hat) + z2 / (4.0 * total)) / total)
+    return (centre + spread) / denominator
+
+
 def _interpolate_curve(raw_confidence: float) -> float:
     """Linearly interpolate the hardcoded calibration curve.
 

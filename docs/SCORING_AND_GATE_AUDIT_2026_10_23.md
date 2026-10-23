@@ -205,3 +205,25 @@ candidate for a shadow arm, not a change.
 
 **Which dimensions drive the ≥ 80 band** is answered by the same file and is
 left for the scoring proposal; the band itself is in §2.
+
+---
+
+## 6. Decisions (owner, 2026-10-23)
+
+Owner: *"make per path same signals max 4, and remaining you decide and fix to
+become the better."* Each decision below was checked against the live book
+(ops `/track-record` and `/performance`, read 2026-10-23) before it was made,
+because the replay is ~12× less selective than live and its levels do not
+transfer.
+
+| Item | Decision | Evidence |
+|---|---|---|
+| Correlated cap | **Changed: 4 per direction per path** (was 4 per direction book-wide). Live. | Owner's instruction. 90d delivered book: 1,139 of 2,804 entries arrived with exactly 3 others open in the same direction, i.e. at the limit; no path ever held more than 2. |
+| Stat filter | **Fixed: compares the Wilson *upper* bound.** Live. | Its docstring promised "statistical confidence before penalising"; the lower bound does the opposite. 6 wins in 15 (40%) was hard-suppressed; now passes. Live TP1 win rate runs ~30%, so the old 45% soft tier hit ordinary pairs. |
+| Meme-coin penalty | **Removed** (it never fired). | Symbols lacked Binance's `1000` prefix. Switching it on was not justified: 90d net per trade 1000PEPE +0.16%, 1000SHIB +0.03% vs +0.13% book-wide. |
+| Score floor 65 | **Unchanged.** | The replay said only ≥ 80 pays. Live does not agree: all-time gross per trade 65–70 +0.05%, 70–75 +0.11%, 75–80 +0.35%, 80+ +0.13% (30d: −0.16 / +0.20 / +0.15 / −0.01). The score barely ranks live outcomes; raising the floor would cut volume for no measured gain. |
+| Overwritten confidence adjustments | **Unchanged, documented.** | They affect nothing today. Deleting ~10 blocks is churn with no outcome change; folding any back into the scorer is a scoring change with no evidence yet. |
+| Funding gate / funding score | **Left off.** | Dead (overwritten) and its sign is backwards: positive funding — longs crowded — "boosts" a long. Switching on an untested, mis-signed input is not a fix. |
+| Spoof gate | **Left off.** | Wiring the book in would switch on a gate that has never run. Needs a shadow arm first. |
+| SMC sweep bonus | **Unchanged.** | It makes the SMC gate inert (§5). Fixing it moves every score by up to 5 points; the score barely ranks live outcomes, so this is not where the edge is. |
+| Longs 15m-regime gate, MVAVW trend gate | **Unchanged, now measured.** | Both now stamp into the suppression audit, which forward-measures what they block. Decide on that, not on the replay. |

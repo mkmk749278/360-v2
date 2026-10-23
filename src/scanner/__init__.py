@@ -8481,20 +8481,30 @@ class Scanner:
             self._increment_path_funnel("geometry:risk_plan:preserved", chan_name, _setup_class_name)
         self._apply_risk_plan_to_signal(sig, risk)
 
-        # ── Correlated position exposure cap ───────────────────────────────
-        # Block new scalp signals when too many same-direction active signals
-        # exist already, to limit correlated BTC-driven stop-out risk.
+        # ── Correlated position exposure cap, per path ─────────────────────
+        # Block a new scalp signal when its own path already has
+        # MAX_CORRELATED_SCALP_SIGNALS active signals in the same direction.
+        # Owner, 2026-10-23: "make per path same signals max 4". It was
+        # book-wide (4 per direction across every path), which held the
+        # delivered book at its limit for 1,139 of 2,804 entries in the 90d
+        # to 2026-10-23 and let one busy path starve every other one.
+        # Both sides are keyed by origin setup class, the identity every
+        # signal keeps for its whole life, so a reclassified setup cannot
+        # escape its path's count.
         if chan_name in _SCALP_CHANNELS:
+            _cap_path = self._resolve_origin_setup_class(sig)
             same_dir_count = sum(
                 1
                 for s in self.router.active_signals.values()
-                if s.direction == sig.direction and s.channel in _SCALP_CHANNELS
+                if s.direction == sig.direction
+                and s.channel in _SCALP_CHANNELS
+                and self._resolve_origin_setup_class(s) == _cap_path
             )
             if same_dir_count >= MAX_CORRELATED_SCALP_SIGNALS:
                 log.info(
-                    "Correlated exposure cap reached for {} {} (direction={}, active={}): "
+                    "Per-path exposure cap reached for {} {} {} (direction={}, active={}): "
                     "blocking signal",
-                    symbol, chan_name, sig.direction.value, same_dir_count,
+                    symbol, chan_name, _cap_path, sig.direction.value, same_dir_count,
                 )
                 self._suppression_counters[
                     f"correlated_scalp_cap:{chan_name}:{_setup_class_name}"
@@ -9250,23 +9260,11 @@ class Scanner:
             fail_open.record("scanner.distribution_gate", _dist_exc)
             log.debug("distribution gate error for {} {} (fail open): {}", symbol, chan_name, _dist_exc)
 
-        # Meme coin low-volume penalty: thin meme coins (<$150M 24h vol) behave
-        # erratically — SMC patterns are noise-driven, not institutional.
-        _MEME_SYMBOLS = frozenset({"PEPEUSDT", "SHIBUSDT", "BONKUSDT", "FLOKIUSDT"})
-        try:
-            if symbol in _MEME_SYMBOLS and volume_24h < 150_000_000.0:
-                _meme_penalty = sig.confidence * (1.0 - 0.85)
-                sig.confidence = max(0.0, sig.confidence * 0.85)
-                _existing_flags = sig.soft_gate_flags or ""
-                sig.soft_gate_flags = (_existing_flags + ",meme_low_vol_penalty").lstrip(",")
-                self._suppression_counters[f"meme_low_vol_penalty:{chan_name}"] += 1
-                log.debug(
-                    "meme low-vol gate {} {}: vol={:.0f} -{}% → {:.1f}",
-                    symbol, chan_name, volume_24h, 15, sig.confidence,
-                )
-        except Exception as _meme_exc:
-            fail_open.record("scanner.meme_gate", _meme_exc)
-            log.debug("meme gate error for {} {} (fail open): {}", symbol, chan_name, _meme_exc)
+        # (The meme-coin low-volume penalty that sat here was removed on
+        # 2026-10-23. It listed PEPEUSDT / SHIBUSDT / BONKUSDT / FLOKIUSDT, but
+        # Binance futures lists them with a 1000 prefix, so it never fired.
+        # The 90d delivered book shows no case for switching it on: 1000PEPE
+        # +0.16% and 1000SHIB +0.03% net per trade against +0.13% book-wide.)
 
         # SMC hard gate: require minimum structural basis (sweep OR MSS present).
         # A signal with smc_score < SMC_HARD_GATE_MIN has no institutional

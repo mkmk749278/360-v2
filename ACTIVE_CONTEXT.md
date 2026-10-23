@@ -33,14 +33,18 @@ align. `tests/test_backtester_tf_alignment.py` fails on the old code.
 **Scoring and gate audit (same PR)** — `docs/SCORING_AND_GATE_AUDIT_2026_10_23.md`.
 16 hard rejects, the conf-fail cooldown, global cooldown and arbitration losers
 now stamp (measurement only, `pre_scoring=True`); 7 silent `except`s record.
-OPEN, owner decisions, nothing changed:
-- `MAX_CORRELATED_SCALP_SIGNALS=4` caps the book at 4 active signals per
-  direction, against the 2026-09-04 "no cap" ruling.
-- Score floor 65 separates nothing; only ≥ 80 is positive in replay.
-- ~10 confidence adjustments overwritten before use; spoof gate, meme list,
-  funding thresholds, SMC sweep bonus are dead or mis-scaled.
-- Stat filter applies win-rate thresholds to a Wilson lower bound.
-- Trend gate may block MVAVW winners (shadow-arm candidate).
+Owner then ruled (*"per path same signals max 4, remaining you decide"*);
+decisions and their live evidence are in §6 of the audit doc:
+- **LIVE: the correlated cap is 4 per direction PER PATH** (was book-wide).
+  Watch after deploy: delivered signals/day and same-direction concurrency
+  should rise; `correlated_scalp_cap:*` in the scan-cycle summary log should
+  fall. Off-switch: `MAX_CORRELATED_SCALP_SIGNALS` in `.env` (check the VPS
+  `.env` does not override it).
+- **LIVE: stat filter compares the Wilson upper bound** (was lower bound).
+- Meme penalty removed (never fired). Score floor 65 kept: live bands do not
+  support 80. Funding (dead, mis-signed), spoof gate, SMC sweep bonus,
+  overwritten adjustments left as they are; 15m longs gate and MVAVW trend gate
+  are now measured by the suppression audit.
 
 ---
 
