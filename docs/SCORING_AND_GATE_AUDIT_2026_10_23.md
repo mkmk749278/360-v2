@@ -68,8 +68,8 @@ are measurement-only (`pre_scoring=True`, so they never feed Layer C).
 | 15 | Stat filter: Wilson lower bound against 25% / 45% (9072) | no | **Defect.** §4. |
 | 16 | Cohort edge (9170) | yes | Works. |
 | 17 | Pair analysis critical (9213) | yes | Works. |
-| 18 | SMC hard gate, smc ≥ 12 (9306) | no | **Owner decision.** §5. |
-| 19 | Trend hard gate, indicators ≥ 10 (9336) | no | **Owner decision.** §5. |
+| 18 | SMC hard gate, smc ≥ 12 (9306) | no | Nearly inert because of the sweep defect (§2, §5). |
+| 19 | Trend hard gate, indicators ≥ 10 (9336) | no | Works, including on MEAN_REVERT. Possible exception: MVAVW (§5). |
 | 20 | Context edge RANGE_FADE, QUIET scalp block (9536, 9577) | yes | Works. |
 | 21 | Layer C context floor, min-confidence (9741, 9775) | yes | Works. |
 | 22 | Entry quality (9876) | yes | Works. |
@@ -162,4 +162,46 @@ August, mostly BTC / ETH / BNB in QUIET. It does not explain October.
 
 ## 5. The SMC and trend hard gates
 
-_Measured by the component replay; filled below._
+Component replay: the same harness with every score dimension stamped per
+candidate, 25 pairs, 2026-05-01 → 2026-10-21, 140,203 candidates. Both gates
+run after the 65 floor, so they are measured on candidates scoring ≥ 65. Net of
+a 0.07% round trip. H1 / H2 are the two halves of the window by time.
+Candidates overlap within a move, so n overstates independent evidence.
+[measured]
+
+**SMC hard gate (smc ≥ 12) is close to inert, and what it removes is not worse.**
+
+| Path | Blocked (smc < 12) | Kept (≥ 12) |
+|---|---|---|
+| MVRTP long | 289 · +0.33% (H1 −0.05, H2 +0.68) | 31,857 · +0.02% |
+| MVRTP short | 232 · +0.17% (H1 −0.08, H2 +0.45) | 25,049 · −0.13% |
+| MVAVW long / short | 39 · +0.36% / 65 · +0.50% | −0.04% / −0.20% |
+| LSR, MEAN_REVERT | 0 blocked | — |
+
+It removes about 1% of candidates. That follows from §2: every sweep earns the
+"recent" +5, so almost every candidate clears 12. The blocked slice reads
+better than the kept one, but it is small and not consistent across halves on
+MVRTP. **Not a lever either way.** Fix the sweep scoring first; then the gate's
+threshold means something and can be measured again.
+
+**Trend hard gate (indicators ≥ 10) is doing its job on most paths, including
+mean reversion.** I expected it to be wrong on MEAN_REVERT, a counter-trend
+idea. It is the opposite:
+
+| Path | Blocked (< 10) | Kept (≥ 10) |
+|---|---|---|
+| MEAN_REVERT long | 1,381 · −0.09% | 1,329 · **+0.30%** (H1 +0.19, H2 +0.45) |
+| MEAN_REVERT short | 1,889 · −0.17% | 2,025 · **+0.31%** (H1 +0.27, H2 +0.36) |
+| MVRTP long | 3,510 · −0.09% | 28,636 · +0.04% |
+| MVRTP short | 3,015 · −0.21% | 22,266 · −0.12% |
+| LSR long / short | −0.28% / −0.16% | −0.06% / −0.04% |
+| **MVAVW long** | 131 · **+0.45%** (H1 +0.16, H2 +0.69) | 4,318 · −0.05% |
+| **MVAVW short** | 124 · **+0.37%** (H1 +0.79, H2 +0.03) | 3,832 · −0.20% |
+
+So the gate stays. The one exception is MOVER_AVWAP_SCALP, where the slice it
+blocks is positive in three of four half-windows while the kept one loses. That
+is ~3% of the path's candidates and the gate is an owner sign-off item; it is a
+candidate for a shadow arm, not a change.
+
+**Which dimensions drive the ≥ 80 band** is answered by the same file and is
+left for the scoring proposal; the band itself is in §2.
