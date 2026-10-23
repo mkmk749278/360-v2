@@ -326,6 +326,57 @@ class _IndicatorTape:
         return ind
 
 
+def _tf_closed_counts(
+    candles_by_tf: Dict[str, Dict], primary_tf: str, total: int
+) -> Dict[str, np.ndarray]:
+    """For each timeframe, the number of its bars closed when primary bar i opens.
+
+    ``counts[tf][i]`` bounds the slice ``[:counts]`` handed to the evaluator at
+    primary index ``i`` (whose own window is ``[:i]``, i.e. bars that closed by
+    the open of bar ``i``).
+
+    * Every timeframe carries ``open_time`` (ms) — the real-store shape: align
+      on time. A bar of period ``p`` opened at ``t`` has closed by ``T`` iff
+      ``t + p <= T``.
+    * No timestamps, same length as the primary — the synthetic flat-data shape
+      (one series reused for every timeframe): identity, as before.
+    * No timestamps, different length: there is no honest alignment, and an
+      index guess is exactly the defect this replaces. The timeframe is left
+      out of the window (the evaluator sees it as absent) and logged once.
+    """
+    prim = candles_by_tf.get(primary_tf, {})
+    p_ot = prim.get("open_time")
+    out: Dict[str, np.ndarray] = {}
+    identity = np.arange(total + 1)
+    have_time = p_ot is not None and len(p_ot) == total and total >= 2
+    # Open time of primary bar i, for i in [0, total]; one past the end opens a
+    # period after the last bar. Empty when the primary carries no timestamps.
+    opens = np.empty(0)
+    if have_time:
+        p_ot_arr = np.asarray(p_ot, dtype=float)
+        p_period = float(np.median(np.diff(p_ot_arr)))
+        opens = np.append(p_ot_arr, p_ot_arr[-1] + p_period)
+    for tf, cd in candles_by_tf.items():
+        n = len(cd.get("close", []))
+        if tf == primary_tf:
+            out[tf] = identity
+            continue
+        ot = cd.get("open_time")
+        if have_time and ot is not None and len(ot) == n and n >= 2:
+            ot_arr = np.asarray(ot, dtype=float)
+            period = float(np.median(np.diff(ot_arr)))
+            out[tf] = np.searchsorted(ot_arr + period, opens, side="right")
+        elif n == total:
+            out[tf] = identity
+        else:
+            log.warning(
+                "Backtest: %s has %d bars, primary %s has %d and no open_time "
+                "to align them — %s left out of the evaluation window",
+                tf, n, primary_tf, total, tf,
+            )
+    return out
+
+
 def _simulate_trade(
     signal: Signal,
     future_candles: Dict,
@@ -1041,6 +1092,13 @@ class Backtester:
             tf: _IndicatorTape(cd) for tf, cd in candles_by_tf.items()
         }
 
+        # How many bars of each timeframe have CLOSED when primary bar i opens.
+        # Slicing every timeframe at the primary index `i` (what this loop did
+        # until 2026-10-23) hands a 5m evaluator 1h/4h/1d bars from unrelated
+        # dates whenever the timeframes differ in length, which is every real
+        # store (`/backtest` passes the live data store). See _tf_closed_counts.
+        closed_counts = _tf_closed_counts(candles_by_tf, primary_tf, total_candles)
+
         # Track open simulated positions (candle index when each trade closes)
         open_positions: List[int] = []
 
@@ -1059,18 +1117,24 @@ class Backtester:
             # is 50 bars (scalp) / 100 (SMC detector); _EVAL_WINDOW leaves ample
             # margin. Indicators are unaffected — they come off the full-history
             # tape below, indexed at i.
-            lo_i = max(0, i - self._eval_window)
             window: Dict[str, Dict] = {}
+            ends: Dict[str, int] = {}
             for tf, cd in candles_by_tf.items():
+                counts = closed_counts.get(tf)
+                if counts is None:
+                    continue  # cannot be aligned to the primary clock — refused
+                end = int(counts[i])
+                lo = max(0, end - self._eval_window)
+                ends[tf] = end
                 window[tf] = {
-                    k: v[lo_i:i] if hasattr(v, "__getitem__") else v
+                    k: v[lo:end] if hasattr(v, "__getitem__") else v
                     for k, v in cd.items()
                 }
 
             # Indicators for each timeframe, read off the pre-computed tape.
             indicators: Dict[str, Dict] = {}
-            for tf, cd in window.items():
-                indicators[tf] = tapes[tf].at(min(i, tapes[tf].n))
+            for tf in window:
+                indicators[tf] = tapes[tf].at(min(ends[tf], tapes[tf].n))
 
             # SMC detection
             smc_result = self._smc_detector.detect(symbol, window, [])
