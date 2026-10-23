@@ -23,7 +23,9 @@ on the data below. **[inferred]** = reasoning from measured facts.
    core pairs, every live October Mover Trend Pullback long was reproduced by
    the replay, and those trades made **+0.13% per trade** live (126 trades). The
    month's loss sat in 145 trades on smaller pairs outside that set,
-   **−0.47% per trade**. §6 has what the replay of those pairs shows.
+   **−0.47% per trade**. Replayed, 98% of those trades reproduce and lose
+   there too: real setups the market did not pay, not an engine or data fault
+   (§6).
 4. **What did hold:** Mover Trend Pullback longs are the only path at or above
    zero over 13 months. Its edge is small and episodic, concentrated in
    January, August and September 2026. Several paths rank below it across
@@ -190,7 +192,23 @@ under-$25M/day tier was the best tier in August (+1.13%) and September
 (+0.74%), and the worst in October (−0.45%). [inferred] That is market beta,
 not a data or engine fault.
 
-_Replay of the 99 smaller pairs for Sep 15 – Oct 21: see §6a._
+### 6a. The smaller pairs, replayed [measured]
+
+The 99 core pairs outside the top 75 that carried live October MVRTP longs
+were replayed for Sep 15 – Oct 21 on the same code.
+
+| Pairs | Live trades | Reproduced by replay | Live net (reproduced trades) | Replay net (same trades) |
+|---|---|---|---|---|
+| Top 75 | 126 | 100% | +0.126% | −0.149% |
+| Smaller 99 | 145 | **98%** | **−0.412%** | **−0.521%** |
+
+**The engine fired the setups the real candles offered, and the market did not
+pay them.** No data or engine fault is involved: the replay, fed Binance's own
+candles, takes the same trades and loses on them too. Across all scored
+candidates Oct 1–19, the replay's MVRTP longs ran −0.153% on the smaller pairs
+and −0.093% on the top 75: worse on small caps, but by much less than the live
+split. Live simply placed more of its October trades on the smaller pairs
+(145 vs 126), in a month when they fell hardest.
 
 ## 7. What this means
 

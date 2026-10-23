@@ -17,7 +17,8 @@ something based only on signal history is not a good idea."* Spec in
   The state-gated playbook is therefore not recommended.
 - **October:** live MVRTP longs on the 75 replayed core pairs made +0.13%/trade
   and were all reproduced by the replay; the loss was on smaller pairs
-  (−0.47%/trade, 145 trades).
+  (−0.47%/trade, 145 trades). Replayed, 98% of those reproduce and lose too:
+  real setups the market did not pay, not an engine or data fault.
 - Replay fidelity: 95% of live MVRTP longs reproduced; outcome correlation
   0.84; exit simulation ~0.4%/trade pessimistic; live filters ~12× more
   selective than the replay can model.
