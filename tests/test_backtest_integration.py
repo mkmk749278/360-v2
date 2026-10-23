@@ -244,18 +244,17 @@ class TestStatFilter:
         store = RollingWinRateStore(window=50, min_samples=15)
         sf = StatisticalFilter(store=store)
 
-        # 35% raw WR with 40 samples → Wilson lower ≈ 0.22–0.28 range
-        # Use 40% raw WR so Wilson lower lands between 0.25 and 0.45 (soft penalty zone)
-        _record_outcomes(sf, "360_SCALP", "BTCUSDT", "TRENDING_UP", n=40, win_rate=0.40)
+        # 20% raw WR with 40 samples → Wilson UPPER ≈ 0.35: confidently
+        # below the 45% soft tier and not below the 25% hard tier.
+        _record_outcomes(sf, "360_SCALP", "BTCUSDT", "TRENDING_UP", n=40, win_rate=0.20)
 
-        wl = store.wilson_lower("360_SCALP", "BTCUSDT", "TRENDING_UP")
-        assert wl is not None
+        wu = store.wilson_upper("360_SCALP", "BTCUSDT", "TRENDING_UP")
+        assert wu is not None
 
         allow, adj_conf, reason = sf.check("360_SCALP", "BTCUSDT", "TRENDING_UP", 75.0)
 
-        # Wilson lower for 40% WR / 40 samples should be in soft penalty zone
-        assert 0.25 <= wl < 0.45, f"Wilson lower {wl} should be in soft penalty zone [0.25, 0.45)"
-        assert allow is True, f"Wilson={wl:.3f} should trigger soft penalty, not hard suppress"
+        assert 0.25 <= wu < 0.45, f"Wilson upper {wu} should be in soft penalty zone [0.25, 0.45)"
+        assert allow is True, f"Wilson UB={wu:.3f} should trigger soft penalty, not hard suppress"
         assert adj_conf == pytest.approx(65.0), f"Expected 75-10=65, got {adj_conf}"
         assert "soft_penalty" in reason
 
