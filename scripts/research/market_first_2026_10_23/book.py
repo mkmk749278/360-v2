@@ -15,8 +15,9 @@ book rather than one symbol. In time order, a candidate is kept only if:
     scanner's floor; replay.py mirrors the scorer).
 
 Same-bar candidates on one symbol keep the evaluator dispatch order, so the
-first one wins, as it does in the scanner. Not applied: the scoring floor, the
-post-evaluator gates and the staleness checks, which the replay cannot see.
+first one wins, as it does in the scanner. Not applied: the soft penalties and
+gates after the score (cohort edge, entry quality, staleness), which the replay
+cannot see.
 """
 from __future__ import annotations
 
