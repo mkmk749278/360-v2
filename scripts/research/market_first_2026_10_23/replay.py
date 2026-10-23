@@ -14,7 +14,10 @@ a 5m strategy 1h bars from a different date; it is not used for that reason.
 What the replay reproduces: candles, `compute_indicators_for_candle_dict`, the
 SMC detector, the regime service and its context, the pair tier, the LevelBook
 (hourly refresh, clock pinned to replay time), and the stop geometry the
-scanner applies after the evaluator (noise floor, then the 0.8% / 1xATR clamp).
+scanner applies after the evaluator: `build_risk_plan` (the per-setup stop cap,
+reject or compress, and the TP rebuild), the noise floor, then the 0.8% / 1xATR
+clamp. The CT macro gates that run just before `build_risk_plan` are not
+replayed (they cover LSR/SR_FLIP longs and LSR/FAR/BDS shorts).
 What it cannot: order flow (CVD, depth, aggTrades, liquidations), funding,
 order blocks, chart patterns, the scoring engine's >= 65 floor, the gate chain
 after the evaluator and the router. Evaluators that branch on a missing input
@@ -55,6 +58,7 @@ from src.detector import SMCDetector  # noqa: E402
 from src.level_book import LevelBook  # noqa: E402
 from src.pair_manager import classify_pair_tier  # noqa: E402
 from src.regime import RegimeService  # noqa: E402
+from src.signal_quality import SetupClass, build_risk_plan  # noqa: E402
 import src.scanner.indicator_compute as indicator_compute_mod  # noqa: E402
 from src.scanner.indicator_compute import compute_indicators_for_candle_dict  # noqa: E402
 
@@ -241,7 +245,7 @@ def main() -> None:
     ks = np.where((s5["close_time"] >= t0) & (s5["close_time"] < t1))[0]
     if a.limit_bars:
         ks = ks[: a.limit_bars]
-    started, n_sig = time.time(), 0
+    started, n_sig, n_risk_rej = time.time(), 0, 0
     for k in ks:
         t = s5["close_time"][k]
         clock["now"] = t / 1000.0
@@ -294,6 +298,19 @@ def main() -> None:
             print(sym, int(t), "evaluate raised", type(exc).__name__, exc, file=sys.stderr)
             continue
         for sig in sigs or []:
+            # Scanner order: build_risk_plan (per-setup SL cap: reject or compress,
+            # TP rebuild) -> noise floor -> enqueue clamp. A rejected plan never
+            # reaches the queue live, so it is counted and dropped here.
+            try:
+                risk = build_risk_plan(sig, ind, win, smc_data, SetupClass(sig.setup_class),
+                                       SPREAD_PCT, channel="360_SCALP")
+            except (ValueError, TypeError, KeyError, IndexError):
+                n_risk_rej += 1
+                continue
+            if not risk.passed:
+                n_risk_rej += 1
+                continue
+            sig.stop_loss, sig.tp1 = float(risk.stop_loss), float(risk.tp1)
             try:
                 sl, tp1, noise = shape(sig, win)
             except (TypeError, ValueError, ZeroDivisionError):
@@ -314,7 +331,7 @@ def main() -> None:
             })
             n_sig += 1
     f.close()
-    print(f"{sym} bars={len(ks)} signals={n_sig} secs={time.time() - started:.0f}")
+    print(f"{sym} bars={len(ks)} signals={n_sig} risk_plan_rejected={n_risk_rej} secs={time.time() - started:.0f}")
 
 
 if __name__ == "__main__":
