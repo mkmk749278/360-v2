@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-10-23 — Market-first methodology: spec + Phase-1 replay (PR #1086, research only)
+
+Owner: *"100% clarity on crypto market first, then we decide — changing
+something based only on signal history is not a good idea."* Spec in
+`docs/MARKET_FIRST_METHODOLOGY_2026_10_23.md`; results in
+`docs/MARKET_FIRST_PHASE1_RESULTS_2026_10_23.md`; tools in
+`scripts/research/market_first_2026_10_23/`. No engine code changed.
+
+- **No market-state label tested predicts next-day alt direction in both
+  halves of the year** (5 candidates; pre-registered criterion fails for all).
+  The state-gated playbook is therefore not recommended.
+- **October:** live MVRTP longs on the 75 replayed core pairs made +0.13%/trade
+  and were all reproduced by the replay; the loss was on smaller pairs
+  (−0.47%/trade, 145 trades).
+- Replay fidelity: 95% of live MVRTP longs reproduced; outcome correlation
+  0.84; exit simulation ~0.4%/trade pessimistic; live filters ~12× more
+  selective than the replay can model.
+
+**Fixed in the same PR — `src/backtester.py` misaligned timeframes.**
+`_backtest_channel` sliced every timeframe by the primary bar index, so a 5m
+evaluator read 1h/4h/1d bars from unrelated dates whenever the series differ
+in length — which the live store always does, and `/backtest` passes the live
+store in. It now aligns on `open_time` and refuses a timeframe it cannot
+align. `tests/test_backtester_tf_alignment.py` fails on the old code.
+
+---
+
 ## 2026-10-01 — CoinDCX auto-trade audit: every gap fixed (owner: "fix everything … merge after green")
 
 Owner enabled CoinDCX for users and asked for a full audit, then said: *"some
