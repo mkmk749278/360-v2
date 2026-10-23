@@ -30,6 +30,18 @@ in length — which the live store always does, and `/backtest` passes the live
 store in. It now aligns on `open_time` and refuses a timeframe it cannot
 align. `tests/test_backtester_tf_alignment.py` fails on the old code.
 
+**Scoring and gate audit (same PR)** — `docs/SCORING_AND_GATE_AUDIT_2026_10_23.md`.
+16 hard rejects, the conf-fail cooldown, global cooldown and arbitration losers
+now stamp (measurement only, `pre_scoring=True`); 7 silent `except`s record.
+OPEN, owner decisions, nothing changed:
+- `MAX_CORRELATED_SCALP_SIGNALS=4` caps the book at 4 active signals per
+  direction, against the 2026-09-04 "no cap" ruling.
+- Score floor 65 separates nothing; only ≥ 80 is positive in replay.
+- ~10 confidence adjustments overwritten before use; spoof gate, meme list,
+  funding thresholds, SMC sweep bonus are dead or mis-scaled.
+- Stat filter applies win-rate thresholds to a Wilson lower bound.
+- Trend gate may block MVAVW winners (shadow-arm candidate).
+
 ---
 
 ## 2026-10-01 — CoinDCX auto-trade audit: every gap fixed (owner: "fix everything … merge after green")
