@@ -7539,7 +7539,10 @@ class Scanner:
         if _fail_entry is not None:
             _fail_count, _suppressed_until = _fail_entry
             if _fail_count >= _CONF_FAIL_MAX_CONSECUTIVE and time.monotonic() < _suppressed_until:
-                return _reject("gated", False)  # Silently skip — cooldown active
+                self._suppression_counters[f"conf_fail_cooldown:{chan_name}"] += 1
+                if _preseed_signal is not None:
+                    self._stamp_prescoring_suppressed(_preseed_signal, "conf_fail_cooldown")
+                return _reject("gated", False)
         # ── End failed-detection cooldown check ───────────────────────────────
 
         if _preseed_signal is not None:
@@ -7558,6 +7561,7 @@ class Scanner:
                     regime=ctx.regime_result.regime.value,
                 )
             except Exception as exc:
+                fail_open.record("scanner.channel_evaluate", exc)
                 log.debug("Channel {} eval error for {}: {}", chan_name, symbol, exc)
                 return _reject("gated", None)
             if sig is None:
@@ -7601,6 +7605,7 @@ class Scanner:
                     _setup_family,
                     ctx.adx_val,
                 )
+                self._stamp_prescoring_suppressed(sig, "ranging_low_adx")
                 return _reject("gated", None)
             # Not blocked.  When the family WOULD block but the signal was exempted,
             # record it distinctly (with the reason) so the exemption's live volume
@@ -7657,6 +7662,7 @@ class Scanner:
                         _atr_pctile,
                         RANGING_LOW_ATR_SUPPRESS_PCTILE,
                     )
+                    self._stamp_prescoring_suppressed(sig, "ranging_low_atr")
                     return _reject("gated", None)
                 # Dark: count + log what we WOULD suppress so the volume and
                 # would-be PnL impact is measurable before the flag is flipped.
@@ -7872,6 +7878,7 @@ class Scanner:
                         regime=_regime_key,
                         would_be_confidence=sig.confidence,
                     ))
+                    self._stamp_prescoring_suppressed(sig, "mtf_gate")
                     return _reject("gated", None)
             if chan_name == "360_SCALP" and _mtf_min_score < _generic_mtf_min_score:
                 _generic_allowed, _ = check_mtf_gate(
@@ -7953,6 +7960,7 @@ class Scanner:
                             "Longs HTF-regime gate blocked {} {}: 15m={}",
                             symbol, chan_name, _regime15,
                         )
+                        self._stamp_prescoring_suppressed(sig, "mtf_longs_regime_down")
                         return _reject("gated", None)
 
         # ── Filter 1c: Counter-trend reversal HARD-block on a confirmed mover ──
@@ -7994,8 +8002,10 @@ class Scanner:
                         "Counter-trend mover hard-block {} {} {} {}: {}",
                         symbol, chan_name, _setup_class_name, sig.direction.value, _ct_reason,
                     )
+                    self._stamp_prescoring_suppressed(sig, "countertrend_mover_block")
                     return _reject("gated", None)
             except Exception as _ct_exc:
+                fail_open.record("scanner.countertrend_mover_block", _ct_exc)
                 log.debug(
                     "Counter-trend mover block error for {} {} (fail open): {}",
                     symbol, chan_name, _ct_exc,
@@ -8164,6 +8174,7 @@ class Scanner:
                         log.debug(
                             "Cross-asset gate blocked {} {}: {}", symbol, chan_name, ca_reason
                         )
+                        self._stamp_prescoring_suppressed(sig, "cross_asset")
                         return _reject("gated", None)
                     if ca_conf_adj != 0.0:
                         sig.confidence += ca_conf_adj
@@ -8377,6 +8388,7 @@ class Scanner:
                 "CT_LONG_MACRO_SUPPRESS {} {} LONG [{}] ({})",
                 symbol, chan_name, _setup_class_name, _ct_why,
             )
+            self._stamp_prescoring_suppressed(sig, "ct_long_macro")
             return _reject("gated", None)
 
         # ── Counter-trend-SHORT macro mirror (S40, DARK — default OFF) ──
@@ -8398,6 +8410,7 @@ class Scanner:
                     "CT_SHORT_MACRO_SUPPRESS {} {} SHORT [{}] ({})",
                     symbol, chan_name, _setup_class_name, _cts_why,
                 )
+                self._stamp_prescoring_suppressed(sig, "ct_short_macro")
                 return _reject("gated", None)
             if DARK_FLAG_SHADOW_TELEMETRY:
                 log.info(
@@ -8433,6 +8446,7 @@ class Scanner:
                     chan_name,
                     _setup_class_name,
                 )
+            self._stamp_prescoring_suppressed(sig, f"risk_plan:{_reason_token}")
             return _reject("gated", None)
         _eval_geom = self._capture_geometry(sig)
         _risk_geom = (
@@ -8482,6 +8496,10 @@ class Scanner:
                     "blocking signal",
                     symbol, chan_name, sig.direction.value, same_dir_count,
                 )
+                self._suppression_counters[
+                    f"correlated_scalp_cap:{chan_name}:{_setup_class_name}"
+                ] += 1
+                self._stamp_prescoring_suppressed(sig, "correlated_scalp_cap")
                 return _reject("gated", None)
 
         cross_verified = await self._verify_cross_exchange(
@@ -8504,6 +8522,7 @@ class Scanner:
             regime_key=_regime_key,
         )
         if legacy_confidence is None:
+            self._stamp_prescoring_suppressed(sig, "base_confidence")
             return _reject("gated", cross_verified)
         sig.confidence = legacy_confidence
         await self._apply_predictive_adjustments(
@@ -8672,6 +8691,7 @@ class Scanner:
                             "Signal blocked by MTF hard gate: {} {} (score={:.2f})",
                             symbol, chan_name, _mtf_result.score,
                         )
+                        self._stamp_prescoring_suppressed(sig, "mtf_hard_block")
                         sig = None
                     else:
                         sig.confidence -= 5.0
@@ -8982,6 +9002,7 @@ class Scanner:
                     pre_tier=_pre_penalty_tier_for_migration,
                     post_tier=_below_tier,
                 )
+                self._stamp_prescoring_suppressed(sig, "score_floor")
                 return _reject("filtered", cross_verified)
             log.debug(
                 "composite score {} {} → {:.1f} (tier={}) smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
@@ -9048,6 +9069,7 @@ class Scanner:
                     regime=_regime_key,
                     would_be_confidence=sig.confidence,
                 ))
+                self._stamp_prescoring_suppressed(sig, "stat_filter")
                 return _reject("filtered", cross_verified)
             _stat_filter_delta = _sf_conf - sig.confidence
             sig.confidence = _sf_conf
@@ -9204,6 +9226,7 @@ class Scanner:
                         symbol, chan_name, _pa_penalty, sig.confidence,
                     )
         except Exception as _pa_exc:
+            fail_open.record("scanner.pair_analysis_gate", _pa_exc)
             log.debug("pair_analysis gate error for {} {} (fail open): {}", symbol, chan_name, _pa_exc)
 
         # DISTRIBUTION soft gate: LONG signals in distribution volume profile carry
@@ -9224,6 +9247,7 @@ class Scanner:
                     symbol, chan_name, _dist_penalty, sig.confidence,
                 )
         except Exception as _dist_exc:
+            fail_open.record("scanner.distribution_gate", _dist_exc)
             log.debug("distribution gate error for {} {} (fail open): {}", symbol, chan_name, _dist_exc)
 
         # Meme coin low-volume penalty: thin meme coins (<$150M 24h vol) behave
@@ -9241,6 +9265,7 @@ class Scanner:
                     symbol, chan_name, volume_24h, 15, sig.confidence,
                 )
         except Exception as _meme_exc:
+            fail_open.record("scanner.meme_gate", _meme_exc)
             log.debug("meme gate error for {} {} (fail open): {}", symbol, chan_name, _meme_exc)
 
         # SMC hard gate: require minimum structural basis (sweep OR MSS present).
@@ -9278,6 +9303,7 @@ class Scanner:
                         regime=_regime_key,
                         would_be_confidence=sig.confidence,
                     ))
+                    self._stamp_prescoring_suppressed(sig, "smc_hard_gate")
                     return _reject("filtered", cross_verified)
 
         # Trend hard gate: EMA alignment is non-negotiable for scalp channels.
@@ -9307,6 +9333,7 @@ class Scanner:
                         regime=_regime_key,
                         would_be_confidence=sig.confidence,
                     ))
+                    self._stamp_prescoring_suppressed(sig, "trend_hard_gate")
                     return _reject("filtered", cross_verified)
 
         min_conf = self.confidence_overrides.get(chan_name, chan.config.min_confidence)
@@ -9444,6 +9471,7 @@ class Scanner:
                 for _k, _v in _mc.as_signal_fields().items():
                     setattr(sig, _k, _v)
         except Exception as _mc_exc:
+            fail_open.record("scanner.market_context_stamp", _mc_exc)
             log.debug(
                 "Market-context stamp error for {} {} (fail open): {}",
                 symbol, chan_name, _mc_exc,
@@ -9610,6 +9638,7 @@ class Scanner:
                             _hc.get("reason", ""),
                         )
             except Exception as _bs_exc:
+                fail_open.record("scanner.btc_state", _bs_exc)
                 log.debug(
                     "BTC-State stamp error for {} {} (fail open): {}",
                     symbol, chan_name, _bs_exc,
@@ -10314,11 +10343,22 @@ class Scanner:
                             "Global directional cooldown: {} {} {} skipped",
                             symbol, _sig_dir, chan_name,
                         )
+                        _sc_for_cd = getattr(sig, "setup_class", chan_name) or chan_name
+                        self._suppression_counters[
+                            f"enqueue_stage:global_cooldown:{_sc_for_cd}"
+                        ] += 1
+                        self._stamp_prescoring_suppressed(sig, "global_cooldown")
                         continue
                     _existing = _scalp_dir_best.get(_sig_dir)
                     if _existing is None:
                         _scalp_dir_best[_sig_dir] = (sig, chan_name)
                     elif sig.confidence > _existing[0].confidence:
+                        # The replaced candidate is dropped here: count and stamp it.
+                        _lost = _existing[0]
+                        self._suppression_counters[
+                            f"scalp_arbitration_lost:{getattr(_lost, 'setup_class', '') or chan_name}"
+                        ] += 1
+                        self._stamp_prescoring_suppressed(_lost, "scalp_arbitration")
                         # New candidate is strictly better — replace and log.
                         log.debug(
                             "Scalp arbitration: {} {} {} (conf={:.1f}) replaces"
@@ -10331,6 +10371,10 @@ class Scanner:
                         _scalp_dir_best[_sig_dir] = (sig, chan_name)
                     else:
                         # Existing candidate is better (or equal) — suppress new one.
+                        self._suppression_counters[
+                            f"scalp_arbitration_lost:{getattr(sig, 'setup_class', '') or chan_name}"
+                        ] += 1
+                        self._stamp_prescoring_suppressed(sig, "scalp_arbitration")
                         log.debug(
                             "Scalp arbitration: {} {} {} (conf={:.1f}) suppressed;"
                             " {} (conf={:.1f}) retained",
