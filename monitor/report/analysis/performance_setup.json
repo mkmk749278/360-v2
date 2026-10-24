@@ -1,66 +1,66 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 2009,
-    "wins": 669,
-    "losses": 817,
-    "neutral": 523,
-    "win_rate_pct": 33.3,
-    "avg_pnl_pct": 0.2347
+    "n": 2039,
+    "wins": 681,
+    "losses": 829,
+    "neutral": 529,
+    "win_rate_pct": 33.4,
+    "avg_pnl_pct": 0.2435
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 362,
-    "wins": 100,
-    "losses": 176,
+    "n": 365,
+    "wins": 102,
+    "losses": 177,
     "neutral": 86,
-    "win_rate_pct": 27.6,
-    "avg_pnl_pct": 0.068
+    "win_rate_pct": 27.9,
+    "avg_pnl_pct": 0.0783
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 314,
-    "wins": 71,
+    "n": 315,
+    "wins": 72,
     "losses": 114,
     "neutral": 129,
-    "win_rate_pct": 22.6,
-    "avg_pnl_pct": 0.1566
+    "win_rate_pct": 22.9,
+    "avg_pnl_pct": 0.1592
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 250,
-    "wins": 60,
-    "losses": 116,
+    "n": 253,
+    "wins": 62,
+    "losses": 117,
     "neutral": 74,
-    "win_rate_pct": 24.0,
-    "avg_pnl_pct": -0.1943
+    "win_rate_pct": 24.5,
+    "avg_pnl_pct": -0.1585
   },
   {
     "setup": "SR_FLIP_RETEST",
-    "n": 203,
+    "n": 204,
     "wins": 56,
-    "losses": 75,
+    "losses": 76,
     "neutral": 72,
-    "win_rate_pct": 27.6,
-    "avg_pnl_pct": 0.0657
-  },
-  {
-    "setup": "DIVERGENCE_CONTINUATION",
-    "n": 160,
-    "wins": 51,
-    "losses": 77,
-    "neutral": 32,
-    "win_rate_pct": 31.9,
-    "avg_pnl_pct": -0.0468
+    "win_rate_pct": 27.5,
+    "avg_pnl_pct": 0.0583
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
-    "n": 159,
-    "wins": 36,
-    "losses": 75,
+    "n": 161,
+    "wins": 37,
+    "losses": 76,
     "neutral": 48,
-    "win_rate_pct": 22.6,
-    "avg_pnl_pct": -0.1152
+    "win_rate_pct": 23.0,
+    "avg_pnl_pct": -0.1053
+  },
+  {
+    "setup": "DIVERGENCE_CONTINUATION",
+    "n": 161,
+    "wins": 52,
+    "losses": 77,
+    "neutral": 32,
+    "win_rate_pct": 32.3,
+    "avg_pnl_pct": -0.0387
   },
   {
     "setup": "BREAKDOWN_SHORT",
