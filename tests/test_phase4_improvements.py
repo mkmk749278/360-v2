@@ -72,8 +72,8 @@ class TestStatFilterWilson:
     def test_soft_penalty_is_10_pts(self):
         """Default soft penalty must be 10 points (not the old 5)."""
         store = RollingWinRateStore(window=30, min_samples=15)
-        # 43% raw WR → Wilson lower bound ~0.27 → soft penalty zone (0.25–0.45)
-        _fill_store(store, "SW", "ETH", "VOL", wins=13, losses=17)
+        # 20% raw WR → Wilson upper bound ~0.37 → soft penalty zone (0.25–0.45)
+        _fill_store(store, "SW", "ETH", "VOL", wins=6, losses=24)
         sf = StatisticalFilter(store)
         allow, conf, reason = sf.check("SW", "ETH", "VOL", 70.0)
         assert allow is True
@@ -81,12 +81,12 @@ class TestStatFilterWilson:
         assert "soft_penalty" in reason
 
     def test_wilson_used_for_threshold_comparison(self):
-        """check() reason must mention 'wilson' not raw 'wr'."""
+        """check() reason must name the Wilson upper bound, not raw 'wr'."""
         store = RollingWinRateStore(window=30, min_samples=15)
         _fill_store(store, "SC", "BTC", "TR", wins=15, losses=5)
         sf = StatisticalFilter(store)
         _allow, _conf, reason = sf.check("SC", "BTC", "TR", 80.0)
-        assert "wilson=" in reason
+        assert "wilson_ub=" in reason
 
 
 # ===========================================================================

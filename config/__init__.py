@@ -3834,10 +3834,10 @@ OBSERVER_DIGEST_LOOKBACK_HOURS: int = _safe_int("OBSERVER_DIGEST_LOOKBACK", "24"
 MTF_HARD_BLOCK: bool = _safe_bool("MTF_HARD_BLOCK", "false")
 
 # ---------------------------------------------------------------------------
-# Correlated position exposure cap
-# Maximum number of same-direction active scalp signals allowed concurrently.
-# When this threshold is reached, additional signals in the same direction are
-# blocked to limit correlated exposure (e.g. all LONG scalps stopped out by BTC).
+# Correlated position exposure cap, PER PATH (owner, 2026-10-23)
+# Maximum number of same-direction active scalp signals allowed concurrently
+# on one path (setup class). When a path reaches it, that path's further
+# signals in the same direction are blocked; other paths are unaffected.
 # ---------------------------------------------------------------------------
 MAX_CORRELATED_SCALP_SIGNALS: int = _safe_int("MAX_CORRELATED_SCALP_SIGNALS", "4")
 

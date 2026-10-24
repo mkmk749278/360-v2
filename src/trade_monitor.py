@@ -657,6 +657,8 @@ class TradeMonitor:
                 if self._cohort_edge_store is not None:
                     self._cohort_edge_store.record(_sf_outcome)
             except Exception as exc:
+                from src import fail_open
+                fail_open.record("trade_monitor.stat_filter_record", exc)
                 log.debug("stat_filter.record failed (non-critical): {}", exc)
 
         # Strategy×Context edge matrix — the REAL (emitted) side of the

@@ -319,10 +319,12 @@ class TestFailedDetectionCooldown:
         src_path = pathlib.Path(__file__).parent.parent / "src" / "scanner" / "__init__.py"
         content = src_path.read_text()
 
-        cooldown_check_pos = content.find("Silently skip — cooldown active")
+        # Anchored on the skip's counter key. The skip used to be silent and the
+        # anchor was its comment; it is counted and stamped since 2026-10-23.
+        cooldown_check_pos = content.find('f"conf_fail_cooldown:{chan_name}"')
         evaluate_call_pos = content.find("sig = chan.evaluate(")
 
-        assert cooldown_check_pos != -1, "Cooldown 'skip' comment not found in scanner"
+        assert cooldown_check_pos != -1, "Cooldown skip counter not found in scanner"
         assert evaluate_call_pos != -1, "chan.evaluate() call not found in scanner"
         assert cooldown_check_pos < evaluate_call_pos, (
             "Cooldown check must be BEFORE chan.evaluate() to save compute time"

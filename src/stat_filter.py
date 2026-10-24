@@ -3,8 +3,11 @@
 Tracks per-(channel, pair, regime) rolling win rates and applies adaptive
 confidence penalties or hard suppression when quality drops below thresholds.
 
-Uses Wilson score lower bound for conservative threshold comparison —
-requires statistical confidence before penalising.
+Compares the Wilson score UPPER bound with each threshold, so a pair is
+penalised or suppressed only when we are ~95% confident its true win rate is
+below that threshold. Until 2026-10-23 it compared the LOWER bound, which is
+the opposite: at 15 outcomes a pair winning 40% has a lower bound near 20%,
+so ordinary pairs were suppressed while the docstring promised confidence.
 
 Thresholds are configurable via environment variables:
 
@@ -23,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Deque, Dict, List, Optional, Tuple
 
-from src.confidence_calibration import wilson_lower_bound
+from src.confidence_calibration import wilson_lower_bound, wilson_upper_bound
 
 
 def _env_float(name: str, default: float) -> float:
@@ -173,6 +176,16 @@ class RollingWinRateStore:
                 return None
             wins = sum(1 for r in records if r.won)
             return wilson_lower_bound(wins, len(records), z)
+
+    def wilson_upper(self, channel: str, pair: str, regime: str, z: float = 1.96) -> Optional[float]:
+        """Return Wilson score upper bound (0.0-1.0) or None if below min_samples."""
+        key = (channel, pair, regime)
+        with self._lock:
+            records = self._records.get(key)
+            if records is None or len(records) < self._min_samples:
+                return None
+            wins = sum(1 for r in records if r.won)
+            return wilson_upper_bound(wins, len(records), z)
 
     def all_keys(self) -> List[Tuple[str, str, str]]:
         """Return all (channel, pair, regime) keys that have recorded outcomes."""
@@ -474,7 +487,9 @@ class CohortEdgeStore:
 class StatisticalFilter:
     """Applies adaptive confidence gates based on rolling win-rate statistics.
 
-    Gate logic (thresholds configurable via env vars; WR = win rate):
+    Gate logic (thresholds configurable via env vars; WR = the Wilson upper
+    bound of the rolling win rate, so a branch fires only when the data is
+    confident the true rate is below its threshold):
     ────────────────────────────────────────────────────────────
     WR >= SOFT_PENALTY_WR          → pass (no penalty)
     HARD_SUPPRESS_WR <= WR < SOFT_PENALTY_WR → soft penalty (-PENALTY_PTS confidence)
@@ -521,7 +536,7 @@ class StatisticalFilter:
             adjusted_confidence: confidence after penalty (may be unchanged).
             reason: human-readable explanation for logs.
         """
-        win_rate = self._store.wilson_lower(channel, pair, regime)
+        win_rate = self._store.wilson_upper(channel, pair, regime)
 
         if win_rate is None:
             return True, current_confidence, "no_history"
@@ -529,13 +544,13 @@ class StatisticalFilter:
         wr_pct = f"{win_rate:.1%}"
 
         if win_rate < self._hard_suppress_wr:
-            return False, 0.0, f"hard_suppress:wilson={wr_pct}"
+            return False, 0.0, f"hard_suppress:wilson_ub={wr_pct}"
 
         if win_rate < self._soft_penalty_wr:
             adj = max(0.0, current_confidence - self._soft_penalty_pts)
-            return True, adj, f"soft_penalty:wilson={wr_pct}"
+            return True, adj, f"soft_penalty:wilson_ub={wr_pct}"
 
-        return True, current_confidence, f"ok:wilson={wr_pct}"
+        return True, current_confidence, f"ok:wilson_ub={wr_pct}"
 
     def record(self, outcome: SignalOutcome) -> None:
         """Forward a resolved signal outcome to the underlying win-rate store."""

@@ -71,6 +71,15 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(Scanner, "_load_level_in_play", lambda self: None)
     monkeypatch.setattr(Scanner, "_persist_level_in_play", lambda self: None)
+    # Breaker status file and the campaign registry both wrote into the repo's
+    # ``data/`` from the full suite (found 2026-10-23, untracked files after a
+    # run). Same isolation: a tmp path, and an in-memory campaign registry.
+    monkeypatch.setattr(
+        Scanner, "_BREAKER_STATUS_PATH", str(tmp_path / "circuit_breaker_status.json"),
+    )
+    import src.campaign_state as _campaign_state
+
+    _campaign_state.reset_for_tests()
     # Default: level-rearm gate disabled in tests so unrelated lifecycle
     # tests (which often dispatch repeated entries at the same price) don't
     # trip it.  TestLevelRearmStateMachine re-enables the production

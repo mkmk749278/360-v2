@@ -4,6 +4,50 @@
 
 ---
 
+## 2026-10-23 — Market-first methodology: spec + Phase-1 replay (PR #1086, research only)
+
+Owner: *"100% clarity on crypto market first, then we decide — changing
+something based only on signal history is not a good idea."* Spec in
+`docs/MARKET_FIRST_METHODOLOGY_2026_10_23.md`; results in
+`docs/MARKET_FIRST_PHASE1_RESULTS_2026_10_23.md`; tools in
+`scripts/research/market_first_2026_10_23/`. No engine code changed.
+
+- **No market-state label tested predicts next-day alt direction in both
+  halves of the year** (5 candidates; pre-registered criterion fails for all).
+  The state-gated playbook is therefore not recommended.
+- **October:** live MVRTP longs on the 75 replayed core pairs made +0.13%/trade
+  and were all reproduced by the replay; the loss was on smaller pairs
+  (−0.47%/trade, 145 trades). Replayed, 98% of those reproduce and lose too:
+  real setups the market did not pay, not an engine or data fault.
+- Replay fidelity: 95% of live MVRTP longs reproduced; outcome correlation
+  0.84; exit simulation ~0.4%/trade pessimistic; live filters ~12× more
+  selective than the replay can model.
+
+**Fixed in the same PR — `src/backtester.py` misaligned timeframes.**
+`_backtest_channel` sliced every timeframe by the primary bar index, so a 5m
+evaluator read 1h/4h/1d bars from unrelated dates whenever the series differ
+in length — which the live store always does, and `/backtest` passes the live
+store in. It now aligns on `open_time` and refuses a timeframe it cannot
+align. `tests/test_backtester_tf_alignment.py` fails on the old code.
+
+**Scoring and gate audit (same PR)** — `docs/SCORING_AND_GATE_AUDIT_2026_10_23.md`.
+16 hard rejects, the conf-fail cooldown, global cooldown and arbitration losers
+now stamp (measurement only, `pre_scoring=True`); 7 silent `except`s record.
+Owner then ruled (*"per path same signals max 4, remaining you decide"*);
+decisions and their live evidence are in §6 of the audit doc:
+- **LIVE: the correlated cap is 4 per direction PER PATH** (was book-wide).
+  Watch after deploy: delivered signals/day and same-direction concurrency
+  should rise; `correlated_scalp_cap:*` in the scan-cycle summary log should
+  fall. Off-switch: `MAX_CORRELATED_SCALP_SIGNALS` in `.env` (check the VPS
+  `.env` does not override it).
+- **LIVE: stat filter compares the Wilson upper bound** (was lower bound).
+- Meme penalty removed (never fired). Score floor 65 kept: live bands do not
+  support 80. Funding (dead, mis-signed), spoof gate, SMC sweep bonus,
+  overwritten adjustments left as they are; 15m longs gate and MVAVW trend gate
+  are now measured by the suppression audit.
+
+---
+
 ## 2026-10-01 — CoinDCX auto-trade audit: every gap fixed (owner: "fix everything … merge after green")
 
 Owner enabled CoinDCX for users and asked for a full audit, then said: *"some
