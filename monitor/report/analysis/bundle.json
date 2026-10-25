@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-10-24T04:58:36.499222+00:00",
-  "generated_at_ts": 1792817916.4992216,
+  "generated_at": "2026-10-25T05:12:49.863851+00:00",
+  "generated_at_ts": 1792905169.8638513,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "5a071f8a7860bc1a721718fe62bee639e76236b2",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 13827,
-    "strategy_matrix_scored_cells": 4838,
+    "strategy_matrix_cells": 13925,
+    "strategy_matrix_scored_cells": 4918,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -25,8 +25,8 @@
       {
         "strategy": "MOVER_AVWAP_SCALP@SAREXIT",
         "context_key": "OFF_HOURS/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL",
-        "edge_r": 4.843608683721699,
-        "n": 19,
+        "edge_r": 4.493636512766899,
+        "n": 20,
         "verdict": "STRONG"
       },
       {
@@ -52,7 +52,7 @@
       },
       {
         "strategy": "DIVERGENCE_CONTINUATION",
-        "context_key": "OVERLAP/MARKDOWN/CASCADE/BTC_FALLING",
+        "context_key": "OVERLAP/MARKDOWN/CASCADE/BTC_FALLING/MIDCAP",
         "edge_r": 2.3517398866010057,
         "n": 50,
         "verdict": "STRONG"
@@ -69,15 +69,8 @@
       {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
         "context_key": "LONDON/QUIET/NORMAL/BTC_NEUTRAL",
-        "edge_r": -7.430167025233221,
-        "n": 29,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "MOVER_TREND_PULLBACK@TUNED",
-        "context_key": "ASIA/MARKDOWN/COMPRESSED/BTC_FALLING",
-        "edge_r": -2.034320718787152,
-        "n": 50,
+        "edge_r": -7.174373216466163,
+        "n": 30,
         "verdict": "NEGATIVE"
       },
       {
@@ -92,6 +85,13 @@
         "context_key": "LONDON/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
         "edge_r": -1.82110331991139,
         "n": 46,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "MOVER_TREND_PULLBACK@TUNED",
+        "context_key": "OVERLAP/MARKUP/COMPRESSED/BTC_NEUTRAL",
+        "edge_r": -1.7370481391012733,
+        "n": 25,
         "verdict": "NEGATIVE"
       }
     ],
