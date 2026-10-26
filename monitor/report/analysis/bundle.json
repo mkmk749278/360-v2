@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-10-25T05:12:49.863851+00:00",
-  "generated_at_ts": 1792905169.8638513,
+  "generated_at": "2026-10-26T05:14:33.167208+00:00",
+  "generated_at_ts": 1792991673.1672077,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "5a071f8a7860bc1a721718fe62bee639e76236b2",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 13925,
-    "strategy_matrix_scored_cells": 4918,
+    "strategy_matrix_cells": 14022,
+    "strategy_matrix_scored_cells": 4954,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -25,8 +25,8 @@
       {
         "strategy": "MOVER_AVWAP_SCALP@SAREXIT",
         "context_key": "OFF_HOURS/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL",
-        "edge_r": 4.493636512766899,
-        "n": 20,
+        "edge_r": 4.251103136943145,
+        "n": 21,
         "verdict": "STRONG"
       },
       {
@@ -74,13 +74,6 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "MOVER_TREND_PULLBACK@TUNED",
-        "context_key": "ASIA/MARKDOWN/NORMAL/BTC_FALLING",
-        "edge_r": -1.9164314580632,
-        "n": 50,
-        "verdict": "NEGATIVE"
-      },
-      {
         "strategy": "RANGE_FADE",
         "context_key": "LONDON/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
         "edge_r": -1.82110331991139,
@@ -92,6 +85,13 @@
         "context_key": "OVERLAP/MARKUP/COMPRESSED/BTC_NEUTRAL",
         "edge_r": -1.7370481391012733,
         "n": 25,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "LIQUIDITY_SWEEP_REVERSAL",
+        "context_key": "OFF_HOURS/MARKUP/COMPRESSED/BTC_NEUTRAL/MIDCAP",
+        "edge_r": -1.6381185464047234,
+        "n": 18,
         "verdict": "NEGATIVE"
       }
     ],
