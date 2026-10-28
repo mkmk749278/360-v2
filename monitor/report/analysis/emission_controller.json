@@ -50,7 +50,7 @@
         "min_samples": null
       },
       "FAILED_AUCTION_RECLAIM": {
-        "suppress_negative": false,
+        "suppress_negative": null,
         "min_samples": null
       },
       "VOLUME_SURGE_BREAKOUT": {
@@ -80,9 +80,9 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -245,9 +245,9 @@
       "SR_FLIP_RETEST|min_samples": 1759,
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157,
       "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251,
-      "FAILED_AUCTION_RECLAIM|suppress_negative": 4102
+      "FAILED_AUCTION_RECLAIM|suppress_negative": 4213
     },
-    "cycle": 4195
+    "cycle": 4239
   },
   "ledger": [
     {
@@ -1626,6 +1626,19 @@
       "ev_per_suppression_r": -0.2832786031444361,
       "n": 347,
       "routable": true
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM",
+      "param": "suppress_negative",
+      "old": false,
+      "new": true,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote",
+      "verdict": "KEEP",
+      "ev_per_suppression_r": 0.28833451237735647,
+      "n": 156,
+      "routable": true
     }
   ],
   "pending": [],
@@ -1665,9 +1678,6 @@
       "suppress_negative": false
     },
     "QUIET_COMPRESSION_BREAK": {
-      "suppress_negative": false
-    },
-    "FAILED_AUCTION_RECLAIM": {
       "suppress_negative": false
     },
     "VOLUME_SURGE_BREAKOUT": {
