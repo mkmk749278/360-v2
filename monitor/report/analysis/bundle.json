@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-11-01T06:45:35.755467+00:00",
-  "generated_at_ts": 1793515535.7554667,
+  "generated_at": "2026-11-02T06:43:53.467669+00:00",
+  "generated_at_ts": 1793601833.4676695,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "5a071f8a7860bc1a721718fe62bee639e76236b2",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 14583,
-    "strategy_matrix_scored_cells": 5275,
+    "strategy_matrix_cells": 14699,
+    "strategy_matrix_scored_cells": 5332,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -25,8 +25,8 @@
       {
         "strategy": "MOVER_AVWAP_SCALP@SAREXIT",
         "context_key": "OFF_HOURS/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL",
-        "edge_r": 4.251103136943145,
-        "n": 21,
+        "edge_r": 4.104805738877525,
+        "n": 23,
         "verdict": "STRONG"
       },
       {
@@ -62,8 +62,8 @@
       {
         "strategy": "MOVER_TREND_PULLBACK@TUNED",
         "context_key": "ASIA/VOLATILE_EXPANSION/NORMAL/BTC_RISING",
-        "edge_r": -11.750481650857184,
-        "n": 44,
+        "edge_r": -11.489800818920537,
+        "n": 45,
         "verdict": "NEGATIVE"
       },
       {

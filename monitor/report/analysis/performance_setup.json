@@ -1,39 +1,39 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 2272,
-    "wins": 750,
-    "losses": 930,
-    "neutral": 592,
-    "win_rate_pct": 33.0,
-    "avg_pnl_pct": 0.2045
+    "n": 2307,
+    "wins": 760,
+    "losses": 942,
+    "neutral": 605,
+    "win_rate_pct": 32.9,
+    "avg_pnl_pct": 0.2062
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 423,
-    "wins": 122,
-    "losses": 201,
+    "n": 434,
+    "wins": 123,
+    "losses": 211,
     "neutral": 100,
-    "win_rate_pct": 28.8,
-    "avg_pnl_pct": 0.1134
+    "win_rate_pct": 28.3,
+    "avg_pnl_pct": 0.09
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 333,
+    "n": 335,
     "wins": 79,
-    "losses": 120,
+    "losses": 122,
     "neutral": 134,
-    "win_rate_pct": 23.7,
-    "avg_pnl_pct": 0.1646
+    "win_rate_pct": 23.6,
+    "avg_pnl_pct": 0.1587
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 280,
-    "wins": 68,
-    "losses": 126,
+    "n": 283,
+    "wins": 69,
+    "losses": 128,
     "neutral": 86,
-    "win_rate_pct": 24.3,
-    "avg_pnl_pct": -0.1502
+    "win_rate_pct": 24.4,
+    "avg_pnl_pct": -0.1521
   },
   {
     "setup": "SR_FLIP_RETEST",
@@ -46,12 +46,12 @@
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
-    "n": 186,
+    "n": 188,
     "wins": 65,
-    "losses": 85,
+    "losses": 87,
     "neutral": 36,
-    "win_rate_pct": 34.9,
-    "avg_pnl_pct": 0.012
+    "win_rate_pct": 34.6,
+    "avg_pnl_pct": 0.0026
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
@@ -73,21 +73,21 @@
   },
   {
     "setup": "TREND_PULLBACK_EMA",
-    "n": 45,
+    "n": 46,
     "wins": 11,
-    "losses": 15,
+    "losses": 16,
     "neutral": 19,
-    "win_rate_pct": 24.4,
-    "avg_pnl_pct": 0.0546
+    "win_rate_pct": 23.9,
+    "avg_pnl_pct": 0.0098
   },
   {
     "setup": "MEAN_REVERT",
-    "n": 37,
+    "n": 39,
     "wins": 12,
-    "losses": 12,
+    "losses": 14,
     "neutral": 13,
-    "win_rate_pct": 32.4,
-    "avg_pnl_pct": 0.1818
+    "win_rate_pct": 30.8,
+    "avg_pnl_pct": 0.1157
   },
   {
     "setup": "VOLUME_SURGE_BREAKOUT",
