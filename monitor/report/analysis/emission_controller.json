@@ -80,9 +80,9 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -247,7 +247,7 @@
       "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251,
       "FAILED_AUCTION_RECLAIM|suppress_negative": 4213
     },
-    "cycle": 4450
+    "cycle": 4494
   },
   "ledger": [
     {
