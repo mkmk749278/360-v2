@@ -19,7 +19,7 @@
       },
       "SR_FLIP_RETEST": {
         "suppress_negative": false,
-        "min_samples": 15
+        "min_samples": null
       },
       "MEAN_REVERT": {
         "suppress_negative": false,
@@ -242,12 +242,12 @@
       "QUIET_COMPRESSION_BREAK|suppress_negative": 848,
       "TREND_PULLBACK_EMA|min_samples": 2369,
       "FAILED_AUCTION_RECLAIM|min_samples": 1745,
-      "SR_FLIP_RETEST|min_samples": 1759,
+      "SR_FLIP_RETEST|min_samples": 4725,
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157,
       "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251,
       "FAILED_AUCTION_RECLAIM|suppress_negative": 4213
     },
-    "cycle": 4707
+    "cycle": 4750
   },
   "ledger": [
     {
@@ -1639,6 +1639,45 @@
       "ev_per_suppression_r": 0.28833451237735647,
       "n": 156,
       "routable": true
+    },
+    {
+      "strategy": "SR_FLIP_RETEST",
+      "param": "min_samples",
+      "old": 15,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=50)",
+      "verdict": "RAISE",
+      "ev_per_suppression_r": null,
+      "n": 50,
+      "routable": true
+    },
+    {
+      "strategy": "SR_FLIP_RETEST",
+      "param": "min_samples",
+      "old": 20,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=50)",
+      "verdict": "RAISE",
+      "ev_per_suppression_r": null,
+      "n": 50,
+      "routable": true
+    },
+    {
+      "strategy": "SR_FLIP_RETEST",
+      "param": "min_samples",
+      "old": 25,
+      "new": 30,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=50)",
+      "verdict": "RAISE",
+      "ev_per_suppression_r": null,
+      "n": 50,
+      "routable": true
     }
   ],
   "pending": [],
@@ -1656,8 +1695,7 @@
       "suppress_negative": false
     },
     "SR_FLIP_RETEST": {
-      "suppress_negative": false,
-      "min_samples": 15
+      "suppress_negative": false
     },
     "MEAN_REVERT": {
       "suppress_negative": false
