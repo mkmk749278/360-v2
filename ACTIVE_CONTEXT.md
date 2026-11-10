@@ -4,6 +4,46 @@
 
 ---
 
+## OPEN 2026-11-10 — outside audit verified: one new finding, nothing changed on the money path
+
+Owner supplied a third-party 7-defect write-up. Checked claim by claim against
+`main` and the live box: `docs/EXTERNAL_AUDIT_VERIFICATION_2026_11_10.md`.
+
+**New and real — the mover paths never ship their own geometry.**
+`build_risk_plan` replaces the MVRTP / MVAVW 15m stop and 1.0/1.6/2.5 R ladder
+with a generic 5m stop and 1.3/2.3/3.4 R, because neither setup is in
+`STRUCTURAL_SLTP_PROTECTED_SETUPS`. Confirmed in code, by running it, and on
+the live feed (TP1 at 1.30–1.50 R on every unmoved MVRTP row; shipped TP1
+~3.95% median against a 2.4% average MFE).
+
+**The audit's fix is wrong: do not add them to the protected set.** That also
+flips the 3.0% stop cap from clamp to reject (authored median 3.30%) and puts
+the 1.0R TP1 under the 1.2 R:R floor, which rejects it. It would remove most
+of a path that is ~60% of the book. Pinned by a test.
+
+**Shipped (measurement + probes, no money-path change):**
+- closed record carries `designed_tp1_distance_pct`; truth report gains
+  "TP1 — authored vs shipped" (nearer / reached / rescued; farther is
+  undecidable). Read it after ~3 days of closes (~20 MVRTP a day).
+- `auto_dispatch` no longer pages when the only keyed user is on CoinDCX.
+- `entry_feature_inputs` no longer pages on a path of first legs (RANGE_FADE).
+
+**Owner decisions waiting:**
+1. Mover geometry: keep the risk-plan geometry, or ship the authored one
+   (needs its own R:R floor and cap policy). Decide on the new table.
+2. Entry quality: `session_quality` wants to reject 56% of candidates against
+   a shared 35% cap, so 1,753 rejections were held back and `cvd_aligned`
+   (removed rows −0.11% vs book +0.13%) enforces almost nothing. Putting
+   `session_quality` back to shadow is one ops switch.
+
+**OPEN, not investigated:** `tuned_variants` (302 `atr_arm_uncomputable`, 364
+cycles) · `edge_reconciliation` (BREAKDOWN_SHORT +0.46R vs 0.3 bound) ·
+`ai_governor_verdicts` (upstream +2, output +0) · `dark_resolution` (GRAMUSDT
+row not advancing) · the one CoinDCX auto-trade user has every entry rejected
+`Insufficient funds` and nothing tells them.
+
+---
+
 ## 2026-10-23 — Market-first methodology: spec + Phase-1 replay (PR #1086, research only)
 
 Owner: *"100% clarity on crypto market first, then we decide — changing

@@ -54,6 +54,7 @@ from src.performance_tracker import (
     PerformanceTracker,
     entry_sl_distance_pct,
     shipped_sl_distance_pct,
+    designed_tp1_distance_pct,
     shipped_tp1_distance_pct,
 )
 from src.predictive_ai import PredictiveEngine
@@ -887,6 +888,7 @@ class CryptoSignalEngine:
                     # Same stamp as the monitor path, so an expired row is not
                     # the one population missing its target (2026-09-26).
                     shipped_tp1_distance_pct=shipped_tp1_distance_pct(sig),
+                    designed_tp1_distance_pct=designed_tp1_distance_pct(sig),
                     create_timestamp=_create_ts,
                     dispatch_timestamp=_dispatch_ts,
                     terminal_outcome_timestamp=_terminal_ts,
@@ -3830,6 +3832,7 @@ class CryptoSignalEngine:
                 # as the alert itself (2026-08-03: 3 of 8 flagged items).
                 per_setup = _ef.missing_by_setup()
                 dead: List[str] = []
+                ordinary: List[str] = []
                 for setup, (n_rows, missing) in sorted(per_setup.items()):
                     if n_rows < 10:
                         continue          # too few of this path to judge yet
@@ -3842,6 +3845,12 @@ class CryptoSignalEngine:
                         # answer is "nothing overhead" are opposite findings
                         # that used to arrive as the same None.
                         why = _ef.absence_reasons(k, setup)
+                        if _ef.absence_is_ordinary(why, n):
+                            # Every absence is a fact about the trade (a
+                            # first leg has no previous leg), not a dark
+                            # input. Said on the healthy line, never dropped.
+                            ordinary.append(f"{setup}.{k}")
+                            continue
                         if why:
                             causes = "/".join(
                                 f"{r}×{c}" for r, c in sorted(
@@ -3860,6 +3869,12 @@ class CryptoSignalEngine:
                     f"({','.join(sorted(undeclared))})"
                     if undeclared else ""
                 )
+                if ordinary:
+                    aside += (
+                        f"; {len(ordinary)} absent on every stamp for an "
+                        f"ordinary reason — no previous leg "
+                        f"({','.join(sorted(ordinary))})"
+                    )
                 if dead:
                     return False, (
                         f"{len(dead)} declared feature(s) absent on EVERY stamp "

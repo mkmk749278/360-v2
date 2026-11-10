@@ -54,6 +54,7 @@ from src.performance_tracker import (
     entry_sl_distance_pct,
     shipped_sl_distance_pct,
     shipped_tp1_distance_pct,
+    designed_tp1_distance_pct,
 )
 from src.runtime_truth_report import build_geometry_override
 from src.smc import Direction
@@ -479,3 +480,159 @@ class TestGeometryOverrideSection:
         ])["SR_FLIP_RETEST"]
         assert out["tightened"] == 0 and out["widened"] == 0
         assert out["median_ratio"] == 1.0
+
+
+class TestDesignedTp1Distance:
+    """The target the EVALUATOR authored. 2026-11-10: ``build_risk_plan``
+    replaces the mover paths' 1.0R ladder with a generic 1.3R one, and the
+    record could not show it — it kept the shipped target only."""
+
+    def test_it_reads_the_evaluator_target_not_the_shipped_one(self):
+        sig = _signal()  # entry 100, shipped tp1 104.13
+        sig.original_tp1 = 103.0
+        assert designed_tp1_distance_pct(sig) == pytest.approx(3.0)
+        assert shipped_tp1_distance_pct(sig) == pytest.approx(4.13)
+
+    def test_an_unstamped_target_is_unknown_never_the_shipped_one(self):
+        sig = _signal()
+        sig.original_tp1 = 0.0
+        assert designed_tp1_distance_pct(sig) == 0.0
+
+    def test_the_field_survives_the_round_trip_to_disk(self, tmp_path):
+        path = tmp_path / "perf.json"
+        tracker = PerformanceTracker(storage_path=str(path))
+        tracker.record_outcome(
+            signal_id="sig-1", channel="360_SCALP", symbol="BTWUSDT",
+            direction="LONG", entry=100.0, hit_tp=1, hit_sl=False,
+            pnl_pct=4.13, outcome_label="TP1_HIT",
+            shipped_tp1_distance_pct=4.13, designed_tp1_distance_pct=3.0,
+        )
+        assert json.loads(path.read_text())[-1]["designed_tp1_distance_pct"] == pytest.approx(3.0)
+        reloaded = PerformanceTracker(storage_path=str(path))
+        assert reloaded._records[-1].designed_tp1_distance_pct == pytest.approx(3.0)
+
+    def test_a_row_written_before_the_field_loads_as_unknown(self, tmp_path):
+        path = tmp_path / "perf.json"
+        tracker = PerformanceTracker(storage_path=str(path))
+        tracker.record_outcome(
+            signal_id="old", channel="360_SCALP", symbol="BTWUSDT",
+            direction="LONG", entry=100.0, hit_tp=0, hit_sl=True,
+            pnl_pct=-3.0, outcome_label="SL_HIT",
+        )
+        rows = json.loads(path.read_text())
+        for row in rows:
+            row.pop("designed_tp1_distance_pct", None)
+        path.write_text(json.dumps(rows))
+        reloaded = PerformanceTracker(storage_path=str(path))
+        assert reloaded._records[-1].designed_tp1_distance_pct == 0.0
+
+    @pytest.mark.parametrize("module", ["src/trade_monitor.py", "src/main.py"])
+    def test_both_terminal_writers_stamp_it(self, module):
+        tree = ast.parse(Path(module).read_text())
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", None) == "record_outcome"
+            and getattr(getattr(node.func, "value", None), "attr", None)
+            == "_performance_tracker"
+        ]
+        assert calls, f"{module} no longer writes the closed-signal record"
+        for call in calls:
+            assert "designed_tp1_distance_pct" in {kw.arg for kw in call.keywords}, (
+                f"{module} writes the closed record without designed_tp1_distance_pct"
+            )
+
+
+class TestTp1OverrideSection:
+    """Authored vs shipped TP1 in the truth report: one direction is decidable
+    from a closed record and the other is counted apart, never pooled."""
+
+    @staticmethod
+    def _row(designed, shipped, mfe, setup="MOVER_TREND_PULLBACK"):
+        return {
+            "setup_class": setup,
+            "designed_tp1_distance_pct": designed,
+            "shipped_tp1_distance_pct": shipped,
+            "max_favorable_excursion_pct": mfe,
+        }
+
+    def test_a_nearer_target_is_rescued_only_between_the_two_levels(self):
+        from src.runtime_truth_report import build_geometry_override
+
+        out = build_geometry_override([
+            self._row(3.0, 4.0, 3.5),   # cleared authored, not shipped: rescued
+            self._row(3.0, 4.0, 4.2),   # cleared both: reached, not a rescue
+            self._row(3.0, 4.0, 1.0),   # cleared neither
+        ])["MOVER_TREND_PULLBACK"]["tp1"]
+        assert out["stamped"] == 3 and out["nearer"] == 3
+        assert out["nearer_reached"] == 2
+        assert out["nearer_rescued"] == 1
+
+    def test_a_farther_target_is_undecidable_and_draws_no_figure(self):
+        from src.runtime_truth_report import build_geometry_override
+
+        out = build_geometry_override([self._row(5.0, 4.0, 4.1)])[
+            "MOVER_TREND_PULLBACK"
+        ]["tp1"]
+        assert out["farther"] == 1 and out["farther_undecidable"] == 1
+        assert out["nearer"] == 0 and out["nearer_rescued"] == 0
+
+    def test_unstamped_rows_are_counted_apart_not_read_as_same(self):
+        from src.runtime_truth_report import build_geometry_override
+
+        out = build_geometry_override([
+            self._row(0.0, 4.0, 4.1), self._row(4.0, 4.0, 1.0),
+        ])["MOVER_TREND_PULLBACK"]["tp1"]
+        assert out["stamped"] == 1 and out["unstamped"] == 1 and out["same"] == 1
+
+
+class TestMoverGeometryIsReplacedByTheRiskPlan:
+    """CHARACTERISATION of a finding, not of a design
+    (docs/EXTERNAL_AUDIT_VERIFICATION_2026_11_10.md §1). It pins what ships
+    today so the finding cannot silently stop being true, and it pins why the
+    obvious repair is wrong. When the owner signs a geometry change off, this
+    class is rewritten in that PR — it must not be deleted to go green."""
+
+    @staticmethod
+    def _plan(setup):
+        import numpy as np
+        from types import SimpleNamespace
+
+        from src.signal_quality import build_risk_plan
+
+        n = 60
+        closes = np.linspace(100.0, 103.0, n)
+        candles = {"5m": {"high": closes + 0.3, "low": closes - 0.3,
+                          "close": closes, "open": closes, "volume": np.ones(n)}}
+        ind = {"5m": {"atr_last": 0.4, "ema9_last": 102.8, "ema21_last": 102.5,
+                      "bb_mid_last": 102.5, "bb_upper_last": 104.0,
+                      "bb_lower_last": 101.0}}
+        entry, sl = 103.0, 100.5
+        d = entry - sl
+        sig = SimpleNamespace(
+            entry=entry, direction=Direction.LONG, stop_loss=sl,
+            tp1=entry + d, tp2=entry + 1.6 * d, tp3=entry + 2.5 * d,
+            symbol="XUSDT", channel="360_SCALP",
+        )
+        return sig, build_risk_plan(sig, ind, candles, {}, setup, 0.02, "360_SCALP")
+
+    @pytest.mark.parametrize("name", ["MOVER_TREND_PULLBACK", "MOVER_AVWAP_SCALP"])
+    def test_the_authored_stop_and_1r_ladder_do_not_ship(self, name):
+        from src.signal_quality import SetupClass
+
+        sig, plan = self._plan(SetupClass(name))
+        assert plan.passed
+        assert plan.stop_loss != pytest.approx(sig.stop_loss)
+        assert plan.r_multiple == pytest.approx(1.3)
+
+    def test_protecting_the_set_as_is_would_reject_the_1r_ladder(self):
+        """The repair an outside audit proposed — add both mover paths to
+        ``STRUCTURAL_SLTP_PROTECTED_SETUPS`` — keeps the authored 1.0R TP1 and
+        then fails it against the 1.2 default R:R floor. A protected setup
+        with this exact geometry is rejected today; the mover paths are ~60%
+        of the delivered book."""
+        from src.signal_quality import SetupClass
+
+        _, plan = self._plan(SetupClass.TREND_PULLBACK_EMA)
+        assert not plan.passed
+        assert "rr 1.00 below 1.20" in plan.reason

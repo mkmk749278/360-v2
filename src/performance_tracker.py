@@ -52,10 +52,17 @@ def shipped_sl_distance_pct(sig: Any) -> float:
     number, and until 2026-08-04 nothing recorded it.  ``entry_sl_distance_pct``
     above reads ``original_sl_distance``, which every evaluator stamps from its
     own structural geometry (for ``MOVER_TREND_PULLBACK``: beyond the mid/slow
-    MA plus an ATR buffer — the level at which the trend thesis is dead).  Two
-    stages in ``scanner._prepare_signal`` then move the stop before it ships,
-    in this order:
+    MA plus an ATR buffer — the level at which the trend thesis is dead).
+    Three stages in ``scanner._prepare_signal`` then move the stop before it
+    ships, in this order:
 
+    * ``signal_quality.build_risk_plan`` REPLACES the stop with a generic 5m
+      recent-structure stop and the TP ladder with 1.3 / 2.3 / 3.4 R of it —
+      unless the setup is in ``STRUCTURAL_SLTP_PROTECTED_SETUPS``.  The two
+      mover paths are not, so their 15m MA / AVWAP stop and 1.0 / 1.6 / 2.5 R
+      ladder never ship.  This stage was missing from this list until
+      2026-11-10 and it is the largest of the three
+      (docs/EXTERNAL_AUDIT_VERIFICATION_2026_11_10.md);
     * ``predictive_ai.adjust_tp_sl`` scales the SL *distance* by the model's
       multiplier — unless the setup is in ``_PREDICTIVE_SLTP_BYPASS_SETUPS``,
       the hand-maintained list of "structurally-protected paths".  The two
@@ -98,6 +105,28 @@ def shipped_tp1_distance_pct(sig: Any) -> float:
     """
     entry = float(getattr(sig, "entry", 0.0) or 0.0)
     tp1 = float(getattr(sig, "tp1", 0.0) or 0.0)
+    if entry <= 0.0 or tp1 <= 0.0:
+        return 0.0
+    return abs(tp1 - entry) / entry * 100.0
+
+
+def designed_tp1_distance_pct(sig: Any) -> float:
+    """The entry→TP1 distance the EVALUATOR authored, in percent, or 0.0.
+
+    The fourth corner of the designed-vs-shipped square.  The record kept the
+    designed stop, the shipped stop and the shipped target; without the
+    designed target nobody could say what the evaluator's own TP1 would have
+    done, and "the risk plan replaces the mover ladder" (1.0R authored, 1.3R
+    shipped — verified 2026-11-10) stayed a statement about code.
+
+    Reads ``Signal.original_tp1``, which every evaluator stamps beside
+    ``original_sl_distance`` and which nothing downstream rewrites except a
+    DCA re-average (it then equals the shipped target, measured from the same
+    re-averaged entry).  0.0 means "not knowable" — the evaluator did not
+    stamp it, or the row closed before this shipped — never "no difference".
+    """
+    entry = float(getattr(sig, "entry", 0.0) or 0.0)
+    tp1 = float(getattr(sig, "original_tp1", 0.0) or 0.0)
     if entry <= 0.0 or tp1 <= 0.0:
         return 0.0
     return abs(tp1 - entry) / entry * 100.0
@@ -197,6 +226,10 @@ class SignalRecord:
     #: The entry→TP1 distance the trade closed against — see
     #: ``shipped_tp1_distance_pct`` above.  0.0 = written before 2026-09-26.
     shipped_tp1_distance_pct: float = 0.0
+    #: The entry→TP1 distance the evaluator authored — see
+    #: ``designed_tp1_distance_pct`` above.  0.0 = written before 2026-11-10
+    #: or not stamped by the evaluator; unknown, never "same as shipped".
+    designed_tp1_distance_pct: float = 0.0
     timestamp: float = field(default_factory=time.time)
     signal_quality_pnl_pct: float = 0.0   # TP-based PnL for signal quality stats
     signal_quality_hit_tp: int = 0         # highest TP reached (for signal quality classification)
@@ -321,6 +354,7 @@ class PerformanceTracker:
         sl_distance_pct_at_entry: float = 0.0,
         shipped_sl_distance_pct: float = 0.0,
         shipped_tp1_distance_pct: float = 0.0,
+        designed_tp1_distance_pct: float = 0.0,
         signal_quality_pnl_pct: Optional[float] = None,
         signal_quality_hit_tp: Optional[int] = None,
         session_name: str = "",
@@ -382,6 +416,7 @@ class PerformanceTracker:
             sl_distance_pct_at_entry=float(sl_distance_pct_at_entry or 0.0),
             shipped_sl_distance_pct=float(shipped_sl_distance_pct or 0.0),
             shipped_tp1_distance_pct=float(shipped_tp1_distance_pct or 0.0),
+            designed_tp1_distance_pct=float(designed_tp1_distance_pct or 0.0),
             signal_quality_pnl_pct=normalize_pnl_pct(sq_pnl),
             signal_quality_hit_tp=sq_hit_tp,
             session_name=session_name,
@@ -1288,6 +1323,8 @@ class PerformanceTracker:
                 # terminal transition only, so older rows stay "unknown".
                 if "shipped_tp1_distance_pct" not in item:
                     item["shipped_tp1_distance_pct"] = 0.0
+                if "designed_tp1_distance_pct" not in item:
+                    item["designed_tp1_distance_pct"] = 0.0
                 for _field in (
                     "create_timestamp",
                     "dispatch_timestamp",
