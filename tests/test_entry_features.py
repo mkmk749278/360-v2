@@ -819,6 +819,43 @@ class TestTheReasonIsMetadataNotAFeature:
                  "missing": ["sigma_at_entry"]})
         assert ef.absence_reasons("sigma_at_entry", "MEAN_REVERT", led) == {}
 
+    def test_a_path_of_first_legs_is_ordinary_not_dark(self):
+        """RANGE_FADE never delivers, so no leg ever closes and every stamp is
+        a first leg. The probe paged on it for 364 cycles (2026-11-10)."""
+        led = ef.EntryFeatureLedger(path="")
+        for i in range(12):
+            led.add({
+                "signal_id": f"r{i}", "setup_class": "RANGE_FADE",
+                "missing": ["campaign_prev_won", "campaign_prev_age_h"],
+                "campaign_prev_won": None, "campaign_prev_age_h": None,
+                ef.reason_key("campaign_prev_won"): "first_leg",
+            })
+        won = ef.absence_reasons("campaign_prev_won", "RANGE_FADE", led)
+        age = ef.absence_reasons("campaign_prev_age_h", "RANGE_FADE", led)
+        assert won == {"first_leg": 12}
+        # The age is absent for the same reason and now says so.
+        assert age == {"first_leg": 12}
+        assert ef.absence_is_ordinary(won, 12) and ef.absence_is_ordinary(age, 12)
+
+    def test_one_unexplained_absence_keeps_the_feature_a_fault(self):
+        assert not ef.absence_is_ordinary({"first_leg": 11}, 12)
+        assert not ef.absence_is_ordinary({}, 12)
+        assert not ef.absence_is_ordinary(
+            {"first_leg": 12, ef.LEVEL_DIST_NO_LEVELS: 1}, 12
+        )
+
+    def test_a_dark_upstream_reason_is_never_ordinary(self):
+        for reason in (ef.LEVEL_DIST_NO_LEVELS, ef.LEVEL_DIST_UNREADABLE_LEVELS,
+                       ef.LEVEL_DIST_NONE_AHEAD, ef.LEVEL_DIST_NO_GEOMETRY):
+            assert not ef.absence_is_ordinary({reason: 5}, 5)
+
+    def test_a_borrowed_reason_is_not_counted_where_the_feature_is_present(self):
+        led = ef.EntryFeatureLedger(path="")
+        led.add({"signal_id": "x", "setup_class": "RANGE_FADE",
+                 "campaign_prev_won": None, "campaign_prev_age_h": 3.0,
+                 ef.reason_key("campaign_prev_won"): "first_leg"})
+        assert ef.absence_reasons("campaign_prev_age_h", "RANGE_FADE", led) == {}
+
 
 class TestOnlyDeclaredFeaturesAreJudged:
     """The 2026-08-03 alert, reproduced.

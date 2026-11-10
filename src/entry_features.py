@@ -1762,6 +1762,41 @@ def undeclared_absences(
     return out
 
 
+#: Absence reasons that are a fact about the TRADE, not a dark upstream.
+#:
+#: ``first_leg`` is the only one: there was no previous leg on the campaign, so
+#: there is no previous outcome to read. On a path that never delivers
+#: (RANGE_FADE is fully gated) no leg ever closes, so EVERY stamp is a first
+#: leg — and ``entry_feature_inputs`` paged "absent on EVERY stamp" for 364
+#: consecutive cycles over a registry that was answering correctly
+#: (2026-11-10). ``campaign_state.absence_reason`` had said so in its own
+#: docstring: "a probe that cannot tell them apart will page on the ordinary
+#: case". Deliberately an allow-list; ``no_levels`` / ``unreadable_levels``
+#: are real faults and ``none_ahead`` on every row of a path is worth a look.
+ORDINARY_ABSENCE_REASONS: frozenset = frozenset({"first_leg"})
+
+#: A feature with no reason key of its own whose absence is the SAME event as
+#: another's. ``campaign_prev_age_h`` is None exactly when ``campaign_prev_won``
+#: is — one read, one cause — and without this it reads "cause unrecorded"
+#: beside a sibling that names the cause.
+ABSENCE_REASON_SOURCE: Dict[str, str] = {
+    "campaign_prev_age_h": "campaign_prev_won",
+}
+
+
+def absence_is_ordinary(reasons: Dict[str, int], n_absent: int) -> bool:
+    """True when ordinary reasons account for EVERY absence, not most of them.
+
+    A row that is absent with no reason, or with any other reason, keeps the
+    feature in the fault column: one unexplained row among hundreds of first
+    legs is the case that must not be averaged away.
+    """
+    if n_absent <= 0:
+        return False
+    ordinary = sum(n for r, n in (reasons or {}).items() if r in ORDINARY_ABSENCE_REASONS)
+    return ordinary >= n_absent and all(r in ORDINARY_ABSENCE_REASONS for r in reasons)
+
+
 def absence_reasons(
     feature: str,
     setup_class: str,
@@ -1778,11 +1813,15 @@ def absence_reasons(
     one sentence asserting the first.
     """
     led = ledger if ledger is not None else get_ledger()
-    key = reason_key(feature)
+    key = reason_key(ABSENCE_REASON_SOURCE.get(feature, feature))
     want = str(setup_class or "")
     out: Dict[str, int] = {}
     for row in led.rows():
         if str(row.get("setup_class") or "UNKNOWN") != want:
+            continue
+        if row.get(feature) is not None:
+            # Present on this row. Only reachable for a borrowed reason key,
+            # whose owner may be absent where this feature is not.
             continue
         reason = row.get(key)
         if reason is None:

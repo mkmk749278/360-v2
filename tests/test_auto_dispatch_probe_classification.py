@@ -173,3 +173,20 @@ def test_an_empty_roster_is_still_its_own_alarm():
         gap_threshold=3,
     )
     assert ok is False and "EMPTY" in msg
+
+
+def test_a_user_who_chose_coindcx_is_a_setting_not_a_blackout():
+    """2026-11-10: one keyed user, on CoinDCX. The Binance dispatcher hands
+    them to the CoinDCX executor and counts ``venue:coindcx`` — and the probe
+    read "every user is being silently skipped" for 362 cycles while CoinDCX
+    attempted every signal."""
+    deliberate, faults = _classify_skips({"venue:coindcx": 83})
+    assert faults == {}
+    assert deliberate == {"venue:coindcx": 83}
+
+
+def test_a_venue_nobody_listed_keeps_the_probe_red():
+    """Named exactly, never by prefix: a hand-off to a venue this list has not
+    been told about may be a hand-off to nothing."""
+    _, faults = _classify_skips({"venue:kraken": 4, "venue:": 1})
+    assert set(faults) == {"venue:kraken", "venue:"}

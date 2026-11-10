@@ -77,6 +77,7 @@ from src.performance_metrics import calculate_trade_pnl_pct, classify_trade_outc
 from src.performance_tracker import (
     entry_sl_distance_pct,
     shipped_sl_distance_pct,
+    designed_tp1_distance_pct,
     shipped_tp1_distance_pct,
 )
 from src.push_notifications import push_signal_outcome
@@ -566,6 +567,7 @@ class TradeMonitor:
                 # kept: every entry/exit study had to approximate it
                 # (docs/LONGS_RESEARCH_2026_09_26.md §11.3, 2026-09-26).
                 shipped_tp1_distance_pct=shipped_tp1_distance_pct(sig),
+                designed_tp1_distance_pct=designed_tp1_distance_pct(sig),
                 signal_quality_pnl_pct=signal_quality_pnl,
                 signal_quality_hit_tp=signal_quality_hit_tp,
                 # Stamped where it becomes true: the regime at entry is knowable

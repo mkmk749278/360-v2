@@ -1219,9 +1219,11 @@ def build_quality_by_setup(records: List[Dict[str, Any]]) -> Dict[str, Dict[str,
 def build_geometry_override(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Per-setup: the stop the evaluator designed vs the one that shipped.
 
-    Two stages move the stop between the evaluator and the wire —
-    ``predictive_ai.adjust_tp_sl`` scales it (unless the setup sits in
-    ``_PREDICTIVE_SLTP_BYPASS_SETUPS``, which the two mover paths do not) and
+    Three stages move the stop between the evaluator and the wire —
+    ``signal_quality.build_risk_plan`` REPLACES stop and TP ladder with generic
+    5m geometry (unless the setup sits in ``STRUCTURAL_SLTP_PROTECTED_SETUPS``,
+    which the two mover paths do not), ``predictive_ai.adjust_tp_sl`` scales it
+    (unless the setup sits in ``_PREDICTIVE_SLTP_BYPASS_SETUPS``) and
     ``_apply_noise_floor_stop`` widens it.  Nothing compared the two, so a
     systematic override was invisible until someone diffed the dispatch log
     against the ledger by hand (2026-08-04: 46 of 46 MVRTP signals tightened,
@@ -1256,8 +1258,49 @@ def build_geometry_override(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             "median_ratio": _median([d / s for d, s in usable if s > 0.0]),
             "tightened": tightened,
             "widened": widened,
+            "tp1": _tp1_override(rows),
         }
     return out
+
+
+def _tp1_override(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The TP1 the evaluator authored vs the one that shipped, on one setup.
+
+    Only one direction is decidable from a closed record, and the two are
+    never pooled.  Where the authored target is NEARER than the shipped one,
+    it was reached iff ``MFE >= its distance`` — every recorded excursion
+    precedes the close, so there is no ordering question.  ``rescued`` is the
+    subset whose MFE cleared the authored target and not the shipped one:
+    trades that would have banked TP1 and did not.  Where the authored target
+    is FARTHER, a row that closed at the shipped TP1 stopped being walked
+    there, so whether it would have gone on is not in the record; those are
+    counted as ``farther_undecidable`` and no figure is drawn from them.
+
+    MFE is tick-sampled, so "reached" under-counts and can never invent a
+    touch.  This says how often the authored target was touched — NOT what
+    the trade would have earned: the authored stop differs too, and that half
+    is not decidable from the record (see ``structural_snap``'s SL arm).
+    """
+    usable = []
+    for r in rows:
+        d = float(r.get("designed_tp1_distance_pct") or 0.0)
+        s = float(r.get("shipped_tp1_distance_pct") or 0.0)
+        if d > 0.0 and s > 0.0:
+            usable.append((d, s, float(r.get("max_favorable_excursion_pct") or 0.0)))
+    nearer = [(d, s, m) for d, s, m in usable if d < s * 0.99]
+    farther = [(d, s, m) for d, s, m in usable if d > s * 1.01]
+    return {
+        "stamped": len(usable),
+        "unstamped": len(rows) - len(usable),
+        "median_designed_pct": _median([d for d, _, _ in usable]),
+        "median_shipped_pct": _median([s for _, s, _ in usable]),
+        "nearer": len(nearer),
+        "nearer_reached": sum(1 for d, _, m in nearer if m >= d),
+        "nearer_rescued": sum(1 for d, s, m in nearer if d <= m < s),
+        "farther": len(farther),
+        "farther_undecidable": sum(1 for d, s, m in farther if s <= m < d),
+        "same": len(usable) - len(nearer) - len(farther),
+    }
 
 
 def summarize_runtime_health(
@@ -2679,7 +2722,7 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             f"- ~3 minute terminal-close behavior: `{json.dumps(lifecycle.get('terminal_close_around_3m', {}), sort_keys=True)}`",
             "",
             "## Stop geometry — designed vs shipped",
-            "_The evaluator authors a structural stop (for the mover paths: beyond the mid/slow MA plus an ATR buffer — where the thesis is dead).  Two stages then move it before it reaches the wire: ``predictive_ai.adjust_tp_sl`` scales the distance by a model multiplier **unless the setup is in ``_PREDICTIVE_SLTP_BYPASS_SETUPS``**, and ``_apply_noise_floor_stop`` widens it to the pair's 1h noise band.  Nothing had ever compared the two ends, so a systematic override was invisible.  ``Ratio`` = designed ÷ shipped; **>1 means the stop that was actually in the market was TIGHTER than the one the TP ladder was built from**, so the R on every other surface divides by a stop the trade never had.  ``Stamped`` leads the row and 0.0 means unknown, not 'no override' — records written before 2026-08-04 cannot be recovered and are excluded from every figure here rather than averaged in._",
+            "_The evaluator authors a structural stop (for the mover paths: beyond the mid/slow MA plus an ATR buffer — where the thesis is dead).  Three stages then move it before it reaches the wire: ``build_risk_plan`` **replaces** stop and TP ladder with generic 5m structure geometry (1.3 / 2.3 / 3.4 R) **unless the setup is in ``STRUCTURAL_SLTP_PROTECTED_SETUPS`` — the two mover paths are not**; ``predictive_ai.adjust_tp_sl`` scales the distance by a model multiplier unless the setup is in ``_PREDICTIVE_SLTP_BYPASS_SETUPS``; and ``_apply_noise_floor_stop`` widens it to the pair's 1h noise band without moving the targets.  Nothing had ever compared the two ends, so a systematic override was invisible.  ``Ratio`` = designed ÷ shipped; **>1 means the stop that was actually in the market was TIGHTER than the one the TP ladder was built from**, so the R on every other surface divides by a stop the trade never had.  ``Stamped`` leads the row and 0.0 means unknown, not 'no override' — records written before 2026-08-04 cannot be recovered and are excluded from every figure here rather than averaged in._",
             "| Path/Setup | Rows | Stamped | Designed % | Shipped % | Ratio | Tightened | Widened |",
             "|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
@@ -2708,6 +2751,39 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             f"- **{_unstamped} of {_unstamped + _stamped} closed records carry no shipped-stop stamp** "
             "(written before 2026-08-04, or in flight across the deploy). They are excluded above. "
             "This shrinks on its own; it is not a fault."
+        )
+
+    lines.extend(
+        [
+            "",
+            "### TP1 — authored vs shipped",
+            "_The same comparison for the first target.  ``Nearer`` = the evaluator's TP1 sat closer than the one that shipped; of those, ``Reached`` had MFE ≥ the authored distance and ``Rescued`` cleared the authored target but **not** the shipped one — trades that would have banked TP1 and did not.  ``Farther / undecidable`` rows closed at the shipped TP1 before the authored one, so the record cannot say whether they would have gone on; no figure is drawn from them.  MFE is tick-sampled, so ``Reached`` under-counts and never invents a touch.  This counts touches, **not PnL**: the authored stop differs too, and that half is not decidable here.  Rows closed before 2026-11-10 carry no authored-TP1 stamp and are excluded, not averaged in._",
+            "| Path/Setup | Stamped | Authored TP1 % | Shipped TP1 % | Nearer | Reached | Rescued | Farther | Farther / undecidable | Same |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    _tp1_rows = [
+        (_setup, (_m.get("tp1") or {})) for _setup, _m in sorted(_geom.items())
+    ]
+    _tp1_rows = [(s, t) for s, t in _tp1_rows if int(t.get("stamped", 0) or 0) > 0]
+    if not _tp1_rows:
+        lines.append(
+            "| _no closed record carries an authored-TP1 stamp yet_ | — | — | — | — | — | — | — | — | — |"
+        )
+    for _setup, _t in _tp1_rows:
+        lines.append(
+            "| {s} | {st} | {d} | {sh} | {n} | {nr} | {res} | {f} | {fu} | {same} |".format(
+                s=_setup,
+                st=_t.get("stamped", 0),
+                d=_t.get("median_designed_pct"),
+                sh=_t.get("median_shipped_pct"),
+                n=_t.get("nearer", 0),
+                nr=_t.get("nearer_reached", 0),
+                res=_t.get("nearer_rescued", 0),
+                f=_t.get("farther", 0),
+                fu=_t.get("farther_undecidable", 0),
+                same=_t.get("same", 0),
+            )
         )
 
     lines.extend(

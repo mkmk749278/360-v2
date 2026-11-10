@@ -2689,6 +2689,18 @@ python -m src.main
   tells you nothing, because both keys look equally reasonable.
 
 
+- **Membership in a set usually buys more than the one property you wanted it
+  for.** An outside audit (2026-11-10) found, correctly, that `build_risk_plan`
+  replaces the two mover paths' stop and 1.0R ladder with generic 5m geometry
+  at 1.3R, because neither is in `STRUCTURAL_SLTP_PROTECTED_SETUPS`. Its fix
+  was one line: add them. That set also switches the stop cap from clamp to
+  reject and leaves the kept 1.0R TP1 under the 1.2 R:R floor — so the fix
+  rejects most of a path that is ~60% of the book. Running the function on one
+  signal showed it in a minute. Before adding a member, list every `in` test
+  on the set. And this file had described MVRTP's targets as 1.0/1.6/2.5 R for
+  three months: that is what the evaluator writes, never what shipped.
+  **Read geometry off the wire, not off the evaluator.**
+
 - **A queued control is a request, and its answer must be published where the
   request was made.** In isolated mode `POST /api/auto-mode` wrote a Redis
   command and returned success; the engine applied it at the end of its next

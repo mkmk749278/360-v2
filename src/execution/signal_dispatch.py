@@ -377,6 +377,15 @@ _DELIBERATE_SKIPS = frozenset({
     "path_pref",       # the user excluded this setup class
     "regime_pref",     # the user excluded this entry regime
     "already_active",  # the user already holds this symbol
+    # The user chose CoinDCX. This dispatcher is the BINANCE order path and
+    # hands them to ``venues.coindcx.dispatch``, which makes its own order
+    # attempts and has its own probe (``coindcx_positions``). Only an explicit,
+    # stored choice resolves to this — every unreadable case resolves to
+    # "binance" — so it is a setting, not a fault. 2026-11-10: with one keyed
+    # user, on CoinDCX, this read "every user is being silently skipped" for
+    # 362 consecutive cycles while CoinDCX was attempting every signal.
+    # Named exactly, not by prefix: the next venue stays red until listed.
+    "venue:coindcx",
 })
 
 
@@ -477,7 +486,8 @@ def auto_dispatch_health_check(
             return True, (
                 f"{skip_gap:.0f} signals fanned out to keyed users and none "
                 f"reached the order path — but every skip is a user setting, "
-                f"not a fault: {_fmt(deliberate)}. No user is on live."
+                f"not a fault: {_fmt(deliberate)}. No user is on live "
+                f"on this (Binance) order path."
             )
         # Lead with the faults: they are the actionable half, and sorting the
         # pooled map by count buries a single lookup_failed under hundreds of
