@@ -1,21 +1,21 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 2557,
-    "wins": 830,
-    "losses": 1049,
-    "neutral": 678,
+    "n": 2588,
+    "wins": 841,
+    "losses": 1060,
+    "neutral": 687,
     "win_rate_pct": 32.5,
-    "avg_pnl_pct": 0.1753
+    "avg_pnl_pct": 0.1811
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 525,
-    "wins": 153,
-    "losses": 245,
-    "neutral": 127,
+    "n": 529,
+    "wins": 154,
+    "losses": 246,
+    "neutral": 129,
     "win_rate_pct": 29.1,
-    "avg_pnl_pct": 0.1462
+    "avg_pnl_pct": 0.1493
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
@@ -28,21 +28,21 @@
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 324,
+    "n": 326,
     "wins": 78,
-    "losses": 147,
-    "neutral": 99,
-    "win_rate_pct": 24.1,
-    "avg_pnl_pct": -0.1721
+    "losses": 148,
+    "neutral": 100,
+    "win_rate_pct": 23.9,
+    "avg_pnl_pct": -0.1783
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
-    "n": 240,
-    "wins": 87,
-    "losses": 107,
+    "n": 242,
+    "wins": 88,
+    "losses": 108,
     "neutral": 46,
-    "win_rate_pct": 36.2,
-    "avg_pnl_pct": 0.0167
+    "win_rate_pct": 36.4,
+    "avg_pnl_pct": 0.0185
   },
   {
     "setup": "SR_FLIP_RETEST",
@@ -73,12 +73,12 @@
   },
   {
     "setup": "TREND_PULLBACK_EMA",
-    "n": 56,
+    "n": 57,
     "wins": 15,
     "losses": 18,
-    "neutral": 23,
-    "win_rate_pct": 26.8,
-    "avg_pnl_pct": 0.2128
+    "neutral": 24,
+    "win_rate_pct": 26.3,
+    "avg_pnl_pct": 0.209
   },
   {
     "setup": "MEAN_REVERT",
@@ -117,6 +117,15 @@
     "avg_pnl_pct": 0.6001
   },
   {
+    "setup": "POST_DISPLACEMENT_CONTINUATION",
+    "n": 3,
+    "wins": 1,
+    "losses": 1,
+    "neutral": 1,
+    "win_rate_pct": 33.3,
+    "avg_pnl_pct": -0.0084
+  },
+  {
     "setup": "WHALE_MOMENTUM",
     "n": 3,
     "wins": 0,
@@ -133,14 +142,5 @@
     "neutral": 1,
     "win_rate_pct": 33.3,
     "avg_pnl_pct": 0.0511
-  },
-  {
-    "setup": "POST_DISPLACEMENT_CONTINUATION",
-    "n": 2,
-    "wins": 1,
-    "losses": 0,
-    "neutral": 1,
-    "win_rate_pct": 50.0,
-    "avg_pnl_pct": 0.8769
   }
 ]
