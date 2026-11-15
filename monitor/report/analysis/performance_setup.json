@@ -1,21 +1,21 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 2588,
-    "wins": 841,
-    "losses": 1060,
-    "neutral": 687,
-    "win_rate_pct": 32.5,
-    "avg_pnl_pct": 0.1811
+    "n": 2610,
+    "wins": 844,
+    "losses": 1073,
+    "neutral": 693,
+    "win_rate_pct": 32.3,
+    "avg_pnl_pct": 0.1683
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 529,
-    "wins": 154,
+    "n": 533,
+    "wins": 158,
     "losses": 246,
     "neutral": 129,
-    "win_rate_pct": 29.1,
-    "avg_pnl_pct": 0.1493
+    "win_rate_pct": 29.6,
+    "avg_pnl_pct": 0.1696
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
@@ -28,21 +28,21 @@
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 326,
-    "wins": 78,
+    "n": 327,
+    "wins": 79,
     "losses": 148,
     "neutral": 100,
-    "win_rate_pct": 23.9,
-    "avg_pnl_pct": -0.1783
+    "win_rate_pct": 24.2,
+    "avg_pnl_pct": -0.1656
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
-    "n": 242,
-    "wins": 88,
-    "losses": 108,
+    "n": 252,
+    "wins": 95,
+    "losses": 111,
     "neutral": 46,
-    "win_rate_pct": 36.4,
-    "avg_pnl_pct": 0.0185
+    "win_rate_pct": 37.7,
+    "avg_pnl_pct": 0.0353
   },
   {
     "setup": "SR_FLIP_RETEST",
@@ -63,6 +63,15 @@
     "avg_pnl_pct": -0.0704
   },
   {
+    "setup": "TREND_PULLBACK_EMA",
+    "n": 58,
+    "wins": 15,
+    "losses": 19,
+    "neutral": 24,
+    "win_rate_pct": 25.9,
+    "avg_pnl_pct": 0.1676
+  },
+  {
     "setup": "BREAKDOWN_SHORT",
     "n": 57,
     "wins": 16,
@@ -70,15 +79,6 @@
     "neutral": 17,
     "win_rate_pct": 28.1,
     "avg_pnl_pct": 0.6737
-  },
-  {
-    "setup": "TREND_PULLBACK_EMA",
-    "n": 57,
-    "wins": 15,
-    "losses": 18,
-    "neutral": 24,
-    "win_rate_pct": 26.3,
-    "avg_pnl_pct": 0.209
   },
   {
     "setup": "MEAN_REVERT",
@@ -118,12 +118,12 @@
   },
   {
     "setup": "POST_DISPLACEMENT_CONTINUATION",
-    "n": 3,
+    "n": 4,
     "wins": 1,
     "losses": 1,
-    "neutral": 1,
-    "win_rate_pct": 33.3,
-    "avg_pnl_pct": -0.0084
+    "neutral": 2,
+    "win_rate_pct": 25.0,
+    "avg_pnl_pct": -0.0063
   },
   {
     "setup": "WHALE_MOMENTUM",
