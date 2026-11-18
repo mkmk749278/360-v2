@@ -1,57 +1,57 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 2665,
-    "wins": 868,
-    "losses": 1090,
-    "neutral": 707,
-    "win_rate_pct": 32.6,
-    "avg_pnl_pct": 0.192
+    "n": 2686,
+    "wins": 873,
+    "losses": 1099,
+    "neutral": 714,
+    "win_rate_pct": 32.5,
+    "avg_pnl_pct": 0.1932
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 549,
-    "wins": 160,
-    "losses": 253,
-    "neutral": 136,
-    "win_rate_pct": 29.1,
-    "avg_pnl_pct": 0.1497
+    "n": 559,
+    "wins": 162,
+    "losses": 257,
+    "neutral": 140,
+    "win_rate_pct": 29.0,
+    "avg_pnl_pct": 0.1421
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 354,
+    "n": 355,
     "wins": 82,
-    "losses": 135,
+    "losses": 136,
     "neutral": 137,
-    "win_rate_pct": 23.2,
-    "avg_pnl_pct": 0.1299
+    "win_rate_pct": 23.1,
+    "avg_pnl_pct": 0.1264
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 331,
-    "wins": 79,
-    "losses": 150,
-    "neutral": 102,
-    "win_rate_pct": 23.9,
-    "avg_pnl_pct": -0.174
+    "n": 334,
+    "wins": 80,
+    "losses": 151,
+    "neutral": 103,
+    "win_rate_pct": 24.0,
+    "avg_pnl_pct": -0.1592
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
-    "n": 254,
-    "wins": 95,
-    "losses": 113,
+    "n": 257,
+    "wins": 96,
+    "losses": 115,
     "neutral": 46,
     "win_rate_pct": 37.4,
-    "avg_pnl_pct": 0.0278
+    "avg_pnl_pct": 0.029
   },
   {
     "setup": "SR_FLIP_RETEST",
-    "n": 208,
-    "wins": 57,
+    "n": 212,
+    "wins": 58,
     "losses": 79,
-    "neutral": 72,
+    "neutral": 75,
     "win_rate_pct": 27.4,
-    "avg_pnl_pct": 0.0511
+    "avg_pnl_pct": 0.056
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
@@ -100,12 +100,12 @@
   },
   {
     "setup": "MA_CROSS_TREND_SHIFT",
-    "n": 19,
+    "n": 21,
     "wins": 5,
-    "losses": 9,
+    "losses": 11,
     "neutral": 5,
-    "win_rate_pct": 26.3,
-    "avg_pnl_pct": 0.2856
+    "win_rate_pct": 23.8,
+    "avg_pnl_pct": 0.1059
   },
   {
     "setup": "FUNDING_EXTREME_SIGNAL",
