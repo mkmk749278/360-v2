@@ -18,6 +18,37 @@ weights, and to replace the per-symbol premiumIndex with one all-symbol call
 (weight 10 instead of ~75). Not done in the 1d-candle PR so that each change
 stays watchable on its own.
 
+## 2026-11-19 (session 2, end) — step 3 shipped both halves; owner's next actions
+
+**Live in prod:**
+- **#1091** fixed the frozen 1d/1w candles. All 75 universe pairs are current
+  on every timeframe.
+- **#1092** added the derivatives recorder, OFF.
+- **#1093** added the plan validator and ledger. `read.analyst_plans` reads
+  `no_file_yet`, and `action.analyst_submit_plan` is in the catalog.
+- **ops #235** added the `/mcp` server and analyst machine tokens.
+
+The analyst pipeline is wired end to end, except for credentials and the
+schedule. **Owner actions to start it:**
+1. Ops Control → Access → *Analyst machine tokens*: mint one (30d).
+2. Store it as a Claude Code environment network secret for
+   `ops.luminapp.org` (`Authorization: Bearer`). See 360ce-ops
+   `docs/ANALYST_MCP.md`.
+3. Arm `deriv_recorder_enabled` and watch one cycle on `read.deriv_history`:
+   `rows_written` ≈ 75 and `weight_declared` ≈ 85.
+
+**Next build steps:**
+- **Step 4:** a dark forward walk of accepted setups, arms per spec §3, plus
+  the ops page and an "hourly plan missed" probe.
+- **Step 5:** the hourly scheduled task. Log its usage against Pro for the
+  first week.
+- MCP tools for book state, the unlock calendar view and plan outcomes come
+  with step 4.
+
+**Not verified:** no plan has been submitted in prod yet. A test submit would
+write to the real ledger, so the first real plan is the first live exercise
+of `submit_plan`.
+
 ## 2026-11-19 (session 2) — step 3, engine half: plan validator + ledger
 
 - **#1092 verified live:** `read.deriv_history` answers with
