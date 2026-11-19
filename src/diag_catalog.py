@@ -470,7 +470,10 @@ def _candle_census(ctx: Ctx) -> Dict[str, Any]:
             "universe_size": len(universe), "symbols_outside_universe": outside,
             "per_timeframe": per_tf, "stalest": stalest,
             "htf_refresh": htf or None,
-            "htf_refresh_note": ("None = this engine predates the 1d/1w refresher"
+            # None has two causes and only one is "old engine": right after a
+            # restart the refresher has not completed its first scan cycle.
+            "htf_refresh_note": ("None = no refresher cycle has completed since boot "
+                                 "(or an engine predating it)"
                                  if not htf else "counters since boot")}
 
 
@@ -479,6 +482,21 @@ def _deriv_recorder(ctx: Ctx) -> Dict[str, Any]:
     from src import derivatives_recorder as _dr
 
     return _dr.summary()
+
+
+def _analyst_plans(ctx: Ctx) -> Dict[str, Any]:
+    """Recent analyst plans from the engine's ledger."""
+    from src import analyst_plan as _ap
+
+    return _ap.get_ledger().recent(int(ctx.args.get("limit") or 5))
+
+
+def _analyst_submit_plan(ctx: Ctx) -> Dict[str, Any]:
+    """Validate and record a plan. Writes the analyst ledger and nothing else."""
+    from src import analyst_plan as _ap
+
+    return _ap.submit(ctx.args.get("plan"), ctx.engine,
+                      source=str(ctx.args.get("source") or "unknown"))
 
 
 def _loop_snapshot(ctx: Ctx) -> Dict[str, Any]:
@@ -842,6 +860,11 @@ for _e in (
           "or not, the last cycle (rows, misses by reason, declared weight) and "
           "what the SQLite file holds. Default OFF; arm after one watched cycle.",
           _deriv_recorder),
+    Entry("read.analyst_plans", "Analyst — recent plans", "read",
+          "The last few plans the hourly analyst submitted: each setup accepted "
+          "or rejected with its named reason, the resolved entry/stop/targets, "
+          "and rejection totals by reason. Read-only.",
+          _analyst_plans),
     Entry("read.loop", "Loop + host counters", "read",
           "Scan cycle, snapshot writer, edge store and CPU-against-quota in one "
           "read.", _loop_snapshot),
@@ -988,6 +1011,13 @@ def _reseed_symbol(ctx: Ctx) -> Dict[str, Any]:
 
 
 for _e in (
+    Entry("action.analyst_submit_plan", "Analyst — submit plan", "action",
+          "Validate a plan of level-id setups against the current menu and "
+          "record it. Takes args.plan (JSON) and args.source.",
+          _analyst_submit_plan,
+          effect=("Appends one plan and its setups to data/analyst_plans_v1.sqlite. "
+                  "Nothing reaches a subscriber, the signal queue or an order; "
+                  "at most 6 plans an hour.")),
     Entry("action.flush_ledgers", "Flush measurement ledgers", "action",
           "Force every measurement ledger to persist what it holds in memory.",
           _flush_ledgers,
