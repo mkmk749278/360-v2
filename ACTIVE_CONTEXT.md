@@ -18,6 +18,46 @@ weights, and to replace the per-symbol premiumIndex with one all-symbol call
 (weight 10 instead of ~75). Not done in the 1d-candle PR so that each change
 stays watchable on its own.
 
+## 2026-11-19 (session 2) — #1091 verified in prod; step 2 recorder built (default OFF)
+
+**#1091 verified live** (guest console, about 12:00 UTC):
+- After deploy the refresher had 121 due buckets, refreshed 6 in its first
+  cycle and deferred 115, as designed.
+- BTCUSDT 1d went from 16 bars behind to 0. BTC's 7d change had been
+  **−4.04% read off the frozen series; the true value is −14.79%.**
+- Breadth refused (`btc_1d_stale_or_undated`) until BTC refreshed. It then read
+  n=31, with 43 pairs still catching up.
+- `read.candle_census`, `read.analyst_market`, `read.analyst_pair` and
+  `read.analyst_watchlist` all return OK.
+
+**Step 2, this PR:** `src/derivatives_recorder.py` records one row per
+(hour, Tier-1 pair) to `data/derivatives_v1.sqlite`:
+- **OI (coin):** read from `OIPoller`'s in-memory store, so no new call.
+- **Funding, mark, index and premium:** one all-symbol `premiumIndex` call
+  (weight 10).
+- **Taker buy/sell:** one call per pair to `takerlongshortRatio` (0 weight,
+  separate 1,000/5min limit, declared 1).
+
+That totals about 85 weight per hour. Every miss is NULL plus a reason column.
+It is **default OFF**: arm `deriv_recorder_enabled` in ops Tunables →
+Measurement, watch one cycle on `read.deriv_history`, and expect `rows_written`
+≈ 75. A liveness probe `deriv_recorder` pages when the recorder is armed and
+2h behind.
+
+Also in this PR:
+- The census now grades only the scanned universe. It still counts the
+  rotated-out symbols.
+- The pair freshness block now includes 1w.
+
+## OPEN 2026-11-19 — the candle store never evicts rotated-out symbols
+
+Prod store: **512 symbols, against a universe of 75.** About 430 symbols that
+rotated out still hold all 7 timeframes. They go back as far as BRETTUSDT,
+which is 90 days stale. They cost memory and snapshot save/load time, and
+`refresh_timeframe` callers (SAR resolver) may still want a few of them. The
+census now excludes them from grading. An eviction policy (keep the universe,
+plus symbols owed a verdict by a ledger) is not built yet.
+
 ## 2026-11-19 (session 2) — 1d / 1w candles were frozen: cause found and fixed
 
 `read.analyst_market` showed BTCUSDT 1d last bar 2026-11-02, 16 bars behind,

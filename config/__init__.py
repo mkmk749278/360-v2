@@ -1678,6 +1678,12 @@ STRUCTURAL_VETO_MEASURE: bool = _safe_bool("STRUCTURAL_VETO_MEASURE", "true")
 # "build shorts system, make it live in ops, not for users"). Runtime switch:
 # ops Control → Tunables → Measurement → unlock_short_lane_enabled.
 UNLOCK_SHORT_LANE_ENABLED: bool = _safe_bool("UNLOCK_SHORT_LANE_ENABLED", "true")
+#: Hourly derivatives recorder (src/derivatives_recorder.py, analyst spec step 2).
+#: DEFAULT OFF per the background-loop rule; the owner arms it from ops after
+#: one watched cycle. Weight per hour: 10 + one per symbol.
+DERIV_RECORDER_ENABLED: bool = _safe_bool("DERIV_RECORDER_ENABLED", "false")
+#: Taker-ratio calls per cycle at most (the Tier-1 set is ~75).
+DERIV_RECORDER_MAX_SYMBOLS: int = _safe_int("DERIV_RECORDER_MAX_SYMBOLS", "100")
 
 # ENFORCE defaults OFF and is gated per setup class, the same shape as the
 # snap: one flip must not move nineteen paths on evidence from the one that is

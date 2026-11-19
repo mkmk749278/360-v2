@@ -287,6 +287,35 @@ class BinanceClient:
             weight=weight_for(path),
         )
 
+    async def fetch_premium_index_all(self) -> Optional[List[Dict[str, Any]]]:
+        """Mark, index and last funding for EVERY symbol (weight 10, futures).
+
+        One call per board, never per symbol: the per-symbol form costs 1 each,
+        so the whole Tier-1 set would cost ~75.
+        """
+        if self.market != "futures":
+            return None
+        path = "/fapi/v1/premiumIndex"
+        data = await self._get(path, weight=weight_for(path))
+        return data if isinstance(data, list) else None
+
+    async def fetch_taker_ratio(
+        self, symbol: str, period: str = "1h", limit: int = 1,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Taker buy/sell volume per period (``/futures/data/takerlongshortRatio``).
+
+        Binance serves only the last 30 days, which is why the recorder keeps
+        its own copy. Separate 1000-requests/5min IP limit.
+        """
+        if self.market != "futures":
+            return None
+        path = "/futures/data/takerlongshortRatio"
+        data = await self._get(
+            path, params={"symbol": symbol, "period": period, "limit": int(limit)},
+            weight=weight_for(path),
+        )
+        return data if isinstance(data, list) else None
+
     async def fetch_all_tickers_24h(self) -> Optional[List[Dict[str, Any]]]:
         """24h statistics for **every** symbol in one request (weight 40).
 

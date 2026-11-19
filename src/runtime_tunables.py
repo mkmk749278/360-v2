@@ -173,6 +173,7 @@ def _build_registry() -> Dict[str, Tunable]:
         GEOMETRY_AB_ENABLED,
         SAR_EXIT_SHADOW_ENABLED,
         UNLOCK_SHORT_LANE_ENABLED,
+        DERIV_RECORDER_ENABLED,
         STALE_TF_REFUSE_ENABLED,
         TRACK_RECORD_PUBLIC_ENABLED,
         SIGNALS_PAYWALL_START,
@@ -1597,6 +1598,21 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=GEOMETRY_AB_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="deriv_recorder_enabled",
+            label="Derivatives recorder (hourly)",
+            description=(
+                "Record hourly open interest (coin), funding, mark/index "
+                "premium and taker buy/sell volume for every Tier-1 pair to "
+                "SQLite, because Binance keeps only 30 days. One all-symbol "
+                "premium call (weight 10) plus one taker call per pair, once "
+                "an hour. Off the money path. Default OFF: arm after one "
+                "watched cycle (read.deriv_history)."
+            ),
+            type="bool",
+            default=DERIV_RECORDER_ENABLED,
             category="Measurement",
         ),
         Tunable(

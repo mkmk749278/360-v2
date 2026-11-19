@@ -336,6 +336,7 @@ class Bootstrap:
             # here reaches a subscriber or an order. Own task so its daily
             # calendar read never delays the maintenance loop's lanes.
             asyncio.create_task(engine._unlock_shorts_loop(), name="unlock_shorts"),
+            asyncio.create_task(engine._deriv_recorder_loop(), name="deriv_recorder"),
             asyncio.create_task(engine._macro_watchdog.start()),
             asyncio.create_task(engine._liquidation_flush_loop()),
             asyncio.create_task(engine._daily_performance_report_loop()),

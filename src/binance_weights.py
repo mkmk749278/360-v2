@@ -49,8 +49,10 @@ from typing import Callable, Dict, Optional, Union
 VERIFIED = "verified:2026-08-05"
 #: Read from Binance's endpoint documentation on 2026-09-25 (unlock-short lane).
 VERIFIED_2026_09_25 = "verified:2026-09-25"
+#: Read from Binance's endpoint documentation on 2026-11-19 (derivatives recorder).
+VERIFIED_2026_11_19 = "verified:2026-11-19"
 #: Every marker that means "read from the vendor's own page on a stated date".
-VERIFIED_MARKERS = (VERIFIED, VERIFIED_2026_09_25)
+VERIFIED_MARKERS = (VERIFIED, VERIFIED_2026_09_25, VERIFIED_2026_11_19)
 #: Pre-existing value preserved from the call site it was moved out of. NOT
 #: independently confirmed — re-check this first if the limiter drifts.
 CARRIED = "carried"
@@ -106,6 +108,18 @@ FIXED: Dict[str, Weight] = {
         1, VERIFIED_2026_09_25,
         "separate 500/5min/IP limit shared with fundingInfo; declared 1 conservatively",
     ),
+    # --- derivatives recorder (src/derivatives_recorder.py) ---------------
+    # Docs: "1 with symbol, 10 without symbol". The recorder makes the
+    # all-symbol call once an hour.
+    "/fapi/v1/premiumIndex": Weight(10, VERIFIED_2026_11_19, "no symbol param = all symbols"),
+    # The /futures/data/* family documents "0 IP weight" and a separate
+    # "IP rate limit 1000 requests/5min" (read on the sibling openInterestHist
+    # and globalLongShortAccountRatio pages; the taker page did not render).
+    # Declared 1 so the shared limiter still counts it.
+    "/futures/data/takerlongshortRatio": Weight(
+        1, VERIFIED_2026_11_19,
+        "0 IP weight + separate 1000/5min IP limit (family docs); declared 1",
+    ),
 }
 
 #: Single-symbol variants of endpoints whose all-symbol form is far heavier.
@@ -114,6 +128,7 @@ FIXED: Dict[str, Weight] = {
 FIXED_SINGLE_SYMBOL: Dict[str, Weight] = {
     "/fapi/v1/ticker/24hr": Weight(1, CARRIED, "with symbol param"),
     "/api/v3/ticker/24hr": Weight(1, CARRIED, "with symbol param"),
+    "/fapi/v1/premiumIndex": Weight(1, VERIFIED_2026_11_19, "with symbol param"),
 }
 
 
