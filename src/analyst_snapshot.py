@@ -110,8 +110,10 @@ def bar_freshness(cd: Optional[dict], tf: str, now_ms: float) -> Dict[str, Any]:
         # update_candle fills a missing open_time with NaN rather than a guess,
         # so an undatable bar is "we cannot tell", never "fresh".
         return {"tf": tf, "readable": False, "reason": "undated_bar"}
-    expected_last_open = (now_ms // step) * step - step
-    behind = max(0, int(round((expected_last_open - last_open) / step)))
+    # Alignment-free: bars that should have CLOSED after the stored one. The
+    # old ``(now // step) * step`` form assumed epoch-aligned bars, which 1w
+    # is not (Binance weeks open Monday; the epoch began on a Thursday).
+    behind = max(0, int((now_ms - last_open) // step) - 1)
     return {"tf": tf, "readable": True, "last_bar_open_ms": int(last_open),
             "bars_behind": behind, "stale": behind >= STALE_INTERVALS}
 
@@ -180,8 +182,10 @@ def _candidates(
             "touches": int(getattr(lv, "touches", 1) or 1),
             "sources": sorted(set(tfs)),
         })
-    # Prior day / week: the newest CLOSED bar is the prior period (the store
-    # never holds the forming bar), so [-1] is correct and [-2] would be wrong.
+    # Prior day / week: callers pass closed bars only (``closed_bars``), so
+    # [-1] is the prior period. The store DOES hold the forming bar after a
+    # REST seed; this comment used to say it never did, and PDH was today's
+    # partial high whenever that was true (2026-11-19).
     for tf, hk, lk in (("1d", "pdh", "pdl"), ("1w", "pwh", "pwl")):
         h, lo = _arr(tf_candles.get(tf), "high"), _arr(tf_candles.get(tf), "low")
         if h is not None and lo is not None:
@@ -276,10 +280,37 @@ def level_menu(
 # ---------------------------------------------------------------------------
 
 
-def _store_candles(engine: Any, symbol: str) -> Dict[str, dict]:
+def closed_bars(cd: Optional[dict], tf: str, now_ms: float) -> Optional[dict]:
+    """*cd* without a trailing bar that has not closed yet.
+
+    A REST-seeded bucket ends with the FORMING bar (Binance returns it), and
+    for 1d / 1w — which have no WS writer — that partial bar is frozen at the
+    moment of the pull. Reading it as a closed period made "prior day high"
+    today's partial high. Undatable last bar → returned unchanged; the
+    freshness block already reports it as unreadable.
+    """
+    if not isinstance(cd, dict):
+        return cd
+    ot = _arr(cd, "open_time")
+    step = TF_MS.get(tf)
+    if ot is None or step is None or not np.isfinite(ot[-1]):
+        return cd
+    if float(ot[-1]) + step <= now_ms:
+        return cd
+    n = len(ot) - 1
+    return {k: (v[:n] if v is not None and hasattr(v, "__len__") and len(v) == n + 1 else v)
+            for k, v in cd.items()}
+
+
+def _store_candles(engine: Any, symbol: str, *, now_ms: Optional[float] = None,
+                   closed_only: bool = True) -> Dict[str, dict]:
     store = getattr(engine, "data_store", None)
     buckets = getattr(store, "candles", None) or {}
-    return dict(buckets.get(symbol) or {})
+    raw = dict(buckets.get(symbol) or {})
+    if not closed_only:
+        return raw
+    now_ms = time.time() * 1000.0 if now_ms is None else now_ms
+    return {tf: closed_bars(cd, tf, now_ms) for tf, cd in raw.items()}
 
 
 def _scanner(engine: Any) -> Any:
@@ -330,17 +361,19 @@ def pair_snapshot(engine: Any, symbol: str, *, now: Optional[float] = None,
                   per_side: int = 4) -> Dict[str, Any]:
     now = time.time() if now is None else now
     now_ms = now * 1000.0
-    tfc = _store_candles(engine, symbol)
+    tfc = _store_candles(engine, symbol, now_ms=now_ms)
     if not tfc:
         return {"symbol": symbol, "readable": False, "reason": "no_candles_in_store"}
     fresh = {tf: bar_freshness(tfc.get(tf), tf, now_ms)
              for tf in ("15m", "1h", "4h", "1d") if tf in tfc}
     price_tf = next((tf for tf in ("5m", "15m", "1h") if _arr(tfc.get(tf), "close") is not None), None)
-    closes_p = _arr(tfc.get(price_tf), "close") if price_tf else None
+    # Price is the newest print, forming bar included.
+    raw = _store_candles(engine, symbol, closed_only=False)
+    closes_p = _arr(raw.get(price_tf), "close") if price_tf else None
     price = float(closes_p[-1]) if closes_p is not None else None
     atr_h1, atr_h4 = atr_of(tfc.get("1h")), atr_of(tfc.get("4h"))
     d1 = _arr(tfc.get("1d"), "close")
-    btc_d1 = _arr(_store_candles(engine, BTC).get("1d"), "close")
+    btc_d1 = _arr(_store_candles(engine, BTC, now_ms=now_ms).get("1d"), "close")
     chg7, btc7 = pct_change(d1, 7), pct_change(btc_d1, 7)
     sc = _scanner(engine)
     lb = getattr(sc, "level_book", None)
@@ -377,30 +410,44 @@ def pair_snapshot(engine: Any, symbol: str, *, now: Optional[float] = None,
     }
 
 
-def altcoin_breadth(engine: Any, symbols: Sequence[str]) -> Dict[str, Any]:
-    """Share of the universe whose 7d return beats BTC's. n and misses counted."""
-    btc7 = pct_change(_arr(_store_candles(engine, BTC).get("1d"), "close"), 7)
+def altcoin_breadth(engine: Any, symbols: Sequence[str], *,
+                    now_ms: Optional[float] = None) -> Dict[str, Any]:
+    """Share of the universe whose 7d return beats BTC's. n and misses counted.
+
+    A pair whose 1d bucket is stale is counted apart (``stale``), never
+    compared: its "7d" ends on a different day than BTC's.
+    """
+    now_ms = time.time() * 1000.0 if now_ms is None else now_ms
+    btc_d1 = _store_candles(engine, BTC, now_ms=now_ms).get("1d")
+    if bar_freshness(btc_d1, "1d", now_ms).get("stale", True):
+        return {"readable": False, "reason": "btc_1d_stale_or_undated"}
+    btc7 = pct_change(_arr(btc_d1, "close"), 7)
     if btc7 is None:
         return {"readable": False, "reason": "no_btc_7d"}
-    beat = n = missing = 0
+    beat = n = missing = stale = 0
     for s in symbols:
         if s == BTC:
             continue
-        r = pct_change(_arr(_store_candles(engine, s).get("1d"), "close"), 7)
+        d1 = _store_candles(engine, s, now_ms=now_ms).get("1d")
+        if d1 is not None and bar_freshness(d1, "1d", now_ms).get("stale", True):
+            stale += 1
+            continue
+        r = pct_change(_arr(d1, "close"), 7)
         if r is None:
             missing += 1
             continue
         n += 1
         beat += int(r > btc7)
     if n == 0:
-        return {"readable": False, "reason": "no_pairs_with_7d", "missing": missing}
+        return {"readable": False, "reason": "no_pairs_with_7d", "missing": missing,
+                "stale": stale}
     return {"readable": True, "share_beating_btc_7d": round(beat / n, 4),
-            "n": n, "missing": missing, "btc_7d_pct": btc7}
+            "n": n, "missing": missing, "stale": stale, "btc_7d_pct": btc7}
 
 
 def market_context(engine: Any, *, now: Optional[float] = None) -> Dict[str, Any]:
     now = time.time() if now is None else now
-    btc = _store_candles(engine, BTC)
+    btc = _store_candles(engine, BTC, now_ms=now * 1000.0)
     state = compute_btc_state({tf: btc[tf] for tf in ("1h", "4h", "1d") if tf in btc},
                               tf_weights={"1h": 0.2, "4h": 0.35, "1d": 0.45})
     b: Any = state["b"]
@@ -422,7 +469,7 @@ def market_context(engine: Any, *, now: Optional[float] = None) -> Dict[str, Any
             "bar_freshness": {tf: bar_freshness(btc.get(tf), tf, now * 1000.0)
                               for tf in ("1h", "4h", "1d") if tf in btc},
         },
-        "breadth": altcoin_breadth(engine, _universe(engine)),
+        "breadth": altcoin_breadth(engine, _universe(engine), now_ms=now * 1000.0),
         "macro_calendar": {
             "readable": False,
             "reason": "not_available — no macro event feed is wired "

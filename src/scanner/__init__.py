@@ -1428,6 +1428,8 @@ class Scanner:
         # symbol can migrate between populations (mover → core admission).
         # Same missing-key-means-never contract as the mover map above.
         self._core_last_reseed: Dict[str, float] = {}
+        # (symbol, tf) -> monotonic ts of the last 1d/1w refresh attempt.
+        self._htf_last_refresh: Dict[tuple, float] = {}
 
         # Per-(symbol, direction, level_bucket) "level in play" registry —
         # see _check_and_record_level_in_play.  Blocks stuck-level repeat-
@@ -2780,6 +2782,93 @@ class Scanner:
 
         await asyncio.gather(*[_reseed(s) for s in to_refresh])
 
+    async def _refresh_stale_htf_candles(self) -> None:
+        """Keep the 1d / 1w buckets current (2026-11-19).
+
+        Those timeframes have no WS kline subscription, so a REST seed is
+        their only writer — and boot gap-fill measured the gap from the
+        snapshot's save time rather than from the bucket, so after a restart
+        nothing ever advanced them. BTCUSDT 1d was found 16 bars behind.
+
+        A REST-seeded bucket ends with the FORMING bar. Once that bar's
+        ``open_time + interval`` has passed, the bucket is missing a close
+        (and its last bar is a partial), so it is REPLACED with a fresh pull
+        at seed depth — exactly once per daily / weekly close per symbol. The
+        test is alignment-free, which matters for 1w (Binance weeks open on
+        Monday; the epoch began on a Thursday).
+
+        Budget: the not-due path reads one float and makes no call. Due
+        buckets are served oldest-first, ``HTF_CANDLE_REFRESH_MAX_PER_CYCLE``
+        per cycle, each throttled to one attempt per
+        ``HTF_CANDLE_REFRESH_RETRY_SEC``; the shortfall is counted.
+
+        Counters: ``htf_refresh:wanted`` / ``refreshed`` / ``failed`` /
+        ``deferred`` / ``undated``.
+        """
+        from config import (
+            HTF_CANDLE_REFRESH_MAX_PER_CYCLE,
+            HTF_CANDLE_REFRESH_RETRY_SEC,
+            HTF_CANDLE_REFRESH_TFS,
+            SEED_TIMEFRAMES,
+        )
+        budget = int(HTF_CANDLE_REFRESH_MAX_PER_CYCLE)
+        if budget <= 0:
+            return
+        data_store = getattr(self, "data_store", None)
+        if data_store is None or not hasattr(data_store, "last_bar_open_ms"):
+            return
+        step_ms = {"1d": 86_400_000, "1w": 604_800_000}
+        depth = {tf.interval: tf.limit for tf in SEED_TIMEFRAMES}
+        now_ms = time.time() * 1000.0
+        now_mono = time.monotonic()
+        due: List[tuple] = []  # (last_open_ms or -inf, symbol, tf)
+        undated = 0
+        for sym in list(getattr(self.pair_mgr, "pairs", {}) or {}):
+            for tf in HTF_CANDLE_REFRESH_TFS:
+                step = step_ms.get(tf)
+                if step is None or tf not in depth:
+                    continue
+                last = data_store.last_bar_open_ms(sym, tf)
+                if last is None:
+                    # Absent or undated: "cannot tell" is not "current".
+                    undated += 1
+                elif not isinstance(last, (int, float)) or last + step > now_ms:
+                    continue  # forming bar still open — nothing new exists
+                tried = self._htf_last_refresh.get((sym, tf))
+                if tried is not None and now_mono - tried < HTF_CANDLE_REFRESH_RETRY_SEC:
+                    continue
+                due.append((float("-inf") if last is None else float(last), sym, tf))
+        due.sort()
+        serve, deferred = due[:budget], max(0, len(due) - budget)
+        c = self._suppression_counters
+        c["htf_refresh:wanted"] += len(due)
+        c["htf_refresh:deferred"] += deferred
+        c["htf_refresh:undated"] += undated
+        if not serve:
+            return
+        for _, sym, tf in serve:
+            self._htf_last_refresh[(sym, tf)] = now_mono
+        if len(self._htf_last_refresh) > 2048:
+            keep = set(getattr(self.pair_mgr, "pairs", {}) or {})
+            self._htf_last_refresh = {
+                k: v for k, v in self._htf_last_refresh.items() if k[0] in keep
+            }
+
+        async def _one(sym: str, tf: str) -> None:
+            info = self.pair_mgr.pairs.get(sym)
+            market = getattr(info, "market", None) or "futures"
+            try:
+                ok = await self.data_store.refresh_timeframe(
+                    sym, tf, int(depth[tf]), str(market))
+            except Exception as exc:  # refresh_timeframe never raises; belt
+                from src import fail_open
+                fail_open.record("scanner.htf_refresh", exc)
+                ok = False
+            c["htf_refresh:refreshed" if ok is True else "htf_refresh:failed"] += 1
+            self._touch_heartbeat_progress()
+
+        await asyncio.gather(*[_one(sym, tf) for _, sym, tf in serve])
+
     async def scan_loop(self) -> None:
         """Periodic scan over all pairs / channels."""
         log.info("Scanner loop started")
@@ -2978,6 +3067,8 @@ class Scanner:
                 # pairs whose WS kline stream stopped writing.  No-op while
                 # the WS is healthy; bounded REST work when it is not.
                 await self._refresh_stale_core_candles()
+                # 1d / 1w have no WS writer; keep them current (2026-11-19).
+                await self._refresh_stale_htf_candles()
                 _all_promoted = list(dict.fromkeys(_promoted + _mover_promoted))  # dedup, order-stable
                 if _all_promoted:
                     _added = 0

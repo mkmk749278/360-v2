@@ -420,18 +420,47 @@ def _candle_census(ctx: Ctx) -> Dict[str, Any]:
             or getattr(store, "data", None))
     if data is None:
         raise LookupError("data store exposes no bucket map")
-    per_tf: Dict[str, Dict[str, int]] = {}
-    for _symbol, tfs in dict(data).items():
+    import time as _time
+
+    from src.analyst_snapshot import TF_MS, bar_freshness, closed_bars
+
+    now_ms = _time.time() * 1000.0
+    per_tf: Dict[str, Dict[str, Any]] = {}
+    worst: Dict[str, List[tuple]] = {}
+    for symbol, tfs in dict(data).items():
         for tf, cd in dict(tfs).items():
             closes = cd.get("close") if isinstance(cd, dict) else None
             n = len(closes) if closes is not None else 0
-            row = per_tf.setdefault(str(tf), {"buckets": 0, "at_cap": 0, "empty": 0})
+            row = per_tf.setdefault(str(tf), {"buckets": 0, "at_cap": 0, "empty": 0,
+                                              "stale": 0, "undated": 0})
             row["buckets"] += 1
             if n >= cap:
                 row["at_cap"] += 1
             if n == 0:
                 row["empty"] += 1
-    return {"bucket_cap": cap, "per_timeframe": per_tf}
+                continue
+            if tf not in TF_MS:
+                continue
+            # Staleness on CLOSED bars, the same test the analyst uses: a
+            # bucket two or more closes behind is stale (2026-11-19 — 1d/1w
+            # had no live writer and froze across restarts).
+            fr = bar_freshness(closed_bars(cd, tf, now_ms), tf, now_ms)
+            if not fr.get("readable"):
+                row["undated"] += 1
+            elif fr.get("stale"):
+                row["stale"] += 1
+                worst.setdefault(tf, []).append((fr["bars_behind"], str(symbol)))
+    stalest = {tf: [{"symbol": sym, "bars_behind": b}
+                    for b, sym in sorted(rows, reverse=True)[:10]]
+               for tf, rows in worst.items()}
+    scanner = getattr(ctx.engine, "_scanner", None)
+    counters = dict(getattr(scanner, "_suppression_counters", {}) or {})
+    htf = {k.split(":", 1)[1]: v for k, v in counters.items()
+           if k.startswith("htf_refresh:")}
+    return {"bucket_cap": cap, "per_timeframe": per_tf, "stalest": stalest,
+            "htf_refresh": htf or None,
+            "htf_refresh_note": ("None = this engine predates the 1d/1w refresher"
+                                 if not htf else "counters since boot")}
 
 
 def _loop_snapshot(ctx: Ctx) -> Dict[str, Any]:

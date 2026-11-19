@@ -67,7 +67,7 @@ def test_level_menu_scores_confluence_and_splits_sides():
 
 
 def test_prior_day_comes_from_the_newest_closed_bar():
-    # The store never holds the forming bar, so [-1] IS the prior day.
+    # level_menu is handed CLOSED bars (closed_bars), so [-1] IS the prior day.
     tfc = {"1d": {"high": np.array([110.0, 120.0]), "low": np.array([90.0, 80.0])}}
     out = A.level_menu(100.0, 2.0, [], tfc)
     ids = {x["id"] for x in out["levels"]}
@@ -143,3 +143,71 @@ def test_candle_census_reads_the_real_store_attribute():
     out = diag_catalog.run("read.candle_census", _engine(), {})
     assert out["ok"], out
     assert out["result"]["per_timeframe"]["1h"]["buckets"] == 3
+
+
+# ── 2026-11-19: frozen 1d / forming-bar fixes ─────────────────────────────
+
+
+def _forming(store, symbol, tf, high):
+    """Append Binance's FORMING bar, as a REST seed leaves it."""
+    step = TF_STEP[tf]
+    store.update_candle(symbol, tf, {
+        "open": 1.0, "high": high, "low": 0.5, "close": 1.0, "volume": 1.0,
+        "open_time": float((int(NOW * 1000) // step) * step)})
+
+
+def test_closed_bars_drops_the_forming_bar_and_keeps_closed_ones():
+    store = HistoricalDataStore()
+    _seed(store, "X", "1d", 10, 1.0, 0.0)
+    _forming(store, "X", "1d", 9.0)
+    cd = store.candles["X"]["1d"]
+    closed = A.closed_bars(cd, "1d", NOW * 1000)
+    assert len(closed["close"]) == 10 and len(closed["open_time"]) == 10
+    assert float(closed["high"][-1]) != 9.0
+    # Already closed: untouched.
+    assert A.closed_bars(closed, "1d", NOW * 1000) is closed
+
+
+def test_prior_day_high_is_not_todays_partial_bar():
+    # A REST seed leaves the forming bar in the store; PDH used to be its high.
+    eng = _engine()
+    _forming(eng.data_store, "ETHUSDT", "1d", 99999.0)
+    snap = A.pair_snapshot(eng, "ETHUSDT", now=NOW)
+    ids = {x["id"] for x in snap["levels"]["levels"]}
+    assert A.level_id("pdh", 99999.0) not in ids
+    assert snap["bar_freshness"]["1d"]["bars_behind"] == 0
+
+
+def test_weekly_freshness_does_not_assume_epoch_aligned_weeks():
+    # Binance weeks open Monday 00:00 UTC; the epoch began on a Thursday.
+    monday = 1_799_625_600_000.0  # a Monday 00:00 UTC
+    assert (monday / 86_400_000 + 3) % 7 == 0  # day 0 was Thursday
+    cd = {"open_time": np.array([monday - TF_STEP["1w"]]), "close": np.array([1.0])}
+    now_ms = monday + 3 * 86_400_000  # Thursday of the forming week
+    f = A.bar_freshness(cd, "1w", now_ms)
+    assert f["readable"] and f["bars_behind"] == 0 and not f["stale"]
+
+
+def test_breadth_counts_stale_pairs_apart_instead_of_comparing_them():
+    eng = _engine(symbols=("BTCUSDT", "ETHUSDT"))
+    _seed(eng.data_store, "SOLUSDT", "1d", 30, 150.0, 0.01, stale_bars=16)
+    out = A.altcoin_breadth(eng, ["BTCUSDT", "ETHUSDT", "SOLUSDT"], now_ms=NOW * 1000)
+    assert out["readable"] and out["n"] == 1 and out["stale"] == 1
+
+
+def test_breadth_refuses_when_btc_itself_is_frozen():
+    eng = _engine(symbols=("ETHUSDT",))
+    _seed(eng.data_store, "BTCUSDT", "1d", 30, 90000.0, 0.0, stale_bars=16)
+    out = A.altcoin_breadth(eng, ["BTCUSDT", "ETHUSDT"], now_ms=NOW * 1000)
+    assert out == {"readable": False, "reason": "btc_1d_stale_or_undated"}
+
+
+def test_candle_census_names_frozen_buckets(monkeypatch):
+    import time as _t
+    monkeypatch.setattr(_t, "time", lambda: NOW)
+    eng = _engine()
+    _seed(eng.data_store, "FROZUSDT", "1d", 30, 1.0, 0.0, stale_bars=16)
+    res = diag_catalog.run("read.candle_census", eng, {})["result"]
+    assert res["per_timeframe"]["1d"]["stale"] == 1
+    assert res["per_timeframe"]["1h"]["stale"] == 0
+    assert res["stalest"]["1d"][0] == {"symbol": "FROZUSDT", "bars_behind": 16}

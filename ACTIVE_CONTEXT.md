@@ -4,6 +4,60 @@
 
 ---
 
+## OPEN 2026-11-19 — `OIPoller` spends ~150 weight/min outside the shared rate limiter
+
+`src/order_flow.py` `OIPoller` uses its own `aiohttp` session. Every 60s it calls
+`/fapi/v1/openInterest` **and** single-symbol `/fapi/v1/premiumIndex` for each
+Tier-1 pair, about 150 requests a minute. None of these pass through
+`BinanceClient._rate_limiter`, so the limiter's estimate is low by that amount
+until a header sync corrects it. This was found while scoping the step-2
+recorder and is not fixed yet.
+
+The fix is to route both calls through `BinanceClient._get` with declared
+weights, and to replace the per-symbol premiumIndex with one all-symbol call
+(weight 10 instead of ~75). Not done in the 1d-candle PR so that each change
+stays watchable on its own.
+
+## 2026-11-19 (session 2) — 1d / 1w candles were frozen: cause found and fixed
+
+`read.analyst_market` showed BTCUSDT 1d last bar 2026-11-02, 16 bars behind,
+with 1h/4h current.
+
+**Cause (from code, two halves):**
+1. 1d and 1w have **no live writer**. Tier-1 pairs subscribe `@kline_1m/5m/15m/1h/4h`
+   and nothing else; a REST seed was the only thing that ever wrote 1d/1w.
+2. Boot `gap_fill` measures the gap from the snapshot's `saved_at`, not from the
+   bucket. The snapshot is re-saved every cycle while 1d/1w stand still, so any
+   restart within 24h of the last save reads "gap 0" for them and keeps the
+   frozen bucket. Only a full re-seed (a >24h outage) or the core dead-stream
+   re-seed could repair them. So **every pair's 1d and 1w** are affected, not
+   just BTC. The last full seed was ~2 Nov.
+
+**Second defect found on the way:** a REST seed keeps Binance's **forming** bar
+as the last element. `analyst_snapshot` said the store "never holds the forming
+bar", so `pdh`/`pdl`/`pwh`/`pwl` could be today's partial range. Also `bar_freshness`
+assumed epoch-aligned bars, which 1w is not (Binance weeks open Monday).
+
+**Shipped (this PR):**
+- `Scanner._refresh_stale_htf_candles`: replaces a 1d/1w bucket once its forming
+  bar has closed. That is once per close per symbol, oldest first,
+  `HTF_CANDLE_REFRESH_MAX_PER_CYCLE=6` per cycle, a 900s retry floor, and no
+  call at all on the not-due path. Worst case is 30 weight per cycle, and only
+  just after a daily or weekly close. Counters are `htf_refresh:*`.
+- The analyst reads closed bars only (`closed_bars`). Breadth counts stale pairs
+  apart and refuses outright when BTC 1d is stale.
+- `read.candle_census` now reports `stale` / `undated` per timeframe, the 10
+  stalest symbols per timeframe, and the refresher counters.
+- Liveness probe `htf_candles`: BTCUSDT 1d/1w current.
+- Boot `gap_fill` was left as is, with a note. Merging keeps the stale partial
+  bar, and replacing every pair's 1d+1w at boot costs about 2,300 weight in a
+  minute. The refresher owns those buckets.
+
+**After deploy:** expect ~330 pairs x 2 timeframes due at once. At 6 per cycle
+the backlog clears in roughly 1–2 hours. Confirm with `read.candle_census`:
+`per_timeframe.1d.stale` should fall to 0, and `htf_refresh.deferred` should
+stop growing.
+
 ## OPEN 2026-11-19 — AI governor dead since 15 Nov: Gemini key rejected (owner fix)
 
 `read.ai_governor` on 2026-11-19: **801 calls since the 15 Nov 02:27 UTC boot,

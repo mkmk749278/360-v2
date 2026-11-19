@@ -4757,6 +4757,29 @@ class CryptoSignalEngine:
 
         fl.add_predicate(PredicateProbe(name="shadow_units", fn=_shadow_health, min_streak=6))
 
+        def _htf_candles():
+            # 1d / 1w have no WS writer; the scanner's budgeted refresher is
+            # their only one (2026-11-19: BTCUSDT 1d found 16 bars behind
+            # while every other probe read healthy). Keyed on BTC, the series
+            # every regime read and the analyst's breadth depend on.
+            from src.analyst_snapshot import bar_freshness, closed_bars
+
+            store = getattr(self, "data_store", None)
+            buckets = (getattr(store, "candles", None) or {}).get("BTCUSDT") or {}
+            now_ms = _time.time() * 1000.0
+            bad = []
+            for tf in ("1d", "1w"):
+                fr = bar_freshness(closed_bars(buckets.get(tf), tf, now_ms), tf, now_ms)
+                if not fr.get("readable"):
+                    bad.append(f"{tf} {fr.get('reason')}")
+                elif fr.get("stale"):
+                    bad.append(f"{tf} {fr['bars_behind']} bars behind")
+            if bad:
+                return False, "BTCUSDT " + ", ".join(bad)
+            return True, "BTCUSDT 1d/1w current"
+
+        fl.add_predicate(PredicateProbe(name="htf_candles", fn=_htf_candles, min_streak=6))
+
         def _coverage():
             # Counts bars AND their age.  Counting alone is what let a 500-bar
             # 15m array frozen at boot score 100% for 2.5 days (2026-07-27): no
