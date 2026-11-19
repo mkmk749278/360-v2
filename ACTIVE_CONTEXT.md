@@ -4,6 +4,52 @@
 
 ---
 
+## OPEN 2026-11-19 — AI governor dead since 15 Nov: Gemini key rejected (owner fix)
+
+`read.ai_governor` on 2026-11-19: **801 calls since the 15 Nov 02:27 UTC boot,
+0 verdicts.** 732 calls returned `HTTP 401 API key not valid`, reason
+`ACCESS_TOKEN_TYPE_UNSUPPORTED`, which suggests the key slot holds an OAuth
+access token rather than an API key. The other 69 failed on timeouts and
+transport errors.
+
+This is the cause of the `ai_governor_verdicts` OPEN item below. Fixing it
+needs the owner: put a valid Gemini **API key** in `GEMINI_API_KEY`, or switch
+the lane off.
+
+**Do not flip `ai_gov_provider` to `anthropic` as the fix.** `src/llm_client.py`'s
+Anthropic body sends `temperature` and a forced `tool_choice`, and current
+Claude models (Opus 5.5 / Sonnet 5.5) reject both with a 400. That would make
+the same dead lane with a different error. The transport has to be fixed first:
+structured output via `output_config.format`, no `temperature`.
+
+Also from this session's governor read, not yet fixed: `read.ai_governor_paired`
+shows **128 `agreement_violations`**. That means MAINTAIN-only rows whose two
+walks disagree, so the control is not independent of the treatment. Treat its
+deltas as suspect until this is explained.
+
+## 2026-11-19 — Hourly AI analyst: research done, spec written, step 1 built
+
+The owner decided signal generation moves to the disciplined-analyst process.
+Claude analyses hourly through scheduled Claude Code sessions on the owner's
+subscription. The connection is an ops MCP server plus a machine token, which
+the owner approved. The engine executes.
+
+- **Spec:** `docs/AI_ANALYST_SPEC_2026_11_19.md`.
+- **Research:** `docs/research/AI_ANALYST_DEEP_RESEARCH_2026_11_19.md`. The
+  owner also has a Gemini Deep Research report, compared in §2 of the spec.
+- **Step 1 (this PR):** `src/analyst_snapshot.py` plus `read.analyst_market` /
+  `read.analyst_pair` / `read.analyst_watchlist`. These are read-only, with no
+  new network or Firestore reads. They are off the money path.
+- **Refuted with our own data:** Gemini's claim that our entry drift comes from
+  the first 10 seconds after a bar boundary. Only 13 of 3,155 entries fall in
+  that window, and drift is largest *late* in the bar.
+- **Fixed:** `read.candle_census` raised on every production run. It read
+  `data_store._data`, and the store keeps its buckets in `.candles`.
+- **Next:** step 2, the derivatives recorder (default OFF), then step 3, the
+  plan endpoint, validator and ledger plus the ops MCP server.
+
+---
+
 ## OPEN 2026-11-10 — outside audit verified: one new finding, nothing changed on the money path
 
 Owner supplied a third-party 7-defect write-up. Checked claim by claim against

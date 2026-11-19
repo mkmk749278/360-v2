@@ -413,7 +413,11 @@ def _candle_census(ctx: Ctx) -> Dict[str, Any]:
     from src.historical_data import _MAX_CANDLES_PER_BUCKET as cap
 
     store = ctx.need("data_store")
-    data = getattr(store, "_data", None) or getattr(store, "data", None)
+    # HistoricalDataStore keeps its buckets in ``candles``. The first cut read
+    # ``_data`` / ``data`` — neither exists — so this entry raised on every run
+    # in production (found 2026-11-19 while building the analyst read model).
+    data = (getattr(store, "candles", None) or getattr(store, "_data", None)
+            or getattr(store, "data", None))
     if data is None:
         raise LookupError("data store exposes no bucket map")
     per_tf: Dict[str, Dict[str, int]] = {}
@@ -596,6 +600,38 @@ def _coindcx(ctx: Ctx) -> Dict[str, Any]:
     return {"venue": _rec.status_snapshot(), "records": rows}
 
 
+def _analyst_market(ctx: Ctx) -> Dict[str, Any]:
+    """BTC regime, altcoin breadth, session, macro-calendar readability.
+
+    Step 1 of ``docs/AI_ANALYST_SPEC_2026_11_19.md``. Pure assembly over the
+    data store; no network or Firestore read.
+    """
+    from src import analyst_snapshot
+
+    ctx.need("data_store")
+    return analyst_snapshot.market_context(ctx.engine)
+
+
+def _analyst_pair(ctx: Ctx) -> Dict[str, Any]:
+    """One pair as the analyst sees it: freshness, ATR, trend, level menu, unlocks."""
+    from src import analyst_snapshot
+
+    symbol = str(ctx.args.get("symbol") or "").upper().strip()
+    if not symbol or not symbol.isalnum():
+        return {"refused": "a single alphanumeric symbol is required",
+                "given": ctx.args.get("symbol")}
+    ctx.need("data_store")
+    return analyst_snapshot.pair_snapshot(ctx.engine, symbol)
+
+
+def _analyst_watchlist(ctx: Ctx) -> Dict[str, Any]:
+    """Pairs near a strong level, best first. A shortlist, never a signal."""
+    from src import analyst_snapshot
+
+    ctx.need("data_store")
+    return analyst_snapshot.watchlist(ctx.engine)
+
+
 def _dispatch_funnel(ctx: Ctx) -> Dict[str, Any]:
     """Where every delivered signal went, per user, since boot.
 
@@ -772,6 +808,22 @@ for _e in (
           "their stop state and last error. Read `sl_resting` on every live "
           "row first: false on a filled position is the naked-stop fault.",
           _coindcx),
+    Entry("read.analyst_market", "Analyst — market context", "read",
+          "What the hourly AI analyst reads first: BTC regime per timeframe, 7d "
+          "altcoin breadth vs BTC (n and misses counted), UTC session, and "
+          "whether the macro calendar is readable — it is not wired yet, and "
+          "says so rather than reporting 'no events'. Read-only; plans nothing.",
+          _analyst_market),
+    Entry("read.analyst_pair", "Analyst — one pair", "read",
+          "One pair as the analyst sees it: bar freshness, ATR, trend per "
+          "timeframe, 7d strength vs BTC, value-area position, unlocks in the "
+          "veto window, and the scored level menu (ids the plan will cite). "
+          "The score weights are a v1 config, not evidence.",
+          _analyst_pair, needs=["symbol"]),
+    Entry("read.analyst_watchlist", "Analyst — watchlist", "read",
+          "Pairs within 1.5 x 1h-ATR of a level scoring >= 60, best first, with "
+          "refusals counted by reason. A shortlist for the analyst, never a "
+          "signal.", _analyst_watchlist),
     Entry("read.dispatch_funnel", "Signal → order funnel", "read",
           "Per delivered signal, how many users got an order placed, how "
           "many were rejected and how many were skipped before the order "
