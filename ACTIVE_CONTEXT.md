@@ -18,6 +18,30 @@ weights, and to replace the per-symbol premiumIndex with one all-symbol call
 (weight 10 instead of ~75). Not done in the 1d-candle PR so that each change
 stays watchable on its own.
 
+## 2026-11-19 (session 2) — step 3, engine half: plan validator + ledger
+
+- **#1092 verified live:** `read.deriv_history` answers with
+  `enabled: false, stored: no_file_yet`, as expected. The census, scoped to the
+  universe, shows **all 75 pairs current on every timeframe** (0 stale) and 439
+  rotated-out symbols counted.
+- **This PR:** `src/analyst_plan.py`, plus the catalog entries
+  `action.analyst_submit_plan` and `read.analyst_plans`.
+  - A plan names levels **by id only**. Prices are resolved from the CURRENT
+    menu, built at depth 12 so that a level sliding past the top 4 between read
+    and submit still resolves.
+  - Validator order: schema → crypto-perp admission → universe/freshness →
+    `unknown_level` → geometry → stop distance → cost floor → caps → unlock veto.
+    - **Stop distance:** stop level ∓ 0.1 ATR, within [0.8, 2.5] × 1h-ATR.
+    - **Cost floor:** TP1 ≥ 3 × 0.07%.
+  - Every setup is recorded, accepted or rejected, with its named reason. Data is
+    in `data/analyst_plans_v1.sqlite`. Macro is stamped `unknown`, never "no
+    events". The cap is 6 plans an hour.
+  - It rides the existing diag channel: owner-gated, and in isolated mode it is
+    queued to the engine container. So no new engine HTTP surface was added.
+    It needs `DIAG_ACTIONS_ENABLED`.
+- **Next:** ops MCP server + machine token, which calls these entries.
+  Then step 4: forward-walk the accepted setups, dark.
+
 ## 2026-11-19 (session 2) — #1091 verified in prod; step 2 recorder built (default OFF)
 
 **#1091 verified live** (guest console, about 12:00 UTC):
