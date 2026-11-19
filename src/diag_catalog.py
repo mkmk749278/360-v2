@@ -427,7 +427,16 @@ def _candle_census(ctx: Ctx) -> Dict[str, Any]:
     now_ms = _time.time() * 1000.0
     per_tf: Dict[str, Dict[str, Any]] = {}
     worst: Dict[str, List[tuple]] = {}
+    # Buckets of pairs that rotated out of the universe stay in the store and
+    # freeze by definition. The first cut of this census pooled them, and
+    # ~430 dead symbols made every timeframe read "mostly stale" (2026-11-19).
+    pm = getattr(ctx.engine, "pair_mgr", None)
+    universe = set(getattr(pm, "pairs", None) or {})
+    outside = 0
     for symbol, tfs in dict(data).items():
+        if universe and symbol not in universe:
+            outside += 1
+            continue
         for tf, cd in dict(tfs).items():
             closes = cd.get("close") if isinstance(cd, dict) else None
             n = len(closes) if closes is not None else 0
@@ -457,10 +466,19 @@ def _candle_census(ctx: Ctx) -> Dict[str, Any]:
     counters = dict(getattr(scanner, "_suppression_counters", {}) or {})
     htf = {k.split(":", 1)[1]: v for k, v in counters.items()
            if k.startswith("htf_refresh:")}
-    return {"bucket_cap": cap, "per_timeframe": per_tf, "stalest": stalest,
+    return {"bucket_cap": cap, "scope": "universe" if universe else "whole_store",
+            "universe_size": len(universe), "symbols_outside_universe": outside,
+            "per_timeframe": per_tf, "stalest": stalest,
             "htf_refresh": htf or None,
             "htf_refresh_note": ("None = this engine predates the 1d/1w refresher"
                                  if not htf else "counters since boot")}
+
+
+def _deriv_recorder(ctx: Ctx) -> Dict[str, Any]:
+    """The hourly derivatives recorder's state, read in the engine process."""
+    from src import derivatives_recorder as _dr
+
+    return _dr.summary()
 
 
 def _loop_snapshot(ctx: Ctx) -> Dict[str, Any]:
@@ -815,8 +833,15 @@ for _e in (
           "dispatch, the drift that gap books as profit, and the same book "
           "rebased beside it. Coverage first.", _entry_fidelity),
     Entry("read.candle_census", "Candle bucket census", "read",
-          "Buckets per timeframe and how many sit at the 1,000-bar cap.",
+          "Per timeframe, over the scanned universe: buckets, how many sit at "
+          "the 1,000-bar cap, stale/undated, the stalest symbols, and the 1d/1w "
+          "refresher's counters. Rotated-out symbols are counted, not graded.",
           _candle_census),
+    Entry("read.deriv_history", "Derivatives recorder", "read",
+          "Hourly OI (coin), funding, premium and taker-volume recorder: armed "
+          "or not, the last cycle (rows, misses by reason, declared weight) and "
+          "what the SQLite file holds. Default OFF; arm after one watched cycle.",
+          _deriv_recorder),
     Entry("read.loop", "Loop + host counters", "read",
           "Scan cycle, snapshot writer, edge store and CPU-against-quota in one "
           "read.", _loop_snapshot),

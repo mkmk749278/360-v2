@@ -207,7 +207,11 @@ def test_candle_census_names_frozen_buckets(monkeypatch):
     monkeypatch.setattr(_t, "time", lambda: NOW)
     eng = _engine()
     _seed(eng.data_store, "FROZUSDT", "1d", 30, 1.0, 0.0, stale_bars=16)
+    _seed(eng.data_store, "GONEUSDT", "1d", 30, 1.0, 0.0, stale_bars=90)
+    eng.pair_mgr.pairs["FROZUSDT"] = object()  # GONEUSDT rotated out
     res = diag_catalog.run("read.candle_census", eng, {})["result"]
+    # A rotated-out pair freezes by definition: counted, never graded.
+    assert res["symbols_outside_universe"] == 1 and res["scope"] == "universe"
     assert res["per_timeframe"]["1d"]["stale"] == 1
     assert res["per_timeframe"]["1h"]["stale"] == 0
     assert res["stalest"]["1d"][0] == {"symbol": "FROZUSDT", "bars_behind": 16}

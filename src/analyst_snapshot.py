@@ -365,7 +365,7 @@ def pair_snapshot(engine: Any, symbol: str, *, now: Optional[float] = None,
     if not tfc:
         return {"symbol": symbol, "readable": False, "reason": "no_candles_in_store"}
     fresh = {tf: bar_freshness(tfc.get(tf), tf, now_ms)
-             for tf in ("15m", "1h", "4h", "1d") if tf in tfc}
+             for tf in ("15m", "1h", "4h", "1d", "1w") if tf in tfc}
     price_tf = next((tf for tf in ("5m", "15m", "1h") if _arr(tfc.get(tf), "close") is not None), None)
     # Price is the newest print, forming bar included.
     raw = _store_candles(engine, symbol, closed_only=False)

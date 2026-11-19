@@ -1988,6 +1988,34 @@ class CryptoSignalEngine:
                 log.warning("Unlock-short lane cycle failed (fail-open): {}", exc)
             await asyncio.sleep(300)
 
+    async def _deriv_recorder_loop(self) -> None:
+        """Hourly derivatives recorder (``src/derivatives_recorder.py``).
+
+        Default OFF; the check each minute is local (a tunable read and a
+        clock compare) and makes no call until armed and due.
+        """
+        from src import derivatives_recorder as _dr
+
+        await asyncio.sleep(90)
+        while True:
+            try:
+                rec = _dr.get_recorder()
+                now = time.time()
+                if _dr.enabled() and rec.due(now):
+                    tier1 = getattr(self.pair_mgr, "tier1_futures_symbols", None)
+                    syms = list(tier1() if callable(tier1) else (tier1 or []))
+                    out = await rec.run_cycle(syms, self._order_flow_store, now=now)
+                    log.info("Derivatives recorder: {}", out)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — the lane must not take the task down
+                from src import fail_open as _fo
+
+                _fo.record("main.deriv_recorder_loop", exc)
+                _dr.get_recorder().last_error = f"{type(exc).__name__}: {exc}"
+                log.warning("Derivatives recorder cycle failed (fail-open): {}", exc)
+            await asyncio.sleep(60)
+
     async def _invalidation_audit_loop(self) -> None:
         """Periodically classify pending invalidation kills as PROTECTIVE /
         PREMATURE / NEUTRAL based on post-kill price action.
@@ -3208,6 +3236,15 @@ class CryptoSignalEngine:
             # throttled a signed call within the hour.
             fn=_ipw.budget_health,
             min_streak=1,
+        ))
+
+        from src import derivatives_recorder as _drec
+
+        fl.add_predicate(PredicateProbe(
+            name="deriv_recorder",
+            # Off is healthy (default OFF). Armed: an hour must land every hour.
+            fn=_drec.health,
+            min_streak=2,
         ))
 
         from src import unlock_shorts as _uls
