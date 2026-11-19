@@ -1163,6 +1163,24 @@ CORE_CANDLE_REFRESH_SEC: float = _safe_float("CORE_CANDLE_REFRESH_SEC", "300")
 #: bigger budget can be argued from measurement, not guessed (REST weight is
 #: spent against a vendor that has IP-banned this box before).
 CORE_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int("CORE_CANDLE_REFRESH_MAX_PER_CYCLE", "4")
+#: Higher-timeframe buckets that have NO live writer (2026-11-19). Every other
+#: SEED_TIMEFRAMES entry has a ``@kline_*`` WS subscription on Tier-1 pairs;
+#: 1d and 1w have none, and boot gap-fill measures the gap from the snapshot's
+#: save time — which advances every save — so a restart left them frozen.
+#: BTCUSDT 1d sat 16 bars behind on 2026-11-19 while 1h/4h were current,
+#: corrupting 7d change, breadth, 1d trend and LevelBook 1d levels.
+HTF_CANDLE_REFRESH_TFS: tuple = ("1d", "1w")
+#: Max REST replaces per scan cycle across all pairs and timeframes. The
+#: do-nothing path makes no call at all (it reads the bucket's last
+#: ``open_time``). A due bucket costs one ``/fapi/v1/klines`` at its seed depth
+#: (1d limit 500 = weight 5, 1w limit 200 = weight 2), so the worst case is
+#: 6 x 5 = 30 weight per cycle — ~60-120/min at a 15-30s cycle against a
+#: 2,400/min IP limit, and only in the minutes after a daily/weekly close.
+#: 0 disables the refresher.
+HTF_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int("HTF_CANDLE_REFRESH_MAX_PER_CYCLE", "6")
+#: Per (symbol, timeframe) retry floor, so a symbol Binance will not serve
+#: cannot spend the budget every cycle.
+HTF_CANDLE_REFRESH_RETRY_SEC: float = _safe_float("HTF_CANDLE_REFRESH_RETRY_SEC", "900")
 #: How old the newest 15m bar may be before the ``candle_coverage`` liveness
 #: probe stops calling a symbol's 15m series live.  Three bars: a 15m stream
 #: writes on close, so two consecutive misses is already a real feed problem

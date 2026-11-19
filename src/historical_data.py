@@ -492,6 +492,14 @@ class HistoricalDataStore:
                 if key in meta and sym in self.candles and tf.interval in self.candles[sym]:
                     saved_at_iso = meta[key].get("saved_at", "")
                     gap = self._estimate_gap_candles(saved_at_iso, tf.interval)
+                    # NOTE: ``saved_at`` is when the FILE was written, not
+                    # when this bucket last advanced. For a timeframe with no
+                    # live writer (1d / 1w) those differ by days and this reads
+                    # "gap 0". Deliberately not "fixed" here: a merge keeps the
+                    # stale partial last bar, and a boot-time REPLACE of every
+                    # pair's 1d+1w costs ~2,300 weight inside one minute. The
+                    # scanner's budgeted ``_refresh_stale_htf_candles`` owns
+                    # those buckets instead (2026-11-19).
                     if gap <= 0:
                         log.debug("No gap needed for %s %s", sym, tf.interval)
                         continue
@@ -919,6 +927,22 @@ class HistoricalDataStore:
         # Stamp the per-(symbol, interval) last-update wall clock so the
         # scanner's data-staleness gate can reject dispatch on frozen feeds.
         self._last_kline_update_ts.setdefault(symbol, {})[interval] = time.time()
+
+    def last_bar_open_ms(self, symbol: str, interval: str) -> Optional[float]:
+        """Open time (ms) of the newest DATED bar in a bucket, or ``None``.
+
+        ``None`` means the bucket is absent, empty or undated — "we cannot
+        tell", which callers must not read as "current".
+        """
+        cd = self.candles.get(symbol, {}).get(interval)
+        if not isinstance(cd, dict):
+            return None
+        ot = cd.get("open_time")
+        # None/len, never truthiness — numpy arrays (hard limit).
+        if ot is None or len(ot) == 0:
+            return None
+        last = float(ot[-1])
+        return last if np.isfinite(last) else None
 
     def last_kline_age_seconds(self, symbol: str, interval: str) -> Optional[float]:
         """Return seconds since the most-recent ``update_candle`` for the
