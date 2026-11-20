@@ -1682,6 +1682,11 @@ UNLOCK_SHORT_LANE_ENABLED: bool = _safe_bool("UNLOCK_SHORT_LANE_ENABLED", "true"
 #: DEFAULT OFF per the background-loop rule; the owner arms it from ops after
 #: one watched cycle. Weight per hour: 10 + one per symbol.
 DERIV_RECORDER_ENABLED: bool = _safe_bool("DERIV_RECORDER_ENABLED", "false")
+#: BRPOP consumer for the diag-catalog channel (src/diag_consumer.py). Answers
+#: ops-console / analyst-MCP requests immediately instead of on the writer's
+#: ~15s cycle. false = writer drain only (the old latency). No vendor or
+#: Firestore calls of its own; inert while the queue is empty.
+DIAG_CONSUMER_ENABLED: bool = _safe_bool("DIAG_CONSUMER_ENABLED", "true")
 #: Taker-ratio calls per cycle at most (the Tier-1 set is ~75).
 DERIV_RECORDER_MAX_SYMBOLS: int = _safe_int("DERIV_RECORDER_MAX_SYMBOLS", "100")
 
