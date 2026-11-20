@@ -2016,6 +2016,30 @@ class CryptoSignalEngine:
                 log.warning("Derivatives recorder cycle failed (fail-open): {}", exc)
             await asyncio.sleep(60)
 
+    async def _analyst_walk_loop(self) -> None:
+        """Dark forward walk of accepted analyst setups, every 5 minutes.
+
+        Reads the candle store and the analyst ledger and writes the ledger's
+        ``walks`` table; the SQLite work runs in a thread.
+        """
+        from config import ANALYST_WALK_ENABLED
+        from src import analyst_walk as _aw
+
+        await asyncio.sleep(120)
+        while True:
+            try:
+                if ANALYST_WALK_ENABLED:
+                    counts = await asyncio.to_thread(_aw.step, self)
+                    if counts.get("setups"):
+                        log.info("Analyst walk: {}", counts)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — the lane must not take the task down
+                from src import fail_open as _fo
+
+                _fo.record("main.analyst_walk_loop", exc)
+            await asyncio.sleep(300)
+
     async def _invalidation_audit_loop(self) -> None:
         """Periodically classify pending invalidation kills as PROTECTIVE /
         PREMATURE / NEUTRAL based on post-kill price action.
@@ -3236,6 +3260,16 @@ class CryptoSignalEngine:
             # throttled a signed call within the hour.
             fn=_ipw.budget_health,
             min_streak=1,
+        ))
+
+        from src import analyst_walk as _awalk
+
+        fl.add_predicate(PredicateProbe(
+            name="analyst_plan_cadence",
+            # "Hourly plan missed": plans were arriving and stopped for 2h+.
+            # No plan ever, or idle >48h, is a decision, not a fault.
+            fn=_awalk.health,
+            min_streak=2,
         ))
 
         from src import derivatives_recorder as _drec
