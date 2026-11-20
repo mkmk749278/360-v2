@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS setups (
     tp1_pct       REAL,
     invalidation  TEXT,
     expires_at    REAL,
-    submitted_at  REAL NOT NULL
+    submitted_at  REAL NOT NULL,
+    menu_json     TEXT
 );
 CREATE INDEX IF NOT EXISTS setups_plan ON setups(plan_id);
 CREATE INDEX IF NOT EXISTS setups_time ON setups(submitted_at);
@@ -228,6 +229,12 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
     if menu.get("refused"):
         raise Reject("snapshot_unreadable", f"menu refused: {menu['refused']}")
     by_id = {lv["id"]: lv for lv in menu.get("levels") or []}
+    # The menu as it stood at submit — the fixed-rule arm (analyst_walk) picks
+    # from exactly this, so the comparison is on the same opportunity.
+    row["menu_json"] = json.dumps([
+        {"id": lv["id"], "price": lv["price"], "side": lv["side"],
+         "distance_atr": lv["distance_atr"], "score": lv["score"]}
+        for lv in menu.get("levels") or []])
 
     def resolve(lid: str) -> float:
         lv = by_id.get(lid)
@@ -305,6 +312,11 @@ class Ledger:
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.executescript(_SCHEMA)
+        # Additive migration: a ledger created before menu_json existed gains
+        # the column; its old rows read NULL ("no_menu_stamped"), never a guess.
+        cols = {r[1] for r in con.execute("PRAGMA table_info(setups)")}
+        if "menu_json" not in cols:
+            con.execute("ALTER TABLE setups ADD COLUMN menu_json TEXT")
         return con
 
     def plans_since(self, since: float) -> int:
@@ -331,14 +343,14 @@ class Ledger:
                 for r in rows:
                     con.execute(
                         "INSERT INTO setups VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (f"{plan_id}:{r['idx']}", plan_id, r["idx"], r.get("symbol"),
                          r.get("side"), r.get("archetype"), r["status"], r.get("reason"),
                          r.get("detail"), r.get("price_at_submit"), r.get("atr_1h"),
                          r.get("entries_json"), r.get("stop_level_price"),
                          r.get("stop_price"), r.get("targets_json"), r.get("stop_atr"),
                          r.get("tp1_pct"), r.get("invalidation"), r.get("expires_at"),
-                         r["submitted_at"]))
+                         r["submitted_at"], r.get("menu_json")))
         finally:
             con.close()
 

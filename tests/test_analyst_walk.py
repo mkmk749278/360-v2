@@ -108,7 +108,8 @@ def test_step_and_summary_over_the_real_ledger(tmp_path, monkeypatch):
     assert out["ok"], out
     by = out["result"]["by_arm"]
     assert by["analyst"]["n"] == 1 and by["none"]["avg_net_pct"] == 0.0
-    assert out["result"]["arms_not_built"] == ["fixed_rule", "existing_signals"]
+    assert out["result"]["arms_not_built"] == ["existing_signals"]
+    assert by["fixed_rule"]["insufficient"] == 1  # a row with no stamped menu
     # Resolved on every arm → not walked again.
     assert W.step(eng, now=NOW)["setups"] == 0 or by["market"]["open"]
 
@@ -127,3 +128,63 @@ def test_cadence_probe(tmp_path):
     assert not ok and "missed" in msg
     assert W.health(now=T0 + 72 * 3600, path=p)[0] is True
     sqlite3.connect(p).close()
+
+
+# ── fixed-rule arm (2026-11-20) ───────────────────────────────────────────
+
+MENU = [  # price 100, ATR 1.0
+    {"id": "a", "price": 99.0, "side": "below", "distance_atr": -1.0, "score": 70},
+    {"id": "b", "price": 99.6, "side": "below", "distance_atr": -0.4, "score": 40},
+    {"id": "c", "price": 97.9, "side": "below", "distance_atr": -2.1, "score": 60},
+    {"id": "d", "price": 103.0, "side": "above", "distance_atr": 3.0, "score": 80},
+    {"id": "e", "price": 100.1, "side": "above", "distance_atr": 0.1, "score": 90},
+]
+
+
+def test_fixed_rule_picks_levels_mechanically():
+    lv, why = W.fixed_rule_levels(MENU, 100.0, 1.0, "long")
+    # entry: best score within 1.5 ATR below (a, 70); stop: nearest level beyond
+    # a giving 0.8-2.5 ATR (c: 99-97.8=1.2); target: best score clearing the
+    # cost floor (e at +1.1% beats d's score? e=90 but 1.1% >= 0.21% → e).
+    assert why == "" and lv["entry"] == 99.0 and abs(lv["stop"] - 97.8) < 1e-9
+    assert lv["target"] == 100.1
+
+
+def test_fixed_rule_without_a_valid_stop_is_no_setup():
+    menu = [m for m in MENU if m["id"] != "c"]
+    assert W.fixed_rule_levels(menu, 100.0, 1.0, "long") == (None, "no_stop_level")
+
+
+def test_fixed_rule_arm_scores_zero_when_no_setup_and_flags_why():
+    s = _setup()
+    s.update(menu_json=json.dumps([m for m in MENU if m["id"] != "c"]),
+             price_at_submit=100.0, atr_1h=1.0)
+    r = W.walk_setup(s, _bucket([(100, 100.5, 99.5, 100)]), NOW)["fixed_rule"]
+    assert r == {"status": "resolved", "gross_pct": 0.0, "net_pct": 0.0,
+                 "exit_reason": "no_rule_setup", "reason": "no_stop_level"}
+
+
+def test_fixed_rule_arm_walks_its_own_geometry():
+    s = _setup()
+    s.update(menu_json=json.dumps(MENU), price_at_submit=100.0, atr_1h=1.0)
+    cd = _bucket([(100, 100.5, 98.9, 99.5), (99.5, 100.2, 99.4, 100.1)])
+    r = W.walk_setup(s, cd, NOW)["fixed_rule"]
+    assert r["entry"] == 99.0 and r["exit_reason"] == "target" and r["exit"] == 100.1
+
+
+def test_a_row_stamped_before_the_menu_is_insufficient_not_guessed():
+    r = W.walk_setup(_setup(), _bucket([(100, 100.5, 99.5, 100)]), NOW)["fixed_rule"]
+    assert r == {"status": "insufficient", "reason": "no_menu_stamped"}
+
+
+def test_menu_is_stamped_at_submit_and_old_ledgers_migrate(tmp_path):
+    import sqlite3 as _sq
+
+    from src import analyst_plan as P
+    p = tmp_path / "old.sqlite"
+    con = _sq.connect(p)
+    con.executescript(P._SCHEMA.replace(",\n    menu_json     TEXT", ""))
+    con.close()
+    con = P.Ledger(str(p))._connect()
+    assert "menu_json" in {r[1] for r in con.execute("PRAGMA table_info(setups)")}
+    con.close()
