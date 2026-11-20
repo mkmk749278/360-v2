@@ -102,7 +102,10 @@ CREATE TABLE IF NOT EXISTS setups (
     invalidation  TEXT,
     expires_at    REAL,
     submitted_at  REAL NOT NULL,
-    menu_json     TEXT
+    menu_json     TEXT,
+    scenario      TEXT,
+    p_target      REAL,
+    plan_mode     TEXT
 );
 CREATE INDEX IF NOT EXISTS setups_plan ON setups(plan_id);
 CREATE INDEX IF NOT EXISTS setups_time ON setups(submitted_at);
@@ -153,6 +156,23 @@ def _parse_setup(s: Any) -> Dict[str, Any]:
         raise Reject("schema", f"side must be one of {SIDES}")
     if s.get("archetype") not in ARCHETYPES:
         raise Reject("schema", f"archetype must be one of {ARCHETYPES}")
+    # Two ways to name a price (plan v2, 2026-11-20): a level id from the menu,
+    # or the analyst's OWN price from its own chart read. Prices are carried as
+    # "px:<price>" ids so the rest of the path is one path; _check validates them
+    # against the real recent range so an invented price cannot pass.
+    if "entry_prices" in s or "stop_price" in s or "target_prices" in s:
+        def _px(v: Any, what: str) -> str:
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+                raise Reject("schema", f"{what} must be positive numbers")
+            return f"px:{float(v)!r}"
+        ep, tp = s.get("entry_prices"), s.get("target_prices")
+        if not isinstance(ep, list) or not 1 <= len(ep) <= 2:
+            raise Reject("schema", "entry_prices: one or two prices")
+        if not isinstance(tp, list) or not 1 <= len(tp) <= 3:
+            raise Reject("schema", "target_prices: one to three prices")
+        s = dict(s, entry_level_ids=[_px(v, "entry_prices") for v in ep],
+                 stop_level_id=_px(s.get("stop_price"), "stop_price"),
+                 target_level_ids=[_px(v, "target_prices") for v in tp])
     entries = s.get("entry_level_ids")
     if not isinstance(entries, list) or not 1 <= len(entries) <= 2:
         raise Reject("schema", "entry_level_ids: one or two level ids")
@@ -172,10 +192,16 @@ def _parse_setup(s: Any) -> Dict[str, Any]:
         raise Reject("schema", f"expiry_hours must be in {EXPIRY_HOURS}")
     if not str(s.get("invalidation") or "").strip():
         raise Reject("schema", "invalidation is required (what would prove it wrong)")
+    p_t = s.get("p_target")
+    if p_t is not None and (not isinstance(p_t, (int, float)) or isinstance(p_t, bool)
+                            or not 0.0 < float(p_t) < 1.0):
+        raise Reject("schema", "p_target must be a probability strictly between 0 and 1")
     return {"symbol": sym, "side": s["side"], "archetype": s["archetype"],
             "entry_ids": [str(x) for x in entries], "weights": [float(w) for w in weights],
             "stop_id": stop, "target_ids": [str(x) for x in targets],
-            "expiry_hours": float(exp), "invalidation": _text(s.get("invalidation"))}
+            "expiry_hours": float(exp), "invalidation": _text(s.get("invalidation")),
+            "scenario": _text(s.get("scenario")),
+            "p_target": float(p_t) if p_t is not None else None}
 
 
 # ── validation against the live engine ────────────────────────────────────
@@ -193,7 +219,8 @@ def validate_setup(raw: Any, engine: Any, *, now: float,
     try:
         s = _parse_setup(raw)
         row.update(symbol=s["symbol"], side=s["side"], archetype=s["archetype"],
-                   invalidation=s["invalidation"],
+                   invalidation=s["invalidation"], scenario=s.get("scenario"),
+                   p_target=s.get("p_target"),
                    expires_at=now + s["expiry_hours"] * 3600.0)
         _check(s, engine, now, admission, row)
         row["status"] = "accepted"
@@ -236,7 +263,24 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
          "distance_atr": lv["distance_atr"], "score": lv["score"]}
         for lv in menu.get("levels") or []])
 
+    # An analyst-named price must lie inside what the market actually traded
+    # over the last 7 days of closed 1h bars, widened by one 1h-ATR. Anything
+    # outside is a price nobody can point at on the chart.
+    h1 = A._store_candles(engine, s["symbol"], now_ms=now * 1000.0).get("1h")
+    hi_a, lo_a = A._arr(h1, "high"), A._arr(h1, "low")
+    band = ((float(lo_a[-168:].min()) - atr, float(hi_a[-168:].max()) + atr)
+            if hi_a is not None and lo_a is not None else None)
+
     def resolve(lid: str) -> float:
+        if lid.startswith("px:"):
+            p = float(lid[3:])
+            if band is None:
+                raise Reject("snapshot_unreadable", "no 1h range to check a named price")
+            if not band[0] <= p <= band[1]:
+                raise Reject("price_out_of_range",
+                             f"{p:g} outside the 7d traded range ±1 ATR "
+                             f"[{band[0]:g}, {band[1]:g}]")
+            return p
         lv = by_id.get(lid)
         if lv is None:
             raise Reject("unknown_level", f"{lid} is not in the current menu")
@@ -247,7 +291,12 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
     targets = [resolve(i) for i in s["target_ids"]]
     long = s["side"] == "long"
     entry = sum(p * w for p, w in zip(entries, s["weights"]))
-    stop = stop_level - STOP_BUFFER_ATR * atr if long else stop_level + STOP_BUFFER_ATR * atr
+    if s["stop_id"].startswith("px:"):
+        stop = stop_level  # the analyst placed it itself, beyond its own structure
+    else:
+        stop = stop_level - STOP_BUFFER_ATR * atr if long else stop_level + STOP_BUFFER_ATR * atr
+    row.update(scenario=s.get("scenario"), p_target=s.get("p_target"),
+               plan_mode="prices" if s["entry_ids"][0].startswith("px:") else "level_ids")
     row.update(entries_json=json.dumps([{"id": i, "price": p, "weight": w} for i, p, w
                                         in zip(s["entry_ids"], entries, s["weights"])]),
                stop_level_price=stop_level, stop_price=round(stop, 10),
@@ -315,8 +364,10 @@ class Ledger:
         # Additive migration: a ledger created before menu_json existed gains
         # the column; its old rows read NULL ("no_menu_stamped"), never a guess.
         cols = {r[1] for r in con.execute("PRAGMA table_info(setups)")}
-        if "menu_json" not in cols:
-            con.execute("ALTER TABLE setups ADD COLUMN menu_json TEXT")
+        for col, typ in (("menu_json", "TEXT"), ("scenario", "TEXT"),
+                         ("p_target", "REAL"), ("plan_mode", "TEXT")):
+            if col not in cols:
+                con.execute(f"ALTER TABLE setups ADD COLUMN {col} {typ}")
         return con
 
     def plans_since(self, since: float) -> int:
@@ -343,14 +394,15 @@ class Ledger:
                 for r in rows:
                     con.execute(
                         "INSERT INTO setups VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (f"{plan_id}:{r['idx']}", plan_id, r["idx"], r.get("symbol"),
                          r.get("side"), r.get("archetype"), r["status"], r.get("reason"),
                          r.get("detail"), r.get("price_at_submit"), r.get("atr_1h"),
                          r.get("entries_json"), r.get("stop_level_price"),
                          r.get("stop_price"), r.get("targets_json"), r.get("stop_atr"),
                          r.get("tp1_pct"), r.get("invalidation"), r.get("expires_at"),
-                         r["submitted_at"], r.get("menu_json")))
+                         r["submitted_at"], r.get("menu_json"), r.get("scenario"),
+                         r.get("p_target"), r.get("plan_mode")))
         finally:
             con.close()
 
@@ -366,7 +418,8 @@ class Ledger:
                 p["setups"] = [dict(r) for r in con.execute(
                     "SELECT idx, symbol, side, archetype, status, reason, detail, "
                     "price_at_submit, stop_price, stop_atr, tp1_pct, entries_json, "
-                    "targets_json, expires_at FROM setups WHERE plan_id = ? ORDER BY idx",
+                    "targets_json, expires_at, scenario, p_target, plan_mode "
+                    "FROM setups WHERE plan_id = ? ORDER BY idx",
                     (p["plan_id"],))]
             totals = dict(con.execute(
                 "SELECT COUNT(*) AS setups, SUM(status='accepted') AS accepted "

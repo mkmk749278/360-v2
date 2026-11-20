@@ -499,6 +499,30 @@ def _analyst_submit_plan(ctx: Ctx) -> Dict[str, Any]:
                       source=str(ctx.args.get("source") or "unknown"))
 
 
+def _analyst_scan(ctx: Ctx) -> Dict[str, Any]:
+    """Every universe pair, one compact row: the analyst's own triage."""
+    from src import analyst_charts as _ac
+
+    return _ac.scan(ctx.engine)
+
+
+def _analyst_chart(ctx: Ctx) -> Dict[str, Any]:
+    """Raw closed bars for one pair. Arguments are pattern- and set-bound."""
+    import re as _re
+
+    from src import analyst_charts as _ac
+
+    symbol = str(ctx.args.get("symbol") or "").upper()
+    if not _re.fullmatch(r"[A-Z0-9]{2,20}USDT", symbol):
+        return {"readable": False, "reason": "symbol must look like XXXUSDT"}
+    tf = str(ctx.args.get("tf") or "1h")
+    try:
+        bars = int(ctx.args.get("bars") or _ac.DEFAULT_BARS)
+    except (TypeError, ValueError):
+        bars = _ac.DEFAULT_BARS
+    return _ac.chart(ctx.engine, symbol, tf, bars)
+
+
 def _analyst_outcomes(ctx: Ctx) -> Dict[str, Any]:
     """Per-arm outcomes of the analyst's accepted setups (dark walk)."""
     from src import analyst_walk as _aw
@@ -872,6 +896,16 @@ for _e in (
           "or rejected with its named reason, the resolved entry/stop/targets, "
           "and rejection totals by reason. Read-only.",
           _analyst_plans),
+    Entry("read.analyst_scan", "Analyst — whole-universe scan", "read",
+          "One compact row per universe pair: price, change 1h/4h/24h/7d, 1h-ATR %, "
+          "24h volume surge, position in the 7-day range, funding and 24h OI change. "
+          "The analyst's own triage of every coin. Read-only.",
+          _analyst_scan),
+    Entry("read.analyst_chart", "Analyst — raw chart", "read",
+          "Closed OHLCV bars with taker-buy share for one pair (args: symbol, tf "
+          "15m/1h/4h/1d, bars <= 300) plus 48h of hourly OI, funding and premium. "
+          "No indicators: the structure read is the analyst's. Read-only.",
+          _analyst_chart),
     Entry("read.analyst_outcomes", "Analyst — plan outcomes (dark)", "read",
           "Every accepted setup walked forward on 5m bars, per arm (analyst limit, "
           "plan tranches, market at submit, no trade): n, win rate, average net of "

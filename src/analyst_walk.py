@@ -336,6 +336,36 @@ def _arm_summary(nets: List[float]) -> Dict[str, Any]:
     }
 
 
+def _calibration(path: str) -> Dict[str, Any]:
+    """How good the analyst's forecasts are: its p_target against what happened.
+
+    Scored on the ``analyst`` arm's FILLED, resolved setups. An unfilled limit
+    never tested the forecast, so it is excluded and counted. Brier score
+    (lower is better; always guessing the observed hit rate scores
+    rate*(1-rate)).
+    """
+    con = _connect(path)
+    try:
+        rows = [dict(r) for r in con.execute(
+            "SELECT s.p_target, w.exit_reason, w.unfilled FROM setups s JOIN walks w "
+            "ON w.setup_id=s.setup_id AND w.arm='analyst' "
+            "WHERE s.p_target IS NOT NULL AND w.status='resolved'")]
+    except sqlite3.OperationalError:
+        return {"n": 0, "reason": "ledger predates p_target"}
+    finally:
+        con.close()
+    scored = [r for r in rows if not r["unfilled"]]
+    if not scored:
+        return {"n": 0, "excluded_unfilled": len(rows) - len(scored)}
+    ps = [float(r["p_target"]) for r in scored]
+    hits = [1.0 if r["exit_reason"] == "target" else 0.0 for r in scored]
+    rate = sum(hits) / len(hits)
+    return {"n": len(scored), "excluded_unfilled": len(rows) - len(scored),
+            "mean_p_target": round(sum(ps) / len(ps), 4), "hit_rate": round(rate, 4),
+            "brier": round(sum((p - h) ** 2 for p, h in zip(ps, hits)) / len(ps), 4),
+            "brier_of_base_rate": round(rate * (1 - rate), 4)}
+
+
 def summary(path: Optional[str] = None) -> Dict[str, Any]:
     """What ``read.analyst_outcomes`` returns. Per arm, never pooled."""
     import os
@@ -360,6 +390,7 @@ def summary(path: Optional[str] = None) -> Dict[str, Any]:
                        "unfilled_scored_at_market": sum(bool(r.get("unfilled")) for r in mine
                                                         if r["status"] == "resolved")}
     return {"readable": True, "by_arm": by_arm, "arms_not_built": list(ARMS_NOT_BUILT),
+            "calibration": _calibration(path),
             "note": ("Net of a 0.07% round trip. Unfilled limits are scored at the market "
                      "outcome. Stop first on an ambiguous 5m bar. Read n before any average.")}
 
