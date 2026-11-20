@@ -43,9 +43,15 @@ stays watchable on its own.
   - Reporting: `read.analyst_outcomes` gives per-arm n, win rate and average,
     with and without the top 1%.
   - Probe `analyst_plan_cadence` fires on "hourly plan missed".
-  - **Not built yet:** the fixed-rule arm and the existing-signals comparison.
-    Both need the level menu stamped at submit. The ops page and the
-    `plan_outcomes` MCP tool are also still to do.
+  - #1096 shipped this, and `plan_outcomes` (ops #236) is live via MCP.
+  - **The fixed-rule arm (next PR):** every setup now stamps the level menu at
+    submit (`menu_json`, an additive column with an `ALTER` migration).
+    The rule takes the analyst's symbol and side, so it isolates level choice.
+    It picks mechanically: entry is the best score within 1.5 ATR; stop is the
+    nearest level beyond the entry giving 0.8–2.5 ATR; target is the best score
+    above the cost floor. No buildable setup scores 0 as `no_rule_setup`. The
+    rule was fixed before any data, and must not be tuned on outcomes.
+  - **Still to do:** the existing-signals comparison, and the ops page.
 
 ## 2026-11-19 (session 2, end) — step 3 shipped both halves; owner's next actions
 

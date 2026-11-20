@@ -13,11 +13,13 @@ Arms built here (one row per setup per arm):
 * ``tranche`` — the plan's own tranches (one or two levels, their weights);
   the weighted average of what filled. Identical to ``analyst`` for one level.
 * ``market``  — full size at the open of the first bar after submit.
+* ``fixed_rule`` — the analyst's symbol and side, but levels picked mechanically
+  from the menu stamped at submit (:func:`fixed_rule_levels`). No setup the
+  rule can build scores 0.00% as ``no_rule_setup``.
 * ``none``    — no trade, 0.00%, so "the model said stand aside" has a number.
 
-Not built yet, and named so nobody reads their absence as zero: the
-**fixed rule on the same menu** (needs the menu snapshot stamped at submit) and
-the **existing signals** comparison.
+Not built yet, and named so nobody reads its absence as zero: the
+**existing signals** comparison.
 
 Scoring rules, each one a rule this repo has already paid for:
 
@@ -56,9 +58,18 @@ TF = "5m"
 STEP_S = 300.0
 HOLD_HORIZON_S = 12 * 3600.0
 ROUND_TRIP_PCT = 0.07
-ARMS = ("analyst", "tranche", "market", "none")
+ARMS = ("analyst", "tranche", "market", "fixed_rule", "none")
 #: Arms named by the spec and deliberately not built in this module yet.
-ARMS_NOT_BUILT = ("fixed_rule", "existing_signals")
+ARMS_NOT_BUILT = ("existing_signals",)
+
+# The fixed rule (spec §1: "if a fixed rule on the same level menu matches the
+# analyst net of fees, the model added nothing"). Fixed before any data, and
+# deliberately NOT tuned on outcomes. It takes the analyst's own symbol and
+# side, so it isolates LEVEL CHOICE, and picks from the menu stamped at submit.
+RULE_ENTRY_MAX_ATR = 1.5
+RULE_STOP_BUFFER_ATR = 0.1
+RULE_STOP_ATR = (0.8, 2.5)
+RULE_COST_FLOOR_PCT = 3 * ROUND_TRIP_PCT
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS walks (
@@ -154,6 +165,46 @@ def _score(long: bool, entry: float, ex: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def fixed_rule_levels(menu: List[Dict[str, Any]], price: float, atr: float,
+                      side: str) -> Tuple[Optional[Dict[str, float]], str]:
+    """Entry / stop / target picked mechanically, or (None, reason).
+
+    * entry  — best-scoring level on the entry side within RULE_ENTRY_MAX_ATR;
+    * stop   — the NEAREST level beyond the entry whose stop (level ∓ buffer)
+               sits RULE_STOP_ATR × ATR from the entry;
+    * target — best-scoring level on the profit side clearing the cost floor.
+    """
+    if not menu or not price or not atr:
+        return None, "no_menu"
+    long = side == "long"
+    below = [lv for lv in menu if lv["side"] == "below"]
+    above = [lv for lv in menu if lv["side"] == "above"]
+    entry_side, profit_side = (below, above) if long else (above, below)
+    cands = [lv for lv in entry_side if abs(float(lv["distance_atr"])) <= RULE_ENTRY_MAX_ATR]
+    if not cands:
+        return None, "no_entry_level"
+    e = max(cands, key=lambda lv: (lv["score"], -abs(float(lv["distance_atr"]))))
+    entry = float(e["price"])
+    stops = []
+    for lv in entry_side:
+        p = float(lv["price"])
+        if (p >= entry) if long else (p <= entry):
+            continue
+        stop = p - RULE_STOP_BUFFER_ATR * atr if long else p + RULE_STOP_BUFFER_ATR * atr
+        d = abs(entry - stop) / atr
+        if RULE_STOP_ATR[0] <= d <= RULE_STOP_ATR[1]:
+            stops.append((abs(entry - p), stop))
+    if not stops:
+        return None, "no_stop_level"
+    stop = min(stops)[1]
+    tgts = [lv for lv in profit_side
+            if abs(float(lv["price"]) - entry) / entry * 100 >= RULE_COST_FLOOR_PCT]
+    if not tgts:
+        return None, "no_target_level"
+    t = max(tgts, key=lambda lv: (lv["score"], -abs(float(lv["distance_atr"]))))
+    return {"entry": entry, "stop": stop, "target": float(t["price"])}, ""
+
+
 def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str, Any]]:
     """All arms for one accepted setup. Pure: the setup row + its 5m bucket."""
     long = setup["side"] == "long"
@@ -170,7 +221,7 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str
         # History that rolled off cannot come back. A missing or undated series
         # can, so it waits until the setup could no longer have resolved.
         gone = why == "history_rolled_off" or now > expires + HOLD_HORIZON_S
-        for arm in ("analyst", "tranche", "market"):
+        for arm in ("analyst", "tranche", "market", "fixed_rule"):
             out[arm] = {"status": "insufficient" if gone else "open", "reason": why}
         return out
 
@@ -179,15 +230,18 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str
     market.update(entry=m_entry, entry_at=float(bars["t"][0]), filled_frac=1.0, unfilled=0)
     out["market"] = market
 
-    def limit_arm(legs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def limit_arm(legs: List[Dict[str, Any]], stop: float = stop,
+                  target: float = target) -> Dict[str, Any]:
         fills = [(leg, _limit_fill(bars, long, float(leg["price"]), expires)) for leg in legs]
         got = [(leg, j) for leg, j in fills if j is not None]
         if not got:
             window_closed = float(bars["t"][-1]) + STEP_S >= expires
             if not window_closed:
                 return {"status": "open", "reason": "awaiting_fill"}
-            r = dict(market)
-            r.update(unfilled=1, filled_frac=0.0, reason="scored_at_market")
+            # Scored at market — with THIS arm's own stop and target.
+            r = _score(long, m_entry, _exit_walk(bars, 0, long, m_entry, stop, target, now))
+            r.update(entry=m_entry, entry_at=float(bars["t"][0]),
+                     unfilled=1, filled_frac=0.0, reason="scored_at_market")
             return r
         w = sum(float(leg["weight"]) for leg, _ in got)
         entry = sum(float(leg["price"]) * float(leg["weight"]) for leg, _ in got) / w
@@ -202,6 +256,20 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str
     first["weight"] = 1.0
     out["analyst"] = limit_arm([first])
     out["tranche"] = limit_arm(entries)
+
+    menu_raw = setup.get("menu_json")
+    if not menu_raw:
+        out["fixed_rule"] = {"status": "insufficient", "reason": "no_menu_stamped"}
+    else:
+        lv, why_not = fixed_rule_levels(json.loads(menu_raw), float(setup.get("price_at_submit")
+                                                                    or 0.0),
+                                        float(setup.get("atr_1h") or 0.0), setup["side"])
+        if lv is None:
+            out["fixed_rule"] = {"status": "resolved", "gross_pct": 0.0, "net_pct": 0.0,
+                                 "exit_reason": "no_rule_setup", "reason": why_not}
+        else:
+            out["fixed_rule"] = limit_arm([{"price": lv["entry"], "weight": 1.0}],
+                                          stop=lv["stop"], target=lv["target"])
     return out
 
 

@@ -57,6 +57,9 @@ def test_a_well_formed_setup_is_accepted_and_recorded_with_resolved_prices(ledge
     (stop_level, stop, status) = con.execute(
         "SELECT stop_level_price, stop_price, status FROM setups").fetchone()
     assert status == "accepted" and stop < stop_level  # placed beyond structure
+    import json as _json
+    menu = _json.loads(con.execute("SELECT menu_json FROM setups").fetchone()[0])
+    assert {ids["entry"], ids["stop"], ids["t1"]} <= {m["id"] for m in menu}
 
 
 def test_a_price_is_never_accepted_in_place_of_a_level_id(ledger):
