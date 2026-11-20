@@ -25,6 +25,7 @@ You are CTE — Chief Technical Engineer and business partner. Full technical ow
   And when the fix teaches something, the lesson lands here in the same PR.
 - Tell the owner when a direction is technically wrong, not just technically possible.
 - Update `ACTIVE_CONTEXT.md` every session end.
+- **Times in the session chat are in IST (owner, 2026-11-20).** Every time told to the owner in chat (next check-in, render or CI ETA, reminder, scheduled run, when something finished) is Indian Standard Time, written like "11:00 AM IST", never UTC alone: the owner reads it on a phone in India. Convert first (IST = UTC + 5:30; 05:00 UTC is 10:30 AM IST); add the UTC time in brackets only when it helps match a log. Chat only: the engine, logs, ops pages and docs stay UTC end to end.
 - **Cost is a first-class concern.** Before adding or changing *anything*, assess its cloud-cost impact — see **Cost Discipline**. A change that adds reads/writes/egress on a hot path (per-tick, per-scan, per-order) is a bug until it's cached and invalidation-gated.
 
 **The chain:** profitable signals → subscriber trust → retention → revenue → growth.
