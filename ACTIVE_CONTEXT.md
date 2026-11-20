@@ -18,6 +18,31 @@ weights, and to replace the per-symbol premiumIndex with one all-symbol call
 (weight 10 instead of ~75). Not done in the 1d-candle PR so that each change
 stays watchable on its own.
 
+## 2026-11-20 — the analyst reads its own charts (owner direction)
+
+Owner: the analyst must analyse the market itself (its own charts, structure,
+levels, scenarios), more than a human in less time, rather than choose from an
+engine-built menu.
+- **Hourly analyst live:** a scheduled task at :35 each hour, one fresh session
+  per run. The first plan (02:37 UTC) was stand_aside with sound reasons.
+- **Owner agreed the AI governor is not needed for this test.** Owner switches
+  `ai_gov_measure_enabled` and `ai_gov_arms_enabled` off in ops. That makes the
+  Gemini key, the Anthropic transport and the 128 violations moot.
+- **This PR (engine):**
+  - `read.analyst_scan` gives every universe pair in compact rows: changes,
+    ATR, volume surge, 7d range position, funding and OI change.
+  - `read.analyst_chart` gives raw closed OHLCV bars plus taker-buy share for
+    15m/1h/4h/1d, plus 48h of recorder OI, funding and premium.
+  - Plan v2: a setup may name its **own prices** (`entry_prices`, `stop_price`,
+    `target_prices`). Each must sit inside the 7d traded range ±1 ATR, or it is
+    refused as `price_out_of_range`. A setup also carries a `scenario` and a
+    `p_target`.
+  - `read.analyst_outcomes` gains **calibration**: Brier score on filled
+    analyst-arm setups, beside the base-rate Brier.
+- **Next:** the ops MCP tools (`market_scan`, `chart`) and the `submit_plan`
+  schema, then rewrite the hourly prompt to a top-down chart analysis
+  procedure.
+
 ## 2026-11-20 — step 4 begins: diag channel BRPOP consumer
 
 - **The owner set up the analyst's access.** The analyst machine token is
