@@ -109,3 +109,28 @@ def test_calibration_scores_filled_forecasts_only(ledger):
     assert cal["n"] == 2 and cal["excluded_unfilled"] == 1
     assert cal["brier"] == round(((0.8 - 1) ** 2 + (0.6 - 0) ** 2) / 2, 4)
     _ = json, TF_STEP
+
+
+def test_a_continuation_target_beyond_the_range_is_allowed(ledger):
+    # ZRO 2026-11-20: a breakdown's target sits under the old low by design.
+    eng = _eng()
+    plan, p, atr = _price_plan(eng)
+    h1 = A._store_candles(eng, "ETHUSDT", now_ms=NOW * 1000)["1h"]
+    hi = float(A._arr(h1, "high")[-168:].max())
+    plan["setups"][0]["target_prices"] = [hi + 2.0 * atr]
+    assert P.submit(plan, eng, now=NOW, admission=ADMIT)["setups"][0]["status"] == "accepted"
+    plan["setups"][0]["target_prices"] = [hi + 4.0 * atr]
+    out = P.submit(plan, eng, now=NOW, admission=ADMIT)["setups"][0]
+    assert out["reason"] == "price_out_of_range" and "target" in out["detail"]
+
+
+def test_an_entry_beyond_the_range_is_still_refused(ledger):
+    eng = _eng()
+    plan, p, atr = _price_plan(eng)
+    h1 = A._store_candles(eng, "ETHUSDT", now_ms=NOW * 1000)["1h"]
+    hi = float(A._arr(h1, "high")[-168:].max())
+    plan["setups"][0].update(entry_prices=[hi + 2 * atr], stop_price=hi + 0.8 * atr,
+                             target_prices=[hi + 2.9 * atr])
+    plan["setups"][0]["side"] = "long"
+    out = P.submit(plan, eng, now=NOW, admission=ADMIT)["setups"][0]
+    assert out["reason"] == "price_out_of_range" and not out["detail"].startswith("target")

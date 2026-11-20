@@ -63,6 +63,8 @@ COST_FLOOR_MULT = 3.0
 #: Menu depth used to resolve ids. Wider than what the analyst is shown, so a
 #: level that slid from 4th to 5th between read and submit still resolves.
 MENU_DEPTH = 12
+#: How far beyond the 7-day traded range an analyst-named TARGET may sit.
+TARGET_RANGE_ATR = 3.0
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
 _TEXT_MAX = 500
 
@@ -268,18 +270,24 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
     # outside is a price nobody can point at on the chart.
     h1 = A._store_candles(engine, s["symbol"], now_ms=now * 1000.0).get("1h")
     hi_a, lo_a = A._arr(h1, "high"), A._arr(h1, "low")
-    band = ((float(lo_a[-168:].min()) - atr, float(hi_a[-168:].max()) + atr)
-            if hi_a is not None and lo_a is not None else None)
+    # Entries and stops must be prices the chart shows (±1 ATR). A TARGET may
+    # sit beyond the old range: in a breakout or breakdown the next objective
+    # is by definition outside it (first live plan, ZRO 2026-11-20, rejected a
+    # continuation target 1.225 under a 1.2475 low). Targets get ±3 ATR.
+    rng = ((float(lo_a[-168:].min()), float(hi_a[-168:].max()))
+           if hi_a is not None and lo_a is not None else None)
 
-    def resolve(lid: str) -> float:
+    def resolve(lid: str, *, target: bool = False) -> float:
         if lid.startswith("px:"):
             p = float(lid[3:])
-            if band is None:
+            if rng is None:
                 raise Reject("snapshot_unreadable", "no 1h range to check a named price")
-            if not band[0] <= p <= band[1]:
+            k = TARGET_RANGE_ATR if target else 1.0
+            lo_b, hi_b = rng[0] - k * atr, rng[1] + k * atr
+            if not lo_b <= p <= hi_b:
                 raise Reject("price_out_of_range",
-                             f"{p:g} outside the 7d traded range ±1 ATR "
-                             f"[{band[0]:g}, {band[1]:g}]")
+                             f"{'target ' if target else ''}{p:g} outside the 7d traded "
+                             f"range ±{k:g} ATR [{lo_b:g}, {hi_b:g}]")
             return p
         lv = by_id.get(lid)
         if lv is None:
@@ -288,7 +296,7 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
 
     entries = [resolve(i) for i in s["entry_ids"]]
     stop_level = resolve(s["stop_id"])
-    targets = [resolve(i) for i in s["target_ids"]]
+    targets = [resolve(i, target=True) for i in s["target_ids"]]
     long = s["side"] == "long"
     entry = sum(p * w for p, w in zip(entries, s["weights"]))
     if s["stop_id"].startswith("px:"):
