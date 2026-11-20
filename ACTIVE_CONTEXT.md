@@ -32,8 +32,20 @@ stays watchable on its own.
   and answers on arrival. It shares `handle_envelope` with the writer's drain,
   which stays as a fallback. Switch: `DIAG_CONSUMER_ENABLED` (default true;
   no vendor or Firestore calls; inert while the queue is empty).
-- **Next in step 4:** a dark forward walk of accepted plan setups, then the
-  ops page and the "hourly plan missed" probe.
+- **Step 4, first half (next PR):** `src/analyst_walk.py` walks every
+  accepted setup forward on dated 5m bars, every 5 minutes.
+  - Arms: `analyst` (limit at the first entry level), `tranche` (the plan's
+    own tranches), `market` (open of the first bar after submit) and `none`.
+  - Scoring: an unfilled limit is scored at the market outcome and flagged.
+    The stop counts first on an ambiguous bar, and a target is never booked
+    on a limit's fill bar. The walk exits at the first target or the stop,
+    else at the close after 12h. Results are net of 0.07%.
+  - Reporting: `read.analyst_outcomes` gives per-arm n, win rate and average,
+    with and without the top 1%.
+  - Probe `analyst_plan_cadence` fires on "hourly plan missed".
+  - **Not built yet:** the fixed-rule arm and the existing-signals comparison.
+    Both need the level menu stamped at submit. The ops page and the
+    `plan_outcomes` MCP tool are also still to do.
 
 ## 2026-11-19 (session 2, end) — step 3 shipped both halves; owner's next actions
 

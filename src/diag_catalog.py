@@ -499,6 +499,13 @@ def _analyst_submit_plan(ctx: Ctx) -> Dict[str, Any]:
                       source=str(ctx.args.get("source") or "unknown"))
 
 
+def _analyst_outcomes(ctx: Ctx) -> Dict[str, Any]:
+    """Per-arm outcomes of the analyst's accepted setups (dark walk)."""
+    from src import analyst_walk as _aw
+
+    return _aw.summary()
+
+
 def _loop_snapshot(ctx: Ctx) -> Dict[str, Any]:
     """Scan-cycle, writer, edge-store and host counters in one read."""
     from src.api.snapshot_writer import _host_resources, _loop_health
@@ -865,6 +872,12 @@ for _e in (
           "or rejected with its named reason, the resolved entry/stop/targets, "
           "and rejection totals by reason. Read-only.",
           _analyst_plans),
+    Entry("read.analyst_outcomes", "Analyst — plan outcomes (dark)", "read",
+          "Every accepted setup walked forward on 5m bars, per arm (analyst limit, "
+          "plan tranches, market at submit, no trade): n, win rate, average net of "
+          "a 0.07% round trip, with and without the top 1%. Unfilled limits are "
+          "scored at market. Read n first.",
+          _analyst_outcomes),
     Entry("read.loop", "Loop + host counters", "read",
           "Scan cycle, snapshot writer, edge store and CPU-against-quota in one "
           "read.", _loop_snapshot),

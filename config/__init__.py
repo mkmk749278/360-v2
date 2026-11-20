@@ -1687,6 +1687,10 @@ DERIV_RECORDER_ENABLED: bool = _safe_bool("DERIV_RECORDER_ENABLED", "false")
 #: ~15s cycle. false = writer drain only (the old latency). No vendor or
 #: Firestore calls of its own; inert while the queue is empty.
 DIAG_CONSUMER_ENABLED: bool = _safe_bool("DIAG_CONSUMER_ENABLED", "true")
+#: Dark forward walk of accepted analyst setups (src/analyst_walk.py, spec
+#: step 4). Measurement flag, default ON: local candles + the local analyst
+#: SQLite only, no vendor or Firestore call, reaches no subscriber or order.
+ANALYST_WALK_ENABLED: bool = _safe_bool("ANALYST_WALK_ENABLED", "true")
 #: Taker-ratio calls per cycle at most (the Tier-1 set is ~75).
 DERIV_RECORDER_MAX_SYMBOLS: int = _safe_int("DERIV_RECORDER_MAX_SYMBOLS", "100")
 
