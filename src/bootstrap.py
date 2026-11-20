@@ -890,6 +890,20 @@ class Bootstrap:
                     "container loses its Firestore client"
                 )
 
+                # Diag channel — answer the ops console / analyst MCP the
+                # moment a request is queued, instead of on the writer's
+                # ~15s cycle (2 of 3 calls timed out at 25s, 2026-11-20).
+                # Inert while idle; DIAG_CONSUMER_ENABLED=false falls back to
+                # the writer's drain, which is unchanged.
+                from config import DIAG_CONSUMER_ENABLED
+                if DIAG_CONSUMER_ENABLED:
+                    from src.diag_consumer import DiagConsumer
+                    tasks.append(asyncio.create_task(
+                        DiagConsumer(engine, engine._redis_client).start(),
+                        name="diag_consumer",
+                    ))
+                    log.info("Diag consumer started (BRPOP)")
+
                 # Lifecycle alerts — the engine end of the four signup
                 # moments the owner asked to be told about. Same reason as
                 # the bridge above: those events happen in the api container

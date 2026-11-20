@@ -18,6 +18,23 @@ weights, and to replace the per-symbol premiumIndex with one all-symbol call
 (weight 10 instead of ~75). Not done in the 1d-candle PR so that each change
 stays watchable on its own.
 
+## 2026-11-20 — step 4 begins: diag channel BRPOP consumer
+
+- **The owner set up the analyst's access.** The analyst machine token is
+  minted and saved as an environment network secret for `ops.luminapp.org`.
+  The MCP `initialize` call and the `market_context` tool were verified live
+  through it.
+- **The derivatives recorder is armed** (owner, about 01:14 UTC). Its first
+  cycle is due at 02:02 UTC and will be checked with `derivatives_status`.
+- **Fixed (this PR): diag calls were timing out.** 2 of 3 MCP calls returned
+  "engine did not answer within 25s". The queue was drained only on the
+  SnapshotWriter's ~15s-plus cycle. `src/diag_consumer.py` now BRPOPs the queue
+  and answers on arrival. It shares `handle_envelope` with the writer's drain,
+  which stays as a fallback. Switch: `DIAG_CONSUMER_ENABLED` (default true;
+  no vendor or Firestore calls; inert while the queue is empty).
+- **Next in step 4:** a dark forward walk of accepted plan setups, then the
+  ops page and the "hourly plan missed" probe.
+
 ## 2026-11-19 (session 2, end) — step 3 shipped both halves; owner's next actions
 
 **Live in prod:**

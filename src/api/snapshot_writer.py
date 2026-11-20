@@ -1001,12 +1001,14 @@ class SnapshotWriter:
         key is refused there, and no entry can reach an order, a secret or the
         kill switch (asserted structurally in ``tests/test_diag_catalog.py``).
         This function chooses nothing.
+
+        This drain is now the FALLBACK: ``src/diag_consumer.py`` BRPOPs the
+        same queue and answers immediately (2026-11-20). Both run
+        :func:`src.diag_consumer.handle_envelope`, so they cannot drift.
         """
         if not self._redis.available:
             return
-        import json as _json
-
-        from src import diag_catalog
+        from src.diag_consumer import handle_envelope
 
         for _ in range(self._DIAG_MAX_PER_CYCLE):
             try:
@@ -1016,32 +1018,7 @@ class SnapshotWriter:
                 return
             if raw is None:
                 return
-            try:
-                env = _json.loads(raw)
-                req_id = str(env.get("request_id") or "")
-                key = str(env.get("key") or "")
-                args = env.get("args") if isinstance(env.get("args"), dict) else {}
-                queued_at = float(env.get("ts") or 0.0)
-            except Exception:
-                log.warning("snapshot_writer: unparseable diag envelope, dropped")
-                continue
-            if not req_id:
-                continue
-            # A stale envelope is one the caller stopped waiting for — running it
-            # spends engine time on an answer nobody will read, and for an action
-            # it applies a change whose requester is long gone.
-            if queued_at and (time.time() - queued_at) > _store.DIAG_CMD_STALE_S:
-                out = {"ok": False, "key": key, "error": "stale request — not run"}
-            else:
-                out = diag_catalog.run(key, self._engine, args)
-            try:
-                await self._redis.client.set(
-                    _store.KEY_DIAG_RESULT_PREFIX + req_id,
-                    _json.dumps(out, default=str),
-                    ex=_store.TTL_DIAG_RESULT,
-                )
-            except Exception:
-                log.exception("snapshot_writer: could not publish diag result")
+            await handle_envelope(raw, self._engine, self._redis)
 
     # ------------------------------------------------------------------
     # Full-signal-reset command
