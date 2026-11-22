@@ -18,6 +18,29 @@ weights, and to replace the per-symbol premiumIndex with one all-symbol call
 (weight 10 instead of ~75). Not done in the 1d-candle PR so that each change
 stays watchable on its own.
 
+## 2026-11-22 — the analyst as a signal feed (ops only)
+
+Owner: *"make analyst like real signals but to ops only, not for users."*
+- **This PR:** `read.analyst_feed` (`analyst_walk.feed`): every accepted
+  setup with a lifecycle state off the analyst arm (pending / active /
+  tp_hit / sl_hit / time_exit / not_filled / …), its levels, scenario,
+  p_target, R:R and the market + fixed-rule arms beside it.
+- **Ops (paired PR):** `/signals/analyst`, in the Signals nav: one card per
+  setup, live mark on running cards, `not_filled` never shown as a fill.
+- **Findings from 2.5 days of data (n small; do not tune on them):**
+  - 17 of 28 closed analyst-arm setups never filled. Entries sit a median
+    ~1.8% from market, so the analyst arm's result is mostly the market arm's.
+  - Median stated p(TP1) is 0.35 against a median R:R of 1.56, whose
+    break-even is 0.39. So at its own numbers the analyst submits setups it
+    rates below break-even to TP1; the prompt has no EV check.
+  - Calibration: it says 41% to TP1, filled setups hit 18% (n=11); its Brier
+    score is worse than the base rate.
+  - Only TP1 is scored; targets 2–3 are never booked, which matters on a
+    tail-driven book. The `existing_signals` arm is still not built.
+- **Proposed to the owner, not built:** per-setup feedback to the analyst
+  (an MCP tool over this feed), an EV self-check in the prompt, and a
+  held/ladder arm.
+
 ## 2026-11-20 — the analyst reads its own charts (owner direction)
 
 Owner: the analyst must analyse the market itself (its own charts, structure,
