@@ -1,48 +1,48 @@
 [
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 2807,
-    "wins": 918,
-    "losses": 1145,
-    "neutral": 744,
-    "win_rate_pct": 32.7,
-    "avg_pnl_pct": 0.2073
+    "n": 2835,
+    "wins": 929,
+    "losses": 1154,
+    "neutral": 752,
+    "win_rate_pct": 32.8,
+    "avg_pnl_pct": 0.2125
   },
   {
     "setup": "QUIET_COMPRESSION_BREAK",
-    "n": 590,
-    "wins": 175,
-    "losses": 270,
-    "neutral": 145,
-    "win_rate_pct": 29.7,
-    "avg_pnl_pct": 0.1632
+    "n": 596,
+    "wins": 176,
+    "losses": 273,
+    "neutral": 147,
+    "win_rate_pct": 29.5,
+    "avg_pnl_pct": 0.1569
   },
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 366,
-    "wins": 89,
+    "n": 368,
+    "wins": 90,
     "losses": 137,
-    "neutral": 140,
-    "win_rate_pct": 24.3,
-    "avg_pnl_pct": 0.1791
+    "neutral": 141,
+    "win_rate_pct": 24.5,
+    "avg_pnl_pct": 0.1841
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 342,
+    "n": 343,
     "wins": 81,
     "losses": 157,
-    "neutral": 104,
-    "win_rate_pct": 23.7,
-    "avg_pnl_pct": -0.175
+    "neutral": 105,
+    "win_rate_pct": 23.6,
+    "avg_pnl_pct": -0.1745
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
-    "n": 271,
+    "n": 273,
     "wins": 103,
     "losses": 119,
-    "neutral": 49,
-    "win_rate_pct": 38.0,
-    "avg_pnl_pct": 0.0416
+    "neutral": 51,
+    "win_rate_pct": 37.7,
+    "avg_pnl_pct": 0.0413
   },
   {
     "setup": "SR_FLIP_RETEST",
@@ -55,21 +55,21 @@
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
-    "n": 190,
+    "n": 191,
     "wins": 49,
-    "losses": 91,
+    "losses": 92,
     "neutral": 50,
-    "win_rate_pct": 25.8,
-    "avg_pnl_pct": -0.099
+    "win_rate_pct": 25.7,
+    "avg_pnl_pct": -0.1142
   },
   {
     "setup": "BREAKDOWN_SHORT",
-    "n": 63,
-    "wins": 20,
+    "n": 64,
+    "wins": 21,
     "losses": 26,
     "neutral": 17,
-    "win_rate_pct": 31.7,
-    "avg_pnl_pct": 0.7989
+    "win_rate_pct": 32.8,
+    "avg_pnl_pct": 0.8516
   },
   {
     "setup": "TREND_PULLBACK_EMA",
