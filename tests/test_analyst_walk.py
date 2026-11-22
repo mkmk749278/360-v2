@@ -188,3 +188,81 @@ def test_menu_is_stamped_at_submit_and_old_ledgers_migrate(tmp_path):
     con = P.Ledger(str(p))._connect()
     assert "menu_json" in {r[1] for r in con.execute("PRAGMA table_info(setups)")}
     con.close()
+
+
+# ── the feed: setups read as signals (2026-11-22) ─────────────────────────
+
+
+def _ledger_with(tmp_path, monkeypatch, rows):
+    """rows: (setup_id, side, entries, stop, targets) — all accepted, symbol X."""
+    from src import analyst_plan as P
+    led = P.Ledger(str(tmp_path / "plans.sqlite"))
+    monkeypatch.setattr(P, "_ledger", led)
+    con = led._connect()
+    with con:
+        con.execute("INSERT INTO plans (plan_id, submitted_at, bias, notes) "
+                    "VALUES ('p', ?, 'neutral', 'n')", (T0,))
+        for i, (sid, side, entries, stop, targets) in enumerate(rows):
+            con.execute(
+                "INSERT INTO setups (setup_id, plan_id, idx, symbol, side, status,"
+                " entries_json, stop_price, targets_json, expires_at, submitted_at,"
+                " scenario, p_target) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, "p", i, "X", side, "accepted",
+                 json.dumps([{"id": "e", "price": p, "weight": w} for p, w in entries]),
+                 stop, json.dumps([{"id": "t", "price": t} for t in targets]),
+                 T0 + 4 * 3600, T0, "primary", 0.4))
+        con.execute(
+            "INSERT INTO setups (setup_id, plan_id, idx, symbol, side, status, reason,"
+            " submitted_at) VALUES ('p:rej','p',9,'X','long','rejected','geometry',?)", (T0,))
+    con.close()
+    return led
+
+
+def test_feed_reads_each_setup_as_a_signal(tmp_path, monkeypatch):
+    _ledger_with(tmp_path, monkeypatch, [
+        ("p:0", "long", [(99.0, 1.0)], 97.0, [103.0, 105.0]),   # fills, hits TP1
+        ("p:1", "long", [(90.0, 1.0)], 88.0, [95.0]),            # never reached
+    ])
+    st = HistoricalDataStore()
+    for i, b in enumerate([(100, 100.5, 99.5, 100), (100, 100, 98.8, 99.2),
+                           (99.5, 103.5, 99.4, 103)]):
+        st.update_candle("X", "5m", {"open": b[0], "high": b[1], "low": b[2], "close": b[3],
+                                     "volume": 1, "open_time": (T0 + 300 * i) * 1000})
+    eng = type("E", (), {"data_store": st})()
+    W.step(eng, now=NOW)
+    out = diag_catalog.run("read.analyst_feed", eng, {"limit": 10})
+    assert out["ok"], out
+    res = out["result"]
+    by = {r["setup_id"]: r for r in res["rows"]}
+    assert set(by) == {"p:0", "p:1"}, "rejected setups are not signals"
+    hit = by["p:0"]
+    assert hit["state"] == "tp_hit" and hit["targets"] == [103.0, 105.0]
+    assert hit["rr_tp1"] == 2.0 and hit["analyst"]["net_pct"] > 0
+    assert hit["market"] is not None and hit["fixed_rule"] is not None
+    # Inside its window an unreached limit is pending — never a fill.
+    assert by["p:1"]["state"] == "pending"
+    assert res["counts"]["tp_hit"] == 1 and res["counts"]["pending"] == 1
+    assert set(res["counts"]) == set(W.FEED_STATES)
+
+
+def test_feed_states_are_a_closed_set():
+    cases = [
+        (None, "not_walked"),
+        ({"status": "insufficient"}, "insufficient"),
+        ({"status": "open", "reason": "awaiting_fill"}, "pending"),
+        ({"status": "open", "entry": 1.0}, "active"),
+        ({"status": "open", "reason": "no_bars_yet"}, "waiting_data"),
+        ({"status": "resolved", "unfilled": 1, "exit_reason": "target"}, "not_filled"),
+        ({"status": "open", "unfilled": 1}, "not_filled"),
+        ({"status": "resolved", "exit_reason": "target"}, "tp_hit"),
+        ({"status": "resolved", "exit_reason": "stop"}, "sl_hit"),
+        ({"status": "resolved", "exit_reason": "horizon"}, "time_exit"),
+    ]
+    for w, want in cases:
+        assert W._feed_state(w) == want, (w, want)
+        assert want in W.FEED_STATES
+
+
+def test_feed_without_a_ledger_says_so(tmp_path):
+    out = W.feed(path=str(tmp_path / "none.sqlite"))
+    assert out == {"readable": False, "reason": "no_ledger_yet", "rows": []}

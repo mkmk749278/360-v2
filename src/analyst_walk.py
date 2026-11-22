@@ -395,6 +395,130 @@ def summary(path: Optional[str] = None) -> Dict[str, Any]:
                      "outcome. Stop first on an ambiguous 5m bar. Read n before any average.")}
 
 
+# ── the feed: each accepted setup read as a signal (ops-only) ───────────────
+
+#: Lifecycle states for one setup, read off the ``analyst`` arm (a limit at the
+#: first entry, the arm a real order would be). A closed set, so ops can label
+#: every one and badge anything else as unclassified.
+FEED_STATES = ("not_walked", "waiting_data", "pending", "active", "tp_hit",
+               "sl_hit", "time_exit", "not_filled", "insufficient")
+FEED_MAX = 300
+
+
+def _feed_state(w: Optional[Dict[str, Any]]) -> str:
+    """One state per setup. ``not_filled`` covers a limit the market never
+    reached: its PnL is the MARKET outcome and must never read as a fill."""
+    if w is None:
+        return "not_walked"
+    st = w.get("status")
+    if st == "insufficient":
+        return "insufficient"
+    if w.get("unfilled"):
+        return "not_filled"
+    if st == "open":
+        if w.get("reason") == "awaiting_fill":
+            return "pending"
+        return "active" if w.get("entry") is not None else "waiting_data"
+    return {"target": "tp_hit", "stop": "sl_hit",
+            "horizon": "time_exit"}.get(str(w.get("exit_reason")), "insufficient")
+
+
+def _arm_view(w: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if w is None:
+        return None
+    return {k: w.get(k) for k in ("status", "reason", "unfilled", "filled_frac", "entry",
+                                   "entry_at", "exit", "exit_at", "exit_reason",
+                                   "gross_pct", "net_pct", "mfe_pct", "mae_pct",
+                                   "updated_at")}
+
+
+def feed(limit: int = 100, path: Optional[str] = None,
+         now: Optional[float] = None) -> Dict[str, Any]:
+    """Every ACCEPTED analyst setup as a signal card, newest first.
+
+    What ``read.analyst_feed`` returns. Ops-only: this reads the analyst ledger,
+    which nothing on the money path reads, and reaches no subscriber.
+
+    The state and PnL come from the ``analyst`` arm. The walk scores the FIRST
+    target or the stop (else a 12h time exit); later targets are the analyst's
+    and are shown, never booked. ``market`` and ``fixed_rule`` ride beside each
+    row so a card can be read against its own controls, never pooled with them.
+    """
+    import os
+
+    from src import analyst_plan
+
+    now = time.time() if now is None else now
+    path = path or analyst_plan.get_ledger().path
+    if not os.path.exists(path):
+        return {"readable": False, "reason": "no_ledger_yet", "rows": []}
+    limit = max(1, min(int(limit or 100), FEED_MAX))
+    con = analyst_plan.Ledger(path)._connect()  # runs the additive migrations
+    try:
+        con.execute(_SCHEMA)
+        setups = [dict(r) for r in con.execute(
+            "SELECT s.*, p.bias AS plan_bias, p.notes AS plan_notes FROM setups s "
+            "LEFT JOIN plans p ON p.plan_id = s.plan_id WHERE s.status='accepted' "
+            "ORDER BY s.submitted_at DESC, s.idx LIMIT ?", (limit,))]
+        n_total = int(con.execute(
+            "SELECT COUNT(*) FROM setups WHERE status='accepted'").fetchone()[0])
+        walks: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        ids = [s["setup_id"] for s in setups]
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            q = ",".join("?" * len(chunk))
+            for r in con.execute(f"SELECT * FROM walks WHERE setup_id IN ({q})", chunk):
+                walks.setdefault(r["setup_id"], {})[r["arm"]] = dict(r)
+    finally:
+        con.close()
+
+    rows: List[Dict[str, Any]] = []
+    counts: Dict[str, int] = {k: 0 for k in FEED_STATES}
+    for s in setups:
+        arms = walks.get(s["setup_id"], {})
+        a = arms.get("analyst")
+        state = _feed_state(a)
+        counts[state] = counts.get(state, 0) + 1
+        try:
+            entries = json.loads(s.get("entries_json") or "[]")
+            targets = json.loads(s.get("targets_json") or "[]")
+        except ValueError:
+            entries, targets = [], []
+        stop = s.get("stop_price")
+        e1 = float(entries[0]["price"]) if entries else None
+        t1 = float(targets[0]["price"]) if targets else None
+        rr = (round(abs(t1 - e1) / abs(e1 - float(stop)), 3)
+              if e1 is not None and t1 is not None and stop is not None
+              and abs(e1 - float(stop)) > 0 else None)
+        rows.append({
+            "setup_id": s["setup_id"], "plan_id": s["plan_id"],
+            "submitted_at": s["submitted_at"], "expires_at": s.get("expires_at"),
+            "symbol": s.get("symbol"), "side": s.get("side"),
+            "archetype": s.get("archetype"), "plan_mode": s.get("plan_mode"),
+            "bias": s.get("plan_bias"), "plan_notes": s.get("plan_notes"),
+            "price_at_submit": s.get("price_at_submit"), "atr_1h": s.get("atr_1h"),
+            "entries": [{"price": float(e["price"]), "weight": float(e.get("weight") or 0)}
+                        for e in entries],
+            "stop": stop, "targets": [float(t["price"]) for t in targets],
+            "stop_atr": s.get("stop_atr"), "tp1_pct": s.get("tp1_pct"), "rr_tp1": rr,
+            "invalidation": s.get("invalidation"), "scenario": s.get("scenario"),
+            "p_target": s.get("p_target"),
+            "state": state,
+            "analyst": _arm_view(a),
+            "market": _arm_view(arms.get("market")),
+            "fixed_rule": _arm_view(arms.get("fixed_rule")),
+            "expired": bool(s.get("expires_at") and now >= float(s["expires_at"])),
+        })
+    return {"readable": True, "rows": rows, "n_accepted_total": n_total,
+            "n_shown": len(rows), "limit": limit, "states": list(FEED_STATES),
+            "counts": counts, "generated_at": now, "walk_step_s": STEP_S,
+            "note": ("Dark, ops-only. State and PnL are the analyst arm: a limit at the "
+                     "first entry, exiting at the FIRST target or the stop, else a time "
+                     "exit after 12h; later targets are shown, not booked. Net of a 0.07% "
+                     "round trip. A limit the market never reached is 'not_filled' and "
+                     "carries the market outcome, never a fill.")}
+
+
 def health(now: Optional[float] = None, path: Optional[str] = None) -> Tuple[bool, str]:
     """'Hourly plan missed': plans were arriving, then stopped for 2h+."""
     import os
