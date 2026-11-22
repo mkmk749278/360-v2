@@ -530,6 +530,17 @@ def _analyst_outcomes(ctx: Ctx) -> Dict[str, Any]:
     return _aw.summary()
 
 
+def _analyst_feed(ctx: Ctx) -> Dict[str, Any]:
+    """Each accepted analyst setup as a signal card (dark, ops-only)."""
+    from src import analyst_walk as _aw
+
+    try:
+        limit = int(ctx.args.get("limit") or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    return _aw.feed(limit)
+
+
 def _loop_snapshot(ctx: Ctx) -> Dict[str, Any]:
     """Scan-cycle, writer, edge-store and host counters in one read."""
     from src.api.snapshot_writer import _host_resources, _loop_health
@@ -912,6 +923,13 @@ for _e in (
           "a 0.07% round trip, with and without the top 1%. Unfilled limits are "
           "scored at market. Read n first.",
           _analyst_outcomes),
+    Entry("read.analyst_feed", "Analyst — signal feed (dark)", "read",
+          "Every accepted analyst setup as a signal: symbol, side, entry/stop/"
+          "targets, scenario and p_target, its state (pending, active, TP hit, SL "
+          "hit, time exit, not filled) and net PnL from the dark walk, with the "
+          "market and fixed-rule arms beside it (arg: limit <= 300). Ops-only; "
+          "reaches no subscriber or order. Read-only.",
+          _analyst_feed),
     Entry("read.loop", "Loop + host counters", "read",
           "Scan cycle, snapshot writer, edge store and CPU-against-quota in one "
           "read.", _loop_snapshot),
