@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-11-22T07:21:43.899239+00:00",
-  "generated_at_ts": 1795332103.8992388,
+  "generated_at": "2026-11-23T08:05:21.428159+00:00",
+  "generated_at_ts": 1795421121.4281585,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "554b3209e3a4470ca8ab03b516c9a91305ad09bc",
+  "git_sha": "f8830f14dc91512cf3f1a153f9ca345e34dedf31",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 16132,
-    "strategy_matrix_scored_cells": 6408,
+    "strategy_matrix_cells": 16280,
+    "strategy_matrix_scored_cells": 6474,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -32,8 +32,8 @@
       {
         "strategy": "TREND_PULLBACK_EMA@SAREXIT",
         "context_key": "ASIA/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
-        "edge_r": 3.8711838004017936,
-        "n": 31,
+        "edge_r": 3.697234738483406,
+        "n": 32,
         "verdict": "STRONG"
       },
       {
@@ -88,10 +88,10 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "RANGE_FADE",
-        "context_key": "LONDON/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
-        "edge_r": -1.7772211717469186,
-        "n": 47,
+        "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
+        "context_key": "OFF_HOURS/VOLATILE_EXPANSION/NORMAL/BTC_RISING",
+        "edge_r": -1.7781149945202226,
+        "n": 15,
         "verdict": "NEGATIVE"
       }
     ],
