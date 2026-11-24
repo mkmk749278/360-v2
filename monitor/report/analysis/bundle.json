@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-11-23T08:05:21.428159+00:00",
-  "generated_at_ts": 1795421121.4281585,
+  "generated_at": "2026-11-24T10:22:31.180963+00:00",
+  "generated_at_ts": 1795515751.1809628,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "f8830f14dc91512cf3f1a153f9ca345e34dedf31",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 16280,
-    "strategy_matrix_scored_cells": 6474,
+    "strategy_matrix_cells": 16332,
+    "strategy_matrix_scored_cells": 6509,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -32,8 +32,8 @@
       {
         "strategy": "TREND_PULLBACK_EMA@SAREXIT",
         "context_key": "ASIA/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
-        "edge_r": 3.697234738483406,
-        "n": 32,
+        "edge_r": 3.543054104169294,
+        "n": 33,
         "verdict": "STRONG"
       },
       {

@@ -50,7 +50,7 @@
         "min_samples": null
       },
       "FAILED_AUCTION_RECLAIM": {
-        "suppress_negative": null,
+        "suppress_negative": false,
         "min_samples": null
       },
       "VOLUME_SURGE_BREAKOUT": {
@@ -80,9 +80,9 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "DROP",
+        "DROP",
+        "DROP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -245,10 +245,10 @@
       "SR_FLIP_RETEST|min_samples": 4725,
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": 2157,
       "VOLUME_SURGE_BREAKOUT|suppress_negative": 2251,
-      "FAILED_AUCTION_RECLAIM|suppress_negative": 4213,
+      "FAILED_AUCTION_RECLAIM|suppress_negative": 5373,
       "FUNDING_EXTREME_SIGNAL|suppress_negative": 5158
     },
-    "cycle": 5359
+    "cycle": 5405
   },
   "ledger": [
     {
@@ -1692,6 +1692,19 @@
       "ev_per_suppression_r": -0.2771761105596495,
       "n": 121,
       "routable": true
+    },
+    {
+      "strategy": "FAILED_AUCTION_RECLAIM",
+      "param": "suppress_negative",
+      "old": true,
+      "new": false,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote",
+      "verdict": "DROP",
+      "ev_per_suppression_r": -0.5914507409008475,
+      "n": 281,
+      "routable": true
     }
   ],
   "pending": [],
@@ -1731,6 +1744,9 @@
       "suppress_negative": false
     },
     "QUIET_COMPRESSION_BREAK": {
+      "suppress_negative": false
+    },
+    "FAILED_AUCTION_RECLAIM": {
       "suppress_negative": false
     },
     "VOLUME_SURGE_BREAKOUT": {
