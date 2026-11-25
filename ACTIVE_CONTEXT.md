@@ -46,9 +46,11 @@ are in `docs/ANALYST_PROMPT_V2_2026_11_25.md`.
 - **Not adopted:** a hard EV gate (the binary p·R − (1−p) formula ignores the
   12h time exit, which ended 3 of 5 filled setups in the replay), RR ≥ 1.8, a 4.5% ATR ban, a
   hard book cap in the validator, level-id-only plans (contradicts the owner's
-  2026-11-20 direction), CVD / DVOL / macro feeds (do not exist). The book cap
-  is a prompt rule; the stamps let the walk say later whether the Nth same-side
-  setup added anything.
+  2026-11-20 direction), CVD / DVOL / macro feeds (do not exist).
+- **Owner: no limits on setups** (dark run, collect the data). Prompt v2 has no
+  book cap, per-hour cap, R:R bar or EV gate; it asks for every real setup, up
+  to the engine's 5 per plan. Those candidate limits are stamped instead, to be
+  tested on the record. Only the validator's scoreability checks still refuse.
 - **Prompt v2** written in the doc above; applied to the scheduled task once
   both PRs deployed.
 - **Still not built:** `existing_signals` arm, a TP2 / ladder arm.
