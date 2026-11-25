@@ -4,6 +4,43 @@
 
 ---
 
+## OPEN 2026-11-25 — Lumin app renders the `/api/auto-mode` placeholder as a real "off"
+
+When `build_auto_mode` raises, `GET /api/auto-mode` returns a synthetic
+`mode="off"` with zero equity/PnL so the Trade tab does not 500. Until this
+session that payload was indistinguishable from an engine that really is off,
+so a subscriber saw the off-mode card over a read that failed (CLAUDE.md,
+Shipping Onto a Live Book §7). The engine now publishes `readable: false` on
+that branch only (default `true`; additive, older apps ignore it), and ops'
+Pulse tiles key on it.
+
+**Still open:** `lumin-app` `AutoModeStatus.fromJson`
+(`lib/data/repository.dart`) does not read `readable`, so the app still shows
+the placeholder as "off". The fix: parse it tri-state (`null` = older engine,
+keep current wording), and on `false` say the status could not be read without
+naming a cause or promising a resume. **Blocked here only because the session
+container has no Flutter SDK** to run `flutter test`; any session with one can
+ship it.
+
+## 2026-11-25 — ops refinement (outside audit), phases 1–2
+
+An outside audit of all 40 ops pages was taken as a refinement plan, not a
+rewrite (owner: regroup the nav but keep every URL, tighten the current theme,
+inline-SVG charts, one PR per phase).
+- **Phase 1 (ops #241, merged):** guest `Close` button and `/control` links
+  gated (plus a template-level test the crawl could not replace), entry-features
+  sub-nav, tables scroll inside their card, Binance ban banner on `/profit`,
+  copy fixes.
+- **Phase 2:** Pulse tiles instead of raw JSON (liveness leads with what needs
+  a look), a structured signal dossier with a price ladder anchored on
+  `original_stop_loss`, risk-first `/positions`, numeric columns aligned by
+  derivation. Engine side: `AutoModeStatus.readable` (above).
+- **Next:** phase 3 (Signals split into Live + Labs, Labs index, URLs
+  unchanged), phase 4 (four inline-SVG charts), phase 5 (Ctrl+K, stale-feed
+  banner).
+
+---
+
 ## OPEN 2026-11-19 — `OIPoller` spends ~150 weight/min outside the shared rate limiter
 
 `src/order_flow.py` `OIPoller` uses its own `aiohttp` session. Every 60s it calls
