@@ -2540,6 +2540,7 @@ def build_app(
                 daily_kill_tripped=False,
                 manual_paused=False,
                 current_equity_usd=0.0,
+                readable=False,
             )
 
     @app.get(

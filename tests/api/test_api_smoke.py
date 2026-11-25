@@ -887,6 +887,9 @@ def test_auto_mode_returns_off_default_on_build_error(
     assert body["open_positions"] == 0
     assert body["daily_pnl_usd"] == 0.0
     assert body["daily_kill_tripped"] is False
+    # …and it says it is a placeholder. Without this, "off because the build
+    # raised" and "off because the engine is off" were the same payload.
+    assert body["readable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +902,7 @@ def test_auto_mode_get_returns_current(client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["mode"] == "paper"
+    assert body["readable"] is True
     # Weekly/monthly aggregates land alongside daily — default to 0 with no
     # history yet (clean slate), but the keys must exist so the client
     # can render zeros without conditional null handling.

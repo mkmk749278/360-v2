@@ -426,6 +426,20 @@ class AutoModeStatus(BaseModel):
     monthly_pnl_usd: float = Field(
         0.0, description="Realised PnL over last 30 UTC days (rolling)"
     )
+    # False ONLY on the fail-soft branch of GET /api/auto-mode, which returns
+    # mode="off" with zeros when build_auto_mode raises. Without this field
+    # that synthetic payload is indistinguishable from an engine that really
+    # is off — "unknown wearing a value's caption" (CLAUDE.md, Shipping Onto a
+    # Live Book §7). Additive: older clients ignore it, and True is the
+    # default, so every real reading is unchanged.
+    readable: bool = Field(
+        True,
+        description=(
+            "False when the server could not build this status and returned "
+            "the synthetic off-mode default instead; the other fields are "
+            "then placeholders, not readings."
+        ),
+    )
 
 
 class PnlPoint(BaseModel):
