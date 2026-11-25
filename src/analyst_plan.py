@@ -485,7 +485,8 @@ class Ledger:
         try:
             plans = [dict(r) for r in con.execute(
                 "SELECT plan_id, submitted_at, source, bias, notes, n_setups, n_accepted, "
-                "macro FROM plans ORDER BY submitted_at DESC LIMIT ?", (int(limit),))]
+                "macro, prompt_version FROM plans ORDER BY submitted_at DESC LIMIT ?",
+                (int(limit),))]
             for p in plans:
                 p["setups"] = [dict(r) for r in con.execute(
                     "SELECT idx, symbol, side, archetype, status, reason, detail, "
