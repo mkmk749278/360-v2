@@ -55,22 +55,31 @@ are in `docs/ANALYST_PROMPT_V2_2026_11_25.md`.
   both PRs deployed.
 - **Still not built:** `existing_signals` arm, a TP2 / ladder arm.
 
-## 2026-11-25 — ops refinement (outside audit), phases 1–2
+## 2026-11-25 — ops refinement (outside audit), phases 1–5
 
 An outside audit of all 40 ops pages was taken as a refinement plan, not a
 rewrite (owner: regroup the nav but keep every URL, tighten the current theme,
-inline-SVG charts, one PR per phase).
-- **Phase 1 (ops #241, merged):** guest `Close` button and `/control` links
-  gated (plus a template-level test the crawl could not replace), entry-features
-  sub-nav, tables scroll inside their card, Binance ban banner on `/profit`,
-  copy fixes.
-- **Phase 2:** Pulse tiles instead of raw JSON (liveness leads with what needs
-  a look), a structured signal dossier with a price ladder anchored on
-  `original_stop_loss`, risk-first `/positions`, numeric columns aligned by
-  derivation. Engine side: `AutoModeStatus.readable` (above).
-- **Next:** phase 3 (Signals split into Live + Labs, Labs index, URLs
-  unchanged), phase 4 (four inline-SVG charts), phase 5 (Ctrl+K, stale-feed
-  banner).
+inline-SVG charts, one PR per phase). Each phase was verified on production
+in a guest session: 41 guest pages, no horizontal overflow at 1440/1280/393px,
+no guest-visible write control.
+- **Phase 1 (ops #241):** guest `Close` button and `/control` links gated
+  (plus a template-level test the crawl could not replace), entry-features
+  sub-nav, tables scroll inside their card, Binance ban banner on `/profit`.
+- **Phase 2 (ops #242, engine #1102):** Pulse tiles instead of raw JSON, a
+  signal dossier with a price ladder, risk-first `/positions`.
+  `AutoModeStatus.readable` (above). The live read caught a ladder that
+  refused break-even stops (FILUSDT SL = entry); fixed before it mattered.
+- **Stale CSS (ops #243):** Cloudflare caches `/static/*` 4h and nothing was
+  versioned, so every deploy served new HTML over the old stylesheet. Assets
+  are now linked by content hash.
+- **Phase 3 (ops #244):** Signals/Autonomy regrouped into Live + Labs, with a
+  `/labs` index (design facts only; each page grades its own state).
+- **Phase 4 (ops #245):** four inline-SVG charts. On production the
+  track-record curve ends at exactly the page's net USDT headline (+145.21).
+- **Phase 5 + live fix (ops #247):** Ctrl+K quick jump, site-wide status
+  strip; `/signals/analyst` 500'd whenever any row was not yet walked
+  (`market: {}` read by attribute). #246 (another session, same day) touched
+  the same line and kept the defect; #247 fixes it and pins the real shape.
 
 ---
 
