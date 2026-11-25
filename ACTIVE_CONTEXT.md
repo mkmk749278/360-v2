@@ -51,8 +51,11 @@ are in `docs/ANALYST_PROMPT_V2_2026_11_25.md`.
   book cap, per-hour cap, R:R bar or EV gate; it asks for every real setup, up
   to the engine's 5 per plan. Those candidate limits are stamped instead, to be
   tested on the record. Only the validator's scoreability checks still refuse.
-- **Prompt v2** written in the doc above; applied to the scheduled task once
-  both PRs deployed.
+- **Prompt v2 applied** to the scheduled task 2026-11-25 09:21 UTC, after
+  #1103 / ops #246 deployed. First v2 run (09:37): 4 setups, all accepted,
+  both sides (XMR long), shorts at pos 0.21-0.38 rather than the 7d low,
+  stops 0.94-1.82x ATR. `recent_plans` now returns `prompt_version` so the
+  tag is readable from MCP.
 - **Still not built:** `existing_signals` arm, a TP2 / ladder arm.
 
 ## 2026-11-25 — ops refinement (outside audit), phases 1–2

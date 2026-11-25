@@ -131,6 +131,8 @@ def test_submit_stamps_range_position_entry_distance_and_the_book(tmp_path, monk
     assert con.execute("SELECT prompt_version FROM plans ORDER BY submitted_at").fetchall() \
         == [("v2-2026-11-25",), (None,)]
     con.close()
+    # Readable back through recent_plans, not only on disk.
+    assert [p["prompt_version"] for p in led.recent(5)["plans"]] == [None, "v2-2026-11-25"]
 
 
 def test_open_book_drops_setups_the_walk_has_resolved(tmp_path, monkeypatch):
