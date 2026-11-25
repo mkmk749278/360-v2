@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS plans (
     n_accepted   INTEGER,
     macro        TEXT,
     plan_schema  INTEGER,
-    raw_json     TEXT
+    raw_json     TEXT,
+    prompt_version TEXT
 );
 CREATE TABLE IF NOT EXISTS setups (
     setup_id      TEXT PRIMARY KEY,
@@ -107,7 +108,11 @@ CREATE TABLE IF NOT EXISTS setups (
     menu_json     TEXT,
     scenario      TEXT,
     p_target      REAL,
-    plan_mode     TEXT
+    plan_mode     TEXT,
+    pos_in_7d     REAL,
+    entry_dist_atr REAL,
+    book_same_side INTEGER,
+    book_opposite_side INTEGER
 );
 CREATE INDEX IF NOT EXISTS setups_plan ON setups(plan_id);
 CREATE INDEX IF NOT EXISTS setups_time ON setups(submitted_at);
@@ -145,7 +150,11 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
         raise Reject("schema", "setups must be a list")
     if len(setups) > MAX_SETUPS:
         raise Reject("caps", f"{len(setups)} setups > MAX_SETUPS {MAX_SETUPS}")
-    return {"bias": bias, "notes": _text(raw.get("notes")), "setups": setups}
+    pv = raw.get("prompt_version")
+    return {"bias": bias, "notes": _text(raw.get("notes")), "setups": setups,
+            # Which prompt produced the plan, so a prompt change splits the
+            # population instead of silently redefining it.
+            "prompt_version": str(pv)[:40] if pv is not None else None}
 
 
 def _parse_setup(s: Any) -> Dict[str, Any]:
@@ -276,6 +285,11 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
     # continuation target 1.225 under a 1.2475 low). Targets get ±3 ATR.
     rng = ((float(lo_a[-168:].min()), float(hi_a[-168:].max()))
            if hi_a is not None and lo_a is not None else None)
+    # Stamped where it becomes true: where price sat in its 7-day range when the
+    # setup was planned. Measured, not gated (a short at the 7d low may be
+    # selling exhaustion, or riding a breakdown; the walk will say which).
+    if rng is not None and rng[1] > rng[0]:
+        row["pos_in_7d"] = round((price - rng[0]) / (rng[1] - rng[0]), 4)
 
     def resolve(lid: str, *, target: bool = False) -> float:
         if lid.startswith("px:"):
@@ -320,6 +334,7 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
     if [sign * t for t in targets] != sorted(sign * t for t in targets):
         raise Reject("geometry", "targets must be ordered nearest first")
 
+    row["entry_dist_atr"] = round(abs(entry - price) / atr, 4)
     stop_atr = abs(entry - stop) / atr
     row["stop_atr"] = round(stop_atr, 4)
     if not STOP_MIN_ATR <= stop_atr <= STOP_MAX_ATR:
@@ -337,21 +352,31 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
 
 
 def validate_plan(raw: Any, engine: Any, *, now: Optional[float] = None,
-                  admission=_default_admission) -> Dict[str, Any]:
+                  admission=_default_admission,
+                  open_book: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     now = time.time() if now is None else now
     plan = parse_plan(raw)  # raises Reject for a malformed plan
     rows: List[Dict[str, Any]] = []
     seen: set = set()
+    book = dict(open_book or {"long": 0, "short": 0})
     for i, raw_s in enumerate(plan["setups"]):
         row = validate_setup(raw_s, engine, now=now, admission=admission)
+        if row.get("side") in SIDES:
+            # Exposure at submit, before this setup: same-side setups are one
+            # BTC-beta bet, so the walk can later ask whether the Nth added any.
+            other = "short" if row["side"] == "long" else "long"
+            row["book_same_side"] = book.get(row["side"], 0)
+            row["book_opposite_side"] = book.get(other, 0)
         sym = row.get("symbol")
         if row["status"] == "accepted" and sym in seen:
             row.update(status="rejected", reason="caps", detail="one setup per symbol per plan")
         if sym:
             seen.add(sym)
+        if row["status"] == "accepted":
+            book[row["side"]] = book.get(row["side"], 0) + 1
         row["idx"] = i
         rows.append(row)
-    return {"plan": plan, "setups": rows}
+    return {"plan": plan, "setups": rows, "open_book": book}
 
 
 # ── ledger ────────────────────────────────────────────────────────────────
@@ -373,10 +398,39 @@ class Ledger:
         # the column; its old rows read NULL ("no_menu_stamped"), never a guess.
         cols = {r[1] for r in con.execute("PRAGMA table_info(setups)")}
         for col, typ in (("menu_json", "TEXT"), ("scenario", "TEXT"),
-                         ("p_target", "REAL"), ("plan_mode", "TEXT")):
+                         ("p_target", "REAL"), ("plan_mode", "TEXT"),
+                         ("pos_in_7d", "REAL"), ("entry_dist_atr", "REAL"),
+                         ("book_same_side", "INTEGER"), ("book_opposite_side", "INTEGER")):
             if col not in cols:
                 con.execute(f"ALTER TABLE setups ADD COLUMN {col} {typ}")
+        pcols = {r[1] for r in con.execute("PRAGMA table_info(plans)")}
+        if "prompt_version" not in pcols:
+            con.execute("ALTER TABLE plans ADD COLUMN prompt_version TEXT")
         return con
+
+    def open_book(self, now: float) -> Dict[str, int]:
+        """Accepted setups still owed an outcome, by side: no analyst-arm walk
+        row has resolved them, and they are young enough to still be live
+        (max expiry + the walk's 12h hold). Read at submit; not a hot path."""
+        out = {"long": 0, "short": 0}
+        if not os.path.exists(self.path):
+            return out
+        con = self._connect()
+        try:
+            has_walks = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                    "AND name='walks'").fetchone() is not None
+            walked = ("AND NOT EXISTS (SELECT 1 FROM walks w WHERE w.setup_id = "
+                      "s.setup_id AND w.arm = 'analyst' AND w.status IN "
+                      "('resolved', 'insufficient')) " if has_walks else "")
+            for side, n in con.execute(
+                    "SELECT s.side, COUNT(*) FROM setups s WHERE s.status='accepted' "
+                    "AND s.submitted_at >= ? " + walked + "GROUP BY s.side",
+                    (now - (EXPIRY_HOURS[1] + 12) * 3600.0,)):
+                if side in out:
+                    out[side] = int(n)
+        finally:
+            con.close()
+        return out
 
     def plans_since(self, since: float) -> int:
         if not os.path.exists(self.path):
@@ -395,14 +449,22 @@ class Ledger:
         try:
             with con:
                 con.execute(
-                    "INSERT INTO plans VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO plans (plan_id, submitted_at, source, bias, notes, "
+                    "n_setups, n_accepted, macro, plan_schema, raw_json, prompt_version) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (plan_id, now, source, plan["bias"], plan["notes"], len(rows),
                      sum(r["status"] == "accepted" for r in rows), "unknown",
-                     PLAN_SCHEMA, json.dumps(raw, default=str)[:20000]))
+                     PLAN_SCHEMA, json.dumps(raw, default=str)[:20000],
+                     plan.get("prompt_version")))
                 for r in rows:
                     con.execute(
-                        "INSERT INTO setups VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO setups (setup_id, plan_id, idx, symbol, side, "
+                        "archetype, status, reason, detail, price_at_submit, atr_1h, "
+                        "entries_json, stop_level_price, stop_price, targets_json, "
+                        "stop_atr, tp1_pct, invalidation, expires_at, submitted_at, "
+                        "menu_json, scenario, p_target, plan_mode, pos_in_7d, "
+                        "entry_dist_atr, book_same_side, book_opposite_side) VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (f"{plan_id}:{r['idx']}", plan_id, r["idx"], r.get("symbol"),
                          r.get("side"), r.get("archetype"), r["status"], r.get("reason"),
                          r.get("detail"), r.get("price_at_submit"), r.get("atr_1h"),
@@ -410,7 +472,9 @@ class Ledger:
                          r.get("stop_price"), r.get("targets_json"), r.get("stop_atr"),
                          r.get("tp1_pct"), r.get("invalidation"), r.get("expires_at"),
                          r["submitted_at"], r.get("menu_json"), r.get("scenario"),
-                         r.get("p_target"), r.get("plan_mode")))
+                         r.get("p_target"), r.get("plan_mode"), r.get("pos_in_7d"),
+                         r.get("entry_dist_atr"), r.get("book_same_side"),
+                         r.get("book_opposite_side")))
         finally:
             con.close()
 
@@ -426,7 +490,8 @@ class Ledger:
                 p["setups"] = [dict(r) for r in con.execute(
                     "SELECT idx, symbol, side, archetype, status, reason, detail, "
                     "price_at_submit, stop_price, stop_atr, tp1_pct, entries_json, "
-                    "targets_json, expires_at, scenario, p_target, plan_mode "
+                    "targets_json, expires_at, scenario, p_target, plan_mode, "
+                    "pos_in_7d, entry_dist_atr, book_same_side "
                     "FROM setups WHERE plan_id = ? ORDER BY idx",
                     (p["plan_id"],))]
             totals = dict(con.execute(
@@ -461,7 +526,8 @@ def submit(raw: Any, engine: Any, *, source: str = "unknown",
             return {"accepted": False, "reason": "rate_limited",
                     "detail": f"more than {MAX_PLANS_PER_HOUR} plans in the last hour"}
         try:
-            result = validate_plan(raw, engine, now=now, admission=admission)
+            result = validate_plan(raw, engine, now=now, admission=admission,
+                                   open_book=led.open_book(now))
         except Reject as rj:
             return {"accepted": False, "reason": rj.reason, "detail": rj.detail}
         plan_id = f"p_{int(now)}_{uuid.uuid4().hex[:6]}"
@@ -470,8 +536,10 @@ def submit(raw: Any, engine: Any, *, source: str = "unknown",
     return {
         "accepted": True, "plan_id": plan_id, "macro": "unknown — no macro feed is wired",
         "setups": [{k: r.get(k) for k in ("idx", "symbol", "side", "status", "reason",
-                                           "detail", "stop_price", "stop_atr", "tp1_pct")}
+                                           "detail", "stop_price", "stop_atr", "tp1_pct",
+                                           "entry_dist_atr", "pos_in_7d", "book_same_side")}
                    for r in rows],
         "n_accepted": sum(r["status"] == "accepted" for r in rows),
+        "open_book_after": result.get("open_book"),
         "note": "Recorded and measured dark. Nothing here reaches a subscriber or an order.",
     }

@@ -22,6 +22,39 @@ naming a cause or promising a resume. **Blocked here only because the session
 container has no Flutter SDK** to run `flutter test`; any session with one can
 ship it.
 
+## 2026-11-25 — analyst upgrade, verified before building
+
+Owner uploaded two outside documents (a v2 prompt + gates, and a "senior desk"
+handoff) and asked for the analyst to be upgraded without following them
+blindly. Every claim was checked against the live ledger over MCP and a replay
+of the last 19 accepted setups through `analyst_walk` on 15m bars. The verdicts
+are in `docs/ANALYST_PROMPT_V2_2026_11_25.md`.
+- **Fixed (walk defect, found by the replay):** a market entry already past the
+  setup's own first target (or stop) was walked and booked a "target" at a
+  loss on bar 0 — on the market arm and on every unfilled limit scored at
+  market. 4 of the 19 replayed setups. Now `no_valid_trade` at 0.00%, counted
+  per arm; stored rows are corrected from their own fields on the next step
+  (`repair_geometry`, no bars needed, idempotent). **The analyst arm's numbers
+  move when this deploys**; read them as a new window.
+- **New in `plan_outcomes`:** `analyst_split` (filled vs scored-at-market, fill
+  rate, filled setups by exit: target / stop / horizon), `active_book` (open
+  setups by side), `recent_closed` (last 10 with p_target, R:R, entry distance,
+  7d-range position, MFE/MAE). Per arm `no_valid_trade` count.
+- **Stamped at submit (measured, not gated):** `pos_in_7d`, `entry_dist_atr`,
+  `book_same_side` / `book_opposite_side`, and the plan's `prompt_version`.
+- **Scan:** stale pairs listed under `stale`, out of `rows`.
+- **Not adopted:** a hard EV gate (the binary p·R − (1−p) formula ignores the
+  12h time exit, which ended 3 of 5 filled setups in the replay), RR ≥ 1.8, a 4.5% ATR ban, a
+  hard book cap in the validator, level-id-only plans (contradicts the owner's
+  2026-11-20 direction), CVD / DVOL / macro feeds (do not exist).
+- **Owner: no limits on setups** (dark run, collect the data). Prompt v2 has no
+  book cap, per-hour cap, R:R bar or EV gate; it asks for every real setup, up
+  to the engine's 5 per plan. Those candidate limits are stamped instead, to be
+  tested on the record. Only the validator's scoreability checks still refuse.
+- **Prompt v2** written in the doc above; applied to the scheduled task once
+  both PRs deployed.
+- **Still not built:** `existing_signals` arm, a TP2 / ladder arm.
+
 ## 2026-11-25 — ops refinement (outside audit), phases 1–2
 
 An outside audit of all 40 ops pages was taken as a refinement plan, not a

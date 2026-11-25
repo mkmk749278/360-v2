@@ -99,6 +99,7 @@ def scan(engine: Any, *, now: Optional[float] = None) -> Dict[str, Any]:
     now_ms = now * 1000.0
     deriv = _deriv_index(int(now_ms - 26 * 3_600_000))
     rows: List[Dict[str, Any]] = []
+    stale: List[Dict[str, Any]] = []
     refused: Dict[str, int] = {}
     for sym in A._universe(engine):
         tfc = A._store_candles(engine, sym, now_ms=now_ms)
@@ -116,6 +117,11 @@ def scan(engine: Any, *, now: Optional[float] = None) -> Dict[str, Any]:
         rng = float(hi.max() - lo.min())
         v24 = float(vol[-24:].sum()) if vol is not None else None
         v7 = float(vol[-168:].mean()) * 24 if vol is not None else None
+        if fr.get("stale"):
+            # Listed apart, not in rows: the validator refuses a stale pair
+            # (data_stale), so a chart read on it is a wasted call.
+            stale.append({"symbol": sym, "bars_behind": fr.get("bars_behind")})
+            continue
         d = deriv.get(sym, [])
         rows.append({
             "symbol": sym,
@@ -132,7 +138,10 @@ def scan(engine: Any, *, now: Optional[float] = None) -> Dict[str, Any]:
         })
     rows.sort(key=lambda r: -abs(r["chg_pct"]["24h"] or 0.0))
     return {"as_of": now, "n": len(rows), "refused": refused, "rows": rows,
-            "note": ("Sorted by |24h change|. Changes are from closed 1h bars. "
+            "stale": stale,
+            "note": ("Sorted by |24h change|. Changes are from closed 1h bars. Pairs whose "
+                     "1h bars are stale are listed under 'stale', not in rows: a setup on "
+                     "one is refused as data_stale. "
                      "funding/OI come from the hourly recorder; None = no history yet, "
                      "never zero.")}
 

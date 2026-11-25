@@ -37,6 +37,14 @@ Scoring rules, each one a rule this repo has already paid for:
 * **Refuse, don't clamp.** Bars that do not reach back to the submit (history
   rolled off, undated bucket) make the row ``insufficient`` with its reason,
   never a walk over the bars that remain.
+* **A market entry already past its own target or stop is no trade.** When the
+  limit sits away from price, the market at submit can already be beyond the
+  first target (a short retest whose TP1 is the low price is sitting on) or
+  beyond the stop. Walking it books a "target" at a loss, or a "stop" at a
+  gain, on the first bar. Such a row scores 0.00% as ``no_valid_trade`` with
+  ``entry_past_target`` / ``entry_past_stop``, and is counted per arm. Before
+  2026-11-25 these rows were booked as walked; :func:`repair_geometry`
+  corrects stored rows from their own fields (no bars needed).
 
 Measurement flag: ``ANALYST_WALK_ENABLED`` (default ON — no vendor, no
 Firestore; local candles and a local SQLite file only).
@@ -147,6 +155,25 @@ def _exit_walk(bars: Dict[str, np.ndarray], start: int, long: bool, entry: float
     return {"status": "open", "mfe": mfe, "mae": mae}
 
 
+def market_geometry(long: bool, entry: float, stop: float, target: float) -> str:
+    """'' if a trade entered at ``entry`` has the target ahead and the stop
+    behind; otherwise which side it is already past."""
+    sign = 1.0 if long else -1.0
+    if sign * (target - entry) <= 0:
+        return "entry_past_target"
+    if sign * (entry - stop) <= 0:
+        return "entry_past_stop"
+    return ""
+
+
+def _no_valid_trade(entry: float, entry_at: float, why: str, **extra: Any) -> Dict[str, Any]:
+    out = {"status": "resolved", "gross_pct": 0.0, "net_pct": 0.0,
+           "exit_reason": "no_valid_trade", "reason": why, "entry": entry,
+           "entry_at": entry_at}
+    out.update(extra)
+    return out
+
+
 def _limit_fill(bars, long: bool, level: float, expires_at: float) -> Optional[int]:
     for j in range(len(bars["t"])):
         if float(bars["t"][j]) >= expires_at:
@@ -226,9 +253,17 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str
         return out
 
     m_entry = float(bars["open"][0])
-    market = _score(long, m_entry, _exit_walk(bars, 0, long, m_entry, stop, target, now))
-    market.update(entry=m_entry, entry_at=float(bars["t"][0]), filled_frac=1.0, unfilled=0)
-    out["market"] = market
+    m_at = float(bars["t"][0])
+
+    def at_market(stop: float, target: float, **extra: Any) -> Dict[str, Any]:
+        why = market_geometry(long, m_entry, stop, target)
+        if why:
+            return _no_valid_trade(m_entry, m_at, why, **extra)
+        r = _score(long, m_entry, _exit_walk(bars, 0, long, m_entry, stop, target, now))
+        r.update(entry=m_entry, entry_at=m_at, **extra)
+        return r
+
+    out["market"] = at_market(stop, target, filled_frac=1.0, unfilled=0)
 
     def limit_arm(legs: List[Dict[str, Any]], stop: float = stop,
                   target: float = target) -> Dict[str, Any]:
@@ -239,9 +274,8 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str
             if not window_closed:
                 return {"status": "open", "reason": "awaiting_fill"}
             # Scored at market — with THIS arm's own stop and target.
-            r = _score(long, m_entry, _exit_walk(bars, 0, long, m_entry, stop, target, now))
-            r.update(entry=m_entry, entry_at=float(bars["t"][0]),
-                     unfilled=1, filled_frac=0.0, reason="scored_at_market")
+            r = at_market(stop, target, unfilled=1, filled_frac=0.0)
+            r.setdefault("reason", "scored_at_market")
             return r
         w = sum(float(leg["weight"]) for leg, _ in got)
         entry = sum(float(leg["price"]) * float(leg["weight"]) for leg, _ in got) / w
@@ -283,6 +317,50 @@ def _connect(path: str) -> sqlite3.Connection:
     return con
 
 
+def repair_geometry(con: sqlite3.Connection) -> int:
+    """Correct stored rows walked before :func:`market_geometry` existed.
+
+    A row entered at market (the ``market`` arm, or any limit arm scored at
+    market because it never filled) whose entry was already past its own target
+    or stop was booked as walked. Every input is on the row: the entry the walk
+    used, and the arm's stop and target (the setup's, or the fixed rule's,
+    re-derived from the menu stamped at submit). So the correction needs no
+    bars and is exact. Idempotent: a repaired row no longer matches.
+    """
+    rows = [dict(r) for r in con.execute(
+        "SELECT w.setup_id, w.arm, w.entry, s.side, s.stop_price, s.targets_json, "
+        "s.menu_json, s.price_at_submit, s.atr_1h FROM walks w JOIN setups s "
+        "ON s.setup_id = w.setup_id WHERE w.status = 'resolved' "
+        "AND w.exit_reason IN ('target', 'stop', 'horizon') "
+        "AND (w.arm = 'market' OR w.unfilled = 1) AND w.entry IS NOT NULL")]
+    fixed = 0
+    for r in rows:
+        long = r["side"] == "long"
+        try:
+            if r["arm"] == "fixed_rule":
+                lv, _ = fixed_rule_levels(json.loads(r["menu_json"] or "[]"),
+                                          float(r["price_at_submit"] or 0.0),
+                                          float(r["atr_1h"] or 0.0), r["side"])
+                if lv is None:
+                    continue
+                stop, target = lv["stop"], lv["target"]
+            else:
+                stop = float(r["stop_price"])
+                target = float(json.loads(r["targets_json"] or "[]")[0]["price"])
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        why = market_geometry(long, float(r["entry"]), stop, target)
+        if not why:
+            continue
+        with con:
+            con.execute(
+                "UPDATE walks SET exit_reason='no_valid_trade', reason=?, gross_pct=0.0, "
+                "net_pct=0.0, exit=NULL, exit_at=NULL WHERE setup_id=? AND arm=?",
+                (why, r["setup_id"], r["arm"]))
+        fixed += 1
+    return fixed
+
+
 def step(engine: Any, *, now: Optional[float] = None, path: Optional[str] = None,
          max_setups: int = 200) -> Dict[str, int]:
     """Advance every accepted setup that is still owed a verdict on any arm."""
@@ -297,6 +375,7 @@ def step(engine: Any, *, now: Optional[float] = None, path: Optional[str] = None
         return counts
     con = _connect(path)
     try:
+        counts["geometry_repaired"] = repair_geometry(con)
         setups = [dict(r) for r in con.execute(
             "SELECT s.* FROM setups s WHERE s.status='accepted' AND ("
             " SELECT COUNT(*) FROM walks w WHERE w.setup_id=s.setup_id"
@@ -366,12 +445,90 @@ def _calibration(path: str) -> Dict[str, Any]:
             "brier_of_base_rate": round(rate * (1 - rate), 4)}
 
 
-def summary(path: Optional[str] = None) -> Dict[str, Any]:
+def _split(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The analyst arm, taken apart: filled vs scored-at-market, and by exit.
+
+    The headline per-arm average pools limits that filled with limits scored at
+    the market outcome; read alone it is mostly the market arm. ``by_exit``
+    exists because the walk has THREE outcomes, not two: a filled setup can end
+    at the target, the stop, or the 12h time exit. An expectancy computed as
+    p(target) x R - (1 - p) treats every non-target as a full loss.
+    """
+    res = [r for r in rows if r["status"] == "resolved" and r["net_pct"] is not None]
+    filled = [r for r in res if not r.get("unfilled")]
+    by_exit: Dict[str, Any] = {}
+    for r in filled:
+        b = by_exit.setdefault(str(r.get("exit_reason")), [])
+        b.append(float(r["net_pct"]))
+    return {
+        "filled": _arm_summary([float(r["net_pct"]) for r in filled]),
+        "scored_at_market": _arm_summary([float(r["net_pct"]) for r in res
+                                          if r.get("unfilled")]),
+        "fill_rate": round(len(filled) / len(res), 4) if res else None,
+        "filled_by_exit": {k: {"n": len(v), "share": round(len(v) / len(filled), 4),
+                               "avg_net_pct": round(sum(v) / len(v), 4)}
+                           for k, v in sorted(by_exit.items())},
+    }
+
+
+#: Feed states that are still exposure: a limit waiting, a filled position, or
+#: a setup the walk has not reached yet.
+OPEN_STATES = ("not_walked", "waiting_data", "pending", "active")
+CLOSED_STATES = ("tp_hit", "sl_hit", "time_exit", "not_filled")
+RECENT_CLOSED = 10
+
+
+def book(feed_rows: List[Dict[str, Any]], now: float) -> Dict[str, Any]:
+    """What is still open, by side, off the feed rows. The analyst reads this
+    before planning; before 2026-11-25 it had only its last three plans and
+    guessed what was still open."""
+    open_rows = [r for r in feed_rows if r["state"] in OPEN_STATES]
+    items = []
+    for r in open_rows:
+        a = r.get("analyst") or {}
+        items.append({
+            "symbol": r["symbol"], "side": r["side"], "state": r["state"],
+            "age_h": round((now - float(r["submitted_at"])) / 3600.0, 2),
+            "entry": r["entries"][0]["price"] if r["entries"] else None,
+            "stop": r["stop"], "tp1": r["targets"][0] if r["targets"] else None,
+            "p_target": r.get("p_target"), "mfe_pct": a.get("mfe_pct"),
+            "mae_pct": a.get("mae_pct")})
+    side = {s: sum(i["side"] == s for i in items) for s in ("long", "short")}
+    return {"n": len(items), "by_side": side,
+            "active_by_side": {s: sum(i["side"] == s and i["state"] == "active"
+                                      for i in items) for s in ("long", "short")},
+            "symbols": sorted({i["symbol"] for i in items}), "setups": items,
+            "note": ("Setups still pending (limit not reached, not expired), active "
+                     "(filled, not yet stopped / targeted / timed out) or not walked yet. "
+                     "Alts move with BTC: same-side setups are one bet, not several.")}
+
+
+def recent_closed(feed_rows: List[Dict[str, Any]], n: int = RECENT_CLOSED) -> List[Dict[str, Any]]:
+    """The last closed setups, newest first, with what each one actually did."""
+    out = []
+    for r in feed_rows:
+        if r["state"] not in CLOSED_STATES:
+            continue
+        a = r.get("analyst") or {}
+        out.append({k: r.get(k) for k in ("symbol", "side", "archetype", "p_target",
+                                          "rr_tp1", "stop_atr", "entry_dist_atr",
+                                          "pos_in_7d", "state")}
+                   | {"submitted_at": r["submitted_at"], "net_pct": a.get("net_pct"),
+                      "exit_reason": a.get("exit_reason"), "mfe_pct": a.get("mfe_pct"),
+                      "mae_pct": a.get("mae_pct"),
+                      "market_net_pct": (r.get("market") or {}).get("net_pct")})
+        if len(out) >= n:
+            break
+    return out
+
+
+def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
     """What ``read.analyst_outcomes`` returns. Per arm, never pooled."""
     import os
 
     from src import analyst_plan
 
+    now = time.time() if now is None else now
     path = path or analyst_plan.get_ledger().path
     if not os.path.exists(path):
         return {"readable": False, "reason": "no_ledger_yet"}
@@ -388,11 +545,21 @@ def summary(path: Optional[str] = None) -> Dict[str, Any]:
                        "open": sum(r["status"] == "open" for r in mine),
                        "insufficient": sum(r["status"] == "insufficient" for r in mine),
                        "unfilled_scored_at_market": sum(bool(r.get("unfilled")) for r in mine
-                                                        if r["status"] == "resolved")}
+                                                        if r["status"] == "resolved"),
+                       "no_valid_trade": sum(r.get("exit_reason") == "no_valid_trade"
+                                             for r in mine)}
+    fd = feed(limit=FEED_MAX, path=path, now=now)
+    frows = fd.get("rows") or []
     return {"readable": True, "by_arm": by_arm, "arms_not_built": list(ARMS_NOT_BUILT),
+            "analyst_split": _split([r for r in rows if r["arm"] == "analyst"]),
             "calibration": _calibration(path),
+            "active_book": book(frows, now),
+            "recent_closed": recent_closed(frows),
             "note": ("Net of a 0.07% round trip. Unfilled limits are scored at the market "
-                     "outcome. Stop first on an ambiguous 5m bar. Read n before any average.")}
+                     "outcome; a market entry already past its own target or stop is "
+                     "no_valid_trade at 0.00%. Stop first on an ambiguous 5m bar. Read "
+                     "analyst_split before the analyst arm's headline: it pools fills with "
+                     "market scores. Read n before any average.")}
 
 
 # ── the feed: each accepted setup read as a signal (ops-only) ───────────────
@@ -501,6 +668,11 @@ def feed(limit: int = 100, path: Optional[str] = None,
                         for e in entries],
             "stop": stop, "targets": [float(t["price"]) for t in targets],
             "stop_atr": s.get("stop_atr"), "tp1_pct": s.get("tp1_pct"), "rr_tp1": rr,
+            "entry_dist_atr": (round(abs(e1 - float(s["price_at_submit"])) / float(s["atr_1h"]), 3)
+                               if e1 is not None and s.get("price_at_submit")
+                               and s.get("atr_1h") else None),
+            "pos_in_7d": s.get("pos_in_7d"),
+            "book_same_side": s.get("book_same_side"),
             "invalidation": s.get("invalidation"), "scenario": s.get("scenario"),
             "p_target": s.get("p_target"),
             "state": state,

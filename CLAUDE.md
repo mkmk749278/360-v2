@@ -2701,6 +2701,19 @@ python -m src.main
   three months: that is what the evaluator writes, never what shipped.
   **Read geometry off the wire, not off the evaluator.**
 
+- **A counterfactual entry must be checked against the geometry it borrows.**
+  The analyst walk scores an unfilled limit "at market" with the setup's own
+  stop and target. When the limit sits away from price, the market at submit
+  can already be past that target. A short retest's TP1 is often the low price
+  is sitting on. The walk then booked a "target" at a loss on the first bar.
+  It hit 4 of 19 replayed setups, on the market arm and on every unfilled limit,
+  under a clean "target" label (2026-11-25). Nothing crashed, and the mislabel
+  hid it. Two habits. When an arm borrows geometry from another entry, check
+  the target is still ahead and the stop still behind. When a stored row is
+  wrong and every input is on the row, correct it from the row; never re-walk
+  bars that may have rolled off. And a **replay through the real walk** of the
+  last day's rows found this. Reading either outside document did not.
+
 - **A queued control is a request, and its answer must be published where the
   request was made.** In isolated mode `POST /api/auto-mode` wrote a Redis
   command and returned success; the engine applied it at the end of its next
