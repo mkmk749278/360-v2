@@ -500,6 +500,7 @@ Telegram are both acceptable paging paths.
 | FCM push (topics `alerts`/`signals`) | `src/push_notifications.py` |
 | Closed-signal record (feeds ops `/track-record`, `/performance`) | `src/performance_tracker.py` |
 | Signal-history persistence (app feed) | `src/signal_history_store.py` |
+| The Desk — analyst brief + setups + forward-measured record for the app (`GET /api/desk`) | `src/desk.py` |
 | Truth report | `src/runtime_truth_report.py` |
 | Invalidation audit | `src/invalidation_audit.py` |
 | Fail-open exception telemetry | `src/fail_open.py` |

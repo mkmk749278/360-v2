@@ -541,6 +541,13 @@ def _analyst_feed(ctx: Ctx) -> Dict[str, Any]:
     return _aw.feed(limit)
 
 
+def _desk(ctx: Ctx) -> Dict[str, Any]:
+    """The Desk payload, built the same way the snapshot writer builds it."""
+    from src import desk as _d
+
+    return _d.build(ctx.engine)
+
+
 def _loop_snapshot(ctx: Ctx) -> Dict[str, Any]:
     """Scan-cycle, writer, edge-store and host counters in one read."""
     from src.api.snapshot_writer import _host_resources, _loop_health
@@ -930,6 +937,10 @@ for _e in (
           "market and fixed-rule arms beside it (arg: limit <= 300). Ops-only; "
           "reaches no subscriber or order. Read-only.",
           _analyst_feed),
+    Entry("read.desk", "Desk — what the app's Desk tab reads", "read",
+          "The analyst desk exactly as GET /api/desk serves it: latest brief and "
+          "its freshness, BTC context, the plan log, setups with their walk state, "
+          "and the forward-measured record. Display only. Read-only.", _desk),
     Entry("read.loop", "Loop + host counters", "read",
           "Scan cycle, snapshot writer, edge store and CPU-against-quota in one "
           "read.", _loop_snapshot),

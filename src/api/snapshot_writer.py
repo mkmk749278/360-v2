@@ -58,6 +58,9 @@ _AGENTS_INTERVAL_S   = 60
 #: Per-pair chart context: levels refresh on a much slower TTL than this, so
 #: once a minute is already more often than the answer changes.
 _PAIR_CONTEXT_INTERVAL_S = 60
+#: The analyst plans hourly and the walk steps on bar closes, so once a minute
+#: is already faster than the desk changes.
+_DESK_INTERVAL_S = 60
 
 #: A cycle slower than this has started eating its own margin. The feed-critical
 #: keys carry ``TTL_SIGNALS`` = 60s against a 15s interval — **four** cycles of
@@ -146,6 +149,7 @@ class SnapshotWriter:
         self._last_activity: float = 0.0
         self._last_agents: float   = 0.0
         self._last_pair_context: float = 0.0
+        self._last_desk: float = 0.0
         # Writer health, read by the `snapshot_writer` liveness probe. These are
         # in-memory counters: no network, no cost, and they are the LEADING
         # indicator. The lagging one is the keys vanishing, and by then the app
@@ -336,6 +340,10 @@ class SnapshotWriter:
             with self._timing("pair_context"):
                 await self._write_pair_context()
             self._last_pair_context = now
+        if now - self._last_desk >= _DESK_INTERVAL_S:
+            with self._timing("desk"):
+                await self._write_desk()
+            self._last_desk = now
         # Check for a pending mode-change command from the API container.
         await self._apply_pending_mode_cmd()
         # Check for a pending full-signal-reset command from the API container.
@@ -477,6 +485,25 @@ class SnapshotWriter:
     def _build_pair_context(self) -> dict:
         from src.pair_context import build_snapshot
         return build_snapshot(self._engine)
+
+    async def _write_desk(self) -> None:
+        """Publish the analyst desk (brief, setups, record) for the app.
+
+        The ledger is on the shared volume but the market context needs the
+        engine's candle stores, so the whole block is built here and the API
+        serves one GET. SQLite + in-memory candles only: no Firestore, no
+        exchange call.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(self._executor, self._build_desk)
+            await self._set(_store.KEY_DESK, data, _store.TTL_DESK)
+        except Exception:
+            log.exception("snapshot_writer: failed to write desk")
+
+    def _build_desk(self) -> dict:
+        from src.desk import build
+        return build(self._engine)
 
     async def _write_router_delivery(self) -> None:
         """Publish the router's drop census — the last hop before a subscriber.

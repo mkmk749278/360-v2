@@ -4733,6 +4733,13 @@ FCM_TOPIC_PROXY_MAX_PER_MIN: int = _safe_int("FCM_TOPIC_PROXY_MAX_PER_MIN", "12"
 TRACK_RECORD_PUBLIC_ENABLED: bool = _safe_bool("TRACK_RECORD_PUBLIC_ENABLED", "true")
 
 # ---------------------------------------------------------------------------
+# The Desk (Lumin 2.0, 2026-11-26) — src/desk.py, GET /api/desk.
+# Serves the hourly analyst's brief and its forward-measured setups to the app.
+# Display only: no score, dispatch, exit or order reads it, so this is a
+# kill switch for a subscriber-facing surface, not a dark-first money flag.
+DESK_API_ENABLED: bool = _safe_bool("DESK_API_ENABLED", "true")
+
+# ---------------------------------------------------------------------------
 # Live-signal paywall (owner, 2026-09-25) — src/api/signal_access.py
 # ---------------------------------------------------------------------------
 # Owner reversal of B1: CLOSED signals stay free and visible to everyone
