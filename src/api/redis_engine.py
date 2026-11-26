@@ -139,6 +139,7 @@ class RedisEngineFacade:
         self._trail_governor: Optional[dict] = None
         self._dark_promotion: Optional[dict] = None
         self._pair_context: Optional[dict] = None
+        self._desk: Optional[dict] = None
         self._refreshed_at: float = 0.0
 
     # ------------------------------------------------------------------
@@ -175,6 +176,8 @@ class RedisEngineFacade:
             self._dark_promotion = _store.decode(dp_raw)
             pc_raw = await self._redis.client.get(_store.KEY_PAIR_CONTEXT)
             self._pair_context = _store.decode(pc_raw)
+            desk_raw = await self._redis.client.get(_store.KEY_DESK)
+            self._desk = _store.decode(desk_raw)
         except Exception:
             log.exception("redis_engine: failed to refresh state from Redis")
 
@@ -230,6 +233,12 @@ class RedisEngineFacade:
         (engine predating it, or the key expired) — never an empty map, which
         would read as "the engine tracks no pairs"."""
         return self._pair_context
+
+    def published_desk(self) -> Optional[dict]:
+        """The analyst desk the engine published, or None when absent (engine
+        predating it, or the key expired). None is "not reported", never an
+        empty desk, which would read as an analyst that has said nothing."""
+        return self._desk
 
     def published_data_intake(self) -> Optional[dict]:
         """The engine-computed data-intake X-ray published to Redis, or None.

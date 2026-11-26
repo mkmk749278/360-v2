@@ -176,6 +176,7 @@ def _build_registry() -> Dict[str, Tunable]:
         DERIV_RECORDER_ENABLED,
         STALE_TF_REFUSE_ENABLED,
         TRACK_RECORD_PUBLIC_ENABLED,
+        DESK_API_ENABLED,
         SIGNALS_PAYWALL_START,
         TUNED_VARIANTS_ENABLED,
         LOSS_STREAK_CAP_HOURS,
@@ -1741,6 +1742,21 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=TRACK_RECORD_PUBLIC_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="desk_api_enabled",
+            label="Desk in the app (analyst brief + setups)",
+            description=(
+                "Serve GET /api/desk, which the Lumin 2.0 Desk and Setups tabs "
+                "render: the hourly analyst's latest brief, the engine's BTC "
+                "context and the analyst's setups with their forward-measured "
+                "outcomes (a dark walk, not fills). Display only: it changes no "
+                "score, dispatch, exit or order. OFF -> the endpoint answers "
+                "state='disabled' and the app hides the desk."
+            ),
+            type="bool",
+            default=DESK_API_ENABLED,
             category="Measurement",
         ),
         Tunable(

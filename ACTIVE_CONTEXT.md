@@ -22,6 +22,26 @@ naming a cause or promising a resume. **Blocked here only because the session
 container has no Flutter SDK** to run `flutter test`; any session with one can
 ship it.
 
+## 2026-11-26 — Lumin 2.0 Phase 1a: the Desk read model
+
+Owner direction (2026-11-26): no subscribers yet, so Lumin 2.0 is built in
+place on `lumin-app` main under the same package id and tested through Play's
+internal track; engine signal paths stay the signal source and the hourly
+analyst becomes the app's Desk layer. Plan of record:
+`lumin-app/docs/LUMIN_2_PLAN.md`.
+- **`src/desk.py`** builds the brief (latest plan's bias + notes, freshness
+  `current` ≤ 2h / `stale` / `none`, BTC context + breadth, macro `unknown`),
+  the plan log (24), the accepted setups (200, walk state) and the
+  forward-measured record (`basis: forward_walk`, analyst + market arms,
+  split, calibration). Labels for archetype / bias / state come from here.
+- **Published** as `snapshot:desk` every 60s (TTL 300s); `GET /api/desk` and
+  `GET /api/desk/setups/{id}` for signed-in callers, states `ok` /
+  `not_reported` / `disabled` (+ `not_in_window` per setup). No Firestore read.
+- **Kill switch** `desk_api_enabled` (default ON — display only).
+  `read.desk` on the diag catalog shows ops exactly what the app reads.
+- Also fixed in lumin-app #177: every APK build since 2026-11-20 was red
+  (`jni_flutter` / `shared_preferences_android` overrides).
+
 ## 2026-11-25 — analyst upgrade, verified before building
 
 Owner uploaded two outside documents (a v2 prompt + gates, and a "senior desk"

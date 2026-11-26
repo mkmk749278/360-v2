@@ -2576,6 +2576,62 @@ def build_app(
         )
         return PnlHistoryResponse(**payload)
 
+    def _desk_payload() -> tuple[str, Optional[dict]]:
+        """(state, payload): ``disabled`` / ``not_reported`` / ``ok``."""
+        from src import runtime_tunables as _rt
+
+        try:
+            enabled = bool(_rt.get("desk_api_enabled"))
+        except Exception:  # noqa: BLE001 — a tunable read must never 500 a page
+            enabled = True
+        if not enabled:
+            return "disabled", None
+        published = getattr(engine, "published_desk", None)
+        if callable(published):
+            snap = published()
+        else:
+            # Single-process: the analyst ledger and candle stores are here.
+            try:
+                from src import desk as _desk
+                snap = _desk.build(engine)
+            except Exception:  # noqa: BLE001
+                log.exception("desk: local build failed")
+                snap = None
+        return ("ok" if isinstance(snap, dict) else "not_reported"), snap
+
+    @app.get("/api/desk", tags=["desk"], dependencies=[Depends(auth)])
+    async def desk_get(response: Response) -> Dict[str, Any]:
+        """The Desk: the analyst's latest brief, the plan log, its setups and
+        their forward-measured record, as the engine published it.
+
+        Three states, never two: ``ok``, ``not_reported`` (the engine has not
+        published one: an older engine or an expired key — never an empty
+        desk) and ``disabled`` (the owner switched it off). The same payload
+        for every caller, served from one Redis key; no Firestore read.
+        """
+        state, snap = _desk_payload()
+        response.headers["Cache-Control"] = "private, max-age=30"
+        return {"state": state, "desk": snap}
+
+    @app.get("/api/desk/setups/{setup_id}", tags=["desk"], dependencies=[Depends(auth)])
+    async def desk_setup_get(setup_id: str) -> Dict[str, Any]:
+        """One analyst setup plus the record it is read against.
+
+        ``not_in_window`` when the setup is older than the published window;
+        the app says so instead of a blank dossier.
+        """
+        from src import desk as _desk
+
+        if len(setup_id) > 80:
+            raise HTTPException(status_code=400, detail="bad_setup_id")
+        state, snap = _desk_payload()
+        if state != "ok":
+            return {"state": state, "setup": None, "record": None, "labels": None}
+        row = _desk.setup(snap, setup_id)
+        return {"state": "ok" if row else "not_in_window", "setup": row,
+                "record": snap.get("record"), "labels": snap.get("labels"),
+                "generated_at": snap.get("generated_at")}
+
     @app.get(
         "/api/track-record",
         response_model=TrackRecordResponse,

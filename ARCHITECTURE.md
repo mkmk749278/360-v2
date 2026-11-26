@@ -496,6 +496,23 @@ adoption decision needs. Ops surface: `/signals/sar-live`.
 4. **Wait for a fresh window** after any scoring or cost change — rolling per-cell
    windows keep serving pre-change data.
 
+### 4.5b The hourly AI analyst and the Desk (dark measurement, 2026-11-19 →)
+
+A scheduled Claude session runs at :35 each hour, reads the market over ops'
+`/mcp` tools, and submits a **plan** (`bias`, `notes`, up to 5 setups) to
+`src/analyst_plan.py`. The validator refuses unscoreable setups by name; every
+setup, accepted or rejected, lands in `data/analyst_plans_v1.sqlite`.
+`src/analyst_walk.py` walks each accepted setup forward on real bars in three
+arms (`analyst` limit, `market`, `fixed_rule`), net of a 0.07% round trip.
+**Nothing places an order:** these are measurements, not fills.
+
+`src/desk.py` turns that ledger plus `analyst_snapshot.market_context` into the
+payload the Lumin 2.0 app reads (`GET /api/desk`, published as
+`snapshot:desk` every 60s; `read.desk` on the diag catalog shows the same
+thing to ops). Owner, 2026-11-26: **engine paths stay the signal source; the
+analyst is the Desk layer**, and its setups are labelled forward-measured
+until a pre-agreed test on ~100 filled setups says otherwise.
+
 ### 4.6 Control and observation — `360ce-ops`
 
 | Surface | Route | Reads |
@@ -571,6 +588,10 @@ main.dart → Firebase.init → NotificationService → AppConfig.load
   straight from Binance public REST — no key, no engine load.
 - **Render engine state; never derive it.** A card showing "armed" while dispatch
   silently skips is a bug class this repo has already paid for.
+- **Lumin 2.0 (2026-11-26 →, `docs/LUMIN_2_PLAN.md` in lumin-app)** replaces the
+  tabs with Desk · Setups · Markets · Execution · Account, built in place under
+  the same package id (there are no subscribers yet). The Desk reads
+  `GET /api/desk` (§4.5b).
 
 ---
 
