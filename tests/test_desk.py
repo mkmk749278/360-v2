@@ -169,3 +169,33 @@ def test_route_needs_a_signed_in_caller(tmp_path, monkeypatch):
     from src.api.server import build_app
     app = build_app(_Facade({}), jwt_secret=_SECRET, allow_static=False)
     assert TestClient(app).get("/api/desk").status_code in (401, 403)
+
+
+def _keys(obj, prefix=""):
+    """Every dict key path in obj (lists contribute their first element)."""
+    out = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{prefix}.{k}" if prefix else k
+            out.add(p)
+            out |= _keys(v, p)
+    elif isinstance(obj, list) and obj and isinstance(obj[0], (dict, list)):
+        out |= _keys(obj[0], prefix + "[]")
+    return out
+
+
+def test_payload_matches_the_app_contract_fixture(tmp_path, monkeypatch):
+    """lumin-app reads tests/fixtures/desk_app_contract.json (a byte-identical
+    copy at test/data/fixtures/desk_engine_schema1.json there). A key renamed
+    or dropped here fails this test instead of quietly emptying the app's Desk.
+    Additive keys are fine; regenerate both copies when DESK_SCHEMA bumps."""
+    import pathlib
+    from src import analyst_walk as W
+    _ledger(tmp_path, monkeypatch)
+    eng = _engine()
+    W.step(eng, now=NOW)
+    live = {"state": "ok", "desk": D.build(eng, now=NOW)}
+    pinned = json.loads(pathlib.Path("tests/fixtures/desk_app_contract.json").read_text())
+    assert pinned["desk"]["schema"] == D.DESK_SCHEMA
+    missing = _keys(pinned) - _keys(live)
+    assert not missing, f"keys the app reads are gone: {sorted(missing)}"
