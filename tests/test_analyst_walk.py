@@ -111,7 +111,9 @@ def test_step_and_summary_over_the_real_ledger(tmp_path, monkeypatch):
     assert out["result"]["arms_not_built"] == ["existing_signals"]
     assert by["fixed_rule"]["insufficient"] == 1  # a row with no stamped menu
     # Resolved on every arm → not walked again.
-    assert W.step(eng, now=NOW)["setups"] == 0 or by["market"]["open"]
+    # Settled on every arm → not walked again. Here the ladder's runner (no TP2
+    # in this fixture) is still riding to the horizon, so the setup is owed one.
+    assert W.step(eng, now=NOW)["setups"] == 0 or by["market"]["open"] or by["ladder"]["open"]
 
 
 def test_cadence_probe(tmp_path):
@@ -160,7 +162,7 @@ def test_fixed_rule_arm_scores_zero_when_no_setup_and_flags_why():
     s.update(menu_json=json.dumps([m for m in MENU if m["id"] != "c"]),
              price_at_submit=100.0, atr_1h=1.0)
     r = W.walk_setup(s, _bucket([(100, 100.5, 99.5, 100)]), NOW)["fixed_rule"]
-    assert r == {"status": "resolved", "gross_pct": 0.0, "net_pct": 0.0,
+    assert r == {"status": "resolved", "gross_pct": 0.0, "net_pct": 0.0, "fees_pct": 0.0,
                  "exit_reason": "no_rule_setup", "reason": "no_stop_level"}
 
 
