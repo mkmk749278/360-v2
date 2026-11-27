@@ -69,3 +69,66 @@ still exist (the 5m buffer is ~83h). Older ones are marked
 `insufficient / blend_defect_history_rolled_off` and leave the average. The
 Desk (`GET /api/desk`, Lumin 2.0) carries the realized figure under the same
 keys; the app parses it but does not render it yet.
+
+## Analyst vs the existing system (owner question, same day)
+
+Read from the public track record (`GET /api/track-record/signals`, every
+delivered signal, recorded not reconstructed) and the walk's live v2 numbers.
+Net of the same flat 0.07% on both sides. Day-clustered 95% intervals from
+4,000 resamples of days.
+
+| Same days (11-20..26) | n | avg net / trade | 95% interval |
+|---|---|---|---|
+| **Existing system** | 404 | **+0.17%** | −0.11 … +0.49 |
+| Analyst (limit at first entry) | 225 | −0.12% | −0.48 … +0.67 |
+| Analyst's picks, entered at market | 229 | +0.09% | −0.23 … +1.03 |
+
+Split at the prompt change:
+
+| | v1 prompt, 11-20..24 | v2 prompt, 11-25..26 |
+|---|---|---|
+| Existing system | +0.26% (269) | −0.03% (135) |
+| Analyst, limit | +0.48% (76) | −0.43% (149) |
+| Analyst's picks at market | **+0.81%** (76) | −0.27% (153) |
+
+- **The existing system is ahead per trade, but seven days cannot settle it.**
+  The intervals overlap almost entirely. The existing system also has 90 days
+  of record (3,976 signals, +0.075% net); the analyst has one week.
+- **The analyst's limit entries cost it money in both periods,** against its
+  own picks entered at market. Its v1 picks at market beat the existing system
+  by about 0.55 points per trade on the same days. That is a hypothesis about
+  selection, n = 76 over five days of one regime, not a finding.
+- **The v2 prompt (no limits, up to 5 setups a plan) went from ~16 to ~75
+  setups a day,** and those two days carry the analyst's loss. They were also
+  the days the market fell. The prompt split on `/analyst` is what separates
+  the two causes going forward.
+
+### The existing system's own best and worst cells (30 days, 1,494 signals)
+
+The whole book: +0.070% net per signal, −0.027% without the top 1%, interval
+−0.08 … +0.23. Thin, and carried by its tail. By setup and side, the only
+cell whose interval excludes zero with real n:
+
+- **`QUIET_COMPRESSION_BREAK` SHORT** — 159 signals, 35% win, **+0.40%** net,
+  interval **+0.10 … +0.69**, positive 19 of 31 days. Falsification checks
+  passed:
+  - positive in 4 of 5 weeks (the week of 11-02 was −0.09%);
+  - positive in both regimes it traded (QUIET +0.24%, RANGING +0.88%);
+  - spread over 49 symbols;
+  - still +0.12% after dropping its 10 best trades.
+
+  It earns by shape, not by win rate: TP1 +2.44%, stop −1.27%, 46 break-even
+  scratches at −0.07%.
+- The same setup **LONG** is −0.23% (94).
+- `LIQUIDITY_SWEEP_REVERSAL` LONG is −2.14% (12, interval to +0.15).
+- `MOVER_TREND_PULLBACK` LONG, 56% of all volume, is about 0 once the top 1% is
+  removed (+0.10% with it).
+
+Sixteen setup×side cells were tested. With that many tries, one clean
+winner is expected by chance about half the time. The QCB SHORT result is the
+strongest evidence in the system, not a proven edge. **Win rate is not the
+measure:** `DIVERGENCE_CONTINUATION` wins 42% and loses money, while QCB SHORT
+wins 35% and makes it.
+
+Routing any of these (diverting the losing cells, keeping QCB SHORT) is a
+`/control/routing` decision and an owner sign-off. Nothing here changes it.

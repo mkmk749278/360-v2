@@ -327,3 +327,54 @@ def test_cost_model_is_paired_with_the_flat_fee_on_the_same_rows():
     # Only the miss is priceable (0.00%); the filled row's funding is unknown.
     assert c["n"] == 1 and c["unknown"] == 1 and c["known_filled"] == 0
     assert c["flat_fee_same_rows_avg_pct"] == 0.0
+
+
+# ── the comparison: the existing system over the analyst's window ──────────
+
+
+def _record(tmp_path, rows):
+    from src import track_record
+    track_record.reset_cache()
+    p = tmp_path / "signal_performance.json"
+    p.write_text(json.dumps([
+        {"signal_id": f"s{i}", "symbol": "BTCUSDT", "direction": d, "setup_class": setup,
+         "outcome_label": "TP1_HIT", "pnl_pct": pnl, "terminal_outcome_timestamp": ts}
+        for i, (setup, d, pnl, ts) in enumerate(rows)]))
+    return str(p)
+
+
+def test_existing_signals_are_the_same_window_net_of_the_same_fee(tmp_path):
+    rec = _record(tmp_path, [
+        ("QCB", "SHORT", 1.07, T0 + 3600),        # inside → +1.00 net
+        ("QCB", "SHORT", -0.93, T0 + 7200),       # inside → -1.00 net
+        ("MVRTP", "LONG", 5.0, T0 - 3600),         # closed before the window
+        ("MVRTP", "LONG", None, T0 + 3600),        # no pnl: counted, not scored
+    ])
+    out = W.existing_signals(T0, T0 + 86400, record_path=rec)
+    assert out["readable"] and out["n"] == 2 and out["no_pnl"] == 1
+    assert abs(out["avg_net_pct"]) < 1e-9 and out["win_rate"] == 0.5
+    assert out["by_setup_side"][0]["key"] == "QCB SHORT"
+    assert out["by_day"]["n_days"] == 1
+
+
+def test_existing_signals_states_why_it_cannot_answer(tmp_path):
+    assert W.existing_signals(None, T0)["reason"] == "no_analyst_setup_yet"
+    from src import track_record
+    track_record.reset_cache()
+    out = W.existing_signals(T0, T0 + 1, record_path=str(tmp_path / "absent.json"))
+    assert out == {"readable": False, "reason": "missing"}
+
+
+def test_summary_slices_by_prompt_version_and_archetype(tmp_path, monkeypatch):
+    _ledger(tmp_path, monkeypatch, [{"archetype": "trend_pullback"}])
+    con = P.get_ledger()._connect()
+    with con:
+        con.execute("UPDATE plans SET prompt_version='v2.5-2026-11-27'")
+    con.close()
+    bars = [(100, 100.5, 99.5, 100), (100, 100, 98.8, 99.2), (99.5, 103.5, 99.4, 103)]
+    W.step(type("E", (), {"data_store": _store(bars)})(), now=NOW, deriv_path="")
+    rec = _record(tmp_path, [("QCB", "SHORT", 1.07, T0 + 3600)])
+    out = W.summary(now=NOW, record_path=rec)
+    assert out["by_prompt_version"]["analyst"]["v2.5-2026-11-27"]["n"] == 1
+    assert out["analyst_by_archetype_side"]["trend_pullback long"]["n"] == 1
+    assert out["existing_signals"]["n"] == 1
