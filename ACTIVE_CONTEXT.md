@@ -22,6 +22,24 @@ naming a cause or promising a resume. **Blocked here only because the session
 container has no Flutter SDK** to run `flutter test`; any session with one can
 ship it.
 
+## 2026-11-27 — analyst vs the existing system (standing comparison)
+
+Owner: *"which is actually better, analyst or existing paths system."*
+`read.analyst_outcomes` now carries `existing_signals`: the delivered closed
+signals in the analyst's window, from the recorded track record, net of the
+same 0.07%. It also carries `by_prompt_version` and `analyst_by_archetype_side`.
+`/analyst` leads with the comparison card. Findings, verified on live data,
+are in `docs/ANALYST_REFINEMENT_2026_11_27.md`:
+- Same 7 days: existing +0.17%/signal (404) vs analyst −0.12%/setup (225).
+  The day-clustered intervals overlap; not settled.
+- The analyst's limit entries cost it money against its own picks at market in
+  both prompt periods. v1 picks at market were +0.81% (n 76), a selection
+  hypothesis, not a finding.
+- Existing 30d: +0.07% net, about 0 without the top 1%. Only
+  `QUIET_COMPRESSION_BREAK` SHORT has an interval excluding zero (159 signals,
+  +0.40%, +0.10…+0.69). Any routing change is the owner's call on `/control/routing`.
+- Prompt v2.5 applied to the hourly task 07:42 UTC; first run 08:35.
+
 ## 2026-11-27 — analyst walk v2: measurement integrity
 
 Owner uploaded an outside blueprint and asked for analyst refinement. Every

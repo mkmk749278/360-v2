@@ -108,7 +108,7 @@ def test_step_and_summary_over_the_real_ledger(tmp_path, monkeypatch):
     assert out["ok"], out
     by = out["result"]["by_arm"]
     assert by["analyst"]["n"] == 1 and by["none"]["avg_net_pct"] == 0.0
-    assert out["result"]["arms_not_built"] == ["existing_signals"]
+    assert out["result"]["arms_not_built"] == []  # existing_signals: a window comparison now
     assert by["fixed_rule"]["insufficient"] == 1  # a row with no stamped menu
     # Resolved on every arm → not walked again.
     # Settled on every arm → not walked again. Here the ladder's runner (no TP2

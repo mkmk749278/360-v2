@@ -117,7 +117,9 @@ LIMIT_ARMS = ("analyst", "tranche", "ladder", "fixed_rule")
 #: Exit reasons that mean no trade was taken: zero fees, zero funding.
 NO_TRADE_EXITS = ("no_trade", "no_valid_trade", "no_rule_setup")
 #: Arms named by the spec and deliberately not built in this module yet.
-ARMS_NOT_BUILT = ("existing_signals",)
+#: ``existing_signals`` is built (2026-11-27) as a WINDOW comparison, not a
+#: per-setup arm: see :func:`existing_signals`.
+ARMS_NOT_BUILT: Tuple[str, ...] = ()
 
 # The fixed rule (spec §1: "if a fixed rule on the same level menu matches the
 # analyst net of fees, the model added nothing"). Fixed before any data, and
@@ -1015,7 +1017,81 @@ def _whatif(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+# ── the comparison the spec asked for: the existing system, same window ─────
+
+
+def existing_signals(since: Optional[float], now: float,
+                     record_path: Optional[str] = None) -> Dict[str, Any]:
+    """The engine's DELIVERED signals that closed inside the analyst's window.
+
+    Read from the closed-signal record that ``/track-record`` and the app's
+    Pulse read (``track_record.load_rows``: recorded by ``trade_monitor``,
+    never reconstructed). Each row is its blended ``pnl_pct`` minus the same
+    flat 0.07% the analyst arms are charged, so the two are net on one basis.
+
+    Not a per-setup arm: the existing system trades its own symbols at its own
+    times. What is comparable is the same calendar window, per trade and per
+    day. Its rows are bucketed by CLOSE day and the analyst's by SUBMIT day;
+    the analyst's hold is at most expiry + 12h, so the two calendars differ by
+    under a day, and the note says so rather than pretending they align.
+    """
+    from src import track_record
+
+    if since is None:
+        return {"readable": False, "reason": "no_analyst_setup_yet"}
+    rows, err = track_record.load_rows(record_path)
+    if err:
+        return {"readable": False, "reason": err}
+    win, unreadable = [], 0
+    for r in rows:
+        ts = r.get("closed_at_ts")
+        if ts is None or not since <= float(ts) <= now:
+            continue
+        try:
+            win.append((r, float(r["pnl_pct"]) - ROUND_TRIP_PCT))
+        except (TypeError, ValueError, KeyError):
+            unreadable += 1  # counted, never scored zero
+    groups: Dict[str, List[float]] = {}
+    for r, v in win:
+        groups.setdefault(f"{r.get('setup')} {r.get('direction')}", []).append(v)
+    return {
+        "readable": True, "since": since,
+        "basis": "delivered closed signals in the analyst's window; pnl_pct minus 0.07%",
+        **_arm_summary([v for _, v in win]),
+        "no_pnl": unreadable,
+        "by_day": _by_day([(_day(r.get("closed_at_ts")), v) for r, v in win]),
+        "by_setup_side": sorted(
+            ({"key": k, **_arm_summary(v)} for k, v in groups.items()),
+            key=lambda g: -(g.get("total_net_pct") or 0.0)),
+        "note": ("Recorded, not reconstructed: the signals users actually received. "
+                 "Bucketed by close day; the analyst by submit day."),
+    }
+
+
+def _slices(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The analyst and market arms by prompt version, and the analyst arm by
+    archetype and side. A prompt change is judged on its own rows; pooling
+    versions makes every new prompt look like the old one."""
+    def by(arm: str, key) -> Dict[str, Any]:
+        g: Dict[str, List[float]] = {}
+        for r in rows:
+            if r["arm"] != arm or r["status"] != "resolved" or blend_defect(r):
+                continue
+            v = realized_pct(r)
+            if v is not None:
+                g.setdefault(key(r), []).append(v)
+        return {k: _arm_summary(v) for k, v in sorted(g.items())}
+
+    pv = lambda r: r.get("s_prompt") or "unstamped (v1)"  # noqa: E731
+    return {
+        "by_prompt_version": {arm: by(arm, pv) for arm in ("analyst", "market", "tranche")},
+        "analyst_by_archetype_side": by(
+            "analyst", lambda r: f"{r.get('s_archetype') or '?'} {r.get('s_side') or '?'}"),
+    }
+
+
+def summary(path: Optional[str] = None, now: Optional[float] = None,
+            record_path: Optional[str] = None) -> Dict[str, Any]:
     """What ``read.analyst_outcomes`` returns. Per arm, never pooled."""
     import os
 
@@ -1027,9 +1103,15 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
         return {"readable": False, "reason": "no_ledger_yet"}
     con = _connect(path)
     try:
+        pcols = {r[1] for r in con.execute("PRAGMA table_info(plans)")}
+        pver = "p.prompt_version" if "prompt_version" in pcols else "NULL"
         rows = [dict(r) for r in con.execute(
-            "SELECT w.*, s.submitted_at AS s_submitted_at, s.entries_json AS s_entries "
-            "FROM walks w LEFT JOIN setups s ON s.setup_id = w.setup_id")]
+            "SELECT w.*, s.submitted_at AS s_submitted_at, s.entries_json AS s_entries, "
+            f"s.archetype AS s_archetype, s.side AS s_side, {pver} AS s_prompt "
+            "FROM walks w LEFT JOIN setups s ON s.setup_id = w.setup_id "
+            "LEFT JOIN plans p ON p.plan_id = s.plan_id")]
+        first = con.execute("SELECT MIN(submitted_at) FROM setups "
+                            "WHERE status='accepted'").fetchone()[0]
     finally:
         con.close()
     by_arm = {arm: _arm_block(arm, [r for r in rows if r["arm"] == arm]) for arm in ARMS}
@@ -1040,6 +1122,8 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
             "walk_version": WALK_VERSION,
             "analyst_split": _split(analyst_rows),
             "analyst_whatif": _whatif(analyst_rows),
+            "existing_signals": existing_signals(first, now, record_path),
+            **_slices(rows),
             "calibration": _calibration(path),
             "active_book": book(frows, now),
             "recent_closed": recent_closed(frows),
