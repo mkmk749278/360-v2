@@ -22,6 +22,31 @@ naming a cause or promising a resume. **Blocked here only because the session
 container has no Flutter SDK** to run `flutter test`; any session with one can
 ship it.
 
+## 2026-11-27 — analyst walk v2: measurement integrity
+
+Owner uploaded an outside blueprint and asked for analyst refinement. Every
+claim was checked against the live ledger first. Verdicts are in
+`docs/ANALYST_REFINEMENT_2026_11_27.md`.
+- **The analyst headline was inflated by its own scoring.** Unfilled limits
+  were scored at the market outcome (+1.42%, n 86, a population selected for
+  price running away), so the arm read +0.42% while its 139 fills lost −0.20%.
+  The headline is now **realized per setup posted** (unfilled = 0.00%):
+  about −0.12% on the 2026-11-27 ledger. The old figure is kept as
+  `with_unfilled_at_market`, and the misses alone as `missed_market`.
+- **The market arm is about break-even** (+0.098%, +0.041% without the top 1%), so the
+  blueprint's "go immediate" premise (a mislabelled +0.42%) is not adopted.
+- **Tranche blend defect fixed:** each leg is walked from its own fill, and a
+  leg filling after the exit is cancelled. v1 two-leg rows are re-walked or
+  marked `blend_defect_history_rolled_off`.
+- **Costs by order type + recorded funding** beside the flat 0.07%, paired with
+  the flat figure on the same rows. Funding is charged at each symbol's own
+  settlement times. Unknown is never 0.
+- **New:** `ladder` arm (½ TP1, ½ TP2), `tp1_before_fill`, expiry/cancel
+  what-ifs, day-clustered `by_day`, optional `p_stop` + three-outcome Brier.
+- **Desk record** carries the realized figure under the same keys.
+- **Calibration is no better than the base rate** (Brier 0.2123 vs 0.2080).
+- Prompt v2.5 guidance is in the doc; apply it after deploy, on a fresh window.
+
 ## 2026-11-26 — Lumin 2.0 Phase 1a: the Desk read model
 
 Owner direction (2026-11-26): no subscribers yet, so Lumin 2.0 is built in

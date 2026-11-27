@@ -145,8 +145,13 @@ def _record(path: str, now: float) -> Dict[str, Any]:
     return {
         "readable": True,
         "basis": "forward_walk",
+        # Since walk v2 (2026-11-27) the analyst block is REALIZED per setup
+        # posted: a limit the market never reached earned 0.00%. Before, it
+        # scored unfilled limits at the market outcome — a population selected
+        # for price running away — and read +0.42% while filled setups lost.
         "basis_note": ("Measured forward on real prices, net of a 0.07% round trip. "
-                       "No order was placed: these are not fills."),
+                       "A limit that never filled counts as 0.00%. No order was placed: "
+                       "these are not fills."),
         "analyst": arms.get("analyst") or {"n": 0},
         "market": arms.get("market") or {"n": 0},
         "split": s.get("analyst_split") or {},

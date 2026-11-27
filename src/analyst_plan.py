@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS setups (
     menu_json     TEXT,
     scenario      TEXT,
     p_target      REAL,
+    p_stop        REAL,
     plan_mode     TEXT,
     pos_in_7d     REAL,
     entry_dist_atr REAL,
@@ -207,12 +208,26 @@ def _parse_setup(s: Any) -> Dict[str, Any]:
     if p_t is not None and (not isinstance(p_t, (int, float)) or isinstance(p_t, bool)
                             or not 0.0 < float(p_t) < 1.0):
         raise Reject("schema", "p_target must be a probability strictly between 0 and 1")
+    # The three-outcome forecast (2026-11-27). A filled setup ends at the
+    # target, the stop or the 12h time exit, so p_target alone cannot be scored
+    # against the stop. p_stop is optional (older prompts omit it) and
+    # p_neither is the remainder, so the three always sum to one.
+    p_s = s.get("p_stop")
+    if p_s is not None:
+        if (not isinstance(p_s, (int, float)) or isinstance(p_s, bool)
+                or not 0.0 < float(p_s) < 1.0):
+            raise Reject("schema", "p_stop must be a probability strictly between 0 and 1")
+        if p_t is None:
+            raise Reject("schema", "p_stop needs p_target beside it")
+        if float(p_t) + float(p_s) > 1.0 + 1e-9:
+            raise Reject("schema", "p_target + p_stop must not exceed 1 (p_neither is the rest)")
     return {"symbol": sym, "side": s["side"], "archetype": s["archetype"],
             "entry_ids": [str(x) for x in entries], "weights": [float(w) for w in weights],
             "stop_id": stop, "target_ids": [str(x) for x in targets],
             "expiry_hours": float(exp), "invalidation": _text(s.get("invalidation")),
             "scenario": _text(s.get("scenario")),
-            "p_target": float(p_t) if p_t is not None else None}
+            "p_target": float(p_t) if p_t is not None else None,
+            "p_stop": float(p_s) if p_s is not None else None}
 
 
 # ── validation against the live engine ────────────────────────────────────
@@ -231,7 +246,7 @@ def validate_setup(raw: Any, engine: Any, *, now: float,
         s = _parse_setup(raw)
         row.update(symbol=s["symbol"], side=s["side"], archetype=s["archetype"],
                    invalidation=s["invalidation"], scenario=s.get("scenario"),
-                   p_target=s.get("p_target"),
+                   p_target=s.get("p_target"), p_stop=s.get("p_stop"),
                    expires_at=now + s["expiry_hours"] * 3600.0)
         _check(s, engine, now, admission, row)
         row["status"] = "accepted"
@@ -318,6 +333,7 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
     else:
         stop = stop_level - STOP_BUFFER_ATR * atr if long else stop_level + STOP_BUFFER_ATR * atr
     row.update(scenario=s.get("scenario"), p_target=s.get("p_target"),
+               p_stop=s.get("p_stop"),
                plan_mode="prices" if s["entry_ids"][0].startswith("px:") else "level_ids")
     row.update(entries_json=json.dumps([{"id": i, "price": p, "weight": w} for i, p, w
                                         in zip(s["entry_ids"], entries, s["weights"])]),
@@ -398,7 +414,7 @@ class Ledger:
         # the column; its old rows read NULL ("no_menu_stamped"), never a guess.
         cols = {r[1] for r in con.execute("PRAGMA table_info(setups)")}
         for col, typ in (("menu_json", "TEXT"), ("scenario", "TEXT"),
-                         ("p_target", "REAL"), ("plan_mode", "TEXT"),
+                         ("p_target", "REAL"), ("p_stop", "REAL"), ("plan_mode", "TEXT"),
                          ("pos_in_7d", "REAL"), ("entry_dist_atr", "REAL"),
                          ("book_same_side", "INTEGER"), ("book_opposite_side", "INTEGER")):
             if col not in cols:
@@ -463,8 +479,8 @@ class Ledger:
                         "entries_json, stop_level_price, stop_price, targets_json, "
                         "stop_atr, tp1_pct, invalidation, expires_at, submitted_at, "
                         "menu_json, scenario, p_target, plan_mode, pos_in_7d, "
-                        "entry_dist_atr, book_same_side, book_opposite_side) VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "entry_dist_atr, book_same_side, book_opposite_side, p_stop) VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (f"{plan_id}:{r['idx']}", plan_id, r["idx"], r.get("symbol"),
                          r.get("side"), r.get("archetype"), r["status"], r.get("reason"),
                          r.get("detail"), r.get("price_at_submit"), r.get("atr_1h"),
@@ -474,7 +490,7 @@ class Ledger:
                          r["submitted_at"], r.get("menu_json"), r.get("scenario"),
                          r.get("p_target"), r.get("plan_mode"), r.get("pos_in_7d"),
                          r.get("entry_dist_atr"), r.get("book_same_side"),
-                         r.get("book_opposite_side")))
+                         r.get("book_opposite_side"), r.get("p_stop")))
         finally:
             con.close()
 
@@ -490,7 +506,7 @@ class Ledger:
                 p["setups"] = [dict(r) for r in con.execute(
                     "SELECT idx, symbol, side, archetype, status, reason, detail, "
                     "price_at_submit, stop_price, stop_atr, tp1_pct, entries_json, "
-                    "targets_json, expires_at, scenario, p_target, plan_mode, "
+                    "targets_json, expires_at, scenario, p_target, p_stop, plan_mode, "
                     "pos_in_7d, entry_dist_atr, book_same_side "
                     "FROM setups WHERE plan_id = ? ORDER BY idx",
                     (p["plan_id"],))]
