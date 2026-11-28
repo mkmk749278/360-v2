@@ -178,7 +178,9 @@ model for every taker fill at once, as its own change. The confirm vocabulary
 shipped as `close_beyond_zone` (a close on the trade's side of the zone, which
 covers both a rejection back out and a break through) and `rejection_wick`;
 `btc_not_beyond` is a cancel (`btc_beyond`) rather than a confirm, since both
-end the watch. `forecast_invalidated` waits for the Phase 3 forecast.
+end the watch. `forecast_invalidated` is not built as its own rule: a
+`btc_beyond` cancel at the forecast's own invalidation price says exactly the
+same thing, and the prompt asks for it.
 
 **Order-flow confirmation** (footprint delta in the zone) is **Phase 2b**. The
 dark walk evaluates on candles, and delta is live-only, so a delta condition
@@ -215,6 +217,14 @@ section above.
 - **The 11-26 anomaly:** fixed_rule +66.5% against market −26.6% on the same
   symbols and sides. Read row by row before anything here is judged; it is
   either a real clue (wider stops, wick fills) or a walk defect.
+
+*As built (2026-11-28):* everything above, in `src/analyst_judgement.py`.
+`size` is optional (older prompts read `unsized`, their own population). A
+bad `forecast` is named in `forecast_dropped` and never rejects the setups.
+The forecast's price at the horizon is the close of the last 5m bar ending at
+or before it; a missing bar is `insufficient`. The two stop flags are recorded
+by the walk from this change on, and rows walked before it read unknown.
+The 11-26 read waits for `plan_feed` (ops #252).
 
 ### Phase 4 — Exits
 

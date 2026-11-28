@@ -92,7 +92,10 @@ CREATE TABLE IF NOT EXISTS plans (
     macro        TEXT,
     plan_schema  INTEGER,
     raw_json     TEXT,
-    prompt_version TEXT
+    prompt_version TEXT,
+    forecast_json TEXT,
+    btc_at_submit REAL,
+    forecast_scored_json TEXT
 );
 CREATE TABLE IF NOT EXISTS setups (
     setup_id      TEXT PRIMARY KEY,
@@ -125,7 +128,8 @@ CREATE TABLE IF NOT EXISTS setups (
     book_same_side INTEGER,
     book_opposite_side INTEGER,
     entry_type    TEXT,
-    watch_json    TEXT
+    watch_json    TEXT,
+    size          REAL
 );
 CREATE INDEX IF NOT EXISTS setups_plan ON setups(plan_id);
 CREATE INDEX IF NOT EXISTS setups_time ON setups(submitted_at);
@@ -167,8 +171,12 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
     from src import analyst_pair_book
 
     pair_notes, notes_dropped = analyst_pair_book.parse_notes(raw.get("pair_notes"))
+    from src import analyst_judgement
+
+    forecast, forecast_dropped = analyst_judgement.parse_forecast(raw.get("forecast"))
     return {"bias": bias, "notes": _text(raw.get("notes")), "setups": setups,
             "pair_notes": pair_notes, "pair_notes_dropped": notes_dropped,
+            "forecast": forecast, "forecast_dropped": forecast_dropped,
             # Which prompt produced the plan, so a prompt change splits the
             # population instead of silently redefining it.
             "prompt_version": str(pv)[:40] if pv is not None else None}
@@ -260,7 +268,18 @@ def _parse_setup(s: Any) -> Dict[str, Any]:
             "scenario": _text(s.get("scenario")),
             "p_target": float(p_t) if p_t is not None else None,
             "p_stop": float(p_s) if p_s is not None else None,
-            "entry_type": entry_type, "watch": watch}
+            "entry_type": entry_type, "watch": watch, "size": _size(s.get("size"))}
+
+
+def _size(v: Any) -> Optional[float]:
+    """None = not stated (an older prompt). 0 = the desk would pass."""
+    from src.analyst_judgement import SIZES
+
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or float(v) not in SIZES:
+        raise Reject("schema", f"size must be one of {list(SIZES)}")
+    return float(v)
 
 
 def _num(v: Any, what: str) -> float:
@@ -331,7 +350,7 @@ def validate_setup(raw: Any, engine: Any, *, now: float,
     try:
         s = _parse_setup(raw)
         row.update(symbol=s["symbol"], side=s["side"], archetype=s["archetype"],
-                   entry_type=s["entry_type"],
+                   entry_type=s["entry_type"], size=s.get("size"),
                    watch_json=json.dumps(s["watch"]) if s.get("watch") else None,
                    invalidation=s["invalidation"], scenario=s.get("scenario"),
                    p_target=s.get("p_target"), p_stop=s.get("p_stop"),
@@ -521,12 +540,14 @@ class Ledger:
                          ("pos_in_7d", "REAL"), ("entry_dist_atr", "REAL"),
                          ("book_same_side", "INTEGER"), ("book_opposite_side", "INTEGER"),
                          ("reads_json", "TEXT"), ("profile_json", "TEXT"),
-                         ("entry_type", "TEXT"), ("watch_json", "TEXT")):
+                         ("entry_type", "TEXT"), ("watch_json", "TEXT"), ("size", "REAL")):
             if col not in cols:
                 con.execute(f"ALTER TABLE setups ADD COLUMN {col} {typ}")
         pcols = {r[1] for r in con.execute("PRAGMA table_info(plans)")}
-        if "prompt_version" not in pcols:
-            con.execute("ALTER TABLE plans ADD COLUMN prompt_version TEXT")
+        for col, typ in (("prompt_version", "TEXT"), ("forecast_json", "TEXT"),
+                         ("btc_at_submit", "REAL"), ("forecast_scored_json", "TEXT")):
+            if col not in pcols:
+                con.execute(f"ALTER TABLE plans ADD COLUMN {col} {typ}")
         from src import analyst_pair_book
 
         analyst_pair_book.ensure_schema(con)
@@ -576,12 +597,14 @@ class Ledger:
             with con:
                 con.execute(
                     "INSERT INTO plans (plan_id, submitted_at, source, bias, notes, "
-                    "n_setups, n_accepted, macro, plan_schema, raw_json, prompt_version) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "n_setups, n_accepted, macro, plan_schema, raw_json, prompt_version, "
+                    "forecast_json, btc_at_submit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (plan_id, now, source, plan["bias"], plan["notes"], len(rows),
                      sum(r["status"] == "accepted" for r in rows), "unknown",
                      PLAN_SCHEMA, json.dumps(raw, default=str)[:20000],
-                     plan.get("prompt_version")))
+                     plan.get("prompt_version"),
+                     json.dumps(plan["forecast"]) if plan.get("forecast") else None,
+                     plan.get("btc_at_submit")))
                 for r in rows:
                     con.execute(
                         "INSERT INTO setups (setup_id, plan_id, idx, symbol, side, "
@@ -590,8 +613,8 @@ class Ledger:
                         "stop_atr, tp1_pct, invalidation, expires_at, submitted_at, "
                         "menu_json, scenario, p_target, plan_mode, pos_in_7d, "
                         "entry_dist_atr, book_same_side, book_opposite_side, p_stop, "
-                        "reads_json, profile_json, entry_type, watch_json) VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "reads_json, profile_json, entry_type, watch_json, size) VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (f"{plan_id}:{r['idx']}", plan_id, r["idx"], r.get("symbol"),
                          r.get("side"), r.get("archetype"), r["status"], r.get("reason"),
                          r.get("detail"), r.get("price_at_submit"), r.get("atr_1h"),
@@ -603,7 +626,7 @@ class Ledger:
                          r.get("entry_dist_atr"), r.get("book_same_side"),
                          r.get("book_opposite_side"), r.get("p_stop"),
                          r.get("reads_json"), r.get("profile_json"),
-                         r.get("entry_type"), r.get("watch_json")))
+                         r.get("entry_type"), r.get("watch_json"), r.get("size")))
                 prices = {r.get("symbol"): r.get("price_at_submit") for r in rows
                           if r.get("symbol")}
                 analyst_pair_book.record_notes(con, plan_id, now,
@@ -624,7 +647,7 @@ class Ledger:
                     "SELECT idx, symbol, side, archetype, status, reason, detail, "
                     "price_at_submit, stop_price, stop_atr, tp1_pct, entries_json, "
                     "targets_json, expires_at, scenario, p_target, p_stop, plan_mode, "
-                    "pos_in_7d, entry_dist_atr, book_same_side, entry_type, watch_json "
+                    "pos_in_7d, entry_dist_atr, book_same_side, entry_type, watch_json, size "
                     "FROM setups WHERE plan_id = ? ORDER BY idx",
                     (p["plan_id"],))]
             totals = dict(con.execute(
@@ -686,6 +709,10 @@ def submit(raw: Any, engine: Any, *, source: str = "unknown",
         except Reject as rj:
             return {"accepted": False, "reason": rj.reason, "detail": rj.detail}
         _stamp_setups(result["setups"], engine, now)
+        if result["plan"].get("forecast"):
+            from src import analyst_judgement
+
+            result["plan"]["btc_at_submit"] = analyst_judgement.btc_last_price(engine)
         plan_id = f"p_{int(now)}_{uuid.uuid4().hex[:6]}"
         led.record(plan_id, now, _text(source)[:40], result, raw)
     rows = result["setups"]
@@ -699,5 +726,7 @@ def submit(raw: Any, engine: Any, *, source: str = "unknown",
         "open_book_after": result.get("open_book"),
         "pair_notes_stored": sorted((result["plan"].get("pair_notes") or {})),
         "pair_notes_dropped": result["plan"].get("pair_notes_dropped") or [],
+        "forecast_stored": sorted(result["plan"].get("forecast") or {}),
+        "forecast_dropped": result["plan"].get("forecast_dropped") or [],
         "note": "Recorded and measured dark. Nothing here reaches a subscriber or an order.",
     }
