@@ -52,20 +52,43 @@ def _scanner(engine: Any) -> Any:
 
 
 def liquidations(engine: Any, symbol: str) -> Dict[str, Any]:
+    """Liquidated notional per window, refusing windows the store cannot cover.
+
+    Two ways a window can be short of the truth, and neither reads as zero:
+    the store was created less than the window ago (a restart), or the
+    per-symbol ring is full and its oldest event is inside the window.
+    """
     flow = getattr(engine, "_order_flow_store", None)
     if flow is None:
         return {"readable": False, "reason": "no_order_flow_store"}
-    out: Dict[str, Any] = {"readable": True, "windows": {}}
+    now_m = time.monotonic()
+    created = getattr(flow, "created_monotonic", None)
+    history_s = (now_m - created) if created is not None else None
+    ring = getattr(flow, "_liqs", {}).get(symbol)
+    full_since = (ring[0].timestamp if ring is not None and ring.maxlen
+                  and len(ring) >= ring.maxlen else None)
+    out: Dict[str, Any] = {"readable": True, "windows": {},
+                           "history_seconds": _r(history_s, 0)}
     for name, secs in LIQ_WINDOWS.items():
-        longs = flow.get_recent_liq_volume_usd(symbol, secs, side="SELL")
-        shorts = flow.get_recent_liq_volume_usd(symbol, secs, side="BUY")
-        out["windows"][name] = {"longs_liquidated_usd": _r(longs),
-                                "shorts_liquidated_usd": _r(shorts)}
+        if history_s is None or history_s < secs:
+            out["windows"][name] = {
+                "longs_liquidated_usd": None, "shorts_liquidated_usd": None,
+                "reason": (f"only {int(history_s)}s recorded since the engine restarted"
+                           if history_s is not None else "store age unknown")}
+            continue
+        w = {"longs_liquidated_usd": _r(flow.get_recent_liq_volume_usd(symbol, secs,
+                                                                       side="SELL")),
+             "shorts_liquidated_usd": _r(flow.get_recent_liq_volume_usd(symbol, secs,
+                                                                        side="BUY"))}
+        if full_since is not None and full_since > now_m - secs:
+            w["lower_bound"] = True
+        out["windows"][name] = w
     out["clusters_1h"] = flow.get_liquidation_clusters(symbol, window_seconds=3600,
                                                        max_clusters=3)
-    out["note"] = ("forceOrder events since the engine's last restart, at most 500 per "
-                   "pair. 'longs_liquidated' = forced sells. 0 means none recorded in "
-                   "the window, and the stream covers every universe pair.")
+    out["note"] = ("forceOrder events, every universe pair. 'longs_liquidated' = forced "
+                   "sells. A window longer than the engine has been up is null with a "
+                   "reason, not zero; lower_bound = the 500-event ring filled inside the "
+                   "window, so the true figure is larger.")
     return out
 
 
@@ -100,7 +123,10 @@ def footprint_ladder(symbol: str, last_price: Optional[float]) -> Dict[str, Any]
     return {
         "readable": True, "bars": len(bars),
         "from_ms": bars[0].bar_open, "to_ms": bars[-1].bar_open,
-        "delta_usd": {"last_15": _r(sum(delta[-15:])), "last_60": _r(sum(delta[-60:])),
+        # A window with fewer sealed bars than its name is null: 1 bar summed
+        # under "last_60" would read as an hour of flow.
+        "delta_usd": {"last_15": _r(sum(delta[-15:])) if len(delta) >= 15 else None,
+                      "last_60": _r(sum(delta[-60:])) if len(delta) >= 60 else None,
                       "all": _r(sum(delta))},
         "median_bar_volume_usd": _r(store.volume_baseline(symbol)),
         "ladder": ladder,

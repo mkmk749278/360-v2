@@ -273,6 +273,11 @@ class OrderFlowStore:
     """
 
     def __init__(self) -> None:
+        # When this store began recording (monotonic, the clock liquidation
+        # events carry). A reader asking "how much was liquidated in the last
+        # hour" needs it: right after a restart the answer is "we have only
+        # recorded N seconds", never zero.
+        self.created_monotonic: float = time.monotonic()
         self._oi: Dict[str, Deque[OISnapshot]] = {}
         self._liqs: Dict[str, Deque[LiquidationEvent]] = {}
         # Running CVD (in quote-currency units) per symbol – reset-free rolling sum

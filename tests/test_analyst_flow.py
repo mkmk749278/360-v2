@@ -23,6 +23,7 @@ def _engine(symbol="XYZUSDT", price=100.0):
                                     "close": price, "volume": 1,
                                     "open_time": int(time.time() * 1000) - 600_000})
     flow = OrderFlowStore()
+    flow.created_monotonic = time.monotonic() - 5 * 3600   # a store that has been up 5h
     return type("E", (), {"data_store": st, "_order_flow_store": flow})(), flow
 
 
@@ -55,6 +56,27 @@ def test_liquidations_split_longs_from_shorts():
     assert liq["clusters_1h"], "recent events cluster by price"
 
 
+def test_a_window_longer_than_the_engine_has_been_up_is_null_not_zero():
+    eng, flow = _engine()
+    flow.created_monotonic = time.monotonic() - 1800        # restarted 30 min ago
+    liq = diag_catalog.run("read.analyst_flow", eng, {"symbol": "XYZUSDT"})["result"]["liquidations"]
+    assert liq["windows"]["15m"]["longs_liquidated_usd"] == 0.0
+    for w in ("1h", "4h"):
+        assert liq["windows"][w]["longs_liquidated_usd"] is None
+        assert "since the engine restarted" in liq["windows"][w]["reason"]
+    assert 1790 <= liq["history_seconds"] <= 1810
+
+
+def test_a_full_ring_inside_the_window_is_a_lower_bound():
+    eng, flow = _engine()
+    now = time.monotonic()
+    for i in range(500):                                     # the ring holds 500
+        flow.add_liquidation(LiquidationEvent(now - 600 + i, "XYZUSDT", "SELL", 1.0, 100.0))
+    w = diag_catalog.run("read.analyst_flow", eng,
+                         {"symbol": "XYZUSDT"})["result"]["liquidations"]["windows"]
+    assert w["1h"]["lower_bound"] is True and w["15m"]["lower_bound"] is True
+
+
 def test_footprint_ladder_and_depth_from_the_real_stores():
     eng, _ = _engine()
     fp = footprint.get_store()
@@ -72,6 +94,7 @@ def test_footprint_ladder_and_depth_from_the_real_stores():
     f = r["footprint"]
     assert f["readable"] and f["bars"] == 3
     assert f["delta_usd"]["all"] == pytest.approx(3 * (1000.0 - 5000.0))
+    assert f["delta_usd"]["last_15"] is None, "3 bars must not be summed as 15 minutes"
     top = max(f["ladder"], key=lambda row: abs(row["delta_usd"]))
     assert top["sell_usd"] == pytest.approx(15000.0) and top["price_from"] <= 100.4 < top["price_to"]
     d = r["depth"]
