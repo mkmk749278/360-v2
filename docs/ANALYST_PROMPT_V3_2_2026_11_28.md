@@ -4,6 +4,11 @@
 "Hourly AI setup analyst" (`35 * * * *`). First run 15:35 UTC. The text
 between the two rules below is the task prompt verbatim.
 
+*Corrected 15:50 UTC (#1117):* the side budget reads `units_by_side`. The first
+run counted 38 unsized v2.5 setups as a unit each, found both sides full, and
+sized every idea 0. The intent is unchanged: the budget is the desk's sized
+book.
+
 > v3.1 (Gemini-merged) plus the tools from Phases 1–4 of
 > `docs/ANALYST_DESK_PLAN_2026_11_28.md`. Every field this prompt asks for is
 > accepted and scored by the engine as of 2026-11-28; nothing here is dropped
@@ -148,7 +153,7 @@ For each coin write the primary scenario and an alternative, each with a trigger
 
   Budgets:
   - active risk at most 2.5 units per plan;
-  - the same-side open book plus this plan at most 5.0 units, each setup weighted by its `pair_profile` 1h beta;
+  - `plan_outcomes.active_book.units_by_side` for a side plus this plan at most 5.0 units, each setup weighted by its `pair_profile` 1h beta. Unsized setups from before v3.2 (`unsized_by_side`) and passes (`size: 0`) are history, not desk positions; they do not count;
   - once a side is full, further ideas on it are `size: 0`.
 - **Forecast per setup:** `p_target`, `p_stop` (p_neither = the 12h time exit), anchored to the base rates. Write the EV in the scenario.
 - **`pair_notes`:** for each coin you charted, ≤300 chars: your read, the levels that matter, what you are waiting for. Next hour you will read them back.
