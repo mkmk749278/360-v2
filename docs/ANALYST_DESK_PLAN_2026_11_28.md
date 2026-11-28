@@ -238,6 +238,12 @@ case for Phase 4.
   plan's own `btc_4h.invalidation`.
 - Both are on the same fills as `analyst` and `ladder`, and none is blended.
 
+*As built (2026-11-28):* both arms, on the analyst's own fill for every entry
+type. The trail uses 1h swings confirmed by two closed 1h bars each side; the
+forecast exit applies only to setups trading with the plan's 4h forecast. Old
+setups gain a `runner_24h` row on the next step (`insufficient` where their
+bars have rolled off).
+
 ### Phase 5 — Prompt v3.2 and the judging window
 
 - **v3.2** = v3.1 (Gemini-merged) plus the Phase 1–4 tools:

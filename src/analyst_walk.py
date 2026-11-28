@@ -98,6 +98,22 @@ Entry types, Phase 2 (2026-11-28, ``docs/ANALYST_DESK_PLAN_2026_11_28.md``):
   exactly like the market arm. Charging it to the new entries alone would
   make them read worse than their controls for a reason that is not real.
 
+Exit arms, Phase 4 (2026-11-28), on the analyst's OWN fill whatever its entry:
+
+* ``runner_24h``: half closed at TP1 (the analyst's own exits), half kept with
+  the original stop and no break-even, raised to each 1h swing confirmed after
+  the fill (:func:`_swings_1h`: a swing needs two closed 1h bars on each side,
+  so nothing reads a future bar), out at that stop or after 24h. Built because
+  the 2026-11-26 read showed the analyst capping winners at a near TP1 while
+  a rule holding far targets made its result on the hold.
+* ``btc_invalidated_exit``: the analyst's own stop and target, plus an exit at
+  the bar's close once BTC closes beyond the plan's 4h forecast invalidation.
+  Walked only for setups trading WITH that forecast (a long under 'up', a
+  short under 'down'); the owed-arm count in SQL mirrors :func:`arms_for`
+  exactly, because a setup that reads as owing an arm it never gets is
+  re-selected forever and crowds new setups out of the bounded step.
+* With no fill, both mirror the analyst arm (unfilled, open or no trade).
+
 Measurement flag: ``ANALYST_WALK_ENABLED`` (default ON — no vendor, no
 Firestore; local candles and local SQLite files only).
 """
@@ -128,13 +144,22 @@ WALK_VERSION = 2
 LADDER_SPLIT = 0.5
 #: Expiry caps the what-if tests (hours). A fill later than the cap is dropped.
 WHATIF_EXPIRY_H = (2, 4)
-ARMS = ("analyst", "tranche", "ladder", "market", "fixed_rule", "none", "zone_limit")
+ARMS = ("analyst", "tranche", "ladder", "market", "fixed_rule", "none", "zone_limit",
+        "runner_24h", "btc_invalidated_exit")
 #: Arms that post a limit, so an unfilled row earns 0.00% when realized. A
 #: watch that never confirms is unfilled the same way.
-LIMIT_ARMS = ("analyst", "tranche", "ladder", "fixed_rule", "zone_limit")
+LIMIT_ARMS = ("analyst", "tranche", "ladder", "fixed_rule", "zone_limit", "runner_24h",
+              "btc_invalidated_exit")
 #: Arms walked only for a ``watch`` setup: the control a watch is judged
 #: against, a plain resting limit at the zone's near edge (Phase 2).
 WATCH_ONLY_ARMS = ("zone_limit",)
+#: Phase 4 exit arm walked only when the plan's 4h BTC forecast names an
+#: invalidation and the setup trades WITH that forecast.
+FORECAST_ONLY_ARMS = ("btc_invalidated_exit",)
+#: Runner arm: half at TP1, half trailed behind confirmed 1h swings, 24h cap.
+RUNNER_HORIZON_S = 24 * 3600.0
+RUNNER_SPLIT = 0.5
+SWING_BARS = 2          # a 1h swing needs this many lower highs / higher lows each side
 #: Exit reasons that mean no trade was taken: zero fees, zero funding.
 NO_TRADE_EXITS = ("no_trade", "no_valid_trade", "no_rule_setup")
 #: Arms named by the spec and deliberately not built in this module yet.
@@ -388,12 +413,125 @@ def fixed_rule_levels(menu: List[Dict[str, Any]], price: float, atr: float,
     return {"entry": entry, "stop": stop, "target": float(t["price"])}, ""
 
 
+def _aligned_forecast(setup: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The plan's 4h BTC forecast when it names an invalidation and the setup
+    trades with it (a long under 'up', a short under 'down'); else None."""
+    raw = setup.get("plan_forecast_json")
+    if not raw:
+        return None
+    try:
+        fc = (json.loads(raw) or {}).get("btc_4h") or {}
+    except ValueError:
+        return None
+    want = "up" if setup.get("side") == "long" else "down"
+    if fc.get("dir") != want or not fc.get("invalidation"):
+        return None
+    return fc
+
+
 def arms_for(setup: Dict[str, Any]) -> Tuple[str, ...]:
-    """The arms a setup is walked under: the watch-only control is skipped for
-    setups that are not watches, so it never reads as a zero row."""
-    if (setup.get("entry_type") or "pullback") == "watch":
-        return ARMS
-    return tuple(a for a in ARMS if a not in WATCH_ONLY_ARMS)
+    """The arms a setup is walked under. A conditional arm (the watch control,
+    the forecast exit) is skipped where it does not apply, so it never reads
+    as a zero row."""
+    skip = set()
+    if (setup.get("entry_type") or "pullback") != "watch":
+        skip |= set(WATCH_ONLY_ARMS)
+    if _aligned_forecast(setup) is None:
+        skip |= set(FORECAST_ONLY_ARMS)
+    return tuple(a for a in ARMS if a not in skip)
+
+
+def _swings_1h(bars: Dict[str, np.ndarray], long: bool) -> List[Tuple[float, float]]:
+    """Confirmed 1h swing lows (long) or highs (short): ``(confirmed_at, level)``.
+
+    Built from complete 1h buckets of the 5m bars. A swing at bucket k needs
+    ``SWING_BARS`` higher lows (lower highs) on each side, so it is confirmed
+    only when bucket k + SWING_BARS has closed: nothing reads a future bar.
+    """
+    t = bars["t"]
+    if len(t) == 0:
+        return []
+    hour = np.floor(t / 3600.0)
+    hours = []
+    for h in np.unique(hour):
+        idx = np.flatnonzero(hour == h)
+        if len(idx) < 12:
+            continue                      # a partial hour is not a 1h bar
+        hours.append((h * 3600.0 + 3600.0, float(bars["high"][idx].max()),
+                      float(bars["low"][idx].min())))
+    out = []
+    k0 = SWING_BARS
+    for k in range(k0, len(hours) - SWING_BARS):
+        lv = hours[k][2] if long else hours[k][1]
+        side = [hours[k + d][2] if long else hours[k + d][1]
+                for d in range(-SWING_BARS, SWING_BARS + 1) if d]
+        if (all(lv < x for x in side) if long else all(lv > x for x in side)):
+            out.append((hours[k + SWING_BARS][0], lv))
+    return out
+
+
+def _runner_leg(bars: Dict[str, np.ndarray], start: int, long: bool, entry: float,
+                stop: float, now: float, *, target_on_fill_bar: bool,
+                t0: float) -> Dict[str, Any]:
+    """The runner half: original stop, raised (never lowered) to each newly
+    confirmed 1h swing after the fill, exit at the stop or after 24h."""
+    swings = [sw for sw in _swings_1h(bars, long) if sw[0] > t0]
+    cur = stop
+    moved = False
+    mfe = mae = 0.0
+    k = 0
+    for j in range(start, len(bars["t"])):
+        tj = float(bars["t"][j])
+        while k < len(swings) and swings[k][0] <= tj:
+            lv = swings[k][1]
+            if (lv > cur) if long else (lv < cur):
+                cur, moved = lv, True
+            k += 1
+        hi, lo = float(bars["high"][j]), float(bars["low"][j])
+        mfe = max(mfe, ((hi - entry) if long else (entry - lo)) / entry * 100)
+        mae = max(mae, ((entry - lo) if long else (hi - entry)) / entry * 100)
+        if (lo <= cur) if long else (hi >= cur):
+            return {"status": "resolved", "exit": cur, "exit_at": tj,
+                    "exit_reason": "trail" if moved else "stop", "mfe": mfe, "mae": mae,
+                    "idx": j}
+        if tj + STEP_S - t0 >= RUNNER_HORIZON_S:
+            return {"status": "resolved", "exit": float(bars["close"][j]),
+                    "exit_at": tj + STEP_S, "exit_reason": "horizon", "mfe": mfe,
+                    "mae": mae, "idx": j}
+    return {"status": "open", "mfe": mfe, "mae": mae}
+
+
+def _btc_exit_walk(bars: Dict[str, np.ndarray], start: int, long: bool, entry: float,
+                   stop: float, target: float, now: float, btc: Dict[float, float],
+                   invalidation: float, *, target_on_fill_bar: bool,
+                   t0: float) -> Dict[str, Any]:
+    """The analyst's own exits, plus one: leave at the bar's close once BTC
+    closes beyond the plan's 4h invalidation (the forecast is wrong). A bar
+    with no BTC close is not an exit signal; the stop and target still apply."""
+    mfe = mae = 0.0
+    for j in range(start, len(bars["t"])):
+        tj = float(bars["t"][j])
+        hi, lo = float(bars["high"][j]), float(bars["low"][j])
+        mfe = max(mfe, ((hi - entry) if long else (entry - lo)) / entry * 100)
+        mae = max(mae, ((entry - lo) if long else (hi - entry)) / entry * 100)
+        if (lo <= stop) if long else (hi >= stop):
+            return {"status": "resolved", "exit": stop, "exit_at": tj, "exit_reason": "stop",
+                    "mfe": mfe, "mae": mae, "idx": j}
+        hit = (hi >= target) if long else (lo <= target)
+        if hit and (target_on_fill_bar or j != start):
+            return {"status": "resolved", "exit": target, "exit_at": tj,
+                    "exit_reason": "target", "mfe": mfe, "mae": mae, "idx": j}
+        b = btc.get(tj)
+        # Long under an 'up' forecast is wrong once BTC closes BELOW the level.
+        if b is not None and ((b < invalidation) if long else (b > invalidation)):
+            return {"status": "resolved", "exit": float(bars["close"][j]),
+                    "exit_at": tj + STEP_S, "exit_reason": "btc_invalidated",
+                    "mfe": mfe, "mae": mae, "idx": j}
+        if tj + STEP_S - t0 >= HOLD_HORIZON_S:
+            return {"status": "resolved", "exit": float(bars["close"][j]),
+                    "exit_at": tj + STEP_S, "exit_reason": "horizon", "mfe": mfe,
+                    "mae": mae, "idx": j}
+    return {"status": "open", "mfe": mfe, "mae": mae}
 
 
 def _btc_closes(btc_cd: Any) -> Dict[float, float]:
@@ -650,6 +788,39 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float,
         lad = unfilled(lad, target)
     out["ladder"] = lad
 
+    # ── Phase 4 exit arms, on the analyst's OWN fill ─────────────────────────
+    if entry_type == "pullback":
+        fill = (j, e1, FEE_MAKER_PCT, False) if j is not None else None
+    elif entered is not None:
+        fill = (entered[0], entered[1], entered[2], True)
+    else:
+        fill = None
+    have_btc = _btc_closes(btc_cd)
+    fc = _aligned_forecast(setup)
+    for arm in ("runner_24h", "btc_invalidated_exit"):
+        if arm == "btc_invalidated_exit" and fc is None:
+            continue
+        if fill is None or fill[0] >= len(bars["t"]):
+            # No fill (yet): the arm mirrors the analyst arm, which already
+            # says unfilled, open or no trade.
+            out[arm] = dict(out["analyst"])
+            continue
+        start, px, fee, on_fill = fill
+        t0 = float(bars["t"][start])
+        if arm == "runner_24h":
+            legs = [(RUNNER_SPLIT, px, _exit_walk(bars, start, long, px, stop, target, now,
+                                                  target_on_fill_bar=on_fill, t0=t0)),
+                    (1.0 - RUNNER_SPLIT, px, _runner_leg(bars, start, long, px, stop, now,
+                                                         target_on_fill_bar=on_fill, t0=t0))]
+            r = _combine(long, legs, fee)
+        else:
+            ex = _btc_exit_walk(bars, start, long, px, stop, target, now, have_btc,
+                                float(fc["invalidation"]), target_on_fill_bar=on_fill, t0=t0)
+            r = _score(long, px, ex, entry_fee=fee)
+        r.update(entry=px, entry_at=out["analyst"].get("entry_at", t0), filled_frac=1.0,
+                 unfilled=0)
+        out[arm] = r
+
     menu_raw = setup.get("menu_json")
     if not menu_raw:
         out["fixed_rule"] = {"status": "insufficient", "reason": "no_menu_stamped"}
@@ -850,6 +1021,19 @@ _NEEDS_REWALK = ("w.arm='tranche' AND w.walk_v IS NULL AND w.status='resolved' "
                  "AND json_array_length(s.entries_json) > 1")
 
 
+#: How many arms a setup is owed, in SQL, mirroring :func:`arms_for` exactly.
+#: It must be exact: a setup that settled every arm it is owed but reads as
+#: owing one would be re-selected every step, and with the LIMIT ordered
+#: oldest first, settled setups would crowd out every new one.
+_REQUIRED_ARMS_SQL = (
+    f"{len(ARMS) - len(WATCH_ONLY_ARMS) - len(FORECAST_ONLY_ARMS)}"
+    " + (CASE WHEN COALESCE(s.entry_type, 'pullback') = 'watch' THEN 1 ELSE 0 END)"
+    " + (CASE WHEN json_extract(p.forecast_json, '$.btc_4h.invalidation') IS NOT NULL"
+    " AND ((s.side = 'long' AND json_extract(p.forecast_json, '$.btc_4h.dir') = 'up')"
+    " OR (s.side = 'short' AND json_extract(p.forecast_json, '$.btc_4h.dir') = 'down'))"
+    " THEN 1 ELSE 0 END)")
+
+
 def step(engine: Any, *, now: Optional[float] = None, path: Optional[str] = None,
          max_setups: int = 200, deriv_path: Optional[str] = None) -> Dict[str, int]:
     """Advance every accepted setup that is still owed a verdict on any arm.
@@ -872,13 +1056,13 @@ def step(engine: Any, *, now: Optional[float] = None, path: Optional[str] = None
         counts["geometry_repaired"] = repair_geometry(con)
         counts["fees_backfilled"] = repair_fees(con)
         setups = [dict(r) for r in con.execute(
-            "SELECT s.* FROM setups s WHERE s.status='accepted' AND (("
+            "SELECT s.*, p.forecast_json AS plan_forecast_json FROM setups s "
+            "LEFT JOIN plans p ON p.plan_id = s.plan_id WHERE s.status='accepted' AND (("
             " SELECT COUNT(*) FROM walks w WHERE w.setup_id=s.setup_id"
             " AND w.status IN ('resolved','insufficient')) < "
-            " (CASE WHEN COALESCE(s.entry_type, 'pullback') = 'watch' THEN ? ELSE ? END) "
+            f" ({_REQUIRED_ARMS_SQL}) "
             f" OR EXISTS (SELECT 1 FROM walks w WHERE w.setup_id=s.setup_id AND {_NEEDS_REWALK})) "
-            "ORDER BY s.submitted_at LIMIT ?",
-            (len(ARMS), len(ARMS) - len(WATCH_ONLY_ARMS), int(max_setups)))]
+            "ORDER BY s.submitted_at LIMIT ?", (int(max_setups),))]
         store = getattr(engine, "data_store", None)
         buckets = getattr(store, "candles", None) or {}
         for s in setups:
