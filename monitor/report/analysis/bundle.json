@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-11-27T09:02:52.734173+00:00",
-  "generated_at_ts": 1795770172.7341733,
+  "generated_at": "2026-11-28T08:23:24.155884+00:00",
+  "generated_at_ts": 1795854204.155884,
   "lookback_hours": 24,
   "channel": "360_SCALP",
   "git_sha": "74a9d4d4c58e0dc18f3bfb4f9d7596c45295a51f",
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 16570,
-    "strategy_matrix_scored_cells": 6666,
+    "strategy_matrix_cells": 16668,
+    "strategy_matrix_scored_cells": 6714,
     "performance_setups": 16,
     "suppression_gates": 0
   },
@@ -25,15 +25,15 @@
       {
         "strategy": "MOVER_AVWAP_SCALP@SAREXIT",
         "context_key": "OFF_HOURS/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL",
-        "edge_r": 3.914411696114806,
-        "n": 24,
+        "edge_r": 3.657590126449452,
+        "n": 25,
         "verdict": "STRONG"
       },
       {
         "strategy": "TREND_PULLBACK_EMA@SAREXIT",
         "context_key": "ASIA/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
-        "edge_r": 3.4089388594154424,
-        "n": 34,
+        "edge_r": 3.2111668996087444,
+        "n": 35,
         "verdict": "STRONG"
       },
       {
@@ -67,13 +67,6 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "MOVER_TREND_PULLBACK@TUNED",
-        "context_key": "LONDON/QUIET/NORMAL/BTC_NEUTRAL",
-        "edge_r": -4.642552850399259,
-        "n": 50,
-        "verdict": "NEGATIVE"
-      },
-      {
         "strategy": "LIQUIDITY_SWEEP_REVERSAL",
         "context_key": "OFF_HOURS/DISTRIBUTION/EXPANDED/BTC_FALLING/MIDCAP",
         "edge_r": -1.8101314140336724,
@@ -92,6 +85,13 @@
         "context_key": "OFF_HOURS/VOLATILE_EXPANSION/NORMAL/BTC_RISING",
         "edge_r": -1.7781149945202226,
         "n": 15,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "RANGE_FADE",
+        "context_key": "LONDON/QUIET/COMPRESSED/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": -1.7772211717469186,
+        "n": 47,
         "verdict": "NEGATIVE"
       }
     ],
