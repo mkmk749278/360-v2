@@ -175,11 +175,12 @@ CREATE TABLE IF NOT EXISTS walks (
 #: reader treats as "not known", never as zero.
 _WALK_COLS = (("walk_v", "INTEGER"), ("tp1_before_fill", "INTEGER"),
               ("fees_pct", "REAL"), ("funding_pct", "REAL"), ("funding_reason", "TEXT"),
-              ("watch_state", "TEXT"))
+              ("watch_state", "TEXT"), ("stop_ambiguous", "INTEGER"),
+              ("target_after_stop", "INTEGER"))
 _ROW_COLS = ("setup_id", "arm", "status", "reason", "unfilled", "filled_frac", "entry",
              "entry_at", "exit", "exit_at", "exit_reason", "gross_pct", "net_pct",
              "mfe_pct", "mae_pct", "updated_at", "walk_v", "tp1_before_fill", "fees_pct",
-             "watch_state")
+             "watch_state", "stop_ambiguous", "target_after_stop")
 
 
 # ── pure walk ─────────────────────────────────────────────────────────────
@@ -226,8 +227,12 @@ def _exit_walk(bars: Dict[str, np.ndarray], start: int, long: bool, entry: float
         hit_tgt = target is not None and (hi >= target if long else lo <= target) and (
             target_on_fill_bar or j != start)
         if hit_stop:  # stop first on an ambiguous bar
+            touched_tgt = target is not None and (hi >= target if long else lo <= target)
             return {"status": "resolved", "exit": stop, "exit_at": float(bars["t"][j]),
-                    "exit_reason": "stop", "mfe": mfe, "mae": mae, "idx": j}
+                    "exit_reason": "stop", "mfe": mfe, "mae": mae, "idx": j,
+                    # Phase 3 stop diagnostics, recorded where they become true.
+                    "stop_ambiguous": int(bool(touched_tgt)),
+                    "target_after_stop": _target_after(bars, j, long, target, t0)}
         if hit_tgt:
             return {"status": "resolved", "exit": target, "exit_at": float(bars["t"][j]),
                     "exit_reason": "target", "mfe": mfe, "mae": mae, "idx": j}
@@ -236,6 +241,21 @@ def _exit_walk(bars: Dict[str, np.ndarray], start: int, long: bool, entry: float
                     "exit_at": float(bars["t"][j]) + STEP_S,
                     "exit_reason": "horizon", "mfe": mfe, "mae": mae, "idx": j}
     return {"status": "open", "mfe": mfe, "mae": mae}
+
+
+def _target_after(bars: Dict[str, np.ndarray], j: int, long: bool,
+                  target: Optional[float], t0: float) -> Optional[int]:
+    """After a stop at bar ``j``: was the target reached later inside the hold
+    window? None while the bars do not yet cover the window, so a row walked
+    early never reads as "no"."""
+    if target is None:
+        return None
+    for k in range(j + 1, len(bars["t"])):
+        if float(bars["t"][k]) - t0 >= HOLD_HORIZON_S:
+            return 0
+        if (float(bars["high"][k]) >= target) if long else (float(bars["low"][k]) <= target):
+            return 1
+    return None
 
 
 def market_geometry(long: bool, entry: float, stop: float, target: float) -> str:
@@ -296,7 +316,9 @@ def _score(long: bool, entry: float, ex: Dict[str, Any],
         g = _gross(long, entry, ex["exit"])
         out.update(exit=ex["exit"], exit_at=ex["exit_at"], exit_reason=ex["exit_reason"],
                    gross_pct=round(g, 4), net_pct=round(g - ROUND_TRIP_PCT, 4),
-                   fees_pct=round(entry_fee + exit_fee(ex["exit_reason"]), 4))
+                   fees_pct=round(entry_fee + exit_fee(ex["exit_reason"]), 4),
+                   stop_ambiguous=ex.get("stop_ambiguous"),
+                   target_after_stop=ex.get("target_after_stop"))
     return out
 
 
@@ -320,7 +342,10 @@ def _combine(long: bool, legs: List[Tuple[float, float, Dict[str, Any]]],
             "exit_reason": reasons[0] if len(reasons) == 1 else "+".join(reasons),
             "gross_pct": round(g, 4), "net_pct": round(g - ROUND_TRIP_PCT, 4),
             "fees_pct": round(fee, 4), "mfe_pct": round(max(ex["mfe"] for _, _, ex in legs), 4),
-            "mae_pct": round(max(ex["mae"] for _, _, ex in legs), 4)}
+            "mae_pct": round(max(ex["mae"] for _, _, ex in legs), 4),
+            # The first leg's exit is the position's: its stop flags describe it.
+            "stop_ambiguous": head.get("stop_ambiguous"),
+            "target_after_stop": head.get("target_after_stop")}
 
 
 def fixed_rule_levels(menu: List[Dict[str, Any]], price: float, atr: float,
@@ -895,6 +920,19 @@ def step(engine: Any, *, now: Optional[float] = None, path: Optional[str] = None
             counts[st] = counts.get(st, 0) + 1
         counts["funding_stamped"] = backfill_funding(
             con, deriv_path if deriv_path is not None else _deriv_path())
+        pcols = {r[1] for r in con.execute("PRAGMA table_info(plans)")}
+        if "forecast_scored_json" in pcols:
+            # Absent only on a ledger no submit has migrated yet: nothing to score.
+            try:
+                from src import analyst_judgement as _jd
+
+                with con:
+                    counts["forecasts_scored"] = _jd.score_forecasts(
+                        con, (buckets.get("BTCUSDT") or {}).get(TF), now)
+            except Exception as exc:  # noqa: BLE001 — never stops the walk
+                from src import fail_open
+
+                fail_open.record("analyst_walk.score_forecasts", exc)
         # The pair book's level marks ride the same step and the same bars.
         # A failure there is counted and never stops the walk.
         try:
@@ -1128,6 +1166,12 @@ def _by_day(pairs: List[Tuple[Optional[str], float]]) -> Dict[str, Any]:
                      for d in sorted(days)]}
 
 
+def _day_ci(pairs: List[Tuple[Optional[str], float]]) -> Dict[str, Any]:
+    from src.analyst_judgement import day_clustered_ci
+
+    return day_clustered_ci(pairs)
+
+
 def _arm_block(arm: str, mine: List[Dict[str, Any]]) -> Dict[str, Any]:
     res = [r for r in mine if r["status"] == "resolved" and r.get("net_pct") is not None]
     excluded = [r for r in res if blend_defect(r)]
@@ -1164,6 +1208,7 @@ def _arm_block(arm: str, mine: List[Dict[str, Any]]) -> Dict[str, Any]:
                        "basis": ("maker 0.02% / taker 0.05% by order type, plus recorded "
                                  "funding; slippage not modelled")},
         "by_day": _by_day([(_day(r.get("s_submitted_at")), v) for r, v in realized]),
+        "day_clustered": _day_ci([(_day(r.get("s_submitted_at")), v) for r, v in realized]),
     }
     if is_limit:
         out["with_unfilled_at_market"] = _arm_summary([float(r["net_pct"]) for r in res])
@@ -1262,6 +1307,22 @@ def _cell(*fields: str) -> Callable[[Dict[str, Any]], Optional[str]]:
     return key
 
 
+def _judgement(path: str, analyst_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Phase 3: size, the BTC forecast, and stop diagnostics."""
+    from src import analyst_judgement as J
+
+    res = [r for r in analyst_rows if r["status"] == "resolved" and not blend_defect(r)]
+    pairs = [(r.get("s_size"), _day(r.get("s_submitted_at")), v)
+             for r in res if (v := realized_pct(r)) is not None]
+    con = _connect(path)
+    try:
+        fc = J.forecast_summary(con)
+    finally:
+        con.close()
+    return {"size": J.size_split(pairs), "forecast": fc,
+            "stop_diagnostics": J.stop_diagnostics(res)}
+
+
 def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
     """What ``read.analyst_outcomes`` returns. Per arm, never pooled."""
     import os
@@ -1277,7 +1338,8 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
         rows = [dict(r) for r in con.execute(
             "SELECT w.*, s.submitted_at AS s_submitted_at, s.entries_json AS s_entries, "
             "s.side AS s_side, s.archetype AS s_archetype, p.bias AS s_bias, "
-            "COALESCE(s.entry_type, 'pullback') AS s_entry_type "
+            "COALESCE(s.entry_type, 'pullback') AS s_entry_type, s.size AS s_size, "
+            "s.entry_dist_atr AS s_entry_dist_atr "
             "FROM walks w LEFT JOIN setups s ON s.setup_id = w.setup_id "
             "LEFT JOIN plans p ON p.plan_id = s.plan_id")]
     finally:
@@ -1293,6 +1355,7 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
             "by_setup": _by_setup(rows, _cell("s_archetype", "s_side")),
             "by_bias": _by_setup(rows, _cell("s_bias", "s_side")),
             "by_entry_type": _by_setup(rows, _cell("s_entry_type", "s_side")),
+            "judgement": _judgement(path, analyst_rows),
             "calibration": _calibration(path),
             "active_book": book(frows, now),
             "recent_closed": recent_closed(frows),
