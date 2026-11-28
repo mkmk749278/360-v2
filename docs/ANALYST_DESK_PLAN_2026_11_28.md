@@ -224,7 +224,10 @@ bad `forecast` is named in `forecast_dropped` and never rejects the setups.
 The forecast's price at the horizon is the close of the last 5m bar ending at
 or before it; a missing bar is `insufficient`. The two stop flags are recorded
 by the walk from this change on, and rows walked before it read unknown.
-The 11-26 read waits for `plan_feed` (ops #252).
+The 11-26 read (via `plan_feed`, ops #252): not a walk defect. The fixed rule's
+far targets are rarely reached and its result is the 12h hold on a trend day,
+while the analyst takes a near TP1. Recorded in `ACTIVE_CONTEXT.md`; it is the
+case for Phase 4.
 
 ### Phase 4 — Exits
 

@@ -61,8 +61,16 @@ ship it.
 - **The analyst is not fully dark:** `src/desk.py` publishes its brief and
   setups to the Lumin 2.0 Desk. Any new setup state ships with a paired
   `lumin-app` label change.
-- **Open:** fixed_rule +66.5% against market −26.6% on 2026-11-26, on the same
-  setups. Unexplained, and read first in Phase 3.
+- **Read 2026-11-28, not a defect:** fixed_rule +66.5% against market −26.6% on
+  2026-11-26. The rule picks the best-scoring profit-side level, not the
+  nearest, so its target is usually far and it rarely gets there (7 of ~85
+  fills in the 300-row feed). Its result is the 12h time exit: +83.3% over 19
+  time exits on 11-26 (XMR short 522→444, AIOT long +28% at peak, MANTRA
+  +15.6%), +30.4% over 24 on the other days in the feed. The analyst does the
+  opposite: a near TP1 (+2.35% to +2.98% average) against stops averaging
+  −2.33% to −3.26%, and it hits TP1 about 31% of the time. **The leak is the
+  exit, not the entry level**, which is what Phase 4's `runner_24h` arm
+  measures. One trend day is not a rule; read it on a ≥21-day window.
 - The hourly task still runs prompt v2.5. Drafts v3 / v3.1 were shared with
   the owner and not applied.
 
