@@ -89,7 +89,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -1015,6 +1015,65 @@ def _whatif(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+#: Arms reported beside the analyst inside each setup-type cell: its own
+#: market and mechanical controls, on the SAME setups, never pooled across.
+SPLIT_ARMS = ("analyst", "market", "fixed_rule")
+SPLIT_MIN_N = 20
+
+
+def _by_setup(rows: List[Dict[str, Any]], key: Callable[[Dict[str, Any]], Optional[str]]
+              ) -> Dict[str, Any]:
+    """Realized per setup posted, per cell, with the controls on the same setups.
+
+    A cell is a setup type (``archetype|side``) or a regime read
+    (``bias|side``). Each cell carries the analyst arm's fill rate and how its
+    fills ended, plus the market and fixed-rule arms over the same setups, so
+    the question "does this kind of setup pay, and does the analyst's entry add
+    anything to it" is answered in one row. ``thin`` marks a cell under
+    ``SPLIT_MIN_N`` posted setups: read n before the average.
+    """
+    cells: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for r in rows:
+        if r["arm"] not in SPLIT_ARMS:
+            continue
+        if r["status"] != "resolved" or r.get("net_pct") is None or blend_defect(r):
+            continue
+        k = key(r)
+        if k is None:
+            continue
+        cells.setdefault(k, {}).setdefault(r["arm"], []).append(r)
+    out: Dict[str, Any] = {}
+    for k in sorted(cells):
+        arms = cells[k]
+        cell: Dict[str, Any] = {}
+        for arm in SPLIT_ARMS:
+            mine = arms.get(arm) or []
+            vals = [v for r in mine if (v := realized_pct(r)) is not None]
+            cell[arm] = {key_: v for key_, v in _arm_summary(vals).items()
+                         if key_ != "without_top_1pct"}
+        a = arms.get("analyst") or []
+        filled = [r for r in a if not r.get("unfilled")
+                  and r.get("exit_reason") not in NO_TRADE_EXITS]
+        exits: Dict[str, int] = {}
+        for r in filled:
+            exits[str(r.get("exit_reason"))] = exits.get(str(r.get("exit_reason")), 0) + 1
+        cell["analyst_fill_rate"] = round(len(filled) / len(a), 4) if a else None
+        cell["analyst_filled_avg_net_pct"] = (
+            round(sum(float(r["net_pct"]) for r in filled) / len(filled), 4)
+            if filled else None)
+        cell["analyst_filled_exits"] = exits
+        cell["thin"] = len(a) < SPLIT_MIN_N
+        out[k] = cell
+    return out
+
+
+def _cell(*fields: str) -> Callable[[Dict[str, Any]], Optional[str]]:
+    def key(r: Dict[str, Any]) -> Optional[str]:
+        vals = [r.get(f) for f in fields]
+        return None if any(v in (None, "") for v in vals) else "|".join(map(str, vals))
+    return key
+
+
 def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
     """What ``read.analyst_outcomes`` returns. Per arm, never pooled."""
     import os
@@ -1028,8 +1087,10 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
     con = _connect(path)
     try:
         rows = [dict(r) for r in con.execute(
-            "SELECT w.*, s.submitted_at AS s_submitted_at, s.entries_json AS s_entries "
-            "FROM walks w LEFT JOIN setups s ON s.setup_id = w.setup_id")]
+            "SELECT w.*, s.submitted_at AS s_submitted_at, s.entries_json AS s_entries, "
+            "s.side AS s_side, s.archetype AS s_archetype, p.bias AS s_bias "
+            "FROM walks w LEFT JOIN setups s ON s.setup_id = w.setup_id "
+            "LEFT JOIN plans p ON p.plan_id = s.plan_id")]
     finally:
         con.close()
     by_arm = {arm: _arm_block(arm, [r for r in rows if r["arm"] == arm]) for arm in ARMS}
@@ -1040,6 +1101,8 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
             "walk_version": WALK_VERSION,
             "analyst_split": _split(analyst_rows),
             "analyst_whatif": _whatif(analyst_rows),
+            "by_setup": _by_setup(rows, _cell("s_archetype", "s_side")),
+            "by_bias": _by_setup(rows, _cell("s_bias", "s_side")),
             "calibration": _calibration(path),
             "active_book": book(frows, now),
             "recent_closed": recent_closed(frows),
@@ -1049,8 +1112,10 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
                      "'missed_market' the unfilled rows alone, a selected counterfactual. "
                      "'cost_model' charges maker/taker by order type plus recorded funding. "
                      "A market entry already past its own target or stop is no_valid_trade "
-                     "at 0.00%. Stop first on an ambiguous 5m bar. Read n, and by_day, "
-                     "before any average.")}
+                     "at 0.00%. Stop first on an ambiguous 5m bar. 'by_setup' (archetype|side) "
+                     "and 'by_bias' (plan bias|side) split the realized result per cell, "
+                     "with market and fixed_rule on the same setups; a 'thin' cell has "
+                     "fewer than 20 setups. Read n, and by_day, before any average.")}
 
 
 # ── the feed: each accepted setup read as a signal (ops-only) ───────────────
