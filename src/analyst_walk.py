@@ -1256,15 +1256,28 @@ def book(feed_rows: List[Dict[str, Any]], now: float) -> Dict[str, Any]:
             "entry": r["entries"][0]["price"] if r["entries"] else None,
             "stop": r["stop"], "tp1": r["targets"][0] if r["targets"] else None,
             "p_target": r.get("p_target"), "mfe_pct": a.get("mfe_pct"),
-            "mae_pct": a.get("mae_pct")})
+            "mae_pct": a.get("mae_pct"), "size": r.get("size")})
     side = {s: sum(i["side"] == s for i in items) for s in ("long", "short")}
-    return {"n": len(items), "by_side": side,
+    # The desk's risk is in units, not setup counts. A setup from a prompt
+    # that stated no size (before v3.2) is not a desk position, and counting
+    # it as one would fill the budget with history (seen on v3.2's first run).
+    units = {s: round(sum(float(i["size"]) for i in items
+                          if i["side"] == s and i.get("size")), 2) for s in ("long", "short")}
+    unsized = {s: sum(i["side"] == s and i.get("size") is None for i in items)
+               for s in ("long", "short")}
+    passed = {s: sum(i["side"] == s and i.get("size") == 0 for i in items)
+              for s in ("long", "short")}
+    return {"n": len(items), "by_side": side, "units_by_side": units,
+            "unsized_by_side": unsized, "passed_by_side": passed,
             "active_by_side": {s: sum(i["side"] == s and i["state"] == "active"
                                       for i in items) for s in ("long", "short")},
             "symbols": sorted({i["symbol"] for i in items}), "setups": items,
             "note": ("Setups still pending (limit not reached, not expired), active "
                      "(filled, not yet stopped / targeted / timed out) or not walked yet. "
-                     "Alts move with BTC: same-side setups are one bet, not several.")}
+                     "Alts move with BTC: same-side setups are one bet, not several. "
+                     "units_by_side is the risk budget: the sum of size over open "
+                     "setups with size > 0; unsized (pre-v3.2) and passed (size 0) "
+                     "setups are counted apart and are not desk positions.")}
 
 
 def recent_closed(feed_rows: List[Dict[str, Any]], n: int = RECENT_CLOSED) -> List[Dict[str, Any]]:
@@ -1666,7 +1679,7 @@ def feed(limit: int = 100, path: Optional[str] = None,
             "entry_dist_atr": (round(abs(e1 - float(s["price_at_submit"])) / float(s["atr_1h"]), 3)
                                if e1 is not None and s.get("price_at_submit")
                                and s.get("atr_1h") else None),
-            "pos_in_7d": s.get("pos_in_7d"),
+            "pos_in_7d": s.get("pos_in_7d"), "size": s.get("size"),
             "book_same_side": s.get("book_same_side"),
             "invalidation": s.get("invalidation"), "scenario": s.get("scenario"),
             "p_target": s.get("p_target"),

@@ -101,6 +101,27 @@ def outcome(ret_pct: float, band: float) -> str:
     return "up" if ret_pct > band else "down" if ret_pct < -band else "range"
 
 
+#: A plan resubmitted within this window replaces the earlier one's forecast:
+#: one run, one call. Without it a corrected resubmission scores the same
+#: forecast twice (seen on v3.2's first run, 2026-11-28 15:37).
+RESUBMIT_WINDOW_S = 20 * 60.0
+
+
+def supersede_resubmits(con: sqlite3.Connection) -> int:
+    """Mark a forecast superseded when a later plan from the same source, within
+    ``RESUBMIT_WINDOW_S``, carries its own. Idempotent; never deletes."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(plans)")}
+    if "forecast_superseded" not in cols:
+        con.execute("ALTER TABLE plans ADD COLUMN forecast_superseded INTEGER")
+    cur = con.execute(
+        "UPDATE plans SET forecast_superseded = 1 WHERE forecast_json IS NOT NULL "
+        "AND forecast_superseded IS NULL AND EXISTS (SELECT 1 FROM plans q WHERE "
+        "q.forecast_json IS NOT NULL AND COALESCE(q.source,'') = COALESCE(plans.source,'') "
+        "AND q.submitted_at > plans.submitted_at AND q.submitted_at <= plans.submitted_at + ?)",
+        (RESUBMIT_WINDOW_S,))
+    return cur.rowcount
+
+
 def score_forecasts(con: sqlite3.Connection, btc_cd: Any, now: float,
                     limit: int = 200) -> int:
     """Score every plan forecast whose horizon has passed. Idempotent.
@@ -109,10 +130,11 @@ def score_forecasts(con: sqlite3.Connection, btc_cd: Any, now: float,
     or before it. A horizon whose bar the store does not hold (gap, or rolled
     off) is scored ``insufficient`` with that reason, never guessed.
     """
+    supersede_resubmits(con)
     rows = [dict(r) for r in con.execute(
         "SELECT plan_id, submitted_at, forecast_json, btc_at_submit FROM plans "
         "WHERE forecast_json IS NOT NULL AND forecast_scored_json IS NULL "
-        "ORDER BY submitted_at LIMIT ?", (int(limit),))]
+        "AND forecast_superseded IS NULL ORDER BY submitted_at LIMIT ?", (int(limit),))]
     if not rows:
         return 0
     t = c = None
@@ -149,10 +171,14 @@ def score_forecasts(con: sqlite3.Connection, btc_cd: Any, now: float,
 
 def forecast_summary(con: sqlite3.Connection) -> Dict[str, Any]:
     try:
+        sup = ("AND forecast_superseded IS NULL"
+               if "forecast_superseded" in {r[1] for r in con.execute(
+                   "PRAGMA table_info(plans)")} else "")
         rows = [dict(r) for r in con.execute(
-            "SELECT forecast_scored_json FROM plans WHERE forecast_scored_json IS NOT NULL")]
+            "SELECT forecast_scored_json FROM plans WHERE forecast_scored_json IS NOT NULL "
+            + sup)]
         pending = con.execute("SELECT COUNT(*) FROM plans WHERE forecast_json IS NOT NULL "
-                              "AND forecast_scored_json IS NULL").fetchone()[0]
+                              "AND forecast_scored_json IS NULL " + sup).fetchone()[0]
     except sqlite3.OperationalError:
         return {"n": 0, "reason": "ledger predates the forecast"}
     out: Dict[str, Any] = {"pending": int(pending)}
