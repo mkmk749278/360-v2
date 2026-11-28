@@ -169,8 +169,16 @@ submitting a replacement watch, or a `cancel_watch` id in the next plan.
 The question is whether entering on confirmation at arrival beats a resting
 limit, on identical setups.
 
-**`immediate`** is walked as a market entry at submit with modelled slippage,
-so "enter now" is costed honestly.
+**`immediate`** is walked as a market entry at submit, taker in.
+
+*As built (2026-11-28):* slippage is not modelled for any arm. Charging it to
+`immediate` and `watch` alone would make them read worse than the market and
+`zone_limit` controls for a reason that is not real; it belongs in the cost
+model for every taker fill at once, as its own change. The confirm vocabulary
+shipped as `close_beyond_zone` (a close on the trade's side of the zone, which
+covers both a rejection back out and a break through) and `rejection_wick`;
+`btc_not_beyond` is a cancel (`btc_beyond`) rather than a confirm, since both
+end the watch. `forecast_invalidated` waits for the Phase 3 forecast.
 
 **Order-flow confirmation** (footprint delta in the zone) is **Phase 2b**. The
 dark walk evaluates on candles, and delta is live-only, so a delta condition
