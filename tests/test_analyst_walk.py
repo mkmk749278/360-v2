@@ -268,3 +268,39 @@ def test_feed_states_are_a_closed_set():
 def test_feed_without_a_ledger_says_so(tmp_path):
     out = W.feed(path=str(tmp_path / "none.sqlite"))
     assert out == {"readable": False, "reason": "no_ledger_yet", "rows": []}
+
+
+def test_summary_splits_by_setup_type_and_bias_with_controls_on_the_same_rows(
+        tmp_path, monkeypatch):
+    """by_setup / by_bias come off the real ledger and catalog, one cell per
+    (archetype, side) and (bias, side); an unfilled limit counts as posted and
+    earns 0.00%, and the market arm is reported over the same setups."""
+    led = _ledger_with(tmp_path, monkeypatch, [
+        ("p:0", "long", [(99.0, 1.0)], 97.0, [103.0, 105.0]),   # fills, hits TP1
+        ("p:1", "short", [(110.0, 1.0)], 112.0, [105.0]),        # never reached
+    ])
+    con = led._connect()
+    with con:
+        con.execute("UPDATE setups SET archetype='level_reclaim', expires_at=? WHERE setup_id='p:0'",
+                    (T0 + 600,))
+        con.execute("UPDATE setups SET archetype='range_fade', expires_at=? WHERE setup_id='p:1'",
+                    (T0 + 600,))
+    con.close()
+    st = HistoricalDataStore()
+    for i, b in enumerate([(100, 100.5, 99.5, 100), (100, 100, 98.8, 99.2),
+                           (99.5, 103.5, 99.4, 103)]):
+        st.update_candle("X", "5m", {"open": b[0], "high": b[1], "low": b[2], "close": b[3],
+                                     "volume": 1, "open_time": (T0 + 300 * i) * 1000})
+    eng = type("E", (), {"data_store": st})()
+    W.step(eng, now=NOW)
+    res = diag_catalog.run("read.analyst_outcomes", eng, {})["result"]
+    bs = res["by_setup"]
+    assert set(bs) == {"level_reclaim|long", "range_fade|short"}
+    win = bs["level_reclaim|long"]
+    assert win["analyst"]["n"] == 1 and win["analyst"]["avg_net_pct"] > 0
+    assert win["analyst_fill_rate"] == 1.0 and win["analyst_filled_exits"] == {"target": 1}
+    assert win["thin"] is True and "market" in win and "fixed_rule" in win
+    miss = bs["range_fade|short"]
+    assert miss["analyst"]["avg_net_pct"] == 0.0, "an unfilled limit earns 0.00%"
+    assert miss["analyst_fill_rate"] == 0.0 and miss["analyst_filled_avg_net_pct"] is None
+    assert set(res["by_bias"]) == {"neutral|long", "neutral|short"}
