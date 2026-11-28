@@ -147,3 +147,33 @@ def test_the_outcomes_carry_the_judgement_block(ledger):
     j = res["judgement"]
     assert set(j) == {"size", "forecast", "stop_diagnostics"}
     assert "day_clustered" in res["by_arm"]["analyst"]
+
+
+def test_a_resubmitted_plan_scores_one_forecast_not_two(ledger):
+    con = ledger._connect()
+    t0 = 1_800_000_000.0
+    fc = json.dumps({"btc_4h": {"dir": "range", "p": 0.55, "horizon_s": 14400.0,
+                                "band_pct": 0.7, "invalidation": None}})
+    with con:
+        for pid, t in (("first", t0), ("resubmit", t0 + 120), ("next_hour", t0 + 3600)):
+            con.execute("INSERT INTO plans (plan_id, submitted_at, source, bias, forecast_json, "
+                        "btc_at_submit) VALUES (?, ?, 'mcp:a', 'neutral', ?, 60000)",
+                        (pid, t, fc))
+        J.score_forecasts(con, _btc(t0, [60000.0] * 70), t0 + 5.5 * 3600)
+    sup = {r[0]: r[1] for r in con.execute("SELECT plan_id, forecast_superseded FROM plans")}
+    assert sup == {"first": 1, "resubmit": None, "next_hour": None}
+    assert J.forecast_summary(con)["btc_4h"]["n"] == 2
+
+
+def test_the_open_book_counts_units_and_keeps_history_apart():
+    now = 1_800_000_000.0
+    rows = [{"symbol": s, "side": side, "state": "pending", "submitted_at": now - 600,
+             "entries": [{"price": 1.0}], "stop": 0.9, "targets": [1.1], "size": size}
+            for s, side, size in (("A", "long", None), ("B", "long", None),
+                                  ("C", "long", 1.5), ("D", "short", 0.0),
+                                  ("E", "short", 0.5))]
+    b = W.book(rows, now)
+    assert b["by_side"] == {"long": 3, "short": 2}
+    assert b["units_by_side"] == {"long": 1.5, "short": 0.5}
+    assert b["unsized_by_side"] == {"long": 2, "short": 0}
+    assert b["passed_by_side"] == {"long": 0, "short": 1}
