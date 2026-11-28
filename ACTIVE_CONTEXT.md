@@ -22,6 +22,33 @@ naming a cause or promising a resume. **Blocked here only because the session
 container has no Flutter SDK** to run `flutter test`; any session with one can
 ship it.
 
+## 2026-11-28 — analyst: split by setup type, and the desk plan
+
+- **#1109 merged:** `plan_outcomes` now carries `by_setup` (archetype|side)
+  and `by_bias` (bias|side). Each cell holds the analyst, market and fixed-rule
+  arms on the same setups, the fill rate and the exits; a cell is `thin` under
+  20 setups. First read: in short continuation setups the analyst loses while
+  market entry on the same setups does not (breakout_retest short −0.48% vs
+  +0.08%, n 78; risk_off shorts −0.35% vs +0.41%, n 84). The limits fill on
+  the failing trades.
+- **Plan of record:** `docs/ANALYST_DESK_PLAN_2026_11_28.md`.
+  - Phase 1: chart images, `pair_flow`, `pair_profile`, a per-coin pair book.
+  - Phase 2: watch, confirm on arrival, then enter.
+  - Phase 3: `size` with 0 = pass, a 4h/12h BTC forecast, day-clustered CIs,
+    stop diagnostics.
+  - Phase 4: exit arms.
+  - Phase 5: prompt v3.2, owner sign-off.
+
+  A Gemini second opinion was checked claim by claim; the verdicts are in that
+  doc.
+- **The analyst is not fully dark:** `src/desk.py` publishes its brief and
+  setups to the Lumin 2.0 Desk. Any new setup state ships with a paired
+  `lumin-app` label change.
+- **Open:** fixed_rule +66.5% against market −26.6% on 2026-11-26, on the same
+  setups. Unexplained, and read first in Phase 3.
+- The hourly task still runs prompt v2.5. Drafts v3 / v3.1 were shared with
+  the owner and not applied.
+
 ## 2026-11-27 — analyst walk v2: measurement integrity
 
 Owner uploaded an outside blueprint and asked for analyst refinement. Every
