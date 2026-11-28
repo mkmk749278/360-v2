@@ -71,8 +71,20 @@ ship it.
   −2.33% to −3.26%, and it hits TP1 about 31% of the time. **The leak is the
   exit, not the entry level**, which is what Phase 4's `runner_24h` arm
   measures. One trend day is not a rule; read it on a ≥21-day window.
-- The hourly task still runs prompt v2.5. Drafts v3 / v3.1 were shared with
-  the owner and not applied.
+- **Phases 1–4 shipped the same day** (engine #1111–#1115, ops #251–#253):
+  - chart images, `pair_flow`, `pair_profile`, the pair book;
+  - watch / immediate entries with a `zone_limit` control;
+  - size, a scored BTC forecast, day-clustered intervals, stop diagnostics;
+  - `runner_24h` and `btc_invalidated_exit` exit arms.
+- **Prompt v3.2 applied 15:30 UTC on owner sign-off**
+  (`docs/ANALYST_PROMPT_V3_2_2026_11_28.md`). Judge it on ≥ 21 days across two
+  BTC regimes, on `day_clustered` intervals, never pooled with v2.5
+  (`prompt_version` is stamped).
+- **First readings, 9 days of v2.5:** analyst −0.18% per setup
+  [−0.44, +0.33], market −0.03% [−0.29, +0.55], fixed_rule +0.07%
+  [−0.29, +0.49]. None is distinguishable yet. `ladder` is the only arm
+  whose interval excludes zero, −0.37% [−0.76, −0.04]: holding half for TP2
+  inside a 12h cap gives back more than it gains.
 
 ## 2026-11-27 — analyst walk v2: measurement integrity
 
