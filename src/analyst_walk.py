@@ -81,6 +81,23 @@ Measurement integrity, walk version 2 (2026-11-27):
 * **Day-clustered:** per arm, the realized result summed per UTC submit day.
   Alts move with BTC, so twenty same-day setups are close to one bet.
 
+Entry types, Phase 2 (2026-11-28, ``docs/ANALYST_DESK_PLAN_2026_11_28.md``):
+
+* ``pullback`` (every setup before this): the arms above, unchanged.
+* ``immediate``: the analyst chose to enter now, so its own arm IS the market
+  entry (taker in). ``tranche`` copies it and ``ladder`` rides it.
+* ``watch``: a zone, one confirmation rule and cancel rules from a closed
+  vocabulary (:func:`watch_walk`). Nothing enters until a CLOSED bar confirms
+  after price reached the zone, and the entry is that bar's close (taker in).
+  A watch that is cancelled or expires is unfilled: 0.00% realized, its market
+  outcome kept as a counterfactual, exactly as for a limit. ``zone_limit`` is
+  its control, a plain resting limit at the zone's near edge on the same
+  setup, so "does confirming on arrival beat a resting order" is answered on
+  identical opportunities. It is walked only for watches (:func:`arms_for`).
+* Slippage is still not modelled for any arm, so a confirmed entry is costed
+  exactly like the market arm. Charging it to the new entries alone would
+  make them read worse than their controls for a reason that is not real.
+
 Measurement flag: ``ANALYST_WALK_ENABLED`` (default ON — no vendor, no
 Firestore; local candles and local SQLite files only).
 """
@@ -111,9 +128,13 @@ WALK_VERSION = 2
 LADDER_SPLIT = 0.5
 #: Expiry caps the what-if tests (hours). A fill later than the cap is dropped.
 WHATIF_EXPIRY_H = (2, 4)
-ARMS = ("analyst", "tranche", "ladder", "market", "fixed_rule", "none")
-#: Arms that post a limit, so an unfilled row earns 0.00% when realized.
-LIMIT_ARMS = ("analyst", "tranche", "ladder", "fixed_rule")
+ARMS = ("analyst", "tranche", "ladder", "market", "fixed_rule", "none", "zone_limit")
+#: Arms that post a limit, so an unfilled row earns 0.00% when realized. A
+#: watch that never confirms is unfilled the same way.
+LIMIT_ARMS = ("analyst", "tranche", "ladder", "fixed_rule", "zone_limit")
+#: Arms walked only for a ``watch`` setup: the control a watch is judged
+#: against, a plain resting limit at the zone's near edge (Phase 2).
+WATCH_ONLY_ARMS = ("zone_limit",)
 #: Exit reasons that mean no trade was taken: zero fees, zero funding.
 NO_TRADE_EXITS = ("no_trade", "no_valid_trade", "no_rule_setup")
 #: Arms named by the spec and deliberately not built in this module yet.
@@ -153,10 +174,12 @@ CREATE TABLE IF NOT EXISTS walks (
 #: Additive columns (v2). Rows walked before them read NULL, which every
 #: reader treats as "not known", never as zero.
 _WALK_COLS = (("walk_v", "INTEGER"), ("tp1_before_fill", "INTEGER"),
-              ("fees_pct", "REAL"), ("funding_pct", "REAL"), ("funding_reason", "TEXT"))
+              ("fees_pct", "REAL"), ("funding_pct", "REAL"), ("funding_reason", "TEXT"),
+              ("watch_state", "TEXT"))
 _ROW_COLS = ("setup_id", "arm", "status", "reason", "unfilled", "filled_frac", "entry",
              "entry_at", "exit", "exit_at", "exit_reason", "gross_pct", "net_pct",
-             "mfe_pct", "mae_pct", "updated_at", "walk_v", "tp1_before_fill", "fees_pct")
+             "mfe_pct", "mae_pct", "updated_at", "walk_v", "tp1_before_fill", "fees_pct",
+             "watch_state")
 
 
 # ── pure walk ─────────────────────────────────────────────────────────────
@@ -340,8 +363,99 @@ def fixed_rule_levels(menu: List[Dict[str, Any]], price: float, atr: float,
     return {"entry": entry, "stop": stop, "target": float(t["price"])}, ""
 
 
-def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str, Any]]:
-    """All arms for one accepted setup. Pure: the setup row + its 5m bucket."""
+def arms_for(setup: Dict[str, Any]) -> Tuple[str, ...]:
+    """The arms a setup is walked under: the watch-only control is skipped for
+    setups that are not watches, so it never reads as a zero row."""
+    if (setup.get("entry_type") or "pullback") == "watch":
+        return ARMS
+    return tuple(a for a in ARMS if a not in WATCH_ONLY_ARMS)
+
+
+def _btc_closes(btc_cd: Any) -> Dict[float, float]:
+    """BTC 5m close by bar open time (seconds), for btc_beyond cancels."""
+    if not isinstance(btc_cd, dict) or btc_cd.get("open_time") is None:
+        return {}
+    t = np.asarray(btc_cd["open_time"], dtype=np.float64) / 1000.0
+    c = np.asarray(btc_cd["close"], dtype=np.float64)
+    if len(t) != len(c):
+        return {}
+    return {float(a): float(b) for a, b in zip(t, c) if np.isfinite(a)}
+
+
+def watch_walk(bars: Dict[str, np.ndarray], long: bool, watch: Dict[str, Any],
+               stop: float, expires_at: float,
+               btc: Optional[Dict[float, float]] = None) -> Dict[str, Any]:
+    """Follow one watch bar by bar until it enters, is cancelled or expires.
+
+    Only CLOSED bars are read, so nothing here knows a bar's close before the
+    bar ended. Per bar, in this order:
+
+    1. **Cancel** (conservative): a close beyond the stop, a ``close_through``
+       level, or BTC closing beyond a ``btc_beyond`` price.
+    2. **Tag:** the bar traded into the zone.
+    3. **Confirm**, on a bar that closes a ``tf`` period, after a tag:
+       ``close_beyond_zone`` (a close on the trade's side of the zone: below it
+       for a short, above it for a long) or ``rejection_wick`` (the period
+       touched the zone, its wick against the trade is at least
+       ``min_wick_ratio`` of its range, and it closed on the trade's side of the
+       zone's middle). Entry is at that close.
+
+    Returns ``{"state": "entered", "j", "price"}``, ``{"state": "cancelled",
+    "j", "why"}``, ``{"state": "expired"}``, or the open states ``watching`` /
+    ``in_zone``.
+    """
+    lo, hi = watch["zone"]
+    mid = (lo + hi) / 2.0
+    conf = watch["confirm"]
+    period = 900.0 if conf.get("tf") == "15m" else STEP_S
+    tagged = False
+    seg_start: Optional[int] = None
+    btc = btc or {}
+    for j in range(len(bars["t"])):
+        t = float(bars["t"][j])
+        if t >= expires_at:
+            return {"state": "expired"}
+        o, h, low, c = (float(bars[k][j]) for k in ("open", "high", "low", "close"))
+        if (c <= stop) if long else (c >= stop):
+            return {"state": "cancelled", "j": j, "why": "closed_beyond_stop"}
+        for k in watch.get("cancel") or []:
+            if k["rule"] == "close_through":
+                if (k.get("tf") == "15m") and ((t + STEP_S) % 900.0 != 0):
+                    continue
+                if (c < k["level"]) if long else (c > k["level"]):
+                    return {"state": "cancelled", "j": j, "why": "close_through"}
+            elif k["rule"] == "btc_beyond":
+                b = btc.get(t)
+                if b is not None and ((b > k["price"]) if k["dir"] == "above"
+                                      else (b < k["price"])):
+                    return {"state": "cancelled", "j": j, "why": "btc_beyond"}
+        if low <= hi and h >= lo:
+            tagged = True
+        if seg_start is None or (t % period) == 0.0:
+            seg_start = j
+        if (t + STEP_S) % period != 0.0 or not tagged:
+            continue
+        so = float(bars["open"][seg_start])
+        sh = float(np.max(bars["high"][seg_start:j + 1]))
+        sl = float(np.min(bars["low"][seg_start:j + 1]))
+        ok = False
+        if conf["rule"] == "close_beyond_zone":
+            ok = (c > hi) if long else (c < lo)
+        elif conf["rule"] == "rejection_wick":
+            rng = sh - sl
+            touched = sl <= hi and sh >= lo
+            wick = ((min(so, c) - sl) if long else (sh - max(so, c)))
+            ok = (touched and rng > 0 and wick / rng >= conf.get("min_wick_ratio", 0.5)
+                  and ((c > mid) if long else (c < mid)))
+        if ok:
+            return {"state": "entered", "j": j, "price": c}
+    return {"state": "in_zone" if tagged else "watching"}
+
+
+def walk_setup(setup: Dict[str, Any], cd: Any, now: float,
+               btc_cd: Any = None) -> Dict[str, Dict[str, Any]]:
+    """All arms for one accepted setup. Pure: the setup row + its 5m bucket
+    (and BTC's, for a watch with a ``btc_beyond`` cancel)."""
     long = setup["side"] == "long"
     entries = json.loads(setup["entries_json"] or "[]")
     targets = json.loads(setup["targets_json"] or "[]")
@@ -356,7 +470,7 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str
         # History that rolled off cannot come back. A missing or undated series
         # can, so it waits until the setup could no longer have resolved.
         gone = why == "history_rolled_off" or now > expires + HOLD_HORIZON_S
-        for arm in ARMS:
+        for arm in arms_for(setup):
             if arm != "none":
                 out[arm] = {"status": "insufficient" if gone else "open", "reason": why}
         return out
@@ -420,10 +534,57 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str
             r["reason"] = f"legs_cancelled_after_exit:{cancelled}"
         return r
 
+    entry_type = setup.get("entry_type") or "pullback"
     first_leg = dict(entries[0])
     first_leg["weight"] = 1.0
-    out["analyst"] = limit_arm([first_leg])
-    out["tranche"] = limit_arm(entries)
+    entered: Optional[Tuple[int, float, float]] = None   # (fill bar, price, entry fee)
+    if entry_type == "immediate":
+        # The analyst chose to enter now: its own arm IS a market entry.
+        out["analyst"] = dict(out["market"])
+        out["tranche"] = dict(out["market"])
+        if not out["market"].get("exit_reason") == "no_valid_trade":
+            entered = (0, m_entry, FEE_TAKER_PCT)
+    elif entry_type == "watch":
+        w = json.loads(setup.get("watch_json") or "{}")
+        ww = watch_walk(bars, long, w, stop, expires, _btc_closes(btc_cd))
+        st = ww["state"]
+        if st == "entered":
+            j, px = ww["j"], ww["price"]
+            at = float(bars["t"][j]) + STEP_S
+            why = market_geometry(long, px, stop, target)
+            if why:
+                a = _no_valid_trade(px, at, why, fees_pct=0.0, filled_frac=1.0, unfilled=0)
+            elif j + 1 >= len(bars["t"]):
+                a = {"status": "open", "reason": "entered", "entry": px, "entry_at": at,
+                     "filled_frac": 1.0, "unfilled": 0, "mfe_pct": 0.0, "mae_pct": 0.0}
+            else:
+                a = _score(long, px, _exit_walk(bars, j + 1, long, px, stop, target, now),
+                           entry_fee=FEE_TAKER_PCT)
+                a.update(entry=px, entry_at=at, filled_frac=1.0, unfilled=0,
+                         tp1_before_fill=int(_touched(bars, j + 1, long, target)))
+                entered = (j + 1, px, FEE_TAKER_PCT)
+            a["watch_state"] = "entered"
+        elif st in ("cancelled", "expired") or (st in ("watching", "in_zone")
+                                                 and window_closed):
+            # Never entered: earns 0.00% when realized; the market outcome is
+            # kept as a counterfactual, exactly as for an unfilled limit.
+            a = unfilled(at_market(stop, target, unfilled=1, filled_frac=0.0), target)
+            a["reason"] = (f"watch_cancelled:{ww.get('why')}" if st == "cancelled"
+                           else "watch_expired")
+            a["watch_state"] = "cancelled" if st == "cancelled" else "expired"
+        else:
+            # Still watching. 'awaiting_fill' keeps every reader (the Desk
+            # among them) on its existing "pending" label.
+            a = {"status": "open", "reason": "awaiting_fill", "watch_state": st}
+        out["analyst"] = a
+        out["tranche"] = dict(a)
+        lo, hi = w["zone"]
+        px0 = float(setup.get("price_at_submit") or m_entry)
+        near = lo if px0 < lo else hi if px0 > hi else (lo + hi) / 2.0
+        out["zone_limit"] = limit_arm([{"price": near, "weight": 1.0}])
+    else:
+        out["analyst"] = limit_arm([first_leg])
+        out["tranche"] = limit_arm(entries)
 
     def ladder_from(start: int, entry: float, fee: float, on_fill: bool) -> Dict[str, Any]:
         t0 = float(bars["t"][start])
@@ -438,8 +599,18 @@ def walk_setup(setup: Dict[str, Any], cd: Any, now: float) -> Dict[str, Dict[str
         return r
 
     e1 = float(entries[0]["price"])
-    j = _limit_fill(bars, long, e1, expires)
-    if j is not None:
+    j = _limit_fill(bars, long, e1, expires) if entry_type == "pullback" else None
+    if entry_type != "pullback":
+        # The ladder rides the analyst's own fill; with none, it mirrors the
+        # analyst arm (open, unfilled or no trade).
+        if entered is None:
+            lad = dict(out["analyst"])
+        elif entered[0] >= len(bars["t"]):
+            lad = dict(out["analyst"])
+        else:
+            lad = ladder_from(entered[0], entered[1], entered[2], on_fill=True)
+            lad.update(filled_frac=1.0, unfilled=0, entry_at=out["analyst"].get("entry_at"))
+    elif j is not None:
         lad = ladder_from(j, e1, FEE_MAKER_PCT, on_fill=False)
         lad.update(filled_frac=1.0, unfilled=0, tp1_before_fill=int(_touched(bars, j, long,
                                                                               target)))
@@ -678,9 +849,11 @@ def step(engine: Any, *, now: Optional[float] = None, path: Optional[str] = None
         setups = [dict(r) for r in con.execute(
             "SELECT s.* FROM setups s WHERE s.status='accepted' AND (("
             " SELECT COUNT(*) FROM walks w WHERE w.setup_id=s.setup_id"
-            " AND w.status IN ('resolved','insufficient')) < ? "
+            " AND w.status IN ('resolved','insufficient')) < "
+            " (CASE WHEN COALESCE(s.entry_type, 'pullback') = 'watch' THEN ? ELSE ? END) "
             f" OR EXISTS (SELECT 1 FROM walks w WHERE w.setup_id=s.setup_id AND {_NEEDS_REWALK})) "
-            "ORDER BY s.submitted_at LIMIT ?", (len(ARMS), int(max_setups)))]
+            "ORDER BY s.submitted_at LIMIT ?",
+            (len(ARMS), len(ARMS) - len(WATCH_ONLY_ARMS), int(max_setups)))]
         store = getattr(engine, "data_store", None)
         buckets = getattr(store, "candles", None) or {}
         for s in setups:
@@ -692,7 +865,8 @@ def step(engine: Any, *, now: Optional[float] = None, path: Optional[str] = None
             rewalk = bool(t and t["walk_v"] is None and t["status"] == "resolved"
                           and not t["unfilled"] and (t["filled_frac"] or 0) >= 0.999
                           and len(json.loads(s.get("entries_json") or "[]")) > 1)
-            arms = walk_setup(s, (buckets.get(s["symbol"]) or {}).get(TF), now)
+            arms = walk_setup(s, (buckets.get(s["symbol"]) or {}).get(TF), now,
+                              btc_cd=(buckets.get("BTCUSDT") or {}).get(TF))
             with con:
                 for arm, r in arms.items():
                     if arm in settled and not (arm == "tranche" and rewalk):
@@ -1102,7 +1276,8 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
     try:
         rows = [dict(r) for r in con.execute(
             "SELECT w.*, s.submitted_at AS s_submitted_at, s.entries_json AS s_entries, "
-            "s.side AS s_side, s.archetype AS s_archetype, p.bias AS s_bias "
+            "s.side AS s_side, s.archetype AS s_archetype, p.bias AS s_bias, "
+            "COALESCE(s.entry_type, 'pullback') AS s_entry_type "
             "FROM walks w LEFT JOIN setups s ON s.setup_id = w.setup_id "
             "LEFT JOIN plans p ON p.plan_id = s.plan_id")]
     finally:
@@ -1117,6 +1292,7 @@ def summary(path: Optional[str] = None, now: Optional[float] = None) -> Dict[str
             "analyst_whatif": _whatif(analyst_rows),
             "by_setup": _by_setup(rows, _cell("s_archetype", "s_side")),
             "by_bias": _by_setup(rows, _cell("s_bias", "s_side")),
+            "by_entry_type": _by_setup(rows, _cell("s_entry_type", "s_side")),
             "calibration": _calibration(path),
             "active_book": book(frows, now),
             "recent_closed": recent_closed(frows),
@@ -1166,7 +1342,7 @@ def _arm_view(w: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return {k: w.get(k) for k in ("status", "reason", "unfilled", "filled_frac", "entry",
                                    "entry_at", "exit", "exit_at", "exit_reason",
                                    "gross_pct", "net_pct", "mfe_pct", "mae_pct",
-                                   "updated_at")}
+                                   "updated_at", "watch_state")}
 
 
 def feed(limit: int = 100, path: Optional[str] = None,
@@ -1232,6 +1408,8 @@ def feed(limit: int = 100, path: Optional[str] = None,
             "submitted_at": s["submitted_at"], "expires_at": s.get("expires_at"),
             "symbol": s.get("symbol"), "side": s.get("side"),
             "archetype": s.get("archetype"), "plan_mode": s.get("plan_mode"),
+            "entry_type": s.get("entry_type") or "pullback",
+            "watch": json.loads(s["watch_json"]) if s.get("watch_json") else None,
             "bias": s.get("plan_bias"), "plan_notes": s.get("plan_notes"),
             "price_at_submit": s.get("price_at_submit"), "atr_1h": s.get("atr_1h"),
             "entries": [{"price": float(e["price"]), "weight": float(e.get("weight") or 0)}

@@ -52,6 +52,16 @@ SIDES = ("long", "short")
 BIASES = ("risk_on", "risk_off", "neutral", "stand_aside")
 
 MAX_SETUPS = 5
+#: How a setup enters (Phase 2, 2026-11-28). ``pullback`` is the resting limit
+#: every setup used before; ``immediate`` enters at market at submit; ``watch``
+#: waits for price to reach a zone and enters only on a confirming close.
+ENTRY_TYPES = ("pullback", "immediate", "watch")
+#: The closed vocabulary a watch may use. Anything else is a schema reject:
+#: a condition the walk cannot evaluate must never be guessed at.
+WATCH_CONFIRM_RULES = ("close_beyond_zone", "rejection_wick")
+WATCH_CANCEL_RULES = ("close_through", "btc_beyond")
+WATCH_TFS = ("5m", "15m")
+MAX_WATCH_CANCELS = 3
 MAX_PLANS_PER_HOUR = 6
 EXPIRY_HOURS = (1, 24)
 #: Stop is placed this many 1h-ATRs beyond its level (beyond structure).
@@ -113,7 +123,9 @@ CREATE TABLE IF NOT EXISTS setups (
     pos_in_7d     REAL,
     entry_dist_atr REAL,
     book_same_side INTEGER,
-    book_opposite_side INTEGER
+    book_opposite_side INTEGER,
+    entry_type    TEXT,
+    watch_json    TEXT
 );
 CREATE INDEX IF NOT EXISTS setups_plan ON setups(plan_id);
 CREATE INDEX IF NOT EXISTS setups_time ON setups(submitted_at);
@@ -176,18 +188,34 @@ def _parse_setup(s: Any) -> Dict[str, Any]:
     # or the analyst's OWN price from its own chart read. Prices are carried as
     # "px:<price>" ids so the rest of the path is one path; _check validates them
     # against the real recent range so an invented price cannot pass.
-    if "entry_prices" in s or "stop_price" in s or "target_prices" in s:
+    entry_type = s.get("entry_type", "pullback")
+    if entry_type not in ENTRY_TYPES:
+        raise Reject("schema", f"entry_type must be one of {ENTRY_TYPES}")
+    watch = _parse_watch(s.get("watch"), s["side"]) if entry_type == "watch" else None
+    if entry_type != "watch" and s.get("watch") is not None:
+        raise Reject("schema", "watch is only for entry_type 'watch'")
+    if entry_type in ("immediate", "watch"):
+        # The entry is not a resting price: market at submit, or the confirming
+        # close inside the zone. A placeholder keeps the rest of the path one
+        # path; _check resolves it (market price, or the zone's middle) and
+        # checks the geometry against it.
+        s = dict(s, entry_prices=None, entry_level_ids=[
+            "mkt" if entry_type == "immediate"
+            else f"px:{(watch['zone'][0] + watch['zone'][1]) / 2.0!r}"],
+            tranche_weights=[1.0])
+    if s.get("entry_prices") is not None or "stop_price" in s or "target_prices" in s:
         def _px(v: Any, what: str) -> str:
             if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
                 raise Reject("schema", f"{what} must be positive numbers")
             return f"px:{float(v)!r}"
         ep, tp = s.get("entry_prices"), s.get("target_prices")
-        if not isinstance(ep, list) or not 1 <= len(ep) <= 2:
+        if entry_type == "pullback" and (not isinstance(ep, list) or not 1 <= len(ep) <= 2):
             raise Reject("schema", "entry_prices: one or two prices")
         if not isinstance(tp, list) or not 1 <= len(tp) <= 3:
             raise Reject("schema", "target_prices: one to three prices")
-        s = dict(s, entry_level_ids=[_px(v, "entry_prices") for v in ep],
-                 stop_level_id=_px(s.get("stop_price"), "stop_price"),
+        if entry_type == "pullback":
+            s = dict(s, entry_level_ids=[_px(v, "entry_prices") for v in ep])
+        s = dict(s, stop_level_id=_px(s.get("stop_price"), "stop_price"),
                  target_level_ids=[_px(v, "target_prices") for v in tp])
     entries = s.get("entry_level_ids")
     if not isinstance(entries, list) or not 1 <= len(entries) <= 2:
@@ -231,7 +259,61 @@ def _parse_setup(s: Any) -> Dict[str, Any]:
             "expiry_hours": float(exp), "invalidation": _text(s.get("invalidation")),
             "scenario": _text(s.get("scenario")),
             "p_target": float(p_t) if p_t is not None else None,
-            "p_stop": float(p_s) if p_s is not None else None}
+            "p_stop": float(p_s) if p_s is not None else None,
+            "entry_type": entry_type, "watch": watch}
+
+
+def _num(v: Any, what: str) -> float:
+    if not isinstance(v, (int, float)) or isinstance(v, bool) or not v > 0:
+        raise Reject("schema", f"{what} must be a positive number")
+    return float(v)
+
+
+def _parse_watch(w: Any, side: str) -> Dict[str, Any]:
+    """A watch, normalised. Every rule is from a closed vocabulary."""
+    if not isinstance(w, dict):
+        raise Reject("schema", "watch must be an object with zone, confirm and cancel")
+    z = w.get("zone")
+    if not isinstance(z, list) or len(z) != 2:
+        raise Reject("schema", "watch.zone must be [low, high]")
+    lo, hi = _num(z[0], "watch.zone"), _num(z[1], "watch.zone")
+    if not lo < hi:
+        raise Reject("schema", "watch.zone low must be below high")
+    c = w.get("confirm")
+    if not isinstance(c, dict) or c.get("rule") not in WATCH_CONFIRM_RULES:
+        raise Reject("schema", f"watch.confirm.rule must be one of {WATCH_CONFIRM_RULES}")
+    tf = c.get("tf", "5m")
+    if tf not in WATCH_TFS:
+        raise Reject("schema", f"watch.confirm.tf must be one of {WATCH_TFS}")
+    confirm: Dict[str, Any] = {"rule": c["rule"], "tf": tf}
+    if c["rule"] == "rejection_wick":
+        r = c.get("min_wick_ratio", 0.5)
+        if not isinstance(r, (int, float)) or isinstance(r, bool) or not 0.2 <= r <= 0.9:
+            raise Reject("schema", "watch.confirm.min_wick_ratio must be in [0.2, 0.9]")
+        confirm["min_wick_ratio"] = float(r)
+    raw_cancel = w.get("cancel", [])
+    if not isinstance(raw_cancel, list) or len(raw_cancel) > MAX_WATCH_CANCELS:
+        raise Reject("schema", f"watch.cancel: a list of at most {MAX_WATCH_CANCELS} rules")
+    cancel = []
+    for k in raw_cancel:
+        if not isinstance(k, dict) or k.get("rule") not in WATCH_CANCEL_RULES:
+            raise Reject("schema", f"watch.cancel rules must be one of {WATCH_CANCEL_RULES}")
+        if k["rule"] == "close_through":
+            cancel.append({"rule": "close_through",
+                           "level": _num(k.get("level"), "close_through.level"),
+                           "tf": k.get("tf", "5m") if k.get("tf", "5m") in WATCH_TFS
+                           else _bad_tf()})
+        else:
+            d = k.get("dir")
+            if d not in ("above", "below"):
+                raise Reject("schema", "btc_beyond.dir must be 'above' or 'below'")
+            cancel.append({"rule": "btc_beyond", "price": _num(k.get("price"),
+                                                               "btc_beyond.price"), "dir": d})
+    return {"zone": [lo, hi], "confirm": confirm, "cancel": cancel}
+
+
+def _bad_tf() -> str:
+    raise Reject("schema", f"close_through.tf must be one of {WATCH_TFS}")
 
 
 # ── validation against the live engine ────────────────────────────────────
@@ -249,6 +331,8 @@ def validate_setup(raw: Any, engine: Any, *, now: float,
     try:
         s = _parse_setup(raw)
         row.update(symbol=s["symbol"], side=s["side"], archetype=s["archetype"],
+                   entry_type=s["entry_type"],
+                   watch_json=json.dumps(s["watch"]) if s.get("watch") else None,
                    invalidation=s["invalidation"], scenario=s.get("scenario"),
                    p_target=s.get("p_target"), p_stop=s.get("p_stop"),
                    expires_at=now + s["expiry_hours"] * 3600.0)
@@ -311,6 +395,8 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
         row["pos_in_7d"] = round((price - rng[0]) / (rng[1] - rng[0]), 4)
 
     def resolve(lid: str, *, target: bool = False) -> float:
+        if lid == "mkt":
+            return float(price)
         if lid.startswith("px:"):
             p = float(lid[3:])
             if rng is None:
@@ -338,7 +424,8 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
         stop = stop_level - STOP_BUFFER_ATR * atr if long else stop_level + STOP_BUFFER_ATR * atr
     row.update(scenario=s.get("scenario"), p_target=s.get("p_target"),
                p_stop=s.get("p_stop"),
-               plan_mode="prices" if s["entry_ids"][0].startswith("px:") else "level_ids")
+               plan_mode=("market" if s["entry_ids"][0] == "mkt" else
+                          "prices" if s["entry_ids"][0].startswith("px:") else "level_ids"))
     row.update(entries_json=json.dumps([{"id": i, "price": p, "weight": w} for i, p, w
                                         in zip(s["entry_ids"], entries, s["weights"])]),
                stop_level_price=stop_level, stop_price=round(stop, 10),
@@ -353,6 +440,18 @@ def _check(s: Dict[str, Any], engine: Any, now: float, admission, row: Dict[str,
         raise Reject("geometry", "every target must be on the profit side of every entry")
     if [sign * t for t in targets] != sorted(sign * t for t in targets):
         raise Reject("geometry", "targets must be ordered nearest first")
+
+    w = s.get("watch")
+    if w is not None:
+        lo, hi = (resolve(f"px:{x!r}") for x in w["zone"])
+        # The whole zone is the entry: the stop must be beyond all of it and
+        # every target beyond its far side, or a confirming close anywhere in
+        # the zone could already be past one of them.
+        if sign * (min(lo, hi) if long else max(lo, hi)) <= sign * stop_level:
+            raise Reject("geometry", "stop level must be beyond the whole watch zone")
+        far = hi if long else lo
+        if any(sign * (t - far) <= 0 for t in targets):
+            raise Reject("geometry", "every target must be beyond the far side of the zone")
 
     row["entry_dist_atr"] = round(abs(entry - price) / atr, 4)
     stop_atr = abs(entry - stop) / atr
@@ -421,7 +520,8 @@ class Ledger:
                          ("p_target", "REAL"), ("p_stop", "REAL"), ("plan_mode", "TEXT"),
                          ("pos_in_7d", "REAL"), ("entry_dist_atr", "REAL"),
                          ("book_same_side", "INTEGER"), ("book_opposite_side", "INTEGER"),
-                         ("reads_json", "TEXT"), ("profile_json", "TEXT")):
+                         ("reads_json", "TEXT"), ("profile_json", "TEXT"),
+                         ("entry_type", "TEXT"), ("watch_json", "TEXT")):
             if col not in cols:
                 con.execute(f"ALTER TABLE setups ADD COLUMN {col} {typ}")
         pcols = {r[1] for r in con.execute("PRAGMA table_info(plans)")}
@@ -490,8 +590,8 @@ class Ledger:
                         "stop_atr, tp1_pct, invalidation, expires_at, submitted_at, "
                         "menu_json, scenario, p_target, plan_mode, pos_in_7d, "
                         "entry_dist_atr, book_same_side, book_opposite_side, p_stop, "
-                        "reads_json, profile_json) VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "reads_json, profile_json, entry_type, watch_json) VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (f"{plan_id}:{r['idx']}", plan_id, r["idx"], r.get("symbol"),
                          r.get("side"), r.get("archetype"), r["status"], r.get("reason"),
                          r.get("detail"), r.get("price_at_submit"), r.get("atr_1h"),
@@ -502,7 +602,8 @@ class Ledger:
                          r.get("p_target"), r.get("plan_mode"), r.get("pos_in_7d"),
                          r.get("entry_dist_atr"), r.get("book_same_side"),
                          r.get("book_opposite_side"), r.get("p_stop"),
-                         r.get("reads_json"), r.get("profile_json")))
+                         r.get("reads_json"), r.get("profile_json"),
+                         r.get("entry_type"), r.get("watch_json")))
                 prices = {r.get("symbol"): r.get("price_at_submit") for r in rows
                           if r.get("symbol")}
                 analyst_pair_book.record_notes(con, plan_id, now,
@@ -523,7 +624,7 @@ class Ledger:
                     "SELECT idx, symbol, side, archetype, status, reason, detail, "
                     "price_at_submit, stop_price, stop_atr, tp1_pct, entries_json, "
                     "targets_json, expires_at, scenario, p_target, p_stop, plan_mode, "
-                    "pos_in_7d, entry_dist_atr, book_same_side "
+                    "pos_in_7d, entry_dist_atr, book_same_side, entry_type, watch_json "
                     "FROM setups WHERE plan_id = ? ORDER BY idx",
                     (p["plan_id"],))]
             totals = dict(con.execute(
