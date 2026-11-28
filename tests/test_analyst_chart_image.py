@@ -9,7 +9,7 @@ NOW = time.time()
 H_MS = 3_600_000
 
 
-def _engine(n=60, symbol="XUSDT", tf="1h"):
+def _engine(n=60, symbol="XYZUSDT", tf="1h"):
     st = HistoricalDataStore()
     last_open = (int(NOW * 1000) // H_MS - 1) * H_MS
     for i in range(n):
@@ -22,7 +22,7 @@ def _engine(n=60, symbol="XUSDT", tf="1h"):
 
 def test_renders_a_png_of_the_closed_bars_through_the_catalog():
     out = diag_catalog.run("read.analyst_chart_image", _engine(),
-                           {"symbol": "xusdt", "tf": "1h", "bars": 40, "levels": [99, "x", 101.5]})
+                           {"symbol": "xyzusdt", "tf": "1h", "bars": 40, "levels": [99, "x", 101.5]})
     assert out["ok"], out
     res = out["result"]
     assert res["readable"] and res["bars"] == 40 and res["mime_type"] == "image/png"
@@ -48,7 +48,7 @@ async def test_the_render_runs_in_a_thread_and_the_loop_only_copies():
     entry.offload = spy
     try:
         out = await diag_catalog.run_async("read.analyst_chart_image", _engine(),
-                                           {"symbol": "XUSDT"})
+                                           {"symbol": "XYZUSDT"})
     finally:
         entry.offload = orig
     assert out["ok"] and out["result"]["png_base64"]
@@ -57,11 +57,11 @@ async def test_the_render_runs_in_a_thread_and_the_loop_only_copies():
 
 async def test_a_refusal_is_named_and_never_drawn():
     out = await diag_catalog.run_async("read.analyst_chart_image", _engine(n=10),
-                                       {"symbol": "XUSDT", "tf": "1h"})
+                                       {"symbol": "XYZUSDT", "tf": "1h"})
     assert out["ok"] and out["result"] == {
-        "symbol": "XUSDT", "tf": "1h", "readable": False, "reason": "short_series",
+        "symbol": "XYZUSDT", "tf": "1h", "readable": False, "reason": "short_series",
         "bars_available": 10}
-    bad_tf = diag_catalog.run("read.analyst_chart_image", _engine(), {"symbol": "XUSDT",
+    bad_tf = diag_catalog.run("read.analyst_chart_image", _engine(), {"symbol": "XYZUSDT",
                                                                        "tf": "5m"})
     assert bad_tf["result"]["readable"] is False and "tf must be" in bad_tf["result"]["reason"]
     none = diag_catalog.run("read.analyst_chart_image", _engine(), {"symbol": "NOPEUSDT"})

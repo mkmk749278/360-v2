@@ -553,6 +553,7 @@ def _analyst_chart(ctx: Ctx) -> Dict[str, Any]:
     symbol = str(ctx.args.get("symbol") or "").upper()
     if not _re.fullmatch(r"[A-Z0-9]{2,20}USDT", symbol):
         return {"readable": False, "reason": "symbol must look like XXXUSDT"}
+    _note_analyst_read(symbol, "chart")
     tf = str(ctx.args.get("tf") or "1h")
     try:
         bars = int(ctx.args.get("bars") or _ac.DEFAULT_BARS)
@@ -561,13 +562,62 @@ def _analyst_chart(ctx: Ctx) -> Dict[str, Any]:
     return _ac.chart(ctx.engine, symbol, tf, bars)
 
 
+def _symbol_arg(ctx: Ctx) -> Optional[str]:
+    import re as _re
+
+    symbol = str(ctx.args.get("symbol") or "").upper()
+    return symbol if _re.fullmatch(r"[A-Z0-9]{2,20}USDT", symbol) else None
+
+
+def _note_analyst_read(symbol: str, kind: str) -> None:
+    """Remember which per-coin reads preceded a plan (Phase 1e stamps)."""
+    from src import analyst_pair_book
+
+    if symbol:
+        analyst_pair_book.note_read(symbol, kind)
+
+
+def _analyst_book(ctx: Ctx) -> Dict[str, Any]:
+    """The analyst's memory of one coin: level outcomes, notes, setups."""
+    from src import analyst_pair_book as _pb
+
+    symbol = _symbol_arg(ctx)
+    if symbol is None:
+        return {"readable": False, "reason": "symbol must look like XXXUSDT"}
+    _note_analyst_read(symbol, "book")
+    return _pb.pair_book(symbol)
+
+
+def _analyst_flow(ctx: Ctx) -> Dict[str, Any]:
+    """Liquidations, footprint, CVD, depth, volume profile and derivatives."""
+    from src import analyst_flow as _af
+
+    symbol = _symbol_arg(ctx)
+    if symbol is None:
+        return {"readable": False, "reason": "symbol must look like XXXUSDT"}
+    _note_analyst_read(symbol, "flow")
+    return _af.pair_flow(ctx.engine, symbol)
+
+
+def _analyst_profile(ctx: Ctx) -> Dict[str, Any]:
+    """How one coin behaves: BTC beta, volatility, character, regimes."""
+    from src import analyst_profile as _ap
+
+    symbol = _symbol_arg(ctx)
+    if symbol is None:
+        return {"readable": False, "reason": "symbol must look like XXXUSDT"}
+    _note_analyst_read(symbol, "profile")
+    return _ap.pair_profile(ctx.engine, symbol)
+
+
 def _analyst_chart_image(ctx: Ctx) -> Dict[str, Any]:
     """Copy the bars for a rendered chart; the PNG is drawn in ``offload``."""
     from src import analyst_chart_image as _aci
 
-    symbol = str(ctx.args.get("symbol") or "").upper()
-    if not symbol:
-        return {"readable": False, "reason": "symbol required"}
+    symbol = _symbol_arg(ctx)
+    if symbol is None:
+        return {"readable": False, "reason": "symbol must look like XXXUSDT"}
+    _note_analyst_read(symbol, "image")
     return _aci.prepare(ctx.engine, symbol, str(ctx.args.get("tf") or "1h"),
                         ctx.args.get("bars") or _aci.DEFAULT_BARS,
                         ctx.args.get("levels"))
@@ -980,6 +1030,26 @@ for _e in (
           "15m/1h/4h/1d, bars <= 300) plus 48h of hourly OI, funding and premium. "
           "No indicators: the structure read is the analyst's. Read-only.",
           _analyst_chart),
+    Entry("read.analyst_flow", "Analyst — pair order flow", "read",
+          "Who is trading one pair (arg: symbol): recent long/short liquidations "
+          "and clusters, a buy/sell volume-by-price ladder from the tick footprint "
+          "(40 pairs), 15m CVD changes, live book depth and imbalance (40 pairs), "
+          "volume profile and funding/OI. Each block says whether it could be read. "
+          "Read-only.",
+          _analyst_flow),
+    Entry("read.analyst_book", "Analyst — pair book", "read",
+          "The analyst's memory of one coin (arg: symbol): every level it marked and "
+          "how price treated it (respected / broke / swept and reclaimed / untested), "
+          "its own earlier notes labelled as hypotheses, and its last setups there. "
+          "Read-only.",
+          _analyst_book),
+    Entry("read.analyst_profile", "Analyst — pair profile", "read",
+          "How one coin behaves (arg: symbol), from stored candles: beta and "
+          "correlation to BTC (1h, 4h, split on BTC up and down bars, last 48h), "
+          "volatility percentile and wick share, trending vs mean-reverting, "
+          "breakout follow-through, returns by BTC regime, liquidity, funding/OI "
+          "context and unlocks. Every figure carries its n. Read-only.",
+          _analyst_profile),
     Entry("read.analyst_chart_image", "Analyst — rendered chart", "read",
           "The same closed bars as the raw chart, drawn as a candlestick PNG with "
           "volume (args: symbol, tf 15m/1h/4h/1d, bars 20-200, optional levels to "

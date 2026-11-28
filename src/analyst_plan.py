@@ -152,7 +152,11 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
     if len(setups) > MAX_SETUPS:
         raise Reject("caps", f"{len(setups)} setups > MAX_SETUPS {MAX_SETUPS}")
     pv = raw.get("prompt_version")
+    from src import analyst_pair_book
+
+    pair_notes, notes_dropped = analyst_pair_book.parse_notes(raw.get("pair_notes"))
     return {"bias": bias, "notes": _text(raw.get("notes")), "setups": setups,
+            "pair_notes": pair_notes, "pair_notes_dropped": notes_dropped,
             # Which prompt produced the plan, so a prompt change splits the
             # population instead of silently redefining it.
             "prompt_version": str(pv)[:40] if pv is not None else None}
@@ -416,12 +420,16 @@ class Ledger:
         for col, typ in (("menu_json", "TEXT"), ("scenario", "TEXT"),
                          ("p_target", "REAL"), ("p_stop", "REAL"), ("plan_mode", "TEXT"),
                          ("pos_in_7d", "REAL"), ("entry_dist_atr", "REAL"),
-                         ("book_same_side", "INTEGER"), ("book_opposite_side", "INTEGER")):
+                         ("book_same_side", "INTEGER"), ("book_opposite_side", "INTEGER"),
+                         ("reads_json", "TEXT"), ("profile_json", "TEXT")):
             if col not in cols:
                 con.execute(f"ALTER TABLE setups ADD COLUMN {col} {typ}")
         pcols = {r[1] for r in con.execute("PRAGMA table_info(plans)")}
         if "prompt_version" not in pcols:
             con.execute("ALTER TABLE plans ADD COLUMN prompt_version TEXT")
+        from src import analyst_pair_book
+
+        analyst_pair_book.ensure_schema(con)
         return con
 
     def open_book(self, now: float) -> Dict[str, int]:
@@ -460,6 +468,8 @@ class Ledger:
 
     def record(self, plan_id: str, now: float, source: str, result: Dict[str, Any],
                raw: Any) -> None:
+        from src import analyst_pair_book
+
         plan, rows = result["plan"], result["setups"]
         con = self._connect()
         try:
@@ -479,8 +489,9 @@ class Ledger:
                         "entries_json, stop_level_price, stop_price, targets_json, "
                         "stop_atr, tp1_pct, invalidation, expires_at, submitted_at, "
                         "menu_json, scenario, p_target, plan_mode, pos_in_7d, "
-                        "entry_dist_atr, book_same_side, book_opposite_side, p_stop) VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "entry_dist_atr, book_same_side, book_opposite_side, p_stop, "
+                        "reads_json, profile_json) VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (f"{plan_id}:{r['idx']}", plan_id, r["idx"], r.get("symbol"),
                          r.get("side"), r.get("archetype"), r["status"], r.get("reason"),
                          r.get("detail"), r.get("price_at_submit"), r.get("atr_1h"),
@@ -490,7 +501,12 @@ class Ledger:
                          r["submitted_at"], r.get("menu_json"), r.get("scenario"),
                          r.get("p_target"), r.get("plan_mode"), r.get("pos_in_7d"),
                          r.get("entry_dist_atr"), r.get("book_same_side"),
-                         r.get("book_opposite_side"), r.get("p_stop")))
+                         r.get("book_opposite_side"), r.get("p_stop"),
+                         r.get("reads_json"), r.get("profile_json")))
+                prices = {r.get("symbol"): r.get("price_at_submit") for r in rows
+                          if r.get("symbol")}
+                analyst_pair_book.record_notes(con, plan_id, now,
+                                               plan.get("pair_notes") or {}, prices)
         finally:
             con.close()
 
@@ -532,6 +548,28 @@ def get_ledger() -> Ledger:
     return _ledger
 
 
+def _stamp_setups(rows: List[Dict[str, Any]], engine: Any, now: float) -> None:
+    """Phase 1e: what the analyst had read, and the coin's profile, per setup.
+
+    Stamped at submit because neither is knowable later. A failure stamps the
+    reason and never blocks the plan.
+    """
+    from src import analyst_pair_book, fail_open
+
+    for r in rows:
+        sym = r.get("symbol")
+        if r.get("status") != "accepted" or not sym:
+            continue
+        r["reads_json"] = json.dumps(analyst_pair_book.reads_for(sym, now))
+        try:
+            r["profile_json"] = json.dumps(analyst_pair_book.profile_stamp(engine, sym),
+                                           default=str)
+        except Exception as exc:  # noqa: BLE001 — a stamp never blocks a plan
+            fail_open.record("analyst_plan.profile_stamp", exc)
+            r["profile_json"] = json.dumps({"readable": False,
+                                            "reason": f"error: {type(exc).__name__}"})
+
+
 def submit(raw: Any, engine: Any, *, source: str = "unknown",
            now: Optional[float] = None, admission=_default_admission) -> Dict[str, Any]:
     """Validate and record one plan. The return is what the analyst reads back."""
@@ -546,6 +584,7 @@ def submit(raw: Any, engine: Any, *, source: str = "unknown",
                                    open_book=led.open_book(now))
         except Reject as rj:
             return {"accepted": False, "reason": rj.reason, "detail": rj.detail}
+        _stamp_setups(result["setups"], engine, now)
         plan_id = f"p_{int(now)}_{uuid.uuid4().hex[:6]}"
         led.record(plan_id, now, _text(source)[:40], result, raw)
     rows = result["setups"]
@@ -557,5 +596,7 @@ def submit(raw: Any, engine: Any, *, source: str = "unknown",
                    for r in rows],
         "n_accepted": sum(r["status"] == "accepted" for r in rows),
         "open_book_after": result.get("open_book"),
+        "pair_notes_stored": sorted((result["plan"].get("pair_notes") or {})),
+        "pair_notes_dropped": result["plan"].get("pair_notes_dropped") or [],
         "note": "Recorded and measured dark. Nothing here reaches a subscriber or an order.",
     }
