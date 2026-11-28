@@ -146,6 +146,13 @@ def render(prep: Dict[str, Any]) -> Dict[str, Any]:
     if axv is not None:
         v = np.asarray(prep["volume"], dtype=float)
         axv.bar(x, v, width=0.7, color=colors, alpha=0.6)
+        # Compact labels instead of matplotlib's "1e6" offset, which lands on
+        # the price panel's corner and reads as a price annotation.
+        from matplotlib.ticker import FuncFormatter
+
+        axv.yaxis.set_major_formatter(FuncFormatter(
+            lambda y, _p: (f"{y / 1e9:.1f}B" if y >= 1e9 else f"{y / 1e6:.1f}M"
+                           if y >= 1e6 else f"{y / 1e3:.0f}k" if y >= 1e3 else f"{y:.0f}")))
         axv.yaxis.tick_right()
         axv.grid(True, alpha=0.2)
         axv.set_ylabel("vol", fontsize=8)
