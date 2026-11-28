@@ -59,6 +59,12 @@ class Entry:
     #: somebody has to have written down and be accountable for.
     effect: str = ""
     needs: List[str] = field(default_factory=list)
+    #: Slow, pure work on the entry's payload, run in a worker thread by
+    #: :func:`run_async`. ``fn`` runs in the event loop and must stay cheap: it
+    #: copies what it needs out of engine state, and ``offload`` does the rest
+    #: (e.g. rendering a chart) without blocking the loop or touching live
+    #: buffers from another thread.
+    offload: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
 
 
 @dataclass
@@ -120,8 +126,13 @@ def catalog() -> List[Dict[str, Any]]:
     ]
 
 
-def run(key: str, engine: Any, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Execute one catalog entry by name. Unknown names are refused, not guessed."""
+def run(key: str, engine: Any, args: Optional[Dict[str, Any]] = None, *,
+        _offload: bool = True) -> Dict[str, Any]:
+    """Execute one catalog entry by name. Unknown names are refused, not guessed.
+
+    An entry's ``offload`` runs inline here, which blocks the caller. The
+    queue consumer uses :func:`run_async`, which runs it in a thread.
+    """
     entry = _REGISTRY.get(key)
     if entry is None:
         return {"ok": False, "key": key, "error": "unknown catalog entry",
@@ -137,6 +148,8 @@ def run(key: str, engine: Any, args: Optional[Dict[str, Any]] = None) -> Dict[st
     t0 = time.perf_counter()
     try:
         payload = entry.fn(Ctx(engine=engine, args=dict(args or {})))
+        if _offload and entry.offload is not None:
+            payload = entry.offload(payload)
         ok, err = True, ""
     except LookupError as exc:          # a collaborator this process does not have
         payload, ok, err = {}, False, f"unavailable: {exc}"
@@ -149,6 +162,31 @@ def run(key: str, engine: Any, args: Optional[Dict[str, Any]] = None) -> Dict[st
         "took_sec": round(time.perf_counter() - t0, 3),
         "ran_at": time.time(),
     }
+
+
+async def run_async(key: str, engine: Any,
+                    args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """:func:`run`, with the entry's ``offload`` in a worker thread.
+
+    The cheap half (``fn``) still runs in the loop, so engine state is only
+    ever read from the loop's own thread. A failure in the threaded half is
+    reported the same way as one in ``fn``.
+    """
+    import asyncio
+
+    out = run(key, engine, args, _offload=False)
+    entry = _REGISTRY.get(key)
+    if not out.get("ok") or entry is None or entry.offload is None:
+        return out
+    t0 = time.perf_counter()
+    try:
+        out["result"] = await asyncio.to_thread(entry.offload, out["result"])
+    except Exception as exc:            # noqa: BLE001 — reported, never raised at the loop
+        log.exception("diag catalog entry {} offload failed", key)
+        out.update(ok=False, result={}, error=f"{type(exc).__name__}: {exc}")
+    out["took_sec"] = round(float(out.get("took_sec") or 0.0)
+                            + time.perf_counter() - t0, 3)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +559,24 @@ def _analyst_chart(ctx: Ctx) -> Dict[str, Any]:
     except (TypeError, ValueError):
         bars = _ac.DEFAULT_BARS
     return _ac.chart(ctx.engine, symbol, tf, bars)
+
+
+def _analyst_chart_image(ctx: Ctx) -> Dict[str, Any]:
+    """Copy the bars for a rendered chart; the PNG is drawn in ``offload``."""
+    from src import analyst_chart_image as _aci
+
+    symbol = str(ctx.args.get("symbol") or "").upper()
+    if not symbol:
+        return {"readable": False, "reason": "symbol required"}
+    return _aci.prepare(ctx.engine, symbol, str(ctx.args.get("tf") or "1h"),
+                        ctx.args.get("bars") or _aci.DEFAULT_BARS,
+                        ctx.args.get("levels"))
+
+
+def _render_chart_image(prep: Dict[str, Any]) -> Dict[str, Any]:
+    from src import analyst_chart_image as _aci
+
+    return _aci.render(prep)
 
 
 def _analyst_outcomes(ctx: Ctx) -> Dict[str, Any]:
@@ -924,11 +980,17 @@ for _e in (
           "15m/1h/4h/1d, bars <= 300) plus 48h of hourly OI, funding and premium. "
           "No indicators: the structure read is the analyst's. Read-only.",
           _analyst_chart),
+    Entry("read.analyst_chart_image", "Analyst — rendered chart", "read",
+          "The same closed bars as the raw chart, drawn as a candlestick PNG with "
+          "volume (args: symbol, tf 15m/1h/4h/1d, bars 20-200, optional levels to "
+          "draw, at most 10). Rendered in a worker thread. Read-only.",
+          _analyst_chart_image, offload=_render_chart_image),
     Entry("read.analyst_outcomes", "Analyst — plan outcomes (dark)", "read",
           "Every accepted setup walked forward on 5m bars, per arm (analyst limit, "
           "plan tranches, market at submit, no trade): n, win rate, average net of "
-          "a 0.07% round trip, with and without the top 1%. Unfilled limits are "
-          "scored at market. Read n first.",
+          "a 0.07% round trip, with and without the top 1%. Realized per setup "
+          "posted: an unfilled limit earns 0.00%. Split by setup type and by bias. "
+          "Read n first.",
           _analyst_outcomes),
     Entry("read.analyst_feed", "Analyst — signal feed (dark)", "read",
           "Every accepted analyst setup as a signal: symbol, side, entry/stop/"
