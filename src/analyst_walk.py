@@ -721,6 +721,20 @@ def step(engine: Any, *, now: Optional[float] = None, path: Optional[str] = None
             counts[st] = counts.get(st, 0) + 1
         counts["funding_stamped"] = backfill_funding(
             con, deriv_path if deriv_path is not None else _deriv_path())
+        # The pair book's level marks ride the same step and the same bars.
+        # A failure there is counted and never stops the walk.
+        try:
+            from src import analyst_pair_book as _pb
+
+            with con:
+                counts["marks_created"] = _pb.sync_marks(con)
+                for k, v in _pb.classify_marks(con, buckets, now).items():
+                    if v:
+                        counts[f"marks_{k}"] = v
+        except Exception as exc:  # noqa: BLE001
+            from src import fail_open
+
+            fail_open.record("analyst_walk.level_marks", exc)
     finally:
         con.close()
     return counts

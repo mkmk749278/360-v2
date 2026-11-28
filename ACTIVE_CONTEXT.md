@@ -4,6 +4,23 @@
 
 ---
 
+## OPEN 2026-11-28 — live candles drop quote volume and the taker split
+
+`HistoricalDataStore.update_candle` (the WebSocket path) appends `open, high,
+low, close, volume, open_time` only. `volume_usd` and `taker_buy_vol_usd`
+exist only on REST-seeded bars, so after the first live bar those arrays
+are shorter than `close`. Readers that check alignment fall back:
+- the analyst `chart` tool's `taker_buy_share` is null on such buckets (the
+  analyst prompt says it is "often null");
+- `pair_profile` liquidity uses base volume x close instead, labelled as an
+  estimate.
+
+**Not fixed here**, because the candle store feeds every evaluator and the
+kline CVD seeding. The fix is to carry `q`/`Q` from the kline message
+through `update_candle` with the same pad-on-mismatch rule `open_time`
+uses, and to check each consumer of the two keys first. Found while
+building analyst Phase 1 (`docs/ANALYST_DESK_PLAN_2026_11_28.md`).
+
 ## OPEN 2026-11-25 — Lumin app renders the `/api/auto-mode` placeholder as a real "off"
 
 When `build_auto_mode` raises, `GET /api/auto-mode` returns a synthetic

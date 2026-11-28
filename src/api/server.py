@@ -2442,7 +2442,7 @@ def build_app(
         # Single-process mode: this IS the engine, so run it here.
         from src import diag_catalog
 
-        return diag_catalog.run(key, engine, args)
+        return await diag_catalog.run_async(key, engine, args)
 
     # ---- Activity ----
 

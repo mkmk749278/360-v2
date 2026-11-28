@@ -60,7 +60,7 @@ async def handle_envelope(raw: Any, engine: Any, redis_client: Any) -> bool:
     if queued_at and (time.time() - queued_at) > _store.DIAG_CMD_STALE_S:
         out = {"ok": False, "key": key, "error": "stale request — not run"}
     else:
-        out = diag_catalog.run(key, engine, args)
+        out = await diag_catalog.run_async(key, engine, args)
     try:
         await redis_client.client.set(
             _store.KEY_DIAG_RESULT_PREFIX + req_id,
